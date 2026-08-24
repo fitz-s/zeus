@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-12
+# Last reused or audited: 2026-08-24
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row), §7 (I2 no-back-coupling:
 #   durable fill bridge + execution_feasibility_evidence), §8 Step 3 (lift the
@@ -77,6 +77,7 @@ import contextlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -144,6 +145,18 @@ _held_quote_sqlite_deadline_layers: dict[int, list[tuple[Callable[[], int], int,
 _market_channel_bootstrap_lock = threading.RLock()
 _market_channel_bootstrap_generation: str | None = None
 _market_channel_bootstrap_started_monotonic: float | None = None
+_market_channel_bootstrap_deadline_monotonic: float | None = None
+_market_channel_bootstrap_cancel_event: threading.Event | None = None
+_market_channel_bootstrap_connections: set[object] = set()
+MARKET_CHANNEL_BOOTSTRAP_READ_DEADLINE_SECONDS = 55.0
+MARKET_CHANNEL_BOOTSTRAP_RUNNER_DRAIN_SECONDS = 5.0
+MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS = 10.0
+_market_channel_universe_reload_lock = threading.Lock()
+_market_channel_universe_reload_generation: str | None = None
+_market_channel_universe_reload_deadline: float | None = None
+_market_channel_universe_reload_cancel: threading.Event | None = None
+_market_channel_universe_reload_connections: set[object] = set()
+_market_channel_universe_refresh_debt: dict[str, object] | None = None
 
 
 class _CanonicalHeldScopeUnavailable(RuntimeError):
@@ -535,14 +548,26 @@ def _write_market_channel_sink_readiness(payload: dict[str, object]) -> None:
     tmp.replace(target)
 
 
-def _edli_begin_market_channel_bootstrap() -> str:
+def _edli_begin_market_channel_bootstrap(
+    *, deadline_monotonic: float | None = None
+) -> str:
     """Fence one restart bootstrap before it may register the in-process sink."""
 
     generation = f"{os.getpid()}-{time.monotonic_ns()}"
     with _market_channel_bootstrap_lock:
-        global _market_channel_bootstrap_generation, _market_channel_bootstrap_started_monotonic
+        global _market_channel_bootstrap_generation
+        global _market_channel_bootstrap_started_monotonic
+        global _market_channel_bootstrap_deadline_monotonic
+        global _market_channel_bootstrap_cancel_event
         _market_channel_bootstrap_generation = generation
         _market_channel_bootstrap_started_monotonic = time.monotonic()
+        _market_channel_bootstrap_deadline_monotonic = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else time.monotonic() + MARKET_CHANNEL_BOOTSTRAP_READ_DEADLINE_SECONDS
+        )
+        _market_channel_bootstrap_cancel_event = threading.Event()
+        _market_channel_bootstrap_connections.clear()
         _write_market_channel_sink_readiness(
             {
                 "schema_version": 1,
@@ -556,9 +581,238 @@ def _edli_begin_market_channel_bootstrap() -> str:
     return generation
 
 
+def _edli_market_channel_bootstrap_cancelled(generation: str) -> bool:
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            return True
+        # A registered generation remains current after its startup deadline is
+        # released; steady-state service work is no longer a bootstrap read.
+        if (
+            _market_channel_bootstrap_cancel_event is None
+            and _market_channel_bootstrap_deadline_monotonic is None
+        ):
+            return False
+        return (
+            _market_channel_bootstrap_cancel_event is None
+            or _market_channel_bootstrap_cancel_event.is_set()
+            or (
+                _market_channel_bootstrap_deadline_monotonic is not None
+                and time.monotonic() >= _market_channel_bootstrap_deadline_monotonic
+            )
+        )
+
+
+def _edli_assert_market_channel_bootstrap_current(generation: str) -> None:
+    if _edli_market_channel_bootstrap_cancelled(generation):
+        raise TimeoutError("market-channel bootstrap read deadline or generation fence")
+
+
+def _edli_market_channel_bootstrap_deadline(generation: str) -> float:
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            raise RuntimeError("market-channel bootstrap generation is not current")
+        deadline = _market_channel_bootstrap_deadline_monotonic
+    if deadline is None:
+        raise RuntimeError("market-channel bootstrap deadline was released before registration")
+    return float(deadline)
+
+
+def _edli_cancel_market_channel_bootstrap(generation: str) -> bool:
+    """Interrupt this generation's SQLite reads without closing across threads."""
+
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            return False
+        if _market_channel_bootstrap_cancel_event is not None:
+            _market_channel_bootstrap_cancel_event.set()
+        connections = tuple(_market_channel_bootstrap_connections)
+    for conn in connections:
+        try:
+            conn.interrupt()
+        except Exception:  # noqa: BLE001 - connection may already be closing
+            pass
+    return True
+
+
+@contextlib.contextmanager
+def _edli_market_channel_bootstrap_connection(conn, generation: str):
+    """Track one pre-registration read and close it after interruptible drain."""
+
+    with _market_channel_bootstrap_lock:
+        if _edli_market_channel_bootstrap_cancelled(generation):
+            conn.close()
+            raise RuntimeError("market-channel bootstrap generation is not current")
+        _market_channel_bootstrap_connections.add(conn)
+
+    def _progress() -> int:
+        return int(_edli_market_channel_bootstrap_cancelled(generation))
+
+    set_progress_handler = getattr(conn, "set_progress_handler", None)
+    try:
+        if callable(set_progress_handler):
+            set_progress_handler(_progress, 1_000)
+    except BaseException:
+        with _market_channel_bootstrap_lock:
+            _market_channel_bootstrap_connections.discard(conn)
+        conn.close()
+        raise
+    try:
+        yield conn
+    finally:
+        if callable(set_progress_handler):
+            try:
+                set_progress_handler(None, 0)
+            except Exception:  # noqa: BLE001
+                pass
+        with _market_channel_bootstrap_lock:
+            _market_channel_bootstrap_connections.discard(conn)
+        conn.close()
+
+
+def _edli_market_channel_universe_reload_cancelled(generation: str) -> bool:
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_universe_reload_generation:
+            return True
+        cancel = _market_channel_universe_reload_cancel
+        deadline = _market_channel_universe_reload_deadline
+    return bool(
+        cancel is None
+        or cancel.is_set()
+        or (deadline is not None and time.monotonic() >= deadline)
+    )
+
+
+def _edli_cancel_market_channel_universe_reload(generation: str) -> None:
+    """Interrupt this reload generation's SQLite work; never overlap successors."""
+
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_universe_reload_generation:
+            return
+        if _market_channel_universe_reload_cancel is not None:
+            _market_channel_universe_reload_cancel.set()
+        connections = tuple(_market_channel_universe_reload_connections)
+    for conn in connections:
+        try:
+            conn.interrupt()
+        except Exception:  # noqa: BLE001 - connection may already be closing
+            pass
+
+
+@contextlib.contextmanager
+def _edli_market_channel_universe_reload_connection(conn, generation: str):
+    with _market_channel_bootstrap_lock:
+        if _edli_market_channel_universe_reload_cancelled(generation):
+            conn.close()
+            raise TimeoutError("market-channel universe reload deadline")
+        _market_channel_universe_reload_connections.add(conn)
+
+    def _progress() -> int:
+        return int(_edli_market_channel_universe_reload_cancelled(generation))
+
+    set_progress_handler = getattr(conn, "set_progress_handler", None)
+    try:
+        if callable(set_progress_handler):
+            set_progress_handler(_progress, 1_000)
+        yield conn
+    finally:
+        if callable(set_progress_handler):
+            try:
+                set_progress_handler(None, 0)
+            except Exception:  # noqa: BLE001
+                pass
+        with _market_channel_bootstrap_lock:
+            _market_channel_universe_reload_connections.discard(conn)
+        conn.close()
+
+
+def _edli_publish_market_channel_universe_refresh_debt(
+    attempt_generation: str, reason: str
+) -> None:
+    """Publish retryable hydration debt without invalidating the sink receipt."""
+
+    global _market_channel_universe_refresh_debt
+    with _market_channel_bootstrap_lock:
+        bootstrap_generation = _market_channel_bootstrap_generation
+    debt_generation = bootstrap_generation or f"{os.getpid()}-unbound"
+    debt = {
+        "generation": debt_generation,
+        "pid": os.getpid(),
+        "attempt_generation": attempt_generation,
+        "reason": str(reason),
+        "scope": "market_channel_universe_reload",
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _market_channel_universe_refresh_debt = debt
+    try:
+        readiness, error = _edli_current_market_channel_sink_readiness()
+        if readiness is not None and error is None:
+            readiness = dict(readiness)
+            readiness["universe_refresh_debt"] = debt
+            _write_market_channel_sink_readiness(readiness)
+    except Exception:  # noqa: BLE001 - debt remains in-process if telemetry fails
+        logger.warning("market-channel universe refresh debt publication failed", exc_info=True)
+
+
+def _edli_clear_market_channel_universe_refresh_debt(_attempt_generation: str) -> None:
+    global _market_channel_universe_refresh_debt
+    if not _market_channel_universe_refresh_debt:
+        return
+    with _market_channel_bootstrap_lock:
+        bootstrap_generation = _market_channel_bootstrap_generation
+    if (
+        _market_channel_universe_refresh_debt.get("generation")
+        != (bootstrap_generation or f"{os.getpid()}-unbound")
+        or _market_channel_universe_refresh_debt.get("pid") != os.getpid()
+    ):
+        return
+    _market_channel_universe_refresh_debt = None
+    try:
+        readiness, error = _edli_current_market_channel_sink_readiness()
+        if readiness is not None and error is None and "universe_refresh_debt" in readiness:
+            readiness = dict(readiness)
+            readiness.pop("universe_refresh_debt", None)
+            _write_market_channel_sink_readiness(readiness)
+    except Exception:  # noqa: BLE001 - successful hydration remains authoritative
+        logger.warning("market-channel universe refresh debt clear failed", exc_info=True)
+
+
 def _edli_market_channel_bootstrap_is_current(generation: str) -> bool:
     with _market_channel_bootstrap_lock:
         return generation == _market_channel_bootstrap_generation
+
+
+def _edli_complete_market_channel_bootstrap(generation: str) -> None:
+    """Mark hydration complete while retaining the fence through sink registration."""
+
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            return
+        if _market_channel_bootstrap_connections:
+            raise RuntimeError("market-channel bootstrap completed with open readers")
+
+
+def _edli_mark_market_channel_bootstrap_registered(generation: str) -> None:
+    """Release bootstrap cancellation only after the persistent sink is registered."""
+
+    global _market_channel_bootstrap_deadline_monotonic
+    global _market_channel_bootstrap_cancel_event
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            raise RuntimeError("market-channel registration generation is not current")
+        if _market_channel_bootstrap_cancel_event is None or (
+            _market_channel_bootstrap_deadline_monotonic is not None
+            and time.monotonic() >= _market_channel_bootstrap_deadline_monotonic
+        ):
+            raise TimeoutError("market-channel registration deadline elapsed")
+        tracked = tuple(_market_channel_bootstrap_connections)
+        for conn in tracked:
+            try:
+                conn.set_progress_handler(None, 0)
+            except Exception:  # noqa: BLE001 - runner finally still closes it
+                pass
+        _market_channel_bootstrap_connections.clear()
+        _market_channel_bootstrap_deadline_monotonic = None
+        _market_channel_bootstrap_cancel_event = None
 
 
 def _edli_publish_market_channel_bootstrap_phase(generation: str, phase: str) -> bool:
@@ -583,12 +837,16 @@ def _edli_publish_market_channel_bootstrap_phase(generation: str, phase: str) ->
 def _edli_supersede_market_channel_bootstrap(generation: str) -> bool:
     """Fence a late bootstrap before it can create a second persistent consumer."""
 
+    _edli_cancel_market_channel_bootstrap(generation)
     with _market_channel_bootstrap_lock:
         global _market_channel_bootstrap_generation, _market_channel_bootstrap_started_monotonic
+        global _market_channel_bootstrap_deadline_monotonic, _market_channel_bootstrap_cancel_event
         if generation != _market_channel_bootstrap_generation:
             return False
         _market_channel_bootstrap_generation = None
         _market_channel_bootstrap_started_monotonic = None
+        _market_channel_bootstrap_deadline_monotonic = None
+        _market_channel_bootstrap_cancel_event = None
         _write_market_channel_sink_readiness(
             {
                 "schema_version": 1,
@@ -696,6 +954,7 @@ def _edli_register_current_market_channel_action_sink(
         # RESET: a later generation may register only after this finally block
         # withdraws it.
         try:
+            _edli_assert_market_channel_bootstrap_current(generation)
             register(service)
             registered = True
             _write_market_channel_sink_readiness(
@@ -4985,26 +5244,84 @@ def _edli_market_channel_token_metadata_reloader(
     seed_first_token_ids = tuple(initial_seed_first_token_ids)
     depth_repair_token_ids = tuple(initial_depth_repair_token_ids)
 
-    def _reload():
+    def _reload_once(generation: str, deadline: float):
+        nonlocal depth_repair_token_ids, fingerprint, seed_first_token_ids, token_metadata
+        from src.state.db import (
+            ZEUS_WORLD_DB_PATH,
+            _connect_read_only,
+            get_forecasts_connection_read_only,
+            get_trade_connection,
+        )
+
+        world_read = None
+        forecasts_read = None
+        trade_read = None
+        reload_stack_owned = False
+        try:
+            world_read = _connect_read_only(
+                ZEUS_WORLD_DB_PATH,
+                deadline_monotonic=deadline,
+            )
+            forecasts_read = get_forecasts_connection_read_only(
+                deadline_monotonic=deadline,
+            )
+            trade_read = get_trade_connection(
+                write_class=None,
+                deadline_monotonic=deadline,
+            )
+            with contextlib.ExitStack() as reload_connections:
+                world_read = reload_connections.enter_context(
+                    _edli_market_channel_universe_reload_connection(
+                        world_read, generation
+                    )
+                )
+                forecasts_read = reload_connections.enter_context(
+                    _edli_market_channel_universe_reload_connection(
+                        forecasts_read, generation
+                    )
+                )
+                trade_read = reload_connections.enter_context(
+                    _edli_market_channel_universe_reload_connection(
+                        trade_read, generation
+                    )
+                )
+                reload_stack_owned = True
+                return _reload_once_with_connections(
+                    generation,
+                    deadline,
+                    world_read,
+                    forecasts_read,
+                    trade_read,
+                )
+        finally:
+            for conn in (trade_read, forecasts_read, world_read):
+                if conn is not None:
+                    # ExitStack owns the tracked close; this is only for a
+                    # connection that failed before entering its context.
+                    if not reload_stack_owned and conn not in _market_channel_universe_reload_connections:
+                        try:
+                            conn.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+
+    def _reload_once_with_connections(
+        generation: str,
+        deadline: float,
+        world_read,
+        forecasts_read,
+        trade_read,
+    ):
+        """Run the existing hydration reads under tracked connection ownership."""
+
         nonlocal depth_repair_token_ids, fingerprint, seed_first_token_ids, token_metadata
         from src.events.triggers.market_channel_ingestor import (
             MarketTokenUniverse,
             active_weather_token_metadata_for_tokens,
             active_weather_token_metadata_from_snapshots,
         )
-        from src.state.db import (
-            get_forecasts_connection_read_only,
-            get_trade_connection,
-            get_world_connection,
-        )
-
-        world_read = None
-        forecasts_read = None
-        trade_read = None
         try:
-            world_read = get_world_connection(write_class=None)
-            forecasts_read = get_forecasts_connection_read_only()
-            trade_read = get_trade_connection(write_class=None)
+            if _edli_market_channel_universe_reload_cancelled(generation):
+                raise TimeoutError("market-channel universe reload deadline")
             candidate_priority_token_ids = _edli_candidate_priority_token_ids(
                 world_read,
                 limit=max(1, int(candidate_priority_limit)),
@@ -5049,10 +5366,14 @@ def _edli_market_channel_token_metadata_reloader(
                 or current_fingerprint[0] != fingerprint[0]
             )
             if projection_changed:
+                if _edli_market_channel_universe_reload_cancelled(generation):
+                    raise TimeoutError("market-channel universe reload deadline")
                 refreshed = active_weather_token_metadata_from_snapshots(
                     trade_read,
                     priority_token_ids=priority_token_ids,
                 )
+                if _edli_market_channel_universe_reload_cancelled(generation):
+                    raise TimeoutError("market-channel universe reload deadline")
             else:
                 # Priority churn is frequent; do not rerun the broad compact-
                 # projection scan just because a candidate/held/rest/Day0 token
@@ -5078,15 +5399,60 @@ def _edli_market_channel_token_metadata_reloader(
             token_metadata = refreshed
             seed_first_token_ids = current_seed_first
             depth_repair_token_ids = current_depth_repair
+            _edli_clear_market_channel_universe_refresh_debt(generation)
             return MarketTokenUniverse(
                 token_metadata=token_metadata,
                 seed_first_token_ids=seed_first_token_ids,
                 depth_repair_token_ids=depth_repair_token_ids,
             )
         finally:
-            for conn in (trade_read, forecasts_read, world_read):
-                if conn is not None:
-                    conn.close()
+            if _edli_market_channel_universe_reload_cancelled(generation):
+                raise TimeoutError("market-channel universe reload deadline")
+
+    def _reload():
+        global _market_channel_universe_reload_generation
+        global _market_channel_universe_reload_deadline
+        global _market_channel_universe_reload_cancel
+        if not _market_channel_universe_reload_lock.acquire(
+            timeout=MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS
+        ):
+            generation = f"{os.getpid()}-{time.monotonic_ns()}"
+            _edli_publish_market_channel_universe_refresh_debt(
+                generation, "reload_worker_not_drained"
+            )
+            raise TimeoutError("market-channel universe reload worker not drained")
+        generation = f"{os.getpid()}-{time.monotonic_ns()}"
+        deadline = time.monotonic() + MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS
+        with _market_channel_bootstrap_lock:
+            _market_channel_universe_reload_generation = generation
+            _market_channel_universe_reload_deadline = deadline
+            _market_channel_universe_reload_cancel = threading.Event()
+            _market_channel_universe_reload_connections.clear()
+        timer = threading.Timer(
+            MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS,
+            _edli_cancel_market_channel_universe_reload,
+            args=(generation,),
+        )
+        timer.daemon = True
+        timer.start()
+        try:
+            return _reload_once(generation, deadline)
+        except (TimeoutError, sqlite3.OperationalError) as exc:
+            _edli_cancel_market_channel_universe_reload(generation)
+            _edli_publish_market_channel_universe_refresh_debt(generation, str(exc))
+            raise TimeoutError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - failed hydration is retryable debt
+            _edli_cancel_market_channel_universe_reload(generation)
+            _edli_publish_market_channel_universe_refresh_debt(generation, str(exc))
+            raise
+        finally:
+            timer.cancel()
+            with _market_channel_bootstrap_lock:
+                _market_channel_universe_reload_generation = None
+                _market_channel_universe_reload_deadline = None
+                _market_channel_universe_reload_cancel = None
+                _market_channel_universe_reload_connections.clear()
+            _market_channel_universe_reload_lock.release()
 
     return _reload
 
@@ -5094,6 +5460,7 @@ def _edli_market_channel_token_metadata_reloader(
 def _edli_market_channel_ingestor_cycle(
     *,
     bootstrap_generation: str | None = None,
+    bootstrap_deadline_monotonic: float | None = None,
 ) -> dict | None:
     """EDLI market-channel online data-service bootstrap.
 
@@ -5122,13 +5489,31 @@ def _edli_market_channel_ingestor_cycle(
                 and elapsed >= 60.0
             ):
                 # SCOPE: the single unregistered bootstrap generation.
-                # DRAIN: fence it, emit failed health, then the scheduler retries owner boot.
+                # DRAIN: interrupt and join its runner before successor ownership.
                 # RESET: a current registered readiness receipt restores the normal lane.
+                runner = _edli_market_channel_thread
+                _edli_cancel_market_channel_bootstrap(active_generation)
+                runner.join(timeout=MARKET_CHANNEL_BOOTSTRAP_RUNNER_DRAIN_SECONDS)
+                if runner.is_alive():
+                    health = {
+                        "thread": "runner_not_drained",
+                        "bootstrap_generation": active_generation,
+                        "bootstrap_elapsed_seconds": elapsed,
+                        "sink_readiness_error": readiness_error,
+                        "scheduler_failed": True,
+                        "scheduler_failure_reason": "registration_runner_not_drained",
+                    }
+                    _write_scheduler_health(
+                        "edli_market_channel_ingestor",
+                        failed=True,
+                        reason=health["scheduler_failure_reason"],
+                        extra=health,
+                    )
+                    return health
                 _edli_supersede_market_channel_bootstrap(active_generation)
                 with _market_channel_bootstrap_lock:
-                    # The old runner may still be unwinding a blocked pre-register
-                    # operation.  Its generation fence prevents late registration.
-                    _edli_market_channel_thread = None
+                    if _edli_market_channel_thread is runner:
+                        _edli_market_channel_thread = None
                 health = {
                     "thread": "bootstrap_superseded",
                     "bootstrap_generation": active_generation,
@@ -5196,7 +5581,9 @@ def _edli_market_channel_ingestor_cycle(
         return health
 
     if bootstrap_generation is None:
-        bootstrap_generation = _edli_begin_market_channel_bootstrap()
+        bootstrap_generation = _edli_begin_market_channel_bootstrap(
+            deadline_monotonic=bootstrap_deadline_monotonic,
+        )
     elif not _edli_market_channel_bootstrap_is_current(bootstrap_generation):
         return {
             "thread": "bootstrap_superseded",
@@ -5205,14 +5592,16 @@ def _edli_market_channel_ingestor_cycle(
             "scheduler_failure_reason": "registration_not_reached",
         }
 
+    _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+
     from src.events.triggers.market_channel_ingestor import (
         active_weather_token_metadata_for_tokens,
-        active_weather_token_metadata_from_snapshots,
     )
     from src.state.db import (
+        ZEUS_WORLD_DB_PATH,
+        _connect_read_only,
         get_forecasts_connection_read_only,
         get_trade_connection,
-        get_world_connection,
     )
 
     # Candidate universe (Blocker #52): tokens the reactor recently decided on must
@@ -5220,109 +5609,126 @@ def _edli_market_channel_ingestor_cycle(
     # evidence row before the pre-submit witness reads it. The full latest-per-market
     # universe is captured up to the cap; candidates are never dropped by the cap.
     candidate_priority_token_ids: list[str] = []
-    world_read = get_world_connection(write_class=None)
     try:
-        candidate_priority_limit = _edli_bounded_positive_int(
-            edli_cfg,
-            "market_channel_candidate_priority_max_tokens",
-            default=32,
-            maximum=1000,
+        world_read = _connect_read_only(
+            ZEUS_WORLD_DB_PATH,
+            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
         )
-        candidate_priority_token_ids = _edli_candidate_priority_token_ids(
-            world_read,
-            limit=candidate_priority_limit,
-        )
+        with _edli_market_channel_bootstrap_connection(
+            world_read, bootstrap_generation
+        ) as world_read:
+            candidate_priority_limit = _edli_bounded_positive_int(
+                edli_cfg,
+                "market_channel_candidate_priority_max_tokens",
+                default=32,
+                maximum=1000,
+            )
+            candidate_priority_token_ids = _edli_candidate_priority_token_ids(
+                world_read,
+                limit=candidate_priority_limit,
+            )
     except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
         logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
     finally:
-        if world_read is not None:
-            world_read.close()
+        _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
 
+    bootstrap_reads = contextlib.ExitStack()
     forecasts_read = None
     try:
-        forecasts_read = get_forecasts_connection_read_only()
+        forecasts_read = get_forecasts_connection_read_only(
+            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
+        )
+        forecasts_read = bootstrap_reads.enter_context(
+            _edli_market_channel_bootstrap_connection(
+                forecasts_read, bootstrap_generation
+            )
+        )
     except Exception as exc:
         logger.warning(
             "EDLI ingestor family-priority forecast read failed (non-fatal): %s",
             exc,
         )
     day0_priority_token_ids: tuple[str, ...] = ()
-    trade_conn = get_trade_connection(write_class=None)
     try:
-        held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
-        _edli_publish_held_quote_audit_token_ids(held_priority_token_ids)
-        open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
-        try:
-            day0_priority_token_ids = _edli_current_day0_priority_token_ids(
+        trade_conn = get_trade_connection(
+            write_class=None,
+            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
+        )
+        trade_conn = bootstrap_reads.enter_context(
+            _edli_market_channel_bootstrap_connection(
+                trade_conn, bootstrap_generation
+            )
+        )
+        with contextlib.nullcontext(trade_conn):
+            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+            held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
+            _edli_publish_held_quote_audit_token_ids(held_priority_token_ids)
+            open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
+            try:
+                day0_priority_token_ids = _edli_current_day0_priority_token_ids(
+                    trade_conn,
+                    forecasts_read,
+                )
+            except Exception as exc:  # noqa: BLE001 - broad universe remains available
+                logger.warning(
+                    "EDLI ingestor Day0-priority read failed (non-fatal): %s",
+                    exc,
+                )
+            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+            priority_token_ids = set(candidate_priority_token_ids)
+            priority_token_ids.update(held_priority_token_ids)
+            priority_token_ids.update(open_rest_priority_token_ids)
+            priority_token_ids.update(day0_priority_token_ids)
+            seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
+                held_priority_token_ids=held_priority_token_ids,
+                open_rest_priority_token_ids=open_rest_priority_token_ids,
+                day0_priority_token_ids=day0_priority_token_ids,
+                candidate_priority_token_ids=candidate_priority_token_ids,
+            )
+            depth_repair_token_ids = _edli_market_channel_depth_repair_token_ids(
+                held_priority_token_ids=held_priority_token_ids,
+                open_rest_priority_token_ids=open_rest_priority_token_ids,
+                candidate_priority_token_ids=candidate_priority_token_ids,
+            )
+            priority_token_ids = _edli_priority_family_token_ids(
                 trade_conn,
                 forecasts_read,
+                priority_token_ids,
             )
-        except Exception as exc:  # noqa: BLE001 - broad universe remains available
-            logger.warning(
-                "EDLI ingestor Day0-priority read failed (non-fatal): %s",
-                exc,
-            )
-        priority_token_ids = set(candidate_priority_token_ids)
-        priority_token_ids.update(held_priority_token_ids)
-        priority_token_ids.update(open_rest_priority_token_ids)
-        priority_token_ids.update(day0_priority_token_ids)
-        seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
-            held_priority_token_ids=held_priority_token_ids,
-            open_rest_priority_token_ids=open_rest_priority_token_ids,
-            day0_priority_token_ids=day0_priority_token_ids,
-            candidate_priority_token_ids=candidate_priority_token_ids,
-        )
-        depth_repair_token_ids = _edli_market_channel_depth_repair_token_ids(
-            held_priority_token_ids=held_priority_token_ids,
-            open_rest_priority_token_ids=open_rest_priority_token_ids,
-            candidate_priority_token_ids=candidate_priority_token_ids,
-        )
-        priority_token_ids = _edli_priority_family_token_ids(
-            trade_conn,
-            forecasts_read,
-            priority_token_ids,
-        )
-        entry_token_ids = set(priority_token_ids)
-        token_metadata = active_weather_token_metadata_from_snapshots(
-            trade_conn,
-            priority_token_ids=entry_token_ids,
-        )
-        token_metadata.update(
-            active_weather_token_metadata_for_tokens(
-                trade_conn,
-                token_ids=held_priority_token_ids,
-                purpose="exit",
-            )
-        )
-        token_metadata_fingerprint = _edli_market_channel_token_metadata_fingerprint(
-            trade_conn,
-            set(seed_first_token_ids),
-            set(depth_repair_token_ids),
-        )
-        token_ids = set(token_metadata)
+            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+            # SCOPE: this bootstrap only the current generation's bounded priority
+            # token set; broad universe hydration is post-receipt.
+            # DRAIN: registration receipt and consumer queue are created before the
+            # reload callback may scan the compact snapshot projection.
+            # RESET: a failed reload retains the registered subscription and retries
+            # on the next universe refresh; it cannot erase continuity.
+            # Registration must not wait on the broad compact snapshot scan.  Keep
+            # candidate/held/open-rest/Day0 scope bounded for the first consumer;
+            # the persistent service reloads the full universe after its receipt.
+            entry_token_ids = set(priority_token_ids)
+            try:
+                token_metadata = active_weather_token_metadata_for_tokens(
+                    trade_conn,
+                    token_ids=entry_token_ids,
+                    purpose="entry",
+                )
+                token_metadata.update(
+                    active_weather_token_metadata_for_tokens(
+                        trade_conn,
+                        token_ids=held_priority_token_ids,
+                        purpose="exit",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - receipt must not await metadata
+                logger.warning(
+                    "EDLI bounded bootstrap metadata read deferred until registration: %s",
+                    exc,
+                )
+                token_metadata = {}
+            token_ids = set(token_metadata)
     finally:
-        trade_conn.close()
-        if forecasts_read is not None:
-            forecasts_read.close()
-
-    if not token_ids:
-        health = {
-            "active_weather_token_ids": 0,
-            "priority_token_ids": len(priority_token_ids),
-            "held_priority_token_ids": len(held_priority_token_ids),
-            "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
-            "day0_priority_token_ids": len(day0_priority_token_ids),
-            "seed_first_token_ids": len(seed_first_token_ids),
-            "quote_cache_enabled": True,
-            "fill_authority": "user_channel_or_reconcile_only",
-            "skipped": "no_priority_token_metadata",
-        }
-        _write_scheduler_health(
-            "edli_market_channel_ingestor",
-            failed=False,
-            extra=health,
-        )
-        return health
+        bootstrap_reads.close()
+        _edli_complete_market_channel_bootstrap(bootstrap_generation)
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient
@@ -5339,7 +5745,11 @@ def _edli_market_channel_ingestor_cycle(
             run_market_channel_service_forever,
             unregister_persistent_market_channel_action_sink,
         )
-        from src.state.db import get_trade_connection, get_world_connection
+        from src.state.db import (
+            ZEUS_WORLD_DB_PATH,
+            _connect,
+            get_trade_connection,
+        )
 
         if not _edli_market_channel_bootstrap_is_current(bootstrap_generation):
             return
@@ -5348,15 +5758,42 @@ def _edli_market_channel_ingestor_cycle(
             "runner_starting",
         )
 
-        # Quote projection and NEW_MARKET_DISCOVERED are not one logical write:
-        # quotes update TRADE latest-state only, while new-market truth writes WORLD.
-        # Separate connections and gates let a long WORLD transaction coexist with
-        # millisecond market-feed ingestion without weakening either DB's ownership.
-        world_conn = get_world_connection(write_class="live")
-        feasibility_conn = get_trade_connection(write_class="live")
-        _bound_price_channel_sqlite_wait(world_conn)
-        _bound_background_price_channel_sqlite_wait(feasibility_conn)
-        _disable_background_quote_autocheckpoint(feasibility_conn)
+        runner_connections = contextlib.ExitStack()
+        try:
+            bootstrap_deadline = _edli_market_channel_bootstrap_deadline(
+                bootstrap_generation
+            )
+            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+            # Quote projection and NEW_MARKET_DISCOVERED are not one logical write:
+            # quotes update TRADE latest-state only, while new-market truth writes WORLD.
+            # Separate connections and gates let a long WORLD transaction coexist with
+            # millisecond market-feed ingestion without weakening either DB's ownership.
+            world_conn = runner_connections.enter_context(
+                _edli_market_channel_bootstrap_connection(
+                    _connect(
+                        ZEUS_WORLD_DB_PATH,
+                        write_class="live",
+                        deadline_monotonic=bootstrap_deadline,
+                    ),
+                    bootstrap_generation,
+                )
+            )
+            feasibility_conn = runner_connections.enter_context(
+                _edli_market_channel_bootstrap_connection(
+                    get_trade_connection(
+                        write_class="live",
+                        deadline_monotonic=bootstrap_deadline,
+                    ),
+                    bootstrap_generation,
+                )
+            )
+            _bound_price_channel_sqlite_wait(world_conn)
+            _bound_background_price_channel_sqlite_wait(feasibility_conn)
+            _disable_background_quote_autocheckpoint(feasibility_conn)
+            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
+        except BaseException:
+            runner_connections.close()
+            raise
 
         def _commit_quote() -> None:
             feasibility_conn.commit()
@@ -5559,7 +5996,9 @@ def _edli_market_channel_ingestor_cycle(
             with PolymarketClient() as clob:
                 reload_token_metadata = _edli_market_channel_token_metadata_reloader(
                     initial_token_metadata=token_metadata,
-                    initial_fingerprint=token_metadata_fingerprint,
+                    # Force the first post-receipt reload to perform the broad
+                    # universe hydration; registration itself stays bounded.
+                    initial_fingerprint=None,
                     initial_seed_first_token_ids=seed_first_token_ids,
                     initial_depth_repair_token_ids=depth_repair_token_ids,
                     candidate_priority_limit=candidate_priority_limit,
@@ -5620,6 +6059,9 @@ def _edli_market_channel_ingestor_cycle(
                     )
                     if not registered:
                         return
+                    _edli_mark_market_channel_bootstrap_registered(
+                        bootstrap_generation
+                    )
                     run_market_channel_service_forever(
                         service,
                         logger=logger,
@@ -5643,10 +6085,7 @@ def _edli_market_channel_ingestor_cycle(
                             unregister_persistent_market_channel_action_sink,
                         )
         finally:
-            try:
-                feasibility_conn.close()
-            finally:
-                world_conn.close()
+            runner_connections.close()
 
     with _market_channel_bootstrap_lock:
         if not _edli_market_channel_bootstrap_is_current(bootstrap_generation):

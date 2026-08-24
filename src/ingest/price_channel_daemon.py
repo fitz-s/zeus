@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-08-24
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision:
 #   a persistent WS thread is a distinct lifecycle → own service),
@@ -91,10 +91,17 @@ def _git_head_at_boot() -> str:
 
 
 _PROCESS_GIT_HEAD = _git_head_at_boot()
+_HEARTBEAT_GENERATION = f"{os.getpid()}-{time.monotonic_ns()}"
 
 _heartbeat_fails = 0
+_heartbeat_status = "STARTING"
+_heartbeat_ready = False
+_heartbeat_published = False
+_bridge_keeper_conn: Any | None = None
+PRICE_CHANNEL_STARTUP_STATUS_FILENAME = "price-channel-ingest-startup.json"
 MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30
 MARKET_CHANNEL_BOOTSTRAP_DEADLINE_SECONDS = 60.0
+MARKET_CHANNEL_BOOTSTRAP_DRAIN_DEADLINE_SECONDS = 5.0
 _market_channel_bootstrap_lock = threading.Lock()
 _market_channel_bootstrap_worker: threading.Thread | None = None
 _market_channel_bootstrap_generation: str | None = None
@@ -126,8 +133,18 @@ def _market_channel_bootstrap_job(fn):
                     "bootstrap_elapsed_seconds": elapsed,
                 }
             # SCOPE: this one bootstrap worker generation, never all consumers.
-            # DRAIN: supersede it before starting its one bounded replacement worker.
+            # DRAIN: interrupt its SQLite readers and join it before a replacement.
             # RESET: a current ready receipt lets future scheduler fires reuse the owner.
+            lane._edli_cancel_market_channel_bootstrap(generation)
+            worker.join(timeout=MARKET_CHANNEL_BOOTSTRAP_DRAIN_DEADLINE_SECONDS)
+            if worker.is_alive():
+                return {
+                    "thread": "bootstrap_worker_not_drained",
+                    "bootstrap_generation": generation,
+                    "bootstrap_elapsed_seconds": elapsed,
+                    "scheduler_failed": True,
+                    "scheduler_failure_reason": "registration_worker_not_drained",
+                }
             lane._edli_supersede_market_channel_bootstrap(generation)
             failure = {
                 "thread": "bootstrap_worker_superseded",
@@ -157,10 +174,16 @@ def _market_channel_bootstrap_job(fn):
             with lane._market_channel_bootstrap_lock:
                 generation = lane._market_channel_bootstrap_generation
         else:
-            generation = lane._edli_begin_market_channel_bootstrap()
+            bootstrap_deadline = now + MARKET_CHANNEL_BOOTSTRAP_DEADLINE_SECONDS - 1.0
+            generation = lane._edli_begin_market_channel_bootstrap(
+                deadline_monotonic=bootstrap_deadline,
+            )
             target = fn
             args = ()
-            kwargs = {"bootstrap_generation": generation}
+            kwargs = {
+                "bootstrap_generation": generation,
+                "bootstrap_deadline_monotonic": bootstrap_deadline,
+            }
         _market_channel_bootstrap_generation = generation
         _market_channel_bootstrap_started_monotonic = now
         _market_channel_bootstrap_worker = threading.Thread(
@@ -193,10 +216,14 @@ def _graceful_shutdown(signum, frame) -> None:
         "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
         os.getpid(), os.getppid(), int(time.monotonic() - _PROCESS_START),
     )
+    _write_price_channel_startup_status("STOPPING")
+    if _heartbeat_published:
+        _write_price_channel_heartbeat(status="STOPPING")
     try:
         _shutdown_scheduler_if_running(_scheduler, wait=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scheduler shutdown error: %s", exc)
+    _close_bridge_keeper(reason="shutdown")
     sys.exit(0)
 
 
@@ -209,6 +236,29 @@ def _shutdown_scheduler_if_running(scheduler: Any | None, *, wait: bool = True) 
         scheduler.shutdown(wait=wait)
     except SchedulerNotRunningError:
         logger.info("Scheduler already stopped during shutdown")
+
+
+def _start_user_channel_ingestor_async(start_fn) -> threading.Thread:
+    """Keep eager credential/market discovery off scheduler construction."""
+
+    def _runner() -> None:
+        try:
+            start_fn()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "price-channel-ingest: user-channel WS start raised (non-fatal; the "
+                "reconcile cycle + durable bridge still run): %s",
+                exc,
+                exc_info=True,
+            )
+
+    worker = threading.Thread(
+        target=_runner,
+        name="price-channel-user-channel-start",
+        daemon=True,
+    )
+    worker.start()
+    return worker
 
 
 def _scheduler_job(job_name: str):
@@ -225,6 +275,7 @@ def _scheduler_job(job_name: str):
         def _wrapper(*args, **kwargs):
             try:
                 result = fn(*args, **kwargs)
+                m5_receipt_identity: tuple[str, int] | None = None
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
                     business_liveness = result if isinstance(result, dict) else None
@@ -241,14 +292,48 @@ def _scheduler_job(job_name: str):
                         if isinstance(business_liveness, dict)
                         else None
                     )
+                    health_extra = business_liveness
+                    if (
+                        job_name == "edli_user_channel_reconcile"
+                        and isinstance(business_liveness, dict)
+                        and not failed
+                    ):
+                        health_extra = {
+                            **business_liveness,
+                            "daemon_pid": os.getpid(),
+                            "heartbeat_generation": _HEARTBEAT_GENERATION,
+                            "heartbeat_receipt": f"{_HEARTBEAT_GENERATION}-{time.monotonic_ns()}",
+                        }
+                        m5_receipt_identity = (
+                            str(health_extra["heartbeat_receipt"]),
+                            os.getpid(),
+                        )
                     _write_scheduler_health(
                         job_name,
                         failed=failed,
                         reason=reason or None,
-                        extra=business_liveness,
+                        extra=health_extra,
                     )
                 except Exception:  # noqa: BLE001 — health write must never break the job
                     pass
+                if m5_receipt_identity is not None:
+                    try:
+                        from src.observability.scheduler_health import (
+                            read_scheduler_job_health,
+                        )
+
+                        receipt = read_scheduler_job_health(job_name)
+                        observed = receipt.get("business_liveness")
+                        if (
+                            receipt.get("status") == "OK"
+                            and isinstance(observed, dict)
+                            and observed.get("heartbeat_receipt")
+                            == m5_receipt_identity[0]
+                            and observed.get("daemon_pid") == m5_receipt_identity[1]
+                        ):
+                            _promote_price_channel_heartbeat_ready()
+                    except Exception:  # noqa: BLE001 — missing receipt fails closed
+                        pass
                 return result
             except Exception as exc:  # noqa: BLE001
                 logger.error("%s failed: %s", job_name, exc, exc_info=True)
@@ -288,29 +373,167 @@ def _scheduler_skip_listener(event: Any) -> None:
         logger.debug("failed to write scheduler skip health", exc_info=True)
 
 
-def _write_price_channel_heartbeat() -> None:
+def _write_price_channel_heartbeat(*, status: str | None = None) -> bool:
     """Write daemon-heartbeat-price-channel-ingest.json every 60s (liveness for the sensor)."""
-    global _heartbeat_fails
+    global _heartbeat_fails, _heartbeat_status, _heartbeat_published, _heartbeat_ready
     from src.config import state_path
 
+    if status is not None:
+        _heartbeat_status = str(status).upper()
+        if _heartbeat_status != "READY":
+            _heartbeat_ready = False
     path = state_path("daemon-heartbeat-price-channel-ingest.json")
     try:
         payload = {
             "daemon": "price-channel-ingest",
-            "alive_at": datetime.now(timezone.utc).isoformat(),
+            "status": _heartbeat_status,
+            "liveness": "ALIVE",
+            # Existing consumers authorize from freshness/git identity, not these
+            # newer status fields.  STARTING must therefore overwrite any old
+            # heartbeat without an alive_at until the first successful M5 proof.
+            "ready": bool(_heartbeat_ready),
             "pid": os.getpid(),
             "git_head": _PROCESS_GIT_HEAD,
         }
+        if _heartbeat_ready:
+            payload["alive_at"] = datetime.now(timezone.utc).isoformat()
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
+        _heartbeat_published = True
         _heartbeat_fails = 0
+        return True
     except Exception as exc:  # noqa: BLE001
         _heartbeat_fails += 1
         logger.error("price-channel-ingest heartbeat write failed (%d): %s", _heartbeat_fails, exc)
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: price-channel heartbeat is unwritable; exiting for launchd recovery")
             os._exit(1)
+    return False
+
+
+def _promote_price_channel_heartbeat_ready() -> None:
+    """Promote canonical liveness only after a successful current M5 proof."""
+
+    global _heartbeat_ready, _heartbeat_status
+    if _heartbeat_ready:
+        return
+    _heartbeat_ready = True
+    _heartbeat_status = "READY"
+    if not _write_price_channel_heartbeat(status="READY"):
+        _heartbeat_ready = False
+        _heartbeat_status = "STARTING"
+
+
+def _abort_startup_failure() -> None:
+    """Abort immediately so SQLite destructors cannot run a clean last-close path."""
+
+    for handler in (*logging.getLogger().handlers, *logger.handlers):
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(1)
+
+
+def _write_price_channel_startup_status(status: str) -> None:
+    """Publish non-authorizing startup phase separate from canonical heartbeat."""
+
+    from src.config import state_path
+
+    try:
+        path = state_path(PRICE_CHANNEL_STARTUP_STATUS_FILENAME)
+        normalized = str(status).upper()
+        payload = {
+            "daemon": "price-channel-ingest",
+            "status": normalized,
+            "liveness": "ALIVE" if normalized in {"STARTING", "READY"} else normalized,
+            "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = Path(str(path) + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001 - non-authorizing telemetry never blocks cleanup
+        logger.warning("price-channel startup status write failed", exc_info=True)
+
+
+def _prepare_startup_bridge(conn: Any) -> None:
+    """Probe the ATTACH bridge without inheriting close-triggered WAL work.
+
+    SQLite can run a large implicit WAL checkpoint while the last connection to a
+    database closes.  This startup bridge is retained as a process-owned keeper, so
+    it must have autocheckpoint disabled before its first daemon-owned query and no
+    active read transaction after the probe.  The normal live daemon remains the
+    owner of recurring PASSIVE checkpoints.
+    """
+
+    # This PRAGMA must precede the sqlite_master probe and any possible close path.
+    conn.execute("PRAGMA wal_autocheckpoint = 0")
+    conn.rollback()
+    cursor = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_current'"
+    )
+    try:
+        cursor.fetchone()
+    finally:
+        close_cursor = getattr(cursor, "close", None)
+        if callable(close_cursor):
+            close_cursor()
+        # SELECTs are read-only, but rollback is explicit so the keeper cannot pin
+        # a WAL snapshot while it waits for the durable consumers to come up.
+        conn.rollback()
+    if bool(getattr(conn, "in_transaction", False)):
+        raise RuntimeError("price-channel startup bridge left an active transaction")
+
+
+def _handoff_bridge_keeper(conn: Any) -> None:
+    """Transfer a clean preflight bridge to the process-owned keeper."""
+
+    global _bridge_keeper_conn
+    if _bridge_keeper_conn is not None and _bridge_keeper_conn is not conn:
+        raise RuntimeError("price-channel startup bridge keeper already exists")
+    conn.rollback()
+    _bridge_keeper_conn = conn
+    logger.info("price-channel-ingest startup bridge handed off to process-owned keeper")
+
+
+def _close_bridge_keeper(*, reason: str) -> None:
+    """Deliberately release the startup keeper on failure, shutdown, or stop."""
+
+    global _bridge_keeper_conn
+    conn = _bridge_keeper_conn
+    _bridge_keeper_conn = None
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        logger.debug("price-channel bridge keeper rollback failed during %s", reason, exc_info=True)
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("price-channel bridge keeper close failed during %s", reason, exc_info=True)
+    else:
+        logger.info("price-channel-ingest bridge keeper closed (%s)", reason)
+
+
+def _abandon_startup_bridge_on_failure(*connections: Any | None) -> None:
+    """Avoid a failure-path last-close checkpoint; process exit releases these FDs."""
+
+    global _bridge_keeper_conn
+    pending: list[Any] = []
+    if _bridge_keeper_conn is not None:
+        pending.append(_bridge_keeper_conn)
+    pending.extend(conn for conn in connections if conn is not None and conn not in pending)
+    _bridge_keeper_conn = None
+    if pending:
+        logger.critical(
+            "price-channel startup failed; abandoning %d SQLite connection(s) "
+            "without close to avoid a last-close WAL checkpoint; process exit will release them",
+            len(pending),
+        )
 
 
 def main() -> None:
@@ -334,6 +557,10 @@ def main() -> None:
     _root.addHandler(_stdout_h)
     _root.addHandler(_stderr_h)
     logger.info("Zeus price-channel-ingest daemon starting (pid=%d)", os.getpid())
+    _write_price_channel_startup_status("STARTING")
+    # This canonical overwrite is intentionally non-authorizing: existing gates
+    # require heartbeat freshness/git identity and ignore newer status fields.
+    _write_price_channel_heartbeat(status="STARTING")
 
     # Proxy health gate — must precede any HTTP call (Gamma/CLOB/WS).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
@@ -359,29 +586,40 @@ def main() -> None:
         get_world_connection,
     )
 
-    _bridge_conn = get_trade_connection_with_world_required(write_class="live")
+    bridge_conn: Any | None = None
     try:
-        # Confirm the durable fill-bridge target table is reachable under the ATTACH path.
-        _bridge_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_current'"
-        ).fetchone()
-    finally:
-        _bridge_conn.close()
-    _world_conn = get_world_connection()
-    try:
-        _world_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='edli_live_order_events'"
-        ).fetchone()
-    finally:
-        _world_conn.close()
-    logger.info(
-        "price-channel-ingest pre-flight OK: durable fill-bridge (trade+world ATTACH) + "
-        "edli_live_order_events reachable under the sanctioned path"
-    )
+        # Keep this connection open through startup. Closing the last trade/world
+        # connection here can synchronously checkpoint a very large WAL before the
+        # daemon has emitted liveness. The keeper is intentionally read-idle.
+        bridge_conn = get_trade_connection_with_world_required(write_class="live")
+        _prepare_startup_bridge(bridge_conn)
 
-    # Prove the booted process identity before network-derived subscription setup can
-    # delay scheduler startup.  The scheduler keeps this same heartbeat current below.
-    _write_price_channel_heartbeat()
+        # Emit the separate phase after the probe but before any transient
+        # connection close; the canonical STARTING overwrite already fail-closes
+        # existing freshness readers.
+        _write_price_channel_startup_status("STARTING")
+        _handoff_bridge_keeper(bridge_conn)
+
+        # This second probe remains a short-lived, non-last connection because the
+        # process-owned ATTACH bridge keeper is already alive.
+        world_conn = get_world_connection()
+        try:
+            world_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='edli_live_order_events'"
+            ).fetchone()
+            world_conn.rollback()
+        finally:
+            world_conn.close()
+        logger.info(
+            "price-channel-ingest pre-flight OK: durable fill-bridge (trade+world ATTACH) + "
+            "edli_live_order_events reachable under the sanctioned path"
+        )
+    except BaseException:
+        _write_price_channel_startup_status("FAILED")
+        keeper_owned = bridge_conn is _bridge_keeper_conn
+        _abandon_startup_bridge_on_failure(bridge_conn if not keeper_owned else None)
+        _abort_startup_failure()
+        raise AssertionError("startup failure abort unexpectedly returned")
 
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
@@ -405,15 +643,7 @@ def main() -> None:
     # Fail-open: a WS-start hiccup must not block the reconcile/market-channel schedulers
     # (the durable bridge + feasibility rows are the persisted truth; the WS reconnects on
     # its own retry loop inside the started thread).
-    try:
-        _start_user_channel_ingestor()
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "price-channel-ingest: user-channel WS start raised (non-fatal; the reconcile "
-            "cycle + durable bridge still run, WS retries on its own loop): %s",
-            exc,
-            exc_info=True,
-        )
+    _start_user_channel_ingestor_async(_start_user_channel_ingestor)
 
     # PRODUCER 2: market-channel online-service bootstrap (1-min). Job id byte-identical to
     # the order daemon's so dashboards / scheduler_health keying carry over unchanged.
@@ -501,13 +731,22 @@ def main() -> None:
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]
+    _write_price_channel_startup_status("READY")
     logger.info("price-channel-ingest scheduler ready. %d jobs: %s", len(jobs), jobs)
 
     try:
         _scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus price-channel-ingest daemon shutting down")
+        _write_price_channel_startup_status("STOPPING")
+        _write_price_channel_heartbeat(status="STOPPING")
         _shutdown_scheduler_if_running(_scheduler, wait=True)
+    except Exception:
+        _write_price_channel_startup_status("FAILED")
+        _write_price_channel_heartbeat(status="FAILED")
+        raise
+    finally:
+        _close_bridge_keeper(reason="scheduler_stop")
 
 
 if __name__ == "__main__":
