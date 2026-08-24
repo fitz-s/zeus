@@ -50,8 +50,6 @@ _COMPOSITE_STATE_DIR_ENV = "ZEUS_LIVE_HEALTH_COMPOSITE_STATE_DIR"
 _COMPOSITE_CHILD_CODE = (
     "import os; from pathlib import Path; "
     "from src.control.live_health import compute_composite_live_health; "
-    "from src.observability.status_summary import write_cycle_pulse; "
-    "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}); "
     "compute_composite_live_health("
     f"state_dir=Path(os.environ[{_COMPOSITE_STATE_DIR_ENV!r}]))"
 )
@@ -190,9 +188,9 @@ def refresh_composite_live_health_bounded(
     state_dir: Optional[Path] = None,
     timeout_seconds: float = COMPOSITE_COMPUTE_TIMEOUT_SECONDS,
 ) -> dict:
-    """Run the composite pulse and compute in a killable one-shot child.
+    """Run composite computation in a killable one-shot child.
 
-    SCOPE: only the composite observability calculation and its pulse.
+    SCOPE: only the composite observability calculation.
     DRAIN: the parent kills/reaps a timed-out child and the next 60-second job
     invocation starts a fresh child. RESET: a zero-exit child publishes its
     normal full result; failure replaces any old healthy receipt with degraded

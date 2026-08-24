@@ -646,11 +646,47 @@ def test_live_probe_alerts_on_stale_composite_and_direct_business_failure(
     assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
 
 
-def test_bounded_composite_timeout_replaces_healthy_receipt_and_allows_next_cycle(
+def test_bounded_composite_success_keeps_daemon_process_identity(
     tmp_path, monkeypatch
 ):
     from src.control import live_health
 
+    state_dir = tmp_path / "state"
+    status_path = state_dir / "status_summary.json"
+    status = {
+        "process": {"pid": os.getpid(), "mode": "live"},
+        "cycle": {
+            "mode": "edli_event_reactor",
+            "completed_at": "2026-08-23T00:00:00+00:00",
+        },
+    }
+    _write_json(status_path, status)
+    child_code = (
+        "import json, os; from pathlib import Path; "
+        f"state_dir = Path(os.environ[{live_health._COMPOSITE_STATE_DIR_ENV!r}]); "
+        "state_dir.mkdir(parents=True, exist_ok=True); "
+        "(state_dir / 'live_health_composite.json').write_text(json.dumps("
+        "{'healthy': True, 'status': 'HEALTHY', "
+        "'computed_at': '2026-08-23T00:00:00+00:00', "
+        "'failing_surfaces': [], 'surfaces': {}}))"
+    )
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
+
+    result = live_health.refresh_composite_live_health_bounded(
+        state_dir=state_dir,
+        timeout_seconds=1.0,
+    )
+
+    assert result["healthy"] is True
+    assert json.loads(status_path.read_text()) == status
+
+
+def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(
+    tmp_path, monkeypatch
+):
+    from src.control import live_health
+
+    assert live_health.COMPOSITE_COMPUTE_TIMEOUT_SECONDS == 45.0
     state_dir = tmp_path / "state"
     _write_json(
         state_dir / "live_health_composite.json",
@@ -662,32 +698,41 @@ def test_bounded_composite_timeout_replaces_healthy_receipt_and_allows_next_cycl
             "surfaces": {},
         },
     )
-    calls = []
-
-    def timed_out_child(command, **kwargs):
-        calls.append((command, kwargs))
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-    monkeypatch.setattr(live_health.subprocess, "run", timed_out_child)
+    pid_file = tmp_path / "live_health_child_pids.txt"
+    child_code = (
+        "import os, time; "
+        f"pid_file = open({str(pid_file)!r}, 'a'); "
+        "pid_file.write(str(os.getpid()) + '\\n'); "
+        "pid_file.flush(); pid_file.close(); time.sleep(60)"
+    )
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
 
     errors = []
     for _ in range(2):
         try:
-            live_health.refresh_composite_live_health_bounded(state_dir=state_dir)
+            live_health.refresh_composite_live_health_bounded(
+                state_dir=state_dir,
+                timeout_seconds=0.5,
+            )
         except RuntimeError as exc:
             errors.append(str(exc))
 
-    assert errors == ["COMPOSITE_COMPUTE_TIMEOUT:45.0s"] * 2
-    assert len(calls) == 2
-    assert all(
-        call[1]["timeout"] == live_health.COMPOSITE_COMPUTE_TIMEOUT_SECONDS
-        for call in calls
-    )
+    assert errors == ["COMPOSITE_COMPUTE_TIMEOUT:0.5s"] * 2
+    pids = [int(value) for value in pid_file.read_text().splitlines()]
+    assert len(pids) == 2
+    assert pids[0] != pids[1]
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError(f"timed-out live-health child still exists: pid={pid}")
     receipt = json.loads((state_dir / "live_health_composite.json").read_text())
     assert receipt["healthy"] is False
     assert receipt["status"] == "DEGRADED"
     assert receipt["failing_surfaces"] == ["composite_compute"]
-    assert receipt["surfaces"]["composite_compute"]["issue"] == "COMPOSITE_COMPUTE_TIMEOUT:45.0s"
+    assert receipt["surfaces"]["composite_compute"]["issue"] == "COMPOSITE_COMPUTE_TIMEOUT:0.5s"
 
 
 def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(
