@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import plistlib
 import sqlite3
@@ -13,6 +14,14 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+
+from src.contracts.global_auction_receipt import (
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_summary,
+)
+from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.certificate import build_certificate
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +132,258 @@ def _entry_fill(path: Path, position_id: str, shares: float, price: float) -> No
     )
     connection.commit()
     connection.close()
+
+
+def _closure_fixture(
+    tmp_path: Path,
+    *,
+    wrong_winner: bool = False,
+    invalid_actionable: bool = False,
+) -> tuple[Path, Path, dict]:
+    """Create trade/world read fixtures for command-scoped receipt closure."""
+    trades = tmp_path / "trades-closure.db"
+    world = tmp_path / "world-closure.db"
+    forecasts = tmp_path / "forecasts-closure.db"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "daemon-heartbeat.json").write_text(
+        json.dumps({"alive": True, "timestamp": loop.iso_now()})
+    )
+    sqlite3.connect(forecasts).close()
+    trade = sqlite3.connect(trades)
+    trade.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, position_id TEXT, envelope_id TEXT,
+            intent_kind TEXT, token_id TEXT, side TEXT, created_at TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT, phase TEXT, last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER
+        );
+        CREATE TABLE position_events (
+            position_id TEXT, event_type TEXT, sequence_no INTEGER,
+            occurred_at TEXT
+        );
+        CREATE TABLE position_decision_attribution (
+            attribution_id TEXT PRIMARY KEY, position_id TEXT, command_id TEXT,
+            decision_certificate_hash TEXT, resolution TEXT,
+            resolution_reason TEXT
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY, condition_id TEXT, yes_token_id TEXT,
+            no_token_id TEXT, selected_outcome_token_id TEXT, side TEXT
+        );
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT
+        );
+        """
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?)",
+        ("position-p", "settled", 1, 1),
+    )
+    world_conn = sqlite3.connect(world)
+    world_conn.execute(
+        """CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY, certificate_type TEXT,
+            schema_version INTEGER, canonicalization_version TEXT,
+            semantic_key TEXT, claim_type TEXT, mode TEXT, decision_time TEXT,
+            source_available_at TEXT, agent_received_at TEXT, persisted_at TEXT,
+            max_parent_source_available_at TEXT, max_parent_agent_received_at TEXT,
+            max_parent_persisted_at TEXT, authority_id TEXT,
+            authority_version TEXT, algorithm_id TEXT, algorithm_version TEXT,
+            config_hash TEXT, model_version_hash TEXT, payload_json TEXT,
+            payload_hash TEXT, certificate_hash TEXT, verifier_status TEXT,
+            created_at TEXT
+        )"""
+    )
+    world_conn.execute(
+        """CREATE TABLE decision_certificate_edges (
+            child_certificate_id TEXT, parent_role TEXT,
+            parent_certificate_hash TEXT, parent_certificate_type TEXT,
+            required INTEGER
+        )"""
+    )
+
+    def add_command(command_id: str, receipt_id: int, cert_hash: str) -> None:
+        summary = {
+            "schema_version": 21,
+            "selection_epoch_identity": f"epoch-{receipt_id}",
+            "selection_cut_at_utc": "2026-08-24T00:00:00+00:00",
+            "decision_at_utc": "2026-08-24T00:00:01+00:00",
+            "full_scope_identity": f"scope-{receipt_id}",
+            "book_epoch_identity": f"book-{receipt_id}",
+            "wealth_witness_identity": f"wealth-{receipt_id}",
+            "wealth_economic_identity": f"wealth-economic-{receipt_id}",
+            "winner_event_id": f"event-{receipt_id}",
+            "winner_candidate_id": f"candidate-{receipt_id}",
+            "winner_actuation_identity": f"actuation-{receipt_id}",
+            "payload_identity": hashlib.sha256(f"payload-{receipt_id}".encode()).hexdigest(),
+            "decision_payload_identity": hashlib.sha256(f"decision-{receipt_id}".encode()).hexdigest(),
+            "audit_context_sha256": "3" * 64,
+            "book_native_side_states_sha256": "4" * 64,
+            "candidate_evaluations_sha256": "5" * 64,
+            "buy_minimum_marketable_repairs_sha256": "6" * 64,
+            "holding_auction_coverage_sha256": "7" * 64,
+            "receipt_hash": hashlib.sha256(f"receipt-{receipt_id}".encode()).hexdigest(),
+        }
+        summary["execution_binding_hash"] = global_auction_execution_binding_hash(summary)
+        summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(summary)
+        mode = "global_single_order_auction"
+        ref = global_auction_receipt_ref_from_summary(
+            decision_log_id=receipt_id,
+            decision_log_mode=mode,
+            summary=summary,
+        )
+        winner_event = "wrong-winner" if wrong_winner and receipt_id == 1 else ref.winner_event_id
+        winner_event = "wrong-winner" if wrong_winner and receipt_id == 1 else ref.winner_event_id
+        payload = {
+            "event_id": f"action-event-{receipt_id}",
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "causal_snapshot_id": f"snapshot-{receipt_id}",
+            "family_id": f"family-{receipt_id}",
+            "candidate_id": f"candidate-{receipt_id}",
+            "condition_id": "condition-p",
+            "token_id": "yes-p",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "executable_snapshot_id": f"exec-{receipt_id}",
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "c_fee_adjusted": 0.40,
+            "c_cost_95pct": 0.40,
+            "p_fill_lcb": 0.10,
+            "trade_score": 0.20,
+            "action_score": 0.20,
+            "fdr_family_id": f"family-{receipt_id}",
+            "kelly_decision_id": f"kelly-{receipt_id}",
+            "risk_decision_id": f"risk-{receipt_id}",
+            "live_cap_usage_id": f"cap-{receipt_id}",
+            "final_intent_id": f"intent-{receipt_id}",
+            "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+            "native_quote_available": True,
+            "submitted": False,
+            "selection_authority_applied": "qkernel_spine",
+            "global_auction_receipt": ref.as_payload(),
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.70,
+                "payoff_q_lcb": 0.60,
+                "cost": 0.40,
+                "edge_lcb": 0.20,
+                "optimal_delta_u": 0.01,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 10.0,
+                "false_edge_rate": 0.01,
+                "selection_guard_basis": "EDGE_POSITIVE",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.60,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "global_actuation_identity": ref.winner_actuation_identity,
+                "global_winner_event_id": winner_event,
+                "global_candidate_id": ref.winner_candidate_id,
+                "global_selection_epoch_identity": ref.selection_epoch_identity,
+                "global_auction_receipt": ref.as_payload(),
+            },
+        }
+        if invalid_actionable and receipt_id == 1:
+            payload.pop("side_effect_status")
+        certificate = build_certificate(
+            certificate_type="ActionableTradeCertificate",
+            semantic_key=f"actionable:{command_id}",
+            claim_type="actionable_trade",
+            mode="LIVE",
+            decision_time=__import__("datetime").datetime.fromisoformat(
+                "2026-08-24T00:00:02+00:00"
+            ),
+            source_available_at=__import__("datetime").datetime.fromisoformat(
+                "2026-08-24T00:00:00+00:00"
+            ),
+            agent_received_at=__import__("datetime").datetime.fromisoformat(
+                "2026-08-24T00:00:00+00:00"
+            ),
+            persisted_at=__import__("datetime").datetime.fromisoformat(
+                "2026-08-24T00:00:01+00:00"
+            ),
+            payload=payload,
+            authority_id="test-authority",
+            authority_version="v1",
+            algorithm_id="test-algorithm",
+            algorithm_version="v1",
+        )
+        trade.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+            (command_id, "position-p", f"env-{receipt_id}", "ENTRY", "yes-p", "BUY", "now"),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?,?)",
+            (
+                f"attr-{receipt_id}",
+                "position-p",
+                command_id,
+                certificate.certificate_hash,
+                "ATTRIBUTED",
+                None,
+            ),
+        )
+        trade.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?,?,?,?,?,?)",
+            (f"env-{receipt_id}", "condition-p", "yes-p", "no-p", "yes-p", "BUY"),
+        )
+        trade.execute(
+            "INSERT INTO decision_log VALUES (?,?,?)",
+            (receipt_id, mode, json.dumps({"summary": summary})),
+        )
+        header = certificate.header
+        world_conn.execute(
+            """INSERT INTO decision_certificates VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            )""",
+            (
+                header.certificate_id,
+                header.certificate_type,
+                header.schema_version,
+                header.canonicalization_version,
+                header.semantic_key,
+                header.claim_type,
+                header.mode,
+                header.decision_time.isoformat(),
+                header.source_available_at.isoformat(),
+                header.agent_received_at.isoformat(),
+                header.persisted_at.isoformat(),
+                None,
+                None,
+                None,
+                header.authority_id,
+                header.authority_version,
+                header.algorithm_id,
+                header.algorithm_version,
+                header.config_hash,
+                header.model_version_hash,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                stable_hash(payload),
+                header.certificate_hash,
+                header.verifier_status,
+                "2026-08-24T00:00:02+00:00",
+            ),
+        )
+
+    add_command("entry-1", 1, "a" * 64)
+    add_command("entry-2", 2, "b" * 64)
+    trade.commit()
+    world_conn.commit()
+    trade.close()
+    world_conn.close()
+    return trades, world, {
+        "repo_root": str(tmp_path),
+        "trades_db": str(trades),
+        "forecasts_db": str(forecasts),
+        "world_db": str(world),
+        "evidence_query_seconds": 1.0,
+        "evidence_max_rows": 20,
+    }
 
 
 def _bootstrap(tmp_path: Path, db: Path) -> tuple[Path, dict]:
@@ -719,6 +980,237 @@ def test_bounded_rows_enforces_row_ceiling(tmp_path: Path) -> None:
     assert len(result["rows"]) == 3
     assert result["truncated"] is True
     assert result["error"] is None
+
+
+def test_evidence_bundle_keeps_two_entry_receipt_closures_for_one_position(tmp_path: Path) -> None:
+    trades, world, config = _closure_fixture(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-closure",
+        "incidents": [{"incident_id": "incident-closure", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle_path = loop.build_evidence_bundle(config, batch, run_dir)
+    incident = json.loads(bundle_path.read_text())["incidents"]["incident-closure"]
+    closures = incident["entry_command_closures"]
+
+    assert [row["command_id"] for row in closures] == ["entry-1", "entry-2"]
+    assert [row["resolution"] for row in closures] == ["ATTRIBUTED", "ATTRIBUTED"]
+    assert [row["global_auction_receipt"]["ref"]["decision_log_id"] for row in closures] == [1, 2]
+    assert len(closures[0]["certificate"]["certificate_hash"]) == 64
+    assert closures[0]["certificate"]["certificate_hash"] != closures[1]["certificate"]["certificate_hash"]
+    assert trades.exists() and world.exists()
+
+
+def test_evidence_bundle_missing_command_chain_is_explicitly_unattributable(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path)
+    trade = sqlite3.connect(config["trades_db"])
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        ("entry-missing", "position-p", "env-missing", "ENTRY", "yes-p", "BUY", "now"),
+    )
+    trade.commit()
+    trade.close()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-missing",
+        "incidents": [{"incident_id": "incident-missing", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    closure = next(
+        row for row in bundle["incidents"]["incident-missing"]["entry_command_closures"]
+        if row["command_id"] == "entry-missing"
+    )
+    assert closure["resolution"] == "UNATTRIBUTABLE"
+    assert closure["reason"] == "ENTRY_ATTRIBUTION_MISSING"
+    assert closure["global_auction_receipt"] is None
+
+
+def test_evidence_bundle_wrong_winner_fails_closed(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path, wrong_winner=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-wrong-winner",
+        "incidents": [{"incident_id": "incident-wrong-winner", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    closure = bundle["incidents"]["incident-wrong-winner"]["entry_command_closures"][0]
+    assert closure["resolution"] == "UNATTRIBUTABLE"
+    assert closure["reason"].startswith("ENTRY_GLOBAL_AUCTION_RECEIPT_REF_INVALID:")
+    assert closure["global_auction_receipt"] is None
+
+
+def test_invalid_actionable_payload_is_unattributable(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path, invalid_actionable=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-invalid-actionable",
+        "incidents": [{"incident_id": "incident-invalid-actionable", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    closure = bundle["incidents"]["incident-invalid-actionable"]["entry_command_closures"][0]
+    assert closure["resolution"] == "UNATTRIBUTABLE"
+    assert "side_effect_status" in closure["reason"]
+
+
+def test_entry_projection_ignores_generic_display_max_rows(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path)
+    config["evidence_max_rows"] = 1
+    config["evidence_entry_page_size"] = 1
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-entry-pagination",
+        "incidents": [{"incident_id": "incident-entry-pagination", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    incident = bundle["incidents"]["incident-entry-pagination"]
+    assert len(incident["venue_commands"]["rows"]) == 1
+    assert [row["command_id"] for row in incident["entry_command_closures"]] == [
+        "entry-1",
+        "entry-2",
+    ]
+    assert incident["entry_command_projection"]["complete"] is True
+
+
+def test_entry_projection_rejects_duplicate_command_identity(tmp_path: Path) -> None:
+    db = tmp_path / "duplicate-entry.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE venue_commands (command_id TEXT, position_id TEXT, intent_kind TEXT, created_at TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        [
+            ("duplicate", "position-p", "ENTRY", "2026-08-24T00:00:00Z"),
+            ("duplicate", "position-p", "ENTRY", "2026-08-24T00:00:00Z"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    projection = loop._entry_commands_projection(
+        db,
+        "position-p",
+        seconds=1.0,
+        ceiling=10,
+        page_size=1,
+    )
+    assert projection["complete"] is False
+    assert projection["incomplete_reason"] == "ENTRY_COMMAND_DUPLICATE_ID"
+
+
+def test_duplicate_entry_projection_invalidates_every_known_closure(tmp_path: Path) -> None:
+    trades, _world, config = _closure_fixture(tmp_path)
+    trade = sqlite3.connect(trades)
+    trade.execute("ALTER TABLE venue_commands RENAME TO venue_commands_original")
+    trade.execute(
+        """CREATE TABLE venue_commands (
+            command_id TEXT, position_id TEXT, envelope_id TEXT,
+            intent_kind TEXT, token_id TEXT, side TEXT, created_at TEXT
+        )"""
+    )
+    trade.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
+        [
+            ("entry-1", "position-p", "env-1", "ENTRY", "yes-p", "BUY", "now"),
+            ("entry-1", "position-p", "env-1", "ENTRY", "yes-p", "BUY", "now"),
+        ],
+    )
+    trade.execute("DROP TABLE venue_commands_original")
+    trade.commit()
+    trade.close()
+    config["evidence_max_rows"] = 1
+    config["evidence_entry_page_size"] = 1
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-duplicate-closure",
+        "incidents": [{"incident_id": "incident-duplicate-closure", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    incident = bundle["incidents"]["incident-duplicate-closure"]
+    assert incident["entry_command_projection"]["complete"] is False
+    assert incident["entry_command_projection"]["incomplete_reason"] == "ENTRY_COMMAND_DUPLICATE_ID"
+    assert incident["entry_command_closures"]
+    assert all(row["resolution"] == "UNATTRIBUTABLE" for row in incident["entry_command_closures"])
+    assert any(row.get("synthetic_ambiguous_record") for row in incident["entry_command_closures"])
+
+
+def test_oversized_receipt_artifact_is_unattributable_and_incomplete(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path)
+    config["evidence_artifact_max_bytes"] = 10
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-artifact-budget",
+        "incidents": [{"incident_id": "incident-artifact-budget", "loss": {"position_id": "position-p"}}],
+    }
+
+    bundle = json.loads(loop.build_evidence_bundle(config, batch, run_dir).read_text())
+    incident = bundle["incidents"]["incident-artifact-budget"]
+    assert all(
+        row["reason"] == "ENTRY_GLOBAL_AUCTION_RECEIPT_ARTIFACT_OVERSIZE"
+        for row in incident["entry_command_closures"]
+    )
+    assert bundle["bundle_complete"] is False
+
+
+def test_aggregate_bundle_budget_marks_known_closures_unattributable(tmp_path: Path) -> None:
+    _trades, _world, config = _closure_fixture(tmp_path)
+    config["evidence_bundle_max_bytes"] = 1_000
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-bundle-budget",
+        "incidents": [{"incident_id": "incident-bundle-budget", "loss": {"position_id": "position-p"}}],
+    }
+
+    path = loop.build_evidence_bundle(config, batch, run_dir)
+    bundle = json.loads(path.read_text())
+    assert bundle["bundle_complete"] is False
+    assert bundle["bundle_incomplete_reason"] == "EVIDENCE_BUNDLE_BYTE_BUDGET_EXCEEDED"
+    assert path.stat().st_size <= config["evidence_bundle_max_bytes"]
+    assert bundle["bundle_bytes"] == path.stat().st_size
+
+
+def test_one_mb_artifact_bundle_hard_ceiling_and_exact_byte_field(tmp_path: Path) -> None:
+    trades, _world, config = _closure_fixture(tmp_path)
+    config["evidence_artifact_max_bytes"] = 2_000_000
+    config["evidence_bundle_max_bytes"] = 1_000
+    trade = sqlite3.connect(trades)
+    artifact = json.loads(
+        trade.execute("SELECT artifact_json FROM decision_log WHERE id=1").fetchone()[0]
+    )
+    artifact["padding"] = "x" * 1_000_000
+    trade.execute(
+        "UPDATE decision_log SET artifact_json=? WHERE id=1",
+        (json.dumps(artifact, sort_keys=True, separators=(",", ":")),),
+    )
+    trade.commit()
+    trade.close()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    batch = {
+        "batch_id": "batch-one-mb-artifact",
+        "incidents": [{"incident_id": "incident-one-mb-artifact", "loss": {"position_id": "position-p"}}],
+    }
+
+    path = loop.build_evidence_bundle(config, batch, run_dir)
+    bundle = json.loads(path.read_text())
+    assert path.stat().st_size <= 1_000
+    assert bundle["bundle_bytes"] == path.stat().st_size
+    assert bundle["bundle_complete"] is False
+    assert bundle["bundle_incomplete_reason"] == "EVIDENCE_BUNDLE_BYTE_BUDGET_EXCEEDED"
 
 
 def test_capital_preemption_defers_without_runner_failure(tmp_path: Path) -> None:

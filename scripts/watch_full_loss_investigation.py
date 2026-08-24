@@ -46,6 +46,11 @@ SCHEMA_VERSION = 1
 FULL_LOSS_RATIO = 0.95
 MAX_BATCH = 20
 ROOT_CAUSE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+DEFAULT_ENTRY_COMMAND_CEILING = 200
+DEFAULT_ENTRY_PAGE_SIZE = 50
+DEFAULT_ARTIFACT_BYTES = 256 * 1024
+DEFAULT_CERTIFICATE_PAYLOAD_BYTES = 256 * 1024
+DEFAULT_BUNDLE_BYTES = 4 * 1024 * 1024
 
 
 INVESTIGATOR_RULES = """# Zeus Full-Loss Investigator
@@ -479,6 +484,7 @@ def bootstrap_workspace(
         "schema_version": SCHEMA_VERSION,
         "repo_root": str(repo_root.resolve()),
         "repair_worktree": str(repair_worktree.resolve()) if repair_worktree else None,
+        "world_db": str((repo_root / "state" / "zeus-world.db").resolve()),
         "trades_db": str((repo_root / "state" / "zeus_trades.db").resolve()),
         "forecasts_db": str((repo_root / "state" / "zeus-forecasts.db").resolve()),
         "codex_bin": DEFAULT_CODEX,
@@ -492,6 +498,11 @@ def bootstrap_workspace(
         "max_heartbeat_age_seconds": 90,
         "evidence_query_seconds": 1.5,
         "evidence_max_rows": 200,
+        "evidence_entry_command_ceiling": DEFAULT_ENTRY_COMMAND_CEILING,
+        "evidence_entry_page_size": DEFAULT_ENTRY_PAGE_SIZE,
+        "evidence_artifact_max_bytes": DEFAULT_ARTIFACT_BYTES,
+        "evidence_certificate_payload_max_bytes": DEFAULT_CERTIFICATE_PAYLOAD_BYTES,
+        "evidence_bundle_max_bytes": DEFAULT_BUNDLE_BYTES,
         "investigator_nice": 15,
     }
     atomic_json(workspace / "runtime" / "config.json", config)
@@ -865,8 +876,31 @@ def _bounded_rows(
     max_rows: int,
 ) -> dict[str, Any]:
     """Run one indexed read with wall-clock and row-count ceilings."""
+    connection = None
+    try:
+        connection = open_read_only(str(db_path.resolve()), timeout=0.1)
+        return _bounded_rows_on_connection(
+            connection,
+            sql,
+            params,
+            seconds=seconds,
+            max_rows=max_rows,
+        )
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _bounded_rows_on_connection(
+    connection: Any,
+    sql: str,
+    params: tuple[Any, ...],
+    *,
+    seconds: float,
+    max_rows: int,
+) -> dict[str, Any]:
+    """Run one bounded read on a caller-owned read-only snapshot."""
     started = time.monotonic()
-    connection = open_read_only(str(db_path.resolve()), timeout=0.1)
     try:
         connection.set_progress_handler(
             lambda: 1 if time.monotonic() - started > seconds else 0,
@@ -888,7 +922,620 @@ def _bounded_rows(
         }
     finally:
         connection.set_progress_handler(None, 0)
-        connection.close()
+
+
+def _entry_commands_projection(
+    db_path: Path,
+    position_id: str,
+    *,
+    seconds: float,
+    ceiling: int,
+    page_size: int,
+) -> dict[str, Any]:
+    """Read all known ENTRY commands with an independent bounded keyset.
+
+    The generic command display is intentionally capped separately.  This
+    projection must not silently lose an ENTRY merely because that display is
+    configured with a small ``max_rows``.  A probe row beyond ``ceiling``
+    makes completeness explicit while keeping memory and query work bounded.
+    """
+    if ceiling <= 0:
+        return {
+            "rows": [],
+            "complete": False,
+            "incomplete_reason": "ENTRY_COMMAND_CEILING_INVALID",
+            "ceiling": ceiling,
+        }
+    page_size = max(1, min(page_size, ceiling))
+    rows: list[dict[str, Any]] = []
+    seen_command_ids: set[str] = set()
+    cursor: tuple[str, str, int] | None = None
+    connection = None
+    try:
+        connection = open_read_only(str(db_path.resolve()), timeout=0.1)
+        connection.execute("BEGIN")
+        while len(rows) < ceiling:
+            remaining = ceiling - len(rows)
+            limit = min(page_size, remaining)
+            if cursor is None:
+                sql = """SELECT rowid, * FROM venue_commands
+                    WHERE position_id=? AND UPPER(intent_kind)='ENTRY'
+                    ORDER BY created_at, command_id, rowid
+                    LIMIT ?"""
+                params: tuple[Any, ...] = (position_id, limit)
+            else:
+                sql = """SELECT rowid, * FROM venue_commands
+                    WHERE position_id=? AND UPPER(intent_kind)='ENTRY'
+                      AND (
+                        created_at > ?
+                        OR (
+                            created_at=?
+                            AND (
+                                command_id>?
+                                OR (command_id=? AND rowid>?)
+                            )
+                        )
+                      )
+                    ORDER BY created_at, command_id, rowid
+                    LIMIT ?"""
+                params = (
+                    position_id,
+                    cursor[0],
+                    cursor[0],
+                    cursor[1],
+                    cursor[1],
+                    cursor[2],
+                    limit,
+                )
+            result = _bounded_rows_on_connection(
+                connection,
+                sql,
+                params,
+                seconds=seconds,
+                max_rows=limit,
+            )
+            if result["error"]:
+                return {
+                    "rows": rows,
+                    "complete": False,
+                    "incomplete_reason": "ENTRY_COMMAND_PROJECTION_UNAVAILABLE",
+                    "query": result,
+                    "ceiling": ceiling,
+                }
+            page = result["rows"]
+            for command in page:
+                command_id = str(command.get("command_id") or "").strip()
+                if command_id in seen_command_ids:
+                    return {
+                        "rows": rows,
+                        "complete": False,
+                        "incomplete_reason": "ENTRY_COMMAND_DUPLICATE_ID",
+                        "ambiguous_command_ids": [command_id],
+                        "ceiling": ceiling,
+                    }
+                if not command_id:
+                    return {
+                        "rows": rows,
+                        "complete": False,
+                        "incomplete_reason": "ENTRY_COMMAND_ID_MISSING",
+                        "ceiling": ceiling,
+                    }
+                seen_command_ids.add(command_id)
+            rows.extend(page)
+            if len(page) < limit:
+                return {
+                    "rows": rows,
+                    "complete": True,
+                    "incomplete_reason": None,
+                    "ceiling": ceiling,
+                }
+            last = page[-1]
+            cursor = (
+                str(last.get("created_at") or ""),
+                str(last.get("command_id") or ""),
+                int(last.get("rowid") or 0),
+            )
+
+        probe_sql = """SELECT command_id, created_at, rowid FROM venue_commands
+            WHERE position_id=? AND UPPER(intent_kind)='ENTRY'
+              AND (
+                created_at > ?
+                OR (
+                    created_at=?
+                    AND (
+                        command_id>?
+                        OR (command_id=? AND rowid>?)
+                    )
+                )
+              )
+            ORDER BY created_at, command_id, rowid LIMIT 1"""
+        probe = _bounded_rows_on_connection(
+            connection,
+            probe_sql,
+            (
+                position_id,
+                cursor[0],
+                cursor[0],
+                cursor[1],
+                cursor[1],
+                cursor[2],
+            ),
+            seconds=seconds,
+            max_rows=1,
+        )
+        if probe["error"]:
+            return {
+                "rows": rows,
+                "complete": False,
+                "incomplete_reason": "ENTRY_COMMAND_CEILING_PROBE_UNAVAILABLE",
+                "query": probe,
+                "ceiling": ceiling,
+            }
+        if probe["rows"]:
+            probe_id = str(probe["rows"][0].get("command_id") or "").strip()
+            return {
+                "rows": rows,
+                "complete": False,
+                "incomplete_reason": (
+                    "ENTRY_COMMAND_DUPLICATE_ID"
+                    if probe_id in seen_command_ids
+                    else "ENTRY_COMMAND_CEILING_REACHED"
+                ),
+                "ambiguous_command_ids": (
+                    [probe_id] if probe_id in seen_command_ids else []
+                ),
+                "ceiling": ceiling,
+            }
+        return {
+            "rows": rows,
+            "complete": True,
+            "incomplete_reason": None,
+            "ceiling": ceiling,
+        }
+    except Exception as exc:
+        return {
+            "rows": rows,
+            "complete": False,
+            "incomplete_reason": "ENTRY_COMMAND_PROJECTION_UNAVAILABLE",
+            "query": {"error": f"{type(exc).__name__}: {exc}"},
+            "ceiling": ceiling,
+        }
+    finally:
+        if connection is not None:
+            connection.rollback()
+            connection.close()
+
+
+def _entry_command_closure(
+    *,
+    trades_db: Path,
+    world_db: Path,
+    command: Mapping[str, Any],
+    seconds: float,
+    artifact_max_bytes: int,
+    certificate_payload_max_bytes: int,
+) -> dict[str, Any]:
+    """Build one exact ENTRY command -> certificate -> auction receipt closure.
+
+    SCOPE: this one ``venue_commands.command_id`` and its exact position_id.
+    DRAIN: none; an absent or malformed link is an explicit audit result and is
+    never retried by selecting another position/time/latest row.
+    RESET: only a newly committed exact command attribution/certificate/receipt
+    chain can make this command attributable on a later read.
+
+    This function is deliberately read-only.  The command and attribution are
+    read from the trade DB, the certificate from the attached-world authority,
+    and the referenced decision_log artifact from the trade DB.  Every lookup
+    is keyed by the preceding identity; no positional or temporal fallback is
+    permitted.
+    """
+    command_id = str(command.get("command_id") or "").strip()
+    position_id = str(command.get("position_id") or "").strip()
+    closure: dict[str, Any] = {
+        "command_id": command_id,
+        "position_id": position_id,
+        "command": dict(command),
+        "resolution": "UNATTRIBUTABLE",
+        "status": "UNATTRIBUTABLE",
+        "reason": None,
+        "attribution": None,
+        "certificate": None,
+        "global_auction_receipt": None,
+    }
+
+    def fail(reason: str, **fields: Any) -> dict[str, Any]:
+        closure["reason"] = reason
+        closure.update(fields)
+        return closure
+
+    if not command_id:
+        return fail("ENTRY_COMMAND_ID_MISSING")
+    if not position_id:
+        return fail("ENTRY_POSITION_ID_MISSING")
+
+    attribution = _bounded_rows(
+        trades_db,
+        "SELECT * FROM position_decision_attribution WHERE command_id=? "
+        "ORDER BY attribution_id",
+        (command_id,),
+        seconds=seconds,
+        max_rows=2,
+    )
+    if attribution["error"]:
+        return fail("ENTRY_ATTRIBUTION_UNAVAILABLE", attribution_query=attribution)
+    if len(attribution["rows"]) == 0:
+        return fail("ENTRY_ATTRIBUTION_MISSING", attribution_query=attribution)
+    if len(attribution["rows"]) != 1 or attribution["truncated"]:
+        return fail("ENTRY_ATTRIBUTION_MULTIPLE_ROWS", attribution_query=attribution)
+    attribution_row = attribution["rows"][0]
+    closure["attribution"] = attribution_row
+    if str(attribution_row.get("position_id") or "").strip() != position_id:
+        return fail("ENTRY_ATTRIBUTION_POSITION_ID_MISMATCH")
+    if str(attribution_row.get("command_id") or "").strip() != command_id:
+        return fail("ENTRY_ATTRIBUTION_COMMAND_ID_MISMATCH")
+    if str(attribution_row.get("resolution") or "").strip() != "ATTRIBUTED":
+        detail = str(attribution_row.get("resolution_reason") or "unspecified").strip()
+        return fail(f"ENTRY_ATTRIBUTION_UNATTRIBUTABLE:{detail}")
+    certificate_hash = str(attribution_row.get("decision_certificate_hash") or "").strip()
+    if not certificate_hash:
+        return fail("ENTRY_CERTIFICATE_HASH_MISSING")
+
+    certificate = _bounded_rows(
+        world_db,
+        """SELECT * FROM decision_certificates
+           WHERE certificate_hash=?
+           ORDER BY certificate_id""",
+        (certificate_hash,),
+        seconds=seconds,
+        max_rows=2,
+    )
+    if certificate["error"]:
+        return fail("ENTRY_CERTIFICATE_UNAVAILABLE", certificate_query=certificate)
+    if len(certificate["rows"]) == 0:
+        return fail("ENTRY_CERTIFICATE_ROW_MISSING", certificate_query=certificate)
+    if len(certificate["rows"]) != 1 or certificate["truncated"]:
+        return fail("ENTRY_CERTIFICATE_MULTIPLE_ROWS", certificate_query=certificate)
+    certificate_row = certificate["rows"][0]
+    closure["certificate"] = certificate_row
+    if str(certificate_row.get("certificate_hash") or "").strip() != certificate_hash:
+        return fail("ENTRY_CERTIFICATE_HASH_ROW_MISMATCH")
+    if str(certificate_row.get("certificate_type") or "").strip() != "ActionableTradeCertificate":
+        return fail("ENTRY_CERTIFICATE_TYPE_INVALID")
+    if str(certificate_row.get("mode") or "").strip() != "LIVE":
+        return fail("ENTRY_CERTIFICATE_MODE_INVALID")
+    if str(certificate_row.get("verifier_status") or "").strip() != "VERIFIED":
+        return fail("ENTRY_CERTIFICATE_VERIFIER_STATUS_INVALID")
+    try:
+        certificate_payload = json.loads(str(certificate_row.get("payload_json") or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fail("ENTRY_CERTIFICATE_PAYLOAD_INVALID")
+    if not isinstance(certificate_payload, dict):
+        return fail("ENTRY_CERTIFICATE_PAYLOAD_NOT_OBJECT")
+    payload_json = str(certificate_row.get("payload_json") or "")
+    payload_bytes = len(payload_json.encode("utf-8"))
+    if payload_bytes > certificate_payload_max_bytes:
+        closure["certificate"] = {
+            key: value for key, value in certificate_row.items() if key != "payload_json"
+        }
+        closure["certificate"]["payload_bytes"] = payload_bytes
+        closure["certificate"]["payload_sha256"] = hashlib.sha256(
+            payload_json.encode("utf-8")
+        ).hexdigest()
+        return fail("ENTRY_CERTIFICATE_PAYLOAD_OVERSIZE")
+
+    # Reconstruct the persisted header identity before consuming any payload
+    # fields.  This proves the attribution hash names this exact row, rather
+    # than merely accepting a row that happens to contain a usable payload.
+    try:
+        from src.decision_kernel.canonicalization import stable_hash
+        from src.decision_kernel.certificate import (
+            CertificateHeader,
+            ParentEdge,
+            certificate_hash_for,
+        )
+        if str(certificate_row.get("payload_hash") or "") != stable_hash(certificate_payload):
+            return fail("ENTRY_CERTIFICATE_PAYLOAD_HASH_MISMATCH")
+
+        edge_rows = _bounded_rows(
+            world_db,
+            """SELECT parent_role, parent_certificate_hash,
+                              parent_certificate_type, required
+                         FROM decision_certificate_edges
+                        WHERE child_certificate_id=?
+                        ORDER BY parent_role, parent_certificate_hash""",
+            (str(certificate_row.get("certificate_id") or ""),),
+            seconds=seconds,
+            max_rows=200,
+        )
+        if edge_rows["error"]:
+            return fail("ENTRY_CERTIFICATE_EDGES_UNAVAILABLE", certificate_edges_query=edge_rows)
+        def cert_time(field: str, *, required: bool = False) -> datetime | None:
+            raw = str(certificate_row.get(field) or "").strip()
+            if not raw:
+                if required:
+                    raise ValueError(f"{field} missing")
+                return None
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        header = CertificateHeader(
+            certificate_id=str(certificate_row.get("certificate_id") or ""),
+            certificate_type=str(certificate_row.get("certificate_type") or ""),
+            schema_version=int(certificate_row["schema_version"]),
+            canonicalization_version=str(certificate_row.get("canonicalization_version") or ""),
+            semantic_key=str(certificate_row.get("semantic_key") or ""),
+            claim_type=str(certificate_row.get("claim_type") or ""),
+            mode=str(certificate_row.get("mode") or ""),
+            decision_time=cert_time("decision_time", required=True),
+            source_available_at=cert_time("source_available_at"),
+            agent_received_at=cert_time("agent_received_at"),
+            persisted_at=cert_time("persisted_at"),
+            max_parent_source_available_at=cert_time("max_parent_source_available_at"),
+            max_parent_agent_received_at=cert_time("max_parent_agent_received_at"),
+            max_parent_persisted_at=cert_time("max_parent_persisted_at"),
+            parent_edges=tuple(
+                ParentEdge(
+                    str(row.get("parent_role") or ""),
+                    str(row.get("parent_certificate_hash") or ""),
+                    str(row.get("parent_certificate_type") or ""),
+                    bool(row.get("required")),
+                )
+                for row in edge_rows["rows"]
+            ),
+            authority_id=str(certificate_row.get("authority_id") or ""),
+            authority_version=str(certificate_row.get("authority_version") or ""),
+            algorithm_id=str(certificate_row.get("algorithm_id") or ""),
+            algorithm_version=str(certificate_row.get("algorithm_version") or ""),
+            config_hash=str(certificate_row.get("config_hash") or "") or None,
+            model_version_hash=str(certificate_row.get("model_version_hash") or "") or None,
+            payload_hash=str(certificate_row.get("payload_hash") or ""),
+            certificate_hash=certificate_hash,
+            verifier_status=str(certificate_row.get("verifier_status") or ""),
+        )
+        if certificate_hash_for(header) != certificate_hash:
+            return fail("ENTRY_CERTIFICATE_HEADER_HASH_MISMATCH")
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return fail(f"ENTRY_CERTIFICATE_HEADER_INVALID:{exc}")
+
+    try:
+        from src.decision_kernel.verifier import _verify_actionable_payload
+
+        _verify_actionable_payload(
+            type("ActionablePayloadCarrier", (), {"payload": certificate_payload})()
+        )
+    except Exception as exc:  # noqa: BLE001 - persisted evidence must fail closed
+        return fail(f"ENTRY_CERTIFICATE_ACTIONABLE_PAYLOAD_INVALID:{exc}")
+
+    envelope_id = str(command.get("envelope_id") or "").strip()
+    if not envelope_id:
+        return fail("ENTRY_ENVELOPE_ID_MISSING")
+    envelope = _bounded_rows(
+        trades_db,
+        """SELECT envelope_id, condition_id, yes_token_id, no_token_id,
+                          selected_outcome_token_id, side
+                     FROM venue_submission_envelopes
+                    WHERE envelope_id=?""",
+        (envelope_id,),
+        seconds=seconds,
+        max_rows=2,
+    )
+    if envelope["error"]:
+        return fail("ENTRY_ENVELOPE_UNAVAILABLE", envelope_query=envelope)
+    if len(envelope["rows"]) != 1 or envelope["truncated"]:
+        return fail(
+            "ENTRY_ENVELOPE_MISSING" if not envelope["rows"] else "ENTRY_ENVELOPE_MULTIPLE_ROWS",
+            envelope_query=envelope,
+        )
+    envelope_row = envelope["rows"][0]
+    closure["envelope"] = envelope_row
+    selected_token = str(envelope_row.get("selected_outcome_token_id") or "").strip()
+    yes_token = str(envelope_row.get("yes_token_id") or "").strip()
+    no_token = str(envelope_row.get("no_token_id") or "").strip()
+    expected_direction = "buy_yes" if selected_token == yes_token else (
+        "buy_no" if selected_token == no_token else ""
+    )
+    if (
+        str(command.get("side") or "").strip().upper() != "BUY"
+        or not expected_direction
+        or str(command.get("token_id") or "").strip() != selected_token
+        or str(certificate_payload.get("condition_id") or "").strip()
+        != str(envelope_row.get("condition_id") or "").strip()
+        or str(certificate_payload.get("token_id") or "").strip() != selected_token
+        or str(certificate_payload.get("direction") or "").strip().lower()
+        != expected_direction
+    ):
+        return fail("ENTRY_CERTIFICATE_COMMAND_IDENTITY_MISMATCH")
+
+    # Reuse the canonical receipt contract's parser and artifact validator.
+    # These are pure validation helpers; they perform no DB writes or venue I/O.
+    try:
+        from src.contracts.global_auction_receipt import (
+            GlobalAuctionReceiptRef,
+            assert_global_auction_receipt_artifact,
+        )
+
+        economics = certificate_payload.get("qkernel_execution_economics")
+        receipt_payload = certificate_payload.get("global_auction_receipt")
+        if not isinstance(economics, Mapping) or receipt_payload in (None, ""):
+            return fail("ENTRY_GLOBAL_AUCTION_RECEIPT_MISSING")
+        nested_payload = economics.get("global_auction_receipt")
+        expected_receipt = GlobalAuctionReceiptRef.from_payload(receipt_payload)
+        nested_receipt = GlobalAuctionReceiptRef.from_payload(nested_payload)
+        if nested_receipt != expected_receipt:
+            return fail("ENTRY_GLOBAL_AUCTION_RECEIPT_CERTIFICATE_MISMATCH")
+        expected_receipt.assert_matches_actuation(
+            winner_event_id=economics.get("global_winner_event_id"),
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=economics.get("global_actuation_identity"),
+            selection_epoch_identity=economics.get("global_selection_epoch_identity"),
+        )
+    except (TypeError, ValueError) as exc:
+        return fail(f"ENTRY_GLOBAL_AUCTION_RECEIPT_REF_INVALID:{exc}")
+
+    decision_log = _bounded_rows(
+        trades_db,
+        "SELECT id, mode, artifact_json FROM decision_log WHERE id=?",
+        (expected_receipt.decision_log_id,),
+        seconds=seconds,
+        max_rows=2,
+    )
+    if decision_log["error"]:
+        return fail("ENTRY_GLOBAL_AUCTION_DECISION_LOG_UNAVAILABLE", decision_log_query=decision_log)
+    if len(decision_log["rows"]) != 1 or decision_log["truncated"]:
+        return fail(
+            "ENTRY_GLOBAL_AUCTION_DECISION_LOG_MISSING"
+            if not decision_log["rows"]
+            else "ENTRY_GLOBAL_AUCTION_DECISION_LOG_MULTIPLE_ROWS",
+            decision_log_query=decision_log,
+        )
+    decision_log_row = decision_log["rows"][0]
+    artifact_json = str(decision_log_row.get("artifact_json") or "")
+    artifact_bytes = len(artifact_json.encode("utf-8"))
+    artifact_sha256 = hashlib.sha256(artifact_json.encode("utf-8")).hexdigest()
+    if artifact_bytes > artifact_max_bytes:
+        return fail(
+            "ENTRY_GLOBAL_AUCTION_RECEIPT_ARTIFACT_OVERSIZE",
+            global_auction_receipt={
+                "ref": expected_receipt.as_payload(),
+                "decision_log": {
+                    "id": decision_log_row.get("id"),
+                    "mode": decision_log_row.get("mode"),
+                    "artifact_bytes": artifact_bytes,
+                    "artifact_sha256": artifact_sha256,
+                },
+            },
+        )
+    try:
+        assert_global_auction_receipt_artifact(
+            expected=expected_receipt,
+            decision_log_id=int(decision_log_row["id"]),
+            decision_log_mode=str(decision_log_row.get("mode") or ""),
+            artifact_json=artifact_json,
+        )
+    except (TypeError, ValueError) as exc:
+        return fail(f"ENTRY_GLOBAL_AUCTION_RECEIPT_ARTIFACT_INVALID:{exc}", decision_log=decision_log_row)
+
+    closure["global_auction_receipt"] = {
+        "ref": expected_receipt.as_payload(),
+        "decision_log": {
+            "id": decision_log_row.get("id"),
+            "mode": decision_log_row.get("mode"),
+            "artifact_json": artifact_json,
+            "artifact_bytes": artifact_bytes,
+            "artifact_sha256": artifact_sha256,
+        },
+    }
+    closure["resolution"] = "ATTRIBUTED"
+    closure["status"] = "ATTRIBUTED"
+    return closure
+
+
+def _render_bundle(payload: dict[str, Any]) -> bytes:
+    """Render the exact stored UTF-8 JSON bytes, including one final newline."""
+    for _ in range(4):
+        raw = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        size = len(raw)
+        if payload.get("bundle_bytes") == size:
+            return raw
+        payload["bundle_bytes"] = size
+    raw = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    if payload.get("bundle_bytes") != len(raw):
+        payload["bundle_bytes"] = len(raw)
+        raw = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+    return raw
+
+
+def _compact_bundle_for_budget(
+    payload: dict[str, Any],
+    *,
+    bundle_max_bytes: int,
+    entry_ceiling: int,
+) -> tuple[dict[str, Any], bytes]:
+    """Deterministically compact evidence until the final bytes fit the cap."""
+    raw = _render_bundle(payload)
+    if len(raw) <= bundle_max_bytes:
+        return payload, raw
+    reason = "EVIDENCE_BUNDLE_BYTE_BUDGET_EXCEEDED"
+    payload["bundle_complete"] = False
+    payload["bundle_incomplete_reason"] = reason
+    incidents = payload.get("incidents") or {}
+    for incident in incidents.values():
+        incident["projection_incomplete_reason"] = reason
+        for field in (
+            "position_events",
+            "venue_command_events",
+            "market_events",
+            "settlement",
+            "observations",
+            "live_posteriors",
+            "raw_forecast_frontier",
+            "token_book_events",
+            "venue_commands",
+        ):
+            incident.pop(field, None)
+        incident["entry_command_projection"] = {
+            "complete": False,
+            "incomplete_reason": reason,
+            "ceiling": entry_ceiling,
+        }
+        incident["entry_command_closures"] = [
+            {
+                "command_id": closure.get("command_id"),
+                "position_id": closure.get("position_id"),
+                "command": closure.get("command"),
+                "resolution": "UNATTRIBUTABLE",
+                "status": "UNATTRIBUTABLE",
+                "reason": reason,
+            }
+            for closure in incident.get("entry_command_closures", [])
+        ]
+    raw = _render_bundle(payload)
+    if len(raw) <= bundle_max_bytes:
+        return payload, raw
+
+    # If preserving full command fields still cannot fit, retain exact command
+    # identities only.  This is a fail-closed manifest, never a completeness
+    # claim; the canonical DB remains the source for a later bounded retry.
+    for incident in incidents.values():
+        incident["entry_command_closures"] = [
+            {
+                "command_id": closure.get("command_id"),
+                "position_id": closure.get("position_id"),
+                "resolution": "UNATTRIBUTABLE",
+                "status": "UNATTRIBUTABLE",
+                "reason": reason,
+            }
+            for closure in incident.get("entry_command_closures", [])
+        ]
+        incident.pop("incident", None)
+    raw = _render_bundle(payload)
+    if len(raw) <= bundle_max_bytes:
+        return payload, raw
+
+    # Last bounded form: the exact batch identity and budget failure.  A
+    # budget smaller than this minimal JSON cannot represent a valid manifest;
+    # fail closed rather than writing bytes that misstate their size.
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "batch_id": payload.get("batch_id"),
+        "bundle_max_bytes": bundle_max_bytes,
+        "bundle_complete": False,
+        "bundle_incomplete_reason": reason,
+        "incidents": {},
+        "bundle_bytes": 0,
+    }
+    raw = _render_bundle(payload)
+    if len(raw) > bundle_max_bytes:
+        raise ValueError(
+            "EVIDENCE_BUNDLE_BYTE_BUDGET_TOO_SMALL_FOR_MINIMAL_MANIFEST"
+        )
+    return payload, raw
 
 
 def build_evidence_bundle(
@@ -899,8 +1546,28 @@ def build_evidence_bundle(
     """Materialize a small projection so the LLM never scans live databases."""
     trades = Path(config["trades_db"])
     forecasts = Path(config["forecasts_db"])
+    world = Path(
+        config.get("world_db")
+        or (Path(config["repo_root"]) / "state" / "zeus-world.db")
+    )
     seconds = float(config.get("evidence_query_seconds", 1.5))
     max_rows = int(config.get("evidence_max_rows", 200))
+    entry_ceiling = int(
+        config.get("evidence_entry_command_ceiling", DEFAULT_ENTRY_COMMAND_CEILING)
+    )
+    entry_page_size = int(
+        config.get("evidence_entry_page_size", DEFAULT_ENTRY_PAGE_SIZE)
+    )
+    artifact_max_bytes = int(
+        config.get("evidence_artifact_max_bytes", DEFAULT_ARTIFACT_BYTES)
+    )
+    certificate_payload_max_bytes = int(
+        config.get(
+            "evidence_certificate_payload_max_bytes",
+            DEFAULT_CERTIFICATE_PAYLOAD_BYTES,
+        )
+    )
+    bundle_max_bytes = int(config.get("evidence_bundle_max_bytes", DEFAULT_BUNDLE_BYTES))
     incidents: dict[str, Any] = {}
     for incident in batch["incidents"]:
         loss = incident["loss"]
@@ -926,6 +1593,48 @@ def build_evidence_bundle(
             command_events.extend(result["rows"])
             if result["error"]:
                 command_event_errors.append(result["error"])
+        entry_projection = _entry_commands_projection(
+            trades,
+            position_id,
+            seconds=seconds,
+            ceiling=entry_ceiling,
+            page_size=entry_page_size,
+        )
+        entry_closures = [
+            _entry_command_closure(
+                trades_db=trades,
+                world_db=world,
+                command=command,
+                seconds=seconds,
+                artifact_max_bytes=artifact_max_bytes,
+                certificate_payload_max_bytes=certificate_payload_max_bytes,
+            )
+            for command in entry_projection["rows"]
+        ]
+        if not entry_projection.get("complete", False):
+            projection_reason = str(
+                entry_projection.get("incomplete_reason")
+                or "ENTRY_COMMAND_PROJECTION_INCOMPLETE"
+            )
+            for closure in entry_closures:
+                closure["resolution"] = "UNATTRIBUTABLE"
+                closure["status"] = "UNATTRIBUTABLE"
+                closure["reason"] = projection_reason
+            for ambiguous_id in entry_projection.get("ambiguous_command_ids", []):
+                entry_closures.append(
+                    {
+                        "command_id": str(ambiguous_id),
+                        "position_id": position_id,
+                        "command": {
+                            "command_id": str(ambiguous_id),
+                            "position_id": position_id,
+                        },
+                        "resolution": "UNATTRIBUTABLE",
+                        "status": "UNATTRIBUTABLE",
+                        "reason": projection_reason,
+                        "synthetic_ambiguous_record": True,
+                    }
+                )
         incidents[str(incident["incident_id"])] = {
             "incident": incident,
             "position_events": _bounded_rows(
@@ -934,6 +1643,15 @@ def build_evidence_bundle(
                 (position_id,), seconds=seconds, max_rows=max_rows,
             ),
             "venue_commands": commands,
+            # Keep one closure per ENTRY command.  In particular, do not
+            # collapse two ENTRY commands for one position by position/time or
+            # by selecting the latest receipt.
+            "entry_command_closures": entry_closures,
+            "entry_command_projection": {
+                key: value
+                for key, value in entry_projection.items()
+                if key != "rows"
+            },
             "venue_command_events": {
                 "rows": command_events[:max_rows],
                 "truncated": len(command_events) > max_rows,
@@ -991,16 +1709,45 @@ def build_evidence_bundle(
         lane = capital_lane_guard(config)
         if not lane["healthy"]:
             raise RuntimeError(f"CAPITAL_LANE_PREEMPTED_EVIDENCE_BUILD:{lane['reasons']}")
-    path = run_dir / "evidence_bundle.json"
-    atomic_json(path, {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "batch_id": batch["batch_id"],
         "created_at": iso_now(),
         "query_seconds_per_slice": seconds,
         "max_rows_per_slice": max_rows,
+        "entry_command_ceiling": entry_ceiling,
+        "artifact_max_bytes": artifact_max_bytes,
+        "certificate_payload_max_bytes": certificate_payload_max_bytes,
+        "bundle_max_bytes": bundle_max_bytes,
         "authority": "bounded_read_only_projection_of_canonical_dbs",
         "incidents": incidents,
-    })
+    }
+    projections_complete = all(
+        incident.get("entry_command_projection", {}).get("complete", False)
+        for incident in incidents.values()
+    )
+    closures_complete = all(
+        closure.get("resolution") == "ATTRIBUTED"
+        for incident in incidents.values()
+        for closure in incident.get("entry_command_closures", [])
+    )
+    payload["bundle_complete"] = (
+        projections_complete and closures_complete
+    )
+    if not projections_complete:
+        payload["bundle_incomplete_reason"] = "ENTRY_COMMAND_PROJECTION_INCOMPLETE"
+    elif not closures_complete:
+        payload["bundle_incomplete_reason"] = "ENTRY_COMMAND_CLOSURE_INCOMPLETE"
+    path = run_dir / "evidence_bundle.json"
+    payload, final_encoded = _compact_bundle_for_budget(
+        payload,
+        bundle_max_bytes=bundle_max_bytes,
+        entry_ceiling=entry_ceiling,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(final_encoded)
+    os.replace(tmp, path)
     return path
 
 
