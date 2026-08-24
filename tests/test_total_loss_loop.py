@@ -166,14 +166,20 @@ def cfg(tmp_path: Path) -> dict:
     }
 
 
-def _position(cfg: dict, *, position_id: str = "p1", direction: str = "buy_yes") -> None:
+def _position(
+    cfg: dict,
+    *,
+    position_id: str = "p1",
+    direction: str = "buy_yes",
+    token_id: str = "yes-token",
+) -> None:
     with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
         conn.execute(
             "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 position_id, "active", f"trade-{position_id}", "market-1", "London",
                 "2026-08-22", "28C", direction, "C", 10.0, 10.0, 5.0, None,
-                0.5, "yes-token", "no-token", "condition-1", None,
+                0.5, token_id, ("no-token" if token_id == "yes-token" else f"no-{token_id}"), "condition-1", None,
                 "2026-08-22T09:00:00+00:00", "high",
             ),
         )
@@ -455,7 +461,14 @@ def test_settlement_backfill_policy_revision_replays_legacy_consolidation_once(
                 "WHERE position_id='p-settled' ORDER BY incident_id"
             )
         }
-    assert second == first
+    # The first bounded evidence slice may leave the newly consolidated
+    # settlement incident blocked; the next slice resolves that exact debt
+    # once, then the policy fingerprint prevents another replay.
+    changed = [incident_id for incident_id in first if second[incident_id] != first[incident_id]]
+    assert len(changed) <= 1
+    if changed:
+        assert second[changed[0]][0] == "queued"
+    assert loop.detect(cfg) == []
 
 
 def test_repeated_chain_mirror_settled_events_are_exactly_once(
@@ -639,11 +652,13 @@ def test_hard_evidence_maintenance_is_capacity_bounded_and_prioritizes_new_activ
 
     first = loop._capture_hard_evidence(cfg, scan_all=True)
     assert first["built"] == ["historical-000"]
-    assert len(first["deferred"]) == 117
+    # The queue is deliberately bounded: one slice must not materialize all
+    # historical retry work before the newest hard incident is captured.
+    assert len(first["deferred"]) == cfg["loop"].get("evidence_queue_batch_size", 32) - 1
     with loop.memory(cfg) as mem:
         assert mem.execute(
             "SELECT COUNT(*) FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending'"
-        ).fetchone()[0] == 117
+        ).fetchone()[0] == cfg["loop"].get("evidence_queue_batch_size", 32) - 1
 
     second = loop._capture_hard_evidence(cfg, scan_all=True)
     assert second["built"] == ["historical-001"]
@@ -683,8 +698,8 @@ def test_capacity_failure_consumes_attempt_and_fingerprint_defers_only_same_inci
     monkeypatch.setattr(loop, "build_evidence", oversized_builder)
     monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in successful)
     trigger_batches = [["large-0"], []]
-    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
-    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg, *_args: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg, *_args: [])
 
     assert loop.detect(cfg) == ["large-0"]
     assert loop._LAST_EVIDENCE_CYCLE["attempted"] == 1
@@ -809,8 +824,8 @@ def test_real_large_snapshot_hits_tiny_capacity_once_then_next_incident_advances
 
     monkeypatch.setattr(loop, "build_evidence", tracked_build)
     trigger_batches = [["real-large-0"], []]
-    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
-    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg, *_args: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg, *_args: [])
 
     assert loop.detect(cfg) == ["real-large-0"]
     assert calls == ["real-large-0"]
@@ -1025,6 +1040,226 @@ def test_startup_schema_fast_path_handles_live_scale_without_repeating_ddl(
     assert observed_cursors[-1] == 3377
     assert spawned == []
     assert bootstrap_calls["value"] == 2
+
+
+def test_ordinary_complete_memory_open_has_no_schema_ddl(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg):
+        pass
+    traces: list[str] = []
+    original_connect = loop.sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        if str(args[0]).endswith("memory.db"):
+            conn.set_trace_callback(traces.append)
+        return conn
+
+    monkeypatch.setattr(loop.sqlite3, "connect", traced_connect)
+    with loop.memory(cfg):
+        pass
+    assert not any(
+        any(token in sql.upper() for token in ("DROP INDEX", "CREATE INDEX", "CREATE TABLE", "ALTER TABLE"))
+        for sql in traces
+    )
+
+
+def test_wrong_schema_normal_open_records_typed_debt_without_ddl(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg):
+        pass
+    with sqlite3.connect(cfg["paths"]["runtime"] + "/memory.db") as conn:
+        conn.execute("DROP INDEX idx_incident_queue")
+    traces: list[str] = []
+    original_connect = loop.sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        if str(args[0]).endswith("memory.db"):
+            conn.set_trace_callback(traces.append)
+        return conn
+
+    monkeypatch.setattr(loop.sqlite3, "connect", traced_connect)
+    with pytest.raises(loop.SchemaMaintenanceDeferred):
+        with loop.memory(cfg):
+            pass
+    assert not any("CREATE INDEX" in sql.upper() or "DROP INDEX" in sql.upper() for sql in traces)
+    debt = json.loads((Path(cfg["paths"]["runtime"]) / "schema-debt.json").read_text())
+    assert debt["status"] == "retry_pending"
+
+
+def test_trigger_receipt_failure_is_durable_and_recovers(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "receipt-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    original_atomic = loop.atomic_json
+
+    def fail_receipt(path: Path, payload: object) -> None:
+        if path.name == "trigger-committed.json":
+            raise OSError("receipt disk")
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(loop, "atomic_json", fail_receipt)
+    assert loop.detect(cfg)
+    with loop.memory(cfg) as mem:
+        row = mem.execute("SELECT status,reason FROM controller_debt WHERE kind='trigger_receipt'").fetchone()
+    assert row is not None and row[0] == "retry_pending" and "committed_receipt_pending" in row[1]
+    (Path(cfg["paths"]["runtime"]) / "trigger-receipt-debt.json").unlink()
+    monkeypatch.setattr(loop, "atomic_json", original_atomic)
+    loop.detect(cfg)
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM controller_debt WHERE kind='trigger_receipt'").fetchone()[0] == "resolved"
+
+
+def test_multiple_receipt_debts_recover_by_exact_debt_id(cfg: dict) -> None:
+    loop._record_committed_receipt_debt(cfg, ["incident-a"], "committed_receipt_pending:a")
+    loop._record_committed_receipt_debt(cfg, ["incident-b"], "committed_receipt_pending:b")
+    loop._retry_committed_receipt(cfg, loop.time.monotonic() + 1.0)
+    with loop.memory(cfg) as mem:
+        rows = mem.execute(
+            "SELECT debt_id,status FROM controller_debt WHERE kind='trigger_receipt' ORDER BY debt_id"
+        ).fetchall()
+    assert len(rows) == 2 and all(row[1] == "resolved" for row in rows)
+
+
+def test_receipt_projection_failure_keeps_db_truth_repairable(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop._record_committed_receipt_debt(cfg, ["projection-incident"], "committed_receipt_pending:projection")
+    original_atomic = loop.atomic_json
+
+    def fail_resolved(path: Path, payload: object) -> None:
+        if isinstance(payload, dict) and payload.get("status") == "resolved":
+            raise OSError("projection disk")
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(loop, "atomic_json", fail_resolved)
+    loop._retry_committed_receipt(cfg, loop.time.monotonic() + 1.0)
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT status,reason FROM controller_debt WHERE debt_id LIKE 'trigger_receipt:%'"
+        ).fetchone()
+    assert row is not None and row[0] == "resolved" and "projection_pending" in row[1]
+    monkeypatch.setattr(loop, "atomic_json", original_atomic)
+    loop._retry_committed_receipt(cfg, loop.time.monotonic() + 1.0)
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT status,reason FROM controller_debt WHERE debt_id LIKE 'trigger_receipt:%'"
+        ).fetchone()
+    assert row is not None and row[0] == "resolved" and row[1] == "committed_receipt_complete"
+
+
+def test_identity_fingerprint_expired_budget_defer_is_typed(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "fingerprint-budget-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    budget = {"deadline": loop.time.monotonic() - 0.001}
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="time_budget"):
+        loop._evidence_identity_fingerprints(cfg, incident_id, budget)
+
+
+def test_postcommit_receipt_deadline_records_pending_debt(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 10.0}
+    original_atomic = loop.atomic_json
+
+    def advance_after_receipt(path: Path, payload: object) -> None:
+        if path.name == "trigger-committed.json":
+            clock["now"] = 11.0
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(loop.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(loop, "atomic_json", advance_after_receipt)
+    loop._publish_trigger_receipt(cfg, ["postcommit-incident"], 10.5)
+    with loop.memory(cfg) as mem:
+        row = mem.execute("SELECT status,reason FROM controller_debt WHERE kind='trigger_receipt'").fetchone()
+    assert row is not None and row[0] == "retry_pending" and "committed_receipt_pending" in row[1]
+
+
+def test_trigger_rollback_returns_no_created_truth_or_receipt(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "trigger-lock-q", "2026-08-22T09:00:02+00:00", 0.01)
+    with loop.memory(cfg):
+        pass
+    lock = sqlite3.connect(cfg["paths"]["runtime"] + "/memory.db", timeout=0.1)
+    lock.execute("BEGIN EXCLUSIVE")
+    cfg["loop"]["trigger_budget_ms"] = 40
+    try:
+        assert loop._detect_trigger(cfg) == []
+    finally:
+        lock.rollback()
+        lock.close()
+    assert not (Path(cfg["paths"]["runtime"]) / "trigger-committed.json").exists()
+
+
+def test_maintenance_locked_sqlite_is_bounded_to_absolute_slice(cfg: dict) -> None:
+    _position(cfg)
+    with loop.memory(cfg):
+        pass
+    lock = sqlite3.connect(cfg["paths"]["runtime"] + "/memory.db", timeout=0.1)
+    lock.execute("BEGIN EXCLUSIVE")
+    started = loop.time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            loop._detect_maintenance(cfg, loop.time.monotonic() + 0.04)
+    finally:
+        lock.rollback()
+        lock.close()
+    assert loop.time.monotonic() - started < 0.75
+
+
+def test_committed_maintenance_ids_survive_postcommit_deadline(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    receipts: list[list[str]] = []
+    captured: list[list[str]] = []
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg, *_args: [])
+    monkeypatch.setattr(
+        loop,
+        "_detect_maintenance",
+        lambda _cfg, _deadline: loop._MaintenanceOutcome(
+            ["maintenance-committed"], postcommit_deferred=True
+        ),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_publish_trigger_receipt",
+        lambda _cfg, ids, _deadline: receipts.append(list(ids)),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_capture_hard_evidence",
+        lambda _cfg, ids, **_kwargs: captured.append(list(ids))
+        or {"built": [], "deferred": []},
+    )
+    assert loop.detect(cfg) == ["maintenance-committed"]
+    assert receipts == [["maintenance-committed"]]
+    assert captured[-1] == ["maintenance-committed"]
+    status = json.loads((Path(cfg["paths"]["runtime"]) / "status.json").read_text())
+    assert status["phase"] == "maintenance_committed"
+    assert status["postcommit_deferred"] is True
+
+
+def test_evidence_queue_cursor_bounds_provider_backoff_capture(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["evidence_queue_batch_size"] = 4
+    with loop.memory(cfg) as mem:
+        for index in range(100):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"queue-{index:03d}", "hard", "p1", f"queue-q-{index:03d}", "below_floor", "yes-token", "sell_yes", .05,
+                 "2026-08-22T09:00:00+00:00", 1, "queued", "blind", "2026-08-22T09:00:00+00:00"),
+            )
+        mem.commit()
+    seen: list[str] = []
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id, **_kwargs: seen.append(incident_id) or True)
+    loop._capture_hard_evidence(cfg, scan_all=True)
+    assert len(seen) == 4
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT value FROM meta WHERE key='evidence_queue_cursor'").fetchone()[0] == "4"
 
 
 def test_startup_missing_schema_uses_bounded_migration_not_fast_path(
@@ -1341,13 +1576,6 @@ def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkey
     monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
     monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
     monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
-    claimed = {"value": False}
-    def claim_once(_cfg, kind):
-        if kind != "hard" or claimed["value"]:
-            return None
-        claimed["value"] = True
-        return {"incident_id": incident_id, "kind": "hard"}
-    monkeypatch.setattr(loop, "_claim", claim_once)
     claim_count = {"hard": 0}
     def claim_once(_cfg, kind):
         if kind != "hard" or claim_count["hard"]:
@@ -1902,8 +2130,8 @@ def test_initial_quote_cursor_uses_primary_key_max_without_scan(
     queries: list[str] = []
     original_open_ro = loop.open_ro
 
-    def traced_open_ro(path: Path):
-        conn = original_open_ro(path)
+    def traced_open_ro(path: Path, **kwargs: object):
+        conn = original_open_ro(path, **kwargs)
         if Path(path) == Path(cfg["paths"]["trades_db"]):
             conn.set_trace_callback(queries.append)
         return conn
@@ -2478,6 +2706,81 @@ def test_incomplete_quote_does_not_hide_following_no_bid_transition(cfg: dict) -
     assert len(hard) == 1
     assert hard[0]["crossing_kind"] == "no_bid"
     assert hard[0]["crossing_evidence_id"] == "q-no-bid"
+
+
+def test_no_bid_episode_reuses_canonical_incident_until_floor_recovery(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "q-episode-1", "2026-08-22T09:00:01+00:00", None)
+    loop.detect(cfg)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE incidents SET status='blocked',stage='evidence' WHERE crossing_kind='no_bid'"
+        )
+        mem.commit()
+    _quote(cfg, "q-episode-incomplete", "2026-08-22T09:00:02+00:00", None)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json='not-json' "
+            "WHERE evidence_id='q-episode-incomplete'"
+        )
+    loop.detect(cfg)
+    _quote(cfg, "q-episode-2", "2026-08-22T09:00:03+00:00", None)
+    loop.detect(cfg)
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_evidence_id"] == "q-episode-2"
+    assert hard[0]["evidence_revision"] >= 2
+
+    _quote(cfg, "q-recovered", "2026-08-22T09:00:04+00:00", 0.20)
+    loop.detect(cfg)
+    _quote(cfg, "q-episode-3", "2026-08-22T09:00:05+00:00", None)
+    loop.detect(cfg)
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 2
+
+
+def test_no_bid_recovery_closes_generation_and_new_position_isolated(cfg: dict) -> None:
+    _position(cfg, position_id="episode-a", token_id="episode-a-token")
+    _position(cfg, position_id="episode-b", token_id="episode-b-token")
+    def observe(evidence_id: str, position_id: str) -> None:
+        with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+            position = loop.tracked_positions(trades, history_days=7)[position_id]
+            quote = dict(trades.execute(
+                "SELECT * FROM execution_feasibility_evidence WHERE evidence_id=?",
+                (evidence_id,),
+            ).fetchone())
+        with loop.memory(cfg) as mem:
+            loop._observe_quote(mem, position, quote, 0.05)
+            mem.commit()
+    _quote(cfg, "a-no-bid-1", "2026-08-22T09:00:01+00:00", None, token="episode-a-token")
+    _quote(cfg, "b-no-bid-1", "2026-08-22T09:00:01+00:00", None, token="episode-b-token")
+    observe("a-no-bid-1", "episode-a")
+    observe("b-no-bid-1", "episode-b")
+    _quote(cfg, "a-recovered", "2026-08-22T09:00:02+00:00", 0.20, token="episode-a-token")
+    observe("a-recovered", "episode-a")
+    _quote(cfg, "a-below", "2026-08-22T09:00:03+00:00", 0.01, token="episode-a-token")
+    observe("a-below", "episode-a")
+    _quote(cfg, "a-no-bid-2", "2026-08-22T09:00:04+00:00", None, token="episode-a-token")
+    observe("a-no-bid-2", "episode-a")
+    with loop.memory(cfg) as mem:
+        rows = mem.execute(
+            "SELECT position_id,crossing_evidence_id FROM incidents "
+            "WHERE kind='hard' AND crossing_kind='no_bid' ORDER BY position_id,detected_at"
+        ).fetchall()
+        states = {
+            row[0]: (row[1], row[2])
+            for row in mem.execute(
+                "SELECT position_id,no_bid_episode_generation,no_bid_episode_open "
+                "FROM position_quote_state WHERE position_id IN ('episode-a','episode-b')"
+            )
+        }
+    assert [(row[0], row[1]) for row in rows] == [
+        ("episode-a", "a-no-bid-1"),
+        ("episode-a", "a-no-bid-2"),
+        ("episode-b", "b-no-bid-1"),
+    ]
+    assert states["episode-a"] == (1, 1)
+    assert states["episode-b"] == (0, 1)
 
 
 @pytest.mark.parametrize(
@@ -3216,8 +3519,8 @@ def test_evidence_wallet_fills_follow_command_trade_ids_without_token_scan(
     queries: list[str] = []
     original_open_ro = loop.open_ro
 
-    def traced_open_ro(path: Path):
-        conn = original_open_ro(path)
+    def traced_open_ro(path: Path, **kwargs: object):
+        conn = original_open_ro(path, **kwargs)
         if Path(path) == Path(cfg["paths"]["trades_db"]):
             conn.set_trace_callback(queries.append)
         return conn
