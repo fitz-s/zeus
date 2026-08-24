@@ -2203,6 +2203,78 @@ def test_materialization_queue_requeues_transient_writer_contention(tmp_path) ->
     assert not failed_dir.exists() or not tuple(failed_dir.iterdir())
 
 
+def test_materialization_queue_retries_transient_day0_frontier_read(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request_path = request_dir / "Istanbul.2026-08-24.high.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "city": "Istanbul",
+                "target_date": "2026-08-24",
+                "temperature_metric": "high",
+                "source_cycle_time": "2026-08-23T18:00:00+00:00",
+                "computed_at": "2026-08-24T08:23:36+00:00",
+                "baseline_source_run_id": "baseline-run",
+                "openmeteo_source_run_id": "anchor-run",
+                "openmeteo_payload_json": "payload.json",
+                "precision_metadata_json": "precision.json",
+                "bins": [{"bin_id": "28C"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_is_current_capital_protection_timeout_retry",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _transient_read_failure(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            2,
+            stdout=(
+                '{"status":"BLOCKED","reason_codes":'
+                '["REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED"]}\n'
+            ),
+            stderr="",
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_transient_read_failure,
+    )
+
+    retries = tuple(request_dir.glob("*.timeout-retry-*.json"))
+    assert report.status == "PROCESSED"
+    assert report.processed_count == 0
+    assert report.failed_count == 0
+    assert len(retries) == 1
+    _base, attempt, retry_at = queue_mod._timeout_retry_state(retries[0])
+    assert attempt == 1
+    assert retry_at is not None
+    assert 0.0 < retry_at - time.time() <= 2.0
+    assert (
+        "REPLACEMENT_LIVE_MATERIALIZATION_TRANSIENT_READ_RETRY_DEFERRED"
+        in report.reason_codes
+    )
+    assert not (tmp_path / "blocked_latest").exists()
+    assert not (tmp_path / "blocked_attempts").exists()
+    assert not failed_dir.exists() or not tuple(failed_dir.iterdir())
+
+
 def test_materialization_queue_bounds_stale_day0_owner_receipts_per_family(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 

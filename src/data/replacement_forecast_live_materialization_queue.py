@@ -1581,6 +1581,12 @@ _STALE_DAY0_OWNER_SUPERSEDED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
 )
 _WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
+_TRANSIENT_READ_RETRY_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_TRANSIENT_READ_RETRY_DEFERRED"
+)
+_TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
+    {"REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED"}
+)
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -3307,6 +3313,8 @@ def _process_claimed_materialization_batch(
     timed_out_requests: list[str] = []
     timeout_stage_reasons: list[str] = []
     deadline_deferred_reasons: list[str] = []
+    transient_read_retries: list[str] = []
+    transient_read_reason_codes: set[str] = set()
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -3515,6 +3523,10 @@ def _process_claimed_materialization_batch(
                 for reason in result_reason_codes
             )
         )
+        transient_block = any(
+            reason in _TRANSIENT_BLOCK_RETRY_REASONS
+            for reason in result_reason_codes
+        )
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
@@ -3545,7 +3557,7 @@ def _process_claimed_materialization_batch(
                     result_evidence=result_evidence,
                 )
                 processed.append(str(receipt))
-        elif timed_out or deadline_deferred:
+        elif timed_out or deadline_deferred or transient_block:
             restored = _restore_claimed_request_after_timeout(
                 input_json,
                 retry_path or request_path,
@@ -3554,8 +3566,14 @@ def _process_claimed_materialization_batch(
                     item.request_payload,
                 ),
             )
-            timed_out_requests.append(str(restored))
-            deadline_deferred_reasons.extend(result_reason_codes)
+            if transient_block:
+                transient_read_retries.append(str(restored))
+                transient_read_reason_codes.update(
+                    set(result_reason_codes) & _TRANSIENT_BLOCK_RETRY_REASONS
+                )
+            else:
+                timed_out_requests.append(str(restored))
+                deadline_deferred_reasons.extend(result_reason_codes)
         elif (
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
@@ -3645,6 +3663,17 @@ def _process_claimed_materialization_batch(
         _LOG.warning(
             "replacement forecast materializations timed out and were deferred: count=%d",
             len(timed_out_requests),
+        )
+    if transient_read_retries:
+        reasons.extend(
+            (
+                _TRANSIENT_READ_RETRY_REASON,
+                *sorted(transient_read_reason_codes),
+            )
+        )
+        _LOG.warning(
+            "replacement forecast transient reads deferred for bounded retry: count=%d",
+            len(transient_read_retries),
         )
     reasons.extend(dict.fromkeys(timeout_stage_reasons))
     reasons.extend(dict.fromkeys(deadline_deferred_reasons))
