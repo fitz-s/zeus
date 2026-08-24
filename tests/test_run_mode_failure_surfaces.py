@@ -9132,6 +9132,129 @@ def test_reactor_bootstrap_rejects_bad_evidence_without_blocking_reduce_only(
         main_module._held_position_monitor_bootstrap_complete.clear()
 
 
+def test_reactor_bootstrap_stall_alerts_once_per_repeat_window_without_setting_event(
+    monkeypatch,
+    caplog,
+) -> None:
+    """A held-position bootstrap stall must escalate from silent to visible.
+
+    2026-08-18 incident (reversal plan item 5a): the promotion function
+    returned False forever with zero alert, locking entries reduce-only for
+    12.1h. Past BOOTSTRAP_ALERT_AFTER_SECONDS this must emit exactly one
+    logger.error per BOOTSTRAP_ALERT_REPEAT_SECONDS window (not once per
+    call) and write a breadcrumb with the blocking position ids -- and the
+    alert path must never set the fail-closed completion Event itself.
+    """
+
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    evidence = {
+        "open_position_count": 2,
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "settlement_recoverable_position_count": 0,
+        "stale_or_missing_position_count": 2,
+        "blocking_stale_position_count": 2,
+        "blocking_stale_positions": [
+            {"position_id": "pos-a"},
+            {"position_id": "pos-b"},
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+    }
+
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    main_module._held_position_monitor_bootstrap_started_monotonic = None
+    main_module._held_position_monitor_bootstrap_started_at_utc = None
+    main_module._held_position_monitor_bootstrap_last_alert_monotonic = None
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: clock["t"])
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="zeus"):
+            # First attempt: starts the clock, far below the alert threshold.
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert (
+                main_module._held_position_monitor_bootstrap_started_monotonic
+                == 0.0
+            )
+            assert not caplog.records
+
+            # Cross the alert threshold: exactly one logger.error + breadcrumb.
+            clock["t"] = main_module.BOOTSTRAP_ALERT_AFTER_SECONDS + 10.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+            alert_records = [
+                r for r in caplog.records if r.levelno == logging.ERROR
+            ]
+            assert len(alert_records) == 1
+            assert "bootstrap stalled" in alert_records[0].message
+
+            from src.config import state_path
+
+            breadcrumb_path = state_path("bootstrap_stall_alert.json")
+            assert breadcrumb_path.exists()
+            payload = json.loads(breadcrumb_path.read_text())
+            assert payload["blocking_stale_count"] == 2
+            assert sorted(payload["blocking_position_ids"]) == ["pos-a", "pos-b"]
+            assert payload["open_position_count"] == 2
+            assert payload["started_at"] is not None
+
+            # Still within the repeat window: no second alert, same call count.
+            caplog.clear()
+            clock["t"] += 5.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+            # Past the repeat window: exactly one more alert.
+            caplog.clear()
+            clock["t"] += main_module.BOOTSTRAP_ALERT_REPEAT_SECONDS + 1.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            second_alerts = [r for r in caplog.records if r.levelno == logging.ERROR]
+            assert len(second_alerts) == 1
+    finally:
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        main_module._held_position_monitor_bootstrap_last_check = 0.0
+        main_module._held_position_monitor_bootstrap_started_monotonic = None
+        main_module._held_position_monitor_bootstrap_started_at_utc = None
+        main_module._held_position_monitor_bootstrap_last_alert_monotonic = None
+
+
 def test_reactor_bootstrap_completes_vacuously_without_open_held_positions(
     monkeypatch,
 ) -> None:

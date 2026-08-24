@@ -111,6 +111,9 @@ _edli_boot_fill_bridge_recovery_thread: threading.Thread | None = None
 _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS = 30.0
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
+_held_position_monitor_bootstrap_started_monotonic: float | None = None
+_held_position_monitor_bootstrap_started_at_utc: datetime | None = None
+_held_position_monitor_bootstrap_last_alert_monotonic: float | None = None
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
 _forecast_held_monitor_preempt_requested = threading.Event()
@@ -180,6 +183,16 @@ _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
+# Bootstrap-stall visibility (2026-08-24 reversal plan item 5a): the gate below
+# is fail-closed by design (SCOPE/DRAIN/RESET at its call sites), but a stall
+# in `_promote_held_position_monitor_bootstrap_from_canonical_progress` used to
+# be silent forever — the 2026-08-18 incident locked entries reduce-only for
+# 12.1h with zero alert. These thresholds turn a silent stall into a visible
+# one without weakening the gate or force-setting the Event.
+BOOTSTRAP_ALERT_AFTER_SECONDS = float(
+    os.environ.get("ZEUS_BOOTSTRAP_ALERT_AFTER_SECONDS", "1800")
+)
+BOOTSTRAP_ALERT_REPEAT_SECONDS = 1800.0
 # The normal full-book monitor runs every 120s.  A separate 30s poll reconstructs
 # overdue work from canonical per-position MONITOR_REFRESHED events after one
 # missed tick plus 30s scheduling tolerance.  It does not create another
@@ -300,6 +313,80 @@ def _utc_run_time_after(seconds: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
+def _maybe_alert_held_position_monitor_bootstrap_stall(
+    *,
+    now_monotonic: float,
+    open_position_count: int,
+    covered_count: int,
+    blocking_stale_count: int,
+    blocking_stale_positions: list,
+) -> None:
+    """Escalate a held-position bootstrap stall from silent to visible.
+
+    SCOPE: logging + a best-effort state breadcrumb only; never sets the
+    completion Event and never weakens the fail-closed gate above it. DRAIN:
+    the caller re-invokes this on every un-throttled promotion attempt that
+    is still not-covered; once elapsed time since the first attempt crosses
+    BOOTSTRAP_ALERT_AFTER_SECONDS this repeats at most once per
+    BOOTSTRAP_ALERT_REPEAT_SECONDS. RESET: process restart clears the
+    started/last-alert monotonic markers along with the completion Event.
+    """
+
+    global _held_position_monitor_bootstrap_last_alert_monotonic
+    started = _held_position_monitor_bootstrap_started_monotonic
+    if started is None:
+        return
+    elapsed = now_monotonic - started
+    if elapsed < BOOTSTRAP_ALERT_AFTER_SECONDS:
+        return
+    last_alert = _held_position_monitor_bootstrap_last_alert_monotonic
+    if (
+        last_alert is not None
+        and now_monotonic - last_alert < BOOTSTRAP_ALERT_REPEAT_SECONDS
+    ):
+        return
+    _held_position_monitor_bootstrap_last_alert_monotonic = now_monotonic
+    blocking_ids = [
+        str(item.get("position_id") or "")
+        for item in blocking_stale_positions
+        if item.get("position_id")
+    ]
+    logger.error(
+        "held-position monitor bootstrap stalled %.0fs (alert threshold %.0fs): "
+        "open_positions=%d covered=%d blocking_stale=%d blocking_position_ids=%s "
+        "-- entries remain reduce-only until canonical post-boot coverage completes",
+        elapsed,
+        BOOTSTRAP_ALERT_AFTER_SECONDS,
+        open_position_count,
+        covered_count,
+        blocking_stale_count,
+        blocking_ids,
+    )
+    started_at_utc = _held_position_monitor_bootstrap_started_at_utc
+    try:
+        from src.config import state_path
+
+        payload = {
+            "started_at": started_at_utc.isoformat() if started_at_utc else None,
+            "elapsed_seconds": elapsed,
+            "alert_after_seconds": BOOTSTRAP_ALERT_AFTER_SECONDS,
+            "open_position_count": open_position_count,
+            "covered_count": covered_count,
+            "blocking_stale_count": blocking_stale_count,
+            "blocking_position_ids": blocking_ids,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        out_path = state_path("bootstrap_stall_alert.json")
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+    except Exception as exc:  # noqa: BLE001 - breadcrumb is best-effort.
+        logger.warning(
+            "held-position monitor bootstrap stall breadcrumb write failed: %s",
+            exc,
+        )
+
+
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     """Release entry work after every held position has a post-boot decision attempt.
 
@@ -309,12 +396,22 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     that exact family fail-closed until its inputs recover. Requiring fresh
     inputs here conflates those debts and turns one provider gap into a global
     reactor/recovery storm.
+
+    A stall past BOOTSTRAP_ALERT_AFTER_SECONDS is escalated via
+    ``_maybe_alert_held_position_monitor_bootstrap_stall`` (logger.error +
+    state/bootstrap_stall_alert.json breadcrumb) instead of staying silent —
+    the gate itself remains fail-closed; the alert never sets the Event.
     """
 
     global _held_position_monitor_bootstrap_last_check
+    global _held_position_monitor_bootstrap_started_monotonic
+    global _held_position_monitor_bootstrap_started_at_utc
     if _held_position_monitor_bootstrap_complete.is_set():
         return True
     now_monotonic = time.monotonic()
+    if _held_position_monitor_bootstrap_started_monotonic is None:
+        _held_position_monitor_bootstrap_started_monotonic = now_monotonic
+        _held_position_monitor_bootstrap_started_at_utc = datetime.now(timezone.utc)
     if (
         now_monotonic - _held_position_monitor_bootstrap_last_check
         < HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS
@@ -351,7 +448,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
                 strict_future=True,
                 monitor_refreshed_only=True,
                 require_fresh_inputs=False,
-                sample_limit=0,
+                sample_limit=5,
             )
         finally:
             conn.close()
@@ -371,6 +468,16 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         required = open_count
         covered = fresh + settlement_recoverable + quote_only_stale
         if blocking_stale > 0 or covered < required:
+            _maybe_alert_held_position_monitor_bootstrap_stall(
+                now_monotonic=now_monotonic,
+                open_position_count=open_count,
+                covered_count=covered,
+                blocking_stale_count=blocking_stale,
+                blocking_stale_positions=cadence_groups.get(
+                    "blocking_stale_positions"
+                )
+                or [],
+            )
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
