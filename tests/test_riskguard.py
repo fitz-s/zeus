@@ -1611,6 +1611,39 @@ class TestMetrics:
             for row in riskguard_module._riskguard_brier_actuating_rows(bound)
         ] == ["current"]
 
+    def test_day0_provider_run_binding_starts_a_new_capital_evidence_cohort(self):
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        old_v9 = (
+            "day0-semrev:"
+            "day0_source_clock_total_variance_minus_path_spread_"
+            "wu_applied_revision_clock_v9:historical-fill"
+        )
+        current_v10 = bind_day0_probability_semantics("provider-run-bound")
+        rows = [
+            {
+                "trade_id": "old-v9",
+                "strategy": "day0_nowcast_entry",
+                "entry_q_versions": (old_v9,),
+            },
+            {
+                "trade_id": "current-v10",
+                "strategy": "day0_nowcast_entry",
+                "entry_q_versions": (current_v10,),
+            },
+        ]
+
+        bound, status = riskguard_module._bind_day0_probability_semantics(rows)
+        by_id = {row["trade_id"]: row for row in bound}
+
+        assert by_id["old-v9"]["probability_semantics_ready"] is False
+        assert by_id["old-v9"]["probability_semantics_blocked_reason"] == (
+            "superseded_probability_semantics"
+        )
+        assert by_id["current-v10"]["probability_semantics_ready"] is True
+        assert status["current_count"] == 1
+        assert status["superseded_count"] == 1
+
     def test_probability_identity_binding_rejects_filled_command_without_fact(self):
         conn = sqlite3.connect(":memory:")
         conn.execute(

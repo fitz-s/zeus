@@ -3093,7 +3093,11 @@ class TestRemainingDayMembers:
         result = era._live_yes_probabilities(
             event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
             payload=payload,
-            family=SimpleNamespace(city="Hong Kong", target_date="2026-07-20"),
+            family=SimpleNamespace(
+                city="Hong Kong",
+                target_date="2026-07-20",
+                metric="low",
+            ),
             conn=sqlite3.connect(":memory:"),
             calibration_conn=sqlite3.connect(":memory:"),
             native_costs={},

@@ -39,7 +39,7 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # authorized a fill.  Increment this when the Day0 probability construction
 # changes; the value is stamped into every live Day0 q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_source_clock_total_variance_minus_path_spread_wu_applied_revision_clock_v9"
+    "day0_provider_run_bound_total_variance_minus_path_spread_wu_revision_clock_v10"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
