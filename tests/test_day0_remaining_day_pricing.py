@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-22
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused or audited: 2026-08-23
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1535,6 +1535,91 @@ class TestRemainingDaySelection:
 class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+
+    def test_current_state_conditioning_aligns_mismatched_elapsed_prefixes(
+        self,
+    ):
+        """A provider's shorter elapsed prefix cannot erase a complete future path."""
+        import src.engine.event_reactor_adapter as era
+
+        full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
+        short_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(15, 24))
+        vectors = [
+            Day0HourlyVector(
+                model="ecmwf_ifs", city="Paris", target_date="2026-06-10",
+                timezone_name="Europe/Paris", captured_at="2026-06-10T14:25:00+00:00",
+                times=full_times, temps_c=tuple(20.0 for _ in full_times),
+            ),
+            Day0HourlyVector(
+                model="icon_global", city="Paris", target_date="2026-06-10",
+                timezone_name="Europe/Paris", captured_at="2026-06-10T14:25:00+00:00",
+                times=short_times, temps_c=tuple(21.0 for _ in short_times),
+            ),
+            Day0HourlyVector(
+                model="ukmo_global_deterministic_10km", city="Paris", target_date="2026-06-10",
+                timezone_name="Europe/Paris", captured_at="2026-06-10T14:25:00+00:00",
+                times=full_times, temps_c=tuple(22.0 for _ in full_times),
+            ),
+        ]
+
+        values, innovations = era._remaining_day_extremes_c_with_current_state_evidence(
+            vectors,
+            target_date="2026-06-10",
+            decision_time=datetime(2026, 6, 10, 14, 25, tzinfo=UTC),
+            observation_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            current_temp_c=20.0,
+            metric="high",
+        )
+
+        from src.config import day0_current_state_innovation_e_fold_hours
+
+        terminal_lead_hours = 20.0 / 3.0  # 14:20Z observation to 21:00Z close
+        decay = np.exp(-terminal_lead_hours / day0_current_state_innovation_e_fold_hours())
+        assert values == pytest.approx([
+            20.0,
+            21.0 - decay,
+            22.0 - 2.0 * decay,
+        ])
+        assert innovations == pytest.approx({
+            "ecmwf_ifs": 0.0,
+            "icon_global": -1.0,
+            "ukmo_global_deterministic_10km": -2.0,
+        })
+
+    def test_current_state_conditioning_rejects_missing_causal_future_hour(
+        self,
+    ):
+        """The common grid remains fail-closed for a missing future hour."""
+        import src.engine.event_reactor_adapter as era
+
+        full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
+        missing_times = tuple(
+            timestamp for timestamp in full_times if timestamp != "2026-06-10T20:00"
+        )
+        vectors = [
+            Day0HourlyVector(
+                model=model, city="Paris", target_date="2026-06-10",
+                timezone_name="Europe/Paris", captured_at="2026-06-10T14:25:00+00:00",
+                times=times, temps_c=tuple(20.0 for _ in times),
+            )
+            for model, times in (
+                ("ecmwf_ifs", full_times),
+                ("icon_global", missing_times),
+                ("ukmo_global_deterministic_10km", full_times),
+            )
+        ]
+
+        values, innovations = era._remaining_day_extremes_c_with_current_state_evidence(
+            vectors,
+            target_date="2026-06-10",
+            decision_time=datetime(2026, 6, 10, 14, 25, tzinfo=UTC),
+            observation_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            current_temp_c=20.0,
+            metric="high",
+        )
+
+        assert values == []
+        assert innovations == {}
 
     def test_same_provider_trajectories_contribute_one_center(self, monkeypatch):
         """Regional/global siblings are correlated centers, not independent outcomes."""

@@ -42239,13 +42239,13 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     """Return extrema after causal, decaying current-state conditioning."""
 
     from src.data.day0_hourly_vectors import (
+        _target_day_hour_grid_utc,
+        day0_hourly_vectors_cover_remaining_window,
         day0_hourly_vector_target_values_utc,
     )
     from src.signal.day0_window import (
         condition_day0_hourly_members_on_current_state,
-        remaining_member_extrema_for_day0,
     )
-    from src.types.metric_identity import MetricIdentity
 
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported metric: {metric}")
@@ -42253,10 +42253,11 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     target = date.fromisoformat(str(target_date)[:10])
-    times: list[str] | None = None
     member_rows: list[list[float]] = []
     models: list[str] = []
     timezone_name: str | None = None
+    vector_values: list[dict[datetime, float]] = []
+    observed_utc = observation_time.astimezone(UTC)
     for vector in vectors:
         try:
             tz = ZoneInfo(str(vector.timezone_name))
@@ -42269,16 +42270,46 @@ def _remaining_day_extremes_c_with_current_state_evidence(
         )
         if values is None:
             return [], {}
-        row_times = [instant.isoformat() for instant, _temp in values]
-        if times is None:
-            times = row_times
+        if timezone_name is None:
             timezone_name = str(vector.timezone_name)
-        elif row_times != times or str(vector.timezone_name) != timezone_name:
+        elif str(vector.timezone_name) != timezone_name:
             return [], {}
-        member_rows.append([float(temp) for _instant, temp in values])
+        vector_values.append({instant: float(temp) for instant, temp in values})
         models.append(str(vector.model))
-    if times is None or timezone_name is None or not member_rows:
+    if timezone_name is None or not vector_values:
         return [], {}
+
+    # Exact provider-run requests may begin their 72-hour horizons at different
+    # local hours.  The elapsed prefix is irrelevant to current-state
+    # conditioning; its causal inputs are the latest hourly anchor at or before
+    # the observation plus every future target-day hour.  Requiring each full
+    # target-day row to be identical therefore converts a valid, complete
+    # remaining-day bundle into an unavailable probability.  Build that common
+    # causal grid explicitly.  No interpolation or missing-hour tolerance is
+    # permitted: every selected provider must contain every required instant.
+    timezone_obj = ZoneInfo(timezone_name)
+    target_grid = _target_day_hour_grid_utc(target=target, tz=timezone_obj)
+    anchor_candidates = [instant for instant in target_grid if instant <= observed_utc]
+    if not anchor_candidates:
+        return [], {}
+    causal_anchor = anchor_candidates[-1]
+    causal_grid = [instant for instant in target_grid if instant >= causal_anchor]
+    if not causal_grid or any(
+        any(instant not in values for instant in causal_grid)
+        for values in vector_values
+    ):
+        return [], {}
+    if not day0_hourly_vectors_cover_remaining_window(
+        vectors,
+        target_date=target_date,
+        window_start=observed_utc,
+    ):
+        return [], {}
+    times = [instant.isoformat() for instant in causal_grid]
+    member_rows = [
+        [values[instant] for instant in causal_grid]
+        for values in vector_values
+    ]
     conditioned = condition_day0_hourly_members_on_current_state(
         np.asarray(member_rows, dtype=float),
         times,
@@ -42289,17 +42320,32 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if conditioned is None:
         return [], {}
     conditioned_members, innovation_values = conditioned
-    extrema, _hours_remaining = remaining_member_extrema_for_day0(
-        conditioned_members,
-        times,
-        timezone_name,
-        target,
-        now=observed_utc,
-        temperature_metric=MetricIdentity.from_raw(metric),
-    )
-    if extrema is None:
+    remaining_indices = [
+        index
+        for index, instant in enumerate(causal_grid)
+        if instant > observed_utc
+    ]
+    if not remaining_indices:
+        day_end = datetime.combine(
+            target + timedelta(days=1),
+            time.min,
+            tzinfo=timezone_obj,
+        ).astimezone(UTC)
+        if (
+            causal_anchor != target_grid[-1]
+            or not timedelta(0) < day_end - observed_utc <= timedelta(hours=1)
+            or not timedelta(0) <= observed_utc - causal_anchor <= timedelta(hours=1)
+        ):
+            return [], {}
+        remaining_indices = [0]
+    remaining = conditioned_members[:, remaining_indices]
+    if remaining.size == 0:
         return [], {}
-    values = extrema.mins if metric == "low" else extrema.maxes
+    values = (
+        remaining.min(axis=1)
+        if metric == "low"
+        else remaining.max(axis=1)
+    )
     return (
         [float(value) for value in values.tolist()],
         {
