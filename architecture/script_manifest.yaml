@@ -2610,6 +2610,38 @@ scripts:
     required_tests: [tests/scripts/test_scoreboard_panels.py]
     unguarded_write_rationale: "No writes; opens both DBs strictly read-only via file:...?mode=ro&immutable=0 URIs; SELECT-only; prints markdown to stdout."
 
+  # --- reversal-plan tier0 item 9 (2026-08-24): market-anchored walk-forward calibrator ---
+  calibrator_walkforward_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the walk-forward evaluation of the offline market-anchored residual
+      calibrator (src/calibration/market_anchored_residual.py): paired
+      log-loss of market p0 alone, raw q, and calibrated r_hat, per month and
+      per |q-p| bucket, plus the fitted beta trajectory and final frozen
+      artifact. Idempotent read-only report; safe to re-run anytime. NOT
+      wired into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      promote a calibrator artifact to a served/canonical parameter set —
+      this script's output is offline analytics only and the module it
+      reports on has no live caller.
+    canonical_command: "python3 -m scripts.calibrator_walkforward_report [--root PATH] [--world PATH] [--min-train-rows N]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_calibrator_walkforward_report.py, tests/calibration/test_market_anchored_residual.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI; SELECT-only; prints markdown to stdout."
+
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,
   # scripts/ops/db_hygiene.sh, scripts/ops/loop_guard.py, scripts/ops/loop_enable.sh,

@@ -1013,6 +1013,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/generate_calibration_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro uri, ATTACHes zeus_trades.db read-only (INV-37) for the strategy_key/entry-time join; SELECT-only over settlement_attribution (settled-only ground truth) + trades.position_current/position_events; writes docs/reference/calibration_report.md + docs/reference/calibration_reliability.svg only
         # --- reversal-plan tier0 item 4 (2026-08-24): non-circular scoreboard ---
         "scripts/scoreboard_panels.py",  # read_only_ro_uri: opens zeus-world.db + zeus_trades.db independently via file:...?mode=ro&immutable=0 uri; SELECT-only over settlement_attribution + venue_commands/venue_trade_facts; replaces the circular settlement_attribution.category scoreboard with price-anchored forecast/selection/execution/lifecycle panels; writes stdout only
+        # --- reversal-plan tier0 item 9 (2026-08-24): market-anchored walk-forward calibrator report ---
+        "scripts/calibrator_walkforward_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri; SELECT-only over settlement_attribution; runs the offline market-anchored residual calibrator (src/calibration/market_anchored_residual.py, not wired into the entry path) and reports paired log-loss of market p0 / raw q / calibrated r_hat; writes stdout only
     }
 )
 
