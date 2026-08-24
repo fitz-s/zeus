@@ -1250,7 +1250,6 @@ def evaluate_edli_stage_readiness(
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
 
     reasons: list[str] = []
-    now = datetime.now(timezone.utc)
     if loaded_sha_file:
         identity_observations = _edli_stage_loaded_sha_observations(loaded_sha_file)
         if identity_observations:
@@ -1280,7 +1279,6 @@ def evaluate_edli_stage_readiness(
                     name="SOURCE_HEALTH",
                     path=source_health_json,
                     max_age_seconds=max_age_seconds,
-                    now=now,
                 )
             )
         if status_json:
@@ -1289,7 +1287,6 @@ def evaluate_edli_stage_readiness(
                     name="STATUS_SUMMARY",
                     path=status_json,
                     max_age_seconds=max_age_seconds,
-                    now=now,
                 )
             )
     finally:
@@ -1443,8 +1440,6 @@ def _edli_live_entry_readiness_block(
         max_age_seconds = int(
             edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
         )
-        now = datetime.now(timezone.utc)
-
         global_reasons: list[str] = []
         family_reasons: dict[str, str] = {}
         conn = _edli_stage_world_connection(world_db_path)
@@ -1481,7 +1476,6 @@ def _edli_live_entry_readiness_block(
                         name="SOURCE_HEALTH",
                         path=source_health_json,
                         max_age_seconds=max_age_seconds,
-                        now=now,
                     )
                 )
             if status_json:
@@ -1490,7 +1484,6 @@ def _edli_live_entry_readiness_block(
                         name="STATUS_SUMMARY",
                         path=status_json,
                         max_age_seconds=max_age_seconds,
-                        now=now,
                     )
                 )
         finally:
@@ -1730,7 +1723,13 @@ def _edli_stage_open_cap_reservation_families(conn) -> tuple[dict[str, str], int
     return family_reasons, unresolved
 
 
-def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int, now: datetime) -> list[str]:
+def _edli_stage_fresh_file_reasons(
+    *,
+    name: str,
+    path: str,
+    max_age_seconds: int,
+    now: datetime | None = None,
+) -> list[str]:
     file_path = Path(path)
     if not file_path.exists():
         return [f"EDLI_STAGE_{name}_MISSING:{path}"]
@@ -1747,7 +1746,12 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
         return [f"EDLI_STAGE_{name}_STALE:invalid_timestamp"]
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    age = (now - parsed.astimezone(timezone.utc)).total_seconds()
+    # Bind the clock after the atomic payload read. The readiness caller may
+    # spend seconds in DB admission checks while the single status writer
+    # advances this file; a clock sampled before those checks makes a newer,
+    # valid payload look impossibly future-dated and blocks every BUY family.
+    observed_now = now or datetime.now(timezone.utc)
+    age = (observed_now - parsed.astimezone(timezone.utc)).total_seconds()
     if age < -EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     age = max(0.0, age)
