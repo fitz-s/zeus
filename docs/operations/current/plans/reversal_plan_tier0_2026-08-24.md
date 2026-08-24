@@ -18,15 +18,15 @@ Goal: durable positive capital growth via evidence-gated amplification. Derived 
 | # | Item | Status |
 |---|---|---|
 | 1 | Entry pause (runtime) | DONE 2026-08-24T09:22:49Z — `control_plane:global:entries_paused` reason `reversal_plan_2026-08-24_entry_pause_until_tier0_release`, no effective_until. Zero resting entry orders confirmed. |
-| 1b | Sizing-governance lock (tracked policy artifact; runtime may lower risk, never raise) | TODO |
-| 2 | Canonical economic-fill read model + Bug A repair + retire skill labels | TODO |
-| 3 | Decision certificate: add decision-time executable side price p₀ + candidate-set provenance | TODO |
-| 4 | Four non-circular panels (forecast/selection/execution/lifecycle) | TODO |
-| 5 | Pipeline repairs: bootstrap timeout+alert, generation coherence, preemption bounds, riskguard age alerts | TODO |
-| 6 | Tier-0 live research mode | **BLOCKED on operator: venue min order $1.00 > 20bp×$268=$0.54.** Options: (a) stay paused until bankroll ≥$500, (b) accept ~37bp/claim, (c) fund. |
+| 1b | Sizing-governance lock | DONE b0c342208 — config/risk_policy.yaml (content-addressed, policy_version+sha256 logged at boot) + assert_risk_policy_artifact as Guard 5 in _run_boot_guards; 4 levers pinned (kelly_multiplier 0.125, max_correlated_pct 0.25, max_portfolio_heat_pct 0.5, max_single_position_pct 0.1), 3 deliberately-not-pinned documented; direction law (lower-only overrides) enforced structurally; 36/36 tests. |
+| 2 | Bug A repair (multi-tranche cert aggregation) | DONE 558229342 — 74 tests pass; live shadow validation: 111/174 Aug UNATTRIBUTABLE now resolve (all size-weighted, 0 fallback), remaining 63 = all-tranche failures (30 single-tranche Bug-B cohort + 33 shared-upstream), fail-closed intact. Fill-dedup handled in panels (P3/P4). |
+| 3 | Decision certificate: add decision-time executable side price p₀ + candidate-set provenance | TODO — scouting done: certs already carry q_live/q_source/global_limit_price/global_jit_book_snapshot_id; gap = explicit top-of-book side price + candidate set beyond sha256 |
+| 4 | Four non-circular panels (forecast/selection/execution/lifecycle) | DONE f77ec1c91 — scripts/scoreboard_panels.py, 19/19 tests, registered (script_manifest.yaml + AGENTS.md + writer-lock allowlist); live smoke reproduces P1 verdict (market beats q all buckets) |
+| 5 | Pipeline repairs | 5a bootstrap stall alert DONE d1aeeeb52 (gate logic untouched, alert+breadcrumb, throttled). 5b generation coherence / preemption bounds / riskguard age alerts TODO |
+| 6 | Tier-0 live research mode | **PARTIALLY BLOCKED on operator.** Corrected venue floor: min_order_size = 1–5 SHARES (executable_market_snapshots), not $1 notional. At 5 shares: price <0.11 fits the 20bp×$268=$0.54 cap; 0.11–0.25 costs $0.55–$1.25 (up to ~47bp). Options: (a) Tier-0 restricted to price <0.11 only, (b) accept up to ~47bp/claim across the full <0.25 band, (c) wait for bankroll ≥$625 (full band fits 20bp). Operator picks. |
 | 7 | Ordinal-selection discriminator (prospective; historical candidate sets not persisted — hash only) | TODO (depends 3) |
-| 8 | Delete scale-in for Tier 0; hold-to-settle cheap; audit historical exits | TODO |
-| 9 | Market-anchored walk-forward calibrator logit(r̂)=logit(p₀)+α_lead+β·clip(logit q−logit p₀); #451 sigma as predeclared challenger only | TODO |
+| 8 | Convex hold-to-settle | PARTIAL 274054532 — auction SELL candidacy blocked for positions with avg entry price <0.25 (blocks GLOBAL_CAPITAL_OPTIMAL_SELL AND auction-routed q-scored sells; hard-fact zero-support direct sells, RED force, emergencies untouched; avg_price via EffectiveExposure fill/chain authority, lawful). Remaining: scale-in deletion for Tier 0 (moot while entries paused; enforce at Tier-0 release), historical exit audit (done in investigation, exit-review agent). |
+| 9 | Market-anchored calibrator | DONE 5f969c590 — module + walk-forward harness + report script, 21/21 tests, all registries. **LIVE RESULT (537 walk-forward predictions, p0-proxy caveat): β converges ~0.10-0.12 (λ=10 heavy shrinkage). Paired log-loss ALL: p0 0.5481, raw q 0.8988, calibrated r̂ 0.5580 — even optimally-shrunk q does NOT beat market price out of sample (marginally worse overall; better only in June and the <0.15 agreement bucket). Gate A verdict as of today: q_cal ≈ parity-at-best → per the two-gate law this licenses NOTHING for capital; live posture stays market-anchored, q has no cardinal authority. Raw q's 0.90 vs 0.55 confirms the original indictment.** |
 | 10 | Two gates (A: probability-use = non-inferiority to price; B: capital-use = positive LCB vs fill after execution) + single bounded Tier 1 | TODO (depends 4,7,9) |
 
 ## Key consult corrections adopted
