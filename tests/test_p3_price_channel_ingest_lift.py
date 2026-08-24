@@ -4999,7 +4999,10 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
     from src.data import polymarket_client
     from src.data.polymarket_request_governor import RequestAdmissionDenied, RequestPriority
     from src.events.triggers import market_channel_ingestor as market_ingestor
-    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelOnlineService,
+        MarketTokenMetadata,
+    )
     from src.ingest import price_channel_ingest as lane
     from src.state import db as state_db
 
@@ -5027,19 +5030,18 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
         },
     )
 
-    class FakeService:
-        rest_seed_backpressure_count = 0
-        rest_seed_backpressure_reason = None
+    singular_calls = 0
 
-        def __init__(self, _ingestor, *, fetch_orderbook, **kwargs):  # noqa: ANN001, ARG002
-            self._fetch_orderbook = fetch_orderbook
-
-        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ARG002
+    class FakeService(MarketChannelOnlineService):
+        def seed_rest_books_in_chunks(self, *, token_ids, deadline_monotonic, **kwargs):  # noqa: ANN001, ARG002
             try:
-                self._fetch_orderbook(next(iter(token_ids)))
+                self._fetch_rest_seed_books(
+                    list(token_ids),
+                    deadline_monotonic=deadline_monotonic,
+                )
             except BaseException:
                 return 0
-            return 1
+            return 0
 
     class FakePolymarketClient:
         def __init__(self, *, public_request_priority=None):  # noqa: ANN001
@@ -5052,6 +5054,11 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
             return False
 
         def get_orderbook_snapshot(self, token_id, *, timeout=None):  # noqa: ANN001
+            nonlocal singular_calls
+            singular_calls += 1
+            raise AssertionError("batch request failure must not fan out to /book")
+
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None):  # noqa: ANN001
             if failure == "request":
                 raise RequestAdmissionDenied("POLYMARKET_SCAN_LEASE_BUSY")
             raise TimeoutError("candidate refresh deadline")
@@ -5079,6 +5086,7 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
         assert result["budget_exhausted"] is False
         assert result["candidate_quote_refresh_request_failure_count"] == 1
         assert result["candidate_quote_refresh_request_failed_tokens"] == 1
+        assert singular_calls == 0
         assert result["candidate_quote_refresh_failure_reasons"] == {
             token_id: "RequestAdmissionDenied: POLYMARKET_SCAN_LEASE_BUSY"
         }
@@ -5086,6 +5094,7 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
         assert result["budget_exhausted"] is True
         assert result["candidate_quote_refresh_request_failure_count"] == 0
         assert result["candidate_quote_refresh_timeout_tokens"] == [token_id]
+        assert singular_calls == 0
 
 
 def test_candidate_quote_refresh_excludes_metadata_ineligible_tokens(monkeypatch):

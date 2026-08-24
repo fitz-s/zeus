@@ -634,6 +634,8 @@ def _budgeted_orderbook_fetchers(
         return _fetch_orderbook, None
 
     def _fetch_orderbooks(token_ids: list[str]) -> dict[str, dict]:
+        from src.data.polymarket_request_governor import RequestAdmissionDenied
+
         try:
             return fetch_many(
                 token_ids,
@@ -643,6 +645,20 @@ def _budgeted_orderbook_fetchers(
             if on_timeout is not None:
                 for token_id in token_ids:
                     on_timeout(str(token_id), exc)
+            raise
+        except RequestAdmissionDenied as exc:
+            if on_request_error is not None:
+                for token_id in token_ids:
+                    on_request_error(str(token_id), exc)
+            # MarketChannelOnlineService treats this typed marker as a shared
+            # request embargo and must not fan the denied batch into /book calls.
+            raise RequestAdmissionDenied(
+                f"POLYMARKET_REQUEST_EMBARGOED:{exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - record each batch request failure
+            if on_request_error is not None:
+                for token_id in token_ids:
+                    on_request_error(str(token_id), exc)
             raise
 
     return _fetch_orderbook, _fetch_orderbooks
