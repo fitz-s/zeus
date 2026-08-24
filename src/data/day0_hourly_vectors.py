@@ -151,6 +151,41 @@ class Day0HourlyVector:
     source_run_meta_json: str | None = None
 
 
+def day0_remaining_carrier_identity_inputs(
+    *,
+    city: str,
+    unit: str,
+    decision_time_utc: str,
+    station_id: str,
+    preliminary_survival_identity: str,
+) -> dict[str, object]:
+    """Build the one identity input shape shared by materialize and replay."""
+
+    normalized_city = str(city or "").strip()
+    normalized_unit = str(unit or "").strip().upper()
+    normalized_decision = str(decision_time_utc or "").strip()
+    normalized_station = str(station_id or "").strip().upper()
+    normalized_likelihood = str(preliminary_survival_identity or "").strip().lower()
+    if (
+        not normalized_city
+        or normalized_unit not in {"C", "F"}
+        or not normalized_decision
+        or not normalized_station
+        or not normalized_likelihood
+    ):
+        raise ValueError("DAY0_REMAINING_CARRIER_IDENTITY_INPUT_INVALID")
+    return {
+        "city": normalized_city,
+        "unit": normalized_unit,
+        "probability_cutoff_utc": normalized_decision,
+        "decision_time_utc": normalized_decision,
+        "station_id": normalized_station,
+        "awc_source_channel": "aviationweather_metar",
+        "ogimet_source_channel": f"ogimet_metar_{normalized_station.lower()}",
+        "preliminary_survival_identity": normalized_likelihood,
+    }
+
+
 def build_day0_remaining_probability_carrier(
     *, future_extremes_c: Iterable[float], boundary_scenarios: Iterable[tuple[float | None, float]],
     metric: str, path_error_sigma_c: float, instrument_sigma_c: float,

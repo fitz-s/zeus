@@ -12,8 +12,10 @@ never substitutes an older row under a different certificate.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
+import numpy as np
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -73,8 +75,9 @@ def _provenance(
     stale_shape_reused: bool = False,
     translation_applied: bool = False,
     shape_source_cycle_time: datetime | None = None,
+    strict_day0: bool = False,
 ) -> dict[str, object]:
-    return {
+    provenance: dict[str, object] = {
         "bin_topology_hash": _TOPO_HASH,
         "replacement_q_mode": q_mode,
         "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
@@ -105,6 +108,69 @@ def _provenance(
             }
         ],
     }
+    if strict_day0:
+        shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+        assert isinstance(shape, dict)
+        shape.update(
+            {
+                "member_values_hash": "member-values-hash",
+            }
+        )
+        provenance["bayes_precision_fusion"]["current_value_serving"] = {
+            "ecmwf_ifs": {
+                "raw_model_forecast_id": "raw-ifs-1",
+                "served_cycle": shape["source_cycle_time"],
+                "captured_at": shape["source_cycle_time"],
+            }
+        }
+        likelihood = {
+            "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+            "cutoff": shape["source_cycle_time"],
+            "successes": [],
+            "failures": [],
+            "unconfirmed_awc_ids": [1],
+            "alpha": 0.5,
+            "beta": 0.5,
+            "station_id": "LLBG",
+            "source_channel_pair": {
+                "awc": "aviationweather_metar",
+                "ogimet": "ogimet_metar_llbg",
+            },
+        }
+        likelihood["identity_hash"] = hashlib.sha256(
+            json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        provenance.update(
+            {
+                "day0_provisional_observation": {
+                    "active": True,
+                    "metric": "high",
+                    "unit": "C",
+                    "source": "aviationweather_metar",
+                },
+                "day0_preliminary_report_survival_likelihood": likelihood,
+                "day0_remaining_carrier_content_identity": "carrier-content-hash",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+                "day0_remaining_carrier_q": [0.2, 0.8],
+                "day0_remaining_carrier_probability_samples": [[0.2, 0.8]] * 500,
+                "day0_remaining_carrier_sample_count": 500,
+                "day0_remaining_carrier_future_extremes_c": [20.0, 21.0],
+                "day0_remaining_carrier_path_error_sigma_c": 0.5,
+                "day0_remaining_carrier_probability_cutoff_utc": shape["source_cycle_time"],
+                "day0_remaining_vector_witness": {
+                    "vector_id": "vector-id-1",
+                    "expected_models": ["ecmwf_ifs"],
+                    "actual_models": ["ecmwf_ifs"],
+                    "capture_times_by_model_utc": {"ecmwf_ifs": shape["source_cycle_time"]},
+                    "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": shape["source_cycle_time"]},
+                    "provider_source_available_at_by_model_utc": {"ecmwf_ifs": shape["source_cycle_time"]},
+                    "source_run_id_by_model": {"ecmwf_ifs": "source-run-1"},
+                    "provider_run_id_by_model": {"ecmwf_ifs": "provider-run-1"},
+                    "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
+                },
+            }
+        )
+    return provenance
 
 
 def _insert_posterior(
@@ -123,6 +189,9 @@ def _insert_posterior(
     translation_applied: bool = False,
     shape_source_cycle_time: datetime | None = None,
     decorrelated_providers_complete: bool | None = None,
+    city: str = "Shanghai",
+    target_date: str = "2026-06-07",
+    strict_day0: bool = False,
 ) -> int:
     # ``with_ucb`` lets a row carry q_lcb_json but NOT q_ucb_json (the freshest-row
     # twin-authority carrier defect: a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it).
@@ -151,6 +220,7 @@ def _insert_posterior(
             if math.isfinite(shape_lag_hours)
             else None
         ),
+        strict_day0=strict_day0,
     )
     if decorrelated_providers_complete is not None:
         provenance["bayes_precision_fusion"]["decorrelated_providers_complete"] = (
@@ -175,8 +245,8 @@ def _insert_posterior(
             SOURCE_ID,
             PRODUCT_ID,
             HIGH_DATA_VERSION,
-            "Shanghai",
-            "2026-06-07",
+            city,
+            target_date,
             "high",
             source_cycle_time.isoformat(),
             source_available_at.isoformat(),
@@ -254,6 +324,173 @@ def _readiness(
         expires_at=expires_at,
         dependencies=dependencies,
     )
+
+
+def _bind_test_hwm(monkeypatch, *, frontier: datetime, eligible: datetime) -> None:
+    """Provide the typed raw-frontier/ENS HWM for in-memory reader fixtures."""
+
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    monkeypatch.setattr(
+        reader,
+        "latest_live_input_cycle",
+        lambda *args, **kwargs: (frontier, "test-raw-frontier"),
+    )
+    monkeypatch.setattr(
+        reader,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: eligible,
+    )
+    monkeypatch.setattr(
+        reader,
+        "replacement_live_input_lag_reason",
+        lambda *args, **kwargs: None,
+    )
+
+
+def test_held_provenance_binds_configured_station_and_source_pair() -> None:
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    provenance = _provenance(
+        q_mode=_FUSED_FULL,
+        strict_day0=True,
+        shape_source_cycle_time=_dt(6, 0),
+    )
+    assert reader._held_pinned_provenance_reason(
+        provenance,
+        city="Tel Aviv",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) is None
+
+    wrong_station = json.loads(json.dumps(provenance))
+    wrong_station["day0_preliminary_report_survival_likelihood"]["station_id"] = "LTFM"
+    assert reader._held_pinned_provenance_reason(
+        wrong_station,
+        city="Tel Aviv",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) == "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_STATION_MISMATCH"
+
+    wrong_pair = json.loads(json.dumps(provenance))
+    wrong_pair["day0_preliminary_report_survival_likelihood"]["source_channel_pair"] = {
+        "awc": "aviationweather_metar",
+        "ogimet": "ogimet_metar_ltfm",
+    }
+    assert reader._held_pinned_provenance_reason(
+        wrong_pair,
+        city="Tel Aviv",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) == "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH"
+
+
+def test_noaa_producer_likelihood_persists_and_reader_accepts_exact_identity(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_prints ("
+        "id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT, "
+        "publish_ts_utc TEXT, value_native REAL, unit TEXT, fetched_at_utc TEXT, raw_report TEXT)"
+    )
+    request = SimpleNamespace(
+        city="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        computed_at=_dt(6, 12),
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_c=33.0,
+    )
+    bins = (
+        SimpleNamespace(lower_c=None, upper_c=32.0),
+        SimpleNamespace(lower_c=33.0, upper_c=33.0),
+        SimpleNamespace(lower_c=34.0, upper_c=None),
+    )
+    carrier, likelihood = materializer._day0_noaa_preliminary_carrier(
+        conn,
+        request,
+        metric="high",
+        future_members_c=(28.0, 29.0, 30.0),
+        bins=bins,
+        path_error_sigma_c=0.5,
+    )
+    assert likelihood["station_id"] == "LLBG"
+    assert likelihood["source_channel_pair"] == {
+        "awc": "aviationweather_metar",
+        "ogimet": "ogimet_metar_llbg",
+    }
+    assert len(carrier["samples"]) == 500
+    persisted_likelihood = json.loads(json.dumps(likelihood))
+    assert persisted_likelihood == likelihood
+    provenance = _provenance(
+        q_mode=_FUSED_FULL,
+        strict_day0=True,
+        shape_source_cycle_time=_dt(6, 0),
+    )
+    provenance["day0_preliminary_report_survival_likelihood"] = persisted_likelihood
+    assert reader._held_pinned_provenance_reason(
+        provenance,
+        city="Tel Aviv",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) is None
+
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.engine import event_reactor_adapter as adapter
+    from src.config import runtime_cities_by_name
+
+    payload = {
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "settlement_unit": "C",
+        "rounded_value": 33.0,
+        "_edli_day0_provisional_boundary_survival_probability": likelihood[
+            "boundary_survival_probability"
+        ],
+        "_edli_day0_provisional_revision_likelihood": persisted_likelihood,
+        "_edli_day0_remaining_content_identity": carrier["content_identity"],
+        "_edli_day0_probability_operator": carrier["operator"],
+        "_edli_day0_remaining_carrier_q": carrier["q"],
+        "_edli_day0_remaining_probability_samples": carrier["samples"],
+        "_edli_day0_remaining_probability_sample_count": carrier["sample_count"],
+        "_edli_day0_remaining_carrier_future_extremes_c": [28.0, 29.0, 30.0],
+        "_edli_day0_remaining_carrier_path_error_sigma_c": 0.5,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": _dt(6, 12).isoformat(),
+        "_edli_day0_remaining_vector_witness": {
+            "vector_id": "vector-id-1",
+            "expected_models": ["ecmwf_ifs"],
+            "actual_models": ["ecmwf_ifs"],
+            "capture_times_by_model_utc": {"ecmwf_ifs": _dt(6, 12).isoformat()},
+            "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": _dt(6, 12).isoformat()},
+            "provider_source_available_at_by_model_utc": {"ecmwf_ifs": _dt(6, 12).isoformat()},
+            "source_run_id_by_model": {"ecmwf_ifs": "source-run-1"},
+            "provider_run_id_by_model": {"ecmwf_ifs": "provider-run-1"},
+            "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
+        },
+    }
+    city = runtime_cities_by_name()["Tel Aviv"]
+    replay_q = adapter._day0_remaining_p_raw_vector(
+        np.asarray([28.0, 29.0, 30.0], dtype=float),
+        city=city,
+        settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[
+            SimpleNamespace(low=None, high=32.0),
+            SimpleNamespace(low=33.0, high=33.0),
+            SimpleNamespace(low=34.0, high=None),
+        ],
+        payload=payload,
+        extra_member_sigma=0.5,
+        decision_time=_dt(6, 12),
+    )
+    assert np.allclose(replay_q, np.asarray(carrier["q"], dtype=float))
 
 
 def test_reader_live_eligible_q_mode_set_mirrors_live_gate() -> None:
@@ -821,7 +1058,7 @@ def test_readiness_bound_q_ucb_missing_cannot_borrow_older_bounds() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_held_pinned_reader_binds_exact_row_without_raw_hwm() -> None:
+def test_held_pinned_reader_binds_exact_row_with_raw_hwm(monkeypatch) -> None:
     conn = _conn()
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
@@ -833,10 +1070,13 @@ def test_held_pinned_reader_binds_exact_row_without_raw_hwm() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        target_date="2026-06-07",
+        strict_day0=True,
     )
     # This newer partial row is intentionally the latest row.  The exact pinned
-    # read must still return the older immutable complete carrier and must not call
-    # the raw-input HWM reader.
+    # read must still return the older immutable complete carrier; the HWM read is
+    # supplied separately and remains read-only.
     _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 6),
@@ -845,18 +1085,22 @@ def test_held_pinned_reader_binds_exact_row_without_raw_hwm() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=False,
+        city="Tel Aviv",
+        target_date="2026-06-07",
     )
     statements.clear()
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 7), eligible=_dt(6, 0))
 
     result = read_pinned_replacement_forecast_bundle(
         conn,
         posterior_id=complete_id,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
 
     assert result.ok is True
@@ -873,18 +1117,19 @@ def test_held_pinned_reader_binds_exact_row_without_raw_hwm() -> None:
     repeated = read_pinned_replacement_forecast_bundle(
         conn,
         posterior_id=complete_id,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
     assert repeated.bundle is not None
     assert repeated.bundle.posterior_identity_hash == result.bundle.posterior_identity_hash
 
 
-def test_prior_complete_reader_resets_when_newer_cycle_is_complete() -> None:
+def test_prior_complete_reader_resets_when_newer_cycle_is_complete(monkeypatch) -> None:
     conn = _conn()
     _insert_posterior(
         conn,
@@ -894,6 +1139,8 @@ def test_prior_complete_reader_resets_when_newer_cycle_is_complete() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
     )
     _insert_posterior(
         conn,
@@ -903,16 +1150,20 @@ def test_prior_complete_reader_resets_when_newer_cycle_is_complete() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
     )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 6), eligible=_dt(6, 6))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
 
     assert result.ok is False
@@ -920,7 +1171,7 @@ def test_prior_complete_reader_resets_when_newer_cycle_is_complete() -> None:
     assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
 
 
-def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute() -> None:
+def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute(monkeypatch) -> None:
     conn = _conn()
     old_complete_id = _insert_posterior(
         conn,
@@ -930,6 +1181,8 @@ def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute() 
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
     )
     _insert_posterior(
         conn,
@@ -939,16 +1192,19 @@ def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute() 
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=False,
+        city="Tel Aviv",
     )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 7), eligible=_dt(6, 6))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 13),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
 
     assert result.ok is True
@@ -957,7 +1213,7 @@ def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute() 
     assert result.bundle.posterior_id == old_complete_id
 
 
-def test_prior_complete_frontier_excludes_future_partial_wave() -> None:
+def test_prior_complete_frontier_excludes_future_partial_wave(monkeypatch) -> None:
     conn = _conn()
     _insert_posterior(
         conn,
@@ -967,6 +1223,8 @@ def test_prior_complete_frontier_excludes_future_partial_wave() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
     )
     for source_cycle_time, source_available_at, computed_at in (
         (_dt(6, 13), _dt(6, 13, 30), _dt(6, 13, 45)),
@@ -981,16 +1239,19 @@ def test_prior_complete_frontier_excludes_future_partial_wave() -> None:
             q_mode=_FUSED_FULL,
             with_bounds=True,
             decorrelated_providers_complete=False,
+            city="Tel Aviv",
         )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 0), eligible=_dt(6, 0))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
 
     assert result.ok is False
@@ -998,7 +1259,7 @@ def test_prior_complete_frontier_excludes_future_partial_wave() -> None:
     assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
 
 
-def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave() -> None:
+def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave(monkeypatch) -> None:
     conn = _conn()
     old_complete_id = _insert_posterior(
         conn,
@@ -1008,6 +1269,8 @@ def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave() -> N
         q_mode=_FUSED_FULL,
         with_bounds=True,
         decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
     )
     for minute in range(1, 81):
         source_cycle_time = _dt(6, 0) + timedelta(minutes=minute)
@@ -1019,16 +1282,19 @@ def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave() -> N
             q_mode=_FUSED_FULL,
             with_bounds=True,
             decorrelated_providers_complete=False,
+            city="Tel Aviv",
         )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 1, 21), eligible=_dt(6, 1, 20))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
-        city="Shanghai",
+        city="Tel Aviv",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 5),
         current_bin_topology_hash=_TOPO_HASH,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
     )
 
     assert result.ok is True

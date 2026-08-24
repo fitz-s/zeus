@@ -28,6 +28,7 @@ Contracts:
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -42,6 +43,7 @@ from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
     align_day0_hourly_vectors_on_common_causal_grid,
     build_day0_remaining_probability_carrier,
+    day0_remaining_carrier_identity_inputs,
     fetch_day0_hourly_vectors,
     parse_openmeteo_hourly_payload,
     persist_day0_hourly_vectors,
@@ -131,6 +133,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
     city = runtime_cities_by_name()["Tel Aviv"]
     future = tuple(31.0 + (index % 5) * 0.25 for index in range(29))
     cutoff = "2026-08-24T09:30:00+00:00"
+    decision_time = datetime(2026, 8, 24, 9, 30, tzinfo=UTC)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         "src.signal.ensemble_signal.sigma_instrument_for_city",
@@ -146,12 +149,13 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             bin_bounds_c=[(None, 30), (31, 31), (32, 32), (33, None)],
             n_point=ensemble_n_mc(),
             n_samples=500,
-            identity_inputs={
-                "city": "Tel Aviv",
-                "unit": "C",
-                "probability_cutoff_utc": cutoff,
-                "preliminary_survival_identity": "priorhash",
-            },
+            identity_inputs=day0_remaining_carrier_identity_inputs(
+                city="Tel Aviv",
+                unit="C",
+                decision_time_utc=cutoff,
+                station_id="LLBG",
+                preliminary_survival_identity="priorhash",
+            ),
         )
         payload = {
             "metric": "high",
@@ -163,6 +167,11 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             "_edli_day0_provisional_revision_likelihood": {
                 "identity_hash": "priorhash",
                 "boundary_survival_probability": 0.95,
+                "station_id": "LLBG",
+                "source_channel_pair": {
+                    "awc": "aviationweather_metar",
+                    "ogimet": "ogimet_metar_llbg",
+                },
             },
             "_edli_day0_probability_operator": expected["operator"],
             "_edli_day0_remaining_probability_sample_count": 500,
@@ -172,6 +181,17 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
             "_edli_day0_remaining_carrier_q": expected["q"],
             "_edli_day0_remaining_content_identity": expected["content_identity"],
+            "_edli_day0_remaining_vector_witness": {
+                "vector_id": "vector-id-1",
+                "expected_models": ["ecmwf_ifs"],
+                "actual_models": ["ecmwf_ifs"],
+                "capture_times_by_model_utc": {"ecmwf_ifs": cutoff},
+                "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": cutoff},
+                "provider_source_available_at_by_model_utc": {"ecmwf_ifs": cutoff},
+                "source_run_id_by_model": {"ecmwf_ifs": "source-run-1"},
+                "provider_run_id_by_model": {"ecmwf_ifs": "provider-run-1"},
+                "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
+            },
         }
         replay = era._day0_remaining_p_raw_vector(
             np.asarray(future),
@@ -185,6 +205,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             ],
             payload=payload,
             extra_member_sigma=0.0,
+            decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
         assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
@@ -212,6 +233,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             ],
             payload=ogimet_payload,
             extra_member_sigma=0.0,
+            decision_time=decision_time,
         )
         assert ogimet_replay.tolist() == pytest.approx(expected["q"])
         assert ogimet_replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
@@ -234,6 +256,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                 ],
                 payload=likelihood_mismatch,
                 extra_member_sigma=0.0,
+                decision_time=decision_time,
             )
         missing_vector = dict(payload)
         missing_vector.pop("_edli_day0_remaining_carrier_future_extremes_c")
@@ -250,6 +273,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                 ],
                 payload=missing_vector,
                 extra_member_sigma=0.0,
+                decision_time=decision_time,
             )
         missing_likelihood = dict(payload)
         missing_likelihood.pop("_edli_day0_provisional_revision_likelihood")
@@ -266,6 +290,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                 ],
                 payload=missing_likelihood,
                 extra_member_sigma=0.0,
+                decision_time=decision_time,
             )
         payload["_edli_day0_remaining_probability_samples"] = [
             [0.0, 1.0, 0.0, 0.0], *expected["samples"][1:]
@@ -283,6 +308,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                 ],
                 payload=payload,
                 extra_member_sigma=0.0,
+                decision_time=decision_time,
             )
         payload["_edli_day0_remaining_probability_samples"] = expected["samples"]
         payload["_edli_day0_remaining_carrier_q"] = [0.0, 0.0, 0.0, 1.0]
@@ -299,6 +325,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                 ],
                 payload=payload,
                 extra_member_sigma=0.0,
+                decision_time=decision_time,
             )
         for field, label in (
             ("_edli_day0_remaining_content_identity", "IDENTITY"),
@@ -329,9 +356,34 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
                     ],
                     payload=missing,
                     extra_member_sigma=0.0,
+                    decision_time=decision_time,
                 )
     finally:
         monkeypatch.undo()
+
+
+def test_noaa_carrier_replay_requires_typed_decision_time():
+    import src.engine.event_reactor_adapter as era
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    city = runtime_cities_by_name()["Tel Aviv"]
+    with pytest.raises(
+        ValueError,
+        match="DAY0_NOAA_PRELIMINARY_CARRIER_DECISION_TIME_MISSING",
+    ):
+        era._day0_remaining_p_raw_vector(
+            np.asarray([31.0, 32.0], dtype=float),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[
+                Bin(None, 30, "C", "30C or below"),
+                Bin(31, 31, "C", "31C"),
+                Bin(32, None, "C", "32C or above"),
+            ],
+            payload={"metric": "high", "settlement_source": "aviationweather_metar"},
+            extra_member_sigma=0.0,
+        )
 
 
 def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
@@ -363,12 +415,27 @@ def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
     )
     monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs", "icon_global"])
     monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: list(vectors))
+    likelihood = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+        "cutoff": "2026-08-24T09:30:00+00:00",
+        "successes": [],
+        "failures": [],
+        "unconfirmed_awc_ids": [],
+        "alpha": 0.5,
+        "beta": 0.5,
+        "evidence_basis": "no_confirmed_same_station_transitions",
+        "station_id": "LTFM",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_ltfm",
+        },
+    }
+    likelihood["identity_hash"] = hashlib.sha256(
+        json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     monkeypatch.setattr(
         "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
-        lambda *_args, **_kwargs: {
-            "identity_hash": "istanbul-prior-v1",
-            "boundary_survival_probability": 0.95,
-        },
+        lambda *_args, **_kwargs: {**likelihood, "boundary_survival_probability": 0.95},
     )
     anchor = OpenMeteoIfs9LocalDayAnchor(
         city_timezone="Europe/Istanbul",
@@ -420,7 +487,8 @@ def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
     assert cutoff == "2026-08-24T09:30:00+00:00"
     assert len(future) == 2
     assert path_sigma > 0.0
-    assert likelihood["identity_hash"] == "istanbul-prior-v1"
+    assert likelihood["station_id"] == "LTFM"
+    assert likelihood["source_channel_pair"]["ogimet"] == "ogimet_metar_ltfm"
     assert carrier["sample_count"] == 500
     assert len(carrier["samples"]) == 500
     assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
@@ -718,6 +786,85 @@ def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
     conn.close()
 
 
+def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
+    """HELD A' rebuilds current vectors; ENTRY-shaped payloads cannot invoke it."""
+    import src.engine.event_reactor_adapter as era
+
+    bounds = [(None, 29)] + [(value, value) for value in range(30, 39)] + [(39, None)]
+    family = SimpleNamespace(
+        city="Tel Aviv",
+        metric="high",
+        candidates=[
+            SimpleNamespace(bin=Bin(low, high, "C", f"bin-{index}"))
+            for index, (low, high) in enumerate(bounds)
+        ],
+    )
+    base_payload = {
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+        "rounded_value": 33.0,
+        "_edli_day0_redecision_authority_scope": (
+            "held_exposure_current_day0_only_v1"
+        ),
+        "_edli_day0_source_clock_predictive_sigma_native": 1.2,
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+        "_edli_day0_provisional_revision_likelihood": {
+            "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+            "identity_hash": "tel-aviv-prior-identity",
+            "boundary_survival_probability": 0.95,
+            "station_id": "LLBG",
+            "source_channel_pair": {
+                "awc": "aviationweather_metar",
+                "ogimet": "ogimet_metar_llbg",
+            },
+        },
+    }
+    payload = dict(base_payload)
+    era._rebuild_held_day0_shared_carrier(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
+        future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+    )
+    assert len(payload["_edli_day0_remaining_carrier_q"]) == 11
+    assert payload["_edli_day0_remaining_probability_sample_count"] == 500
+    assert len(payload["_edli_day0_remaining_probability_samples"]) == 500
+    assert all(
+        sum(row) == pytest.approx(1.0)
+        for row in payload["_edli_day0_remaining_probability_samples"]
+    )
+    assert sum(payload["_edli_day0_remaining_carrier_q"]) == pytest.approx(1.0)
+    assert payload["_edli_day0_held_carrier_rebuild_basis"].startswith(
+        "prior_complete_source_clock_plus_current_causal_hourly_vectors"
+    )
+    assert payload["_edli_day0_remaining_content_identity"]
+    assert payload["_edli_day0_remaining_carrier_path_error_sigma_c"] >= 0.0
+
+    entry_payload = dict(base_payload)
+    entry_payload.pop("_edli_day0_redecision_authority_scope")
+    with pytest.raises(ValueError, match="DAY0_HELD_SHARED_CARRIER_AUTHORITY_REQUIRED"):
+        era._rebuild_held_day0_shared_carrier(
+            payload=entry_payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
+            future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+        )
+
+    missing_likelihood = dict(payload)
+    missing_likelihood.pop("_edli_day0_provisional_revision_likelihood")
+    with pytest.raises(ValueError, match="DAY0_HELD_SHARED_CARRIER_LIKELIHOOD_MISSING"):
+        era._rebuild_held_day0_shared_carrier(
+            payload=missing_likelihood,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
+            future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+        )
+
+
 def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
@@ -727,6 +874,7 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
     future_c = tuple(20.0 + (index % 5) * 0.25 for index in range(29))
     future_f = tuple(value * (9.0 / 5.0) + 32.0 for value in future_c)
     cutoff = "2026-08-24T09:30:00+00:00"
+    decision_time = datetime(2026, 8, 24, 9, 30, tzinfo=UTC)
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
     real_sigma = sigma_instrument_for_city(city)
@@ -742,12 +890,13 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             bin_bounds_c=[(None, 79), (80, 81), (82, 83), (84, None)],
             n_point=ensemble_n_mc(),
             n_samples=500,
-            identity_inputs={
-                "city": "Atlanta",
-                "unit": "F",
-                "probability_cutoff_utc": cutoff,
-                "preliminary_survival_identity": "priorhash-f",
-            },
+            identity_inputs=day0_remaining_carrier_identity_inputs(
+                city="Atlanta",
+                unit="F",
+                decision_time_utc=cutoff,
+                station_id="KATL",
+                preliminary_survival_identity="priorhash-f",
+            ),
         )
         payload = {
             "metric": "high",
@@ -759,6 +908,11 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             "_edli_day0_provisional_revision_likelihood": {
                 "identity_hash": "priorhash-f",
                 "boundary_survival_probability": 0.95,
+                "station_id": "KATL",
+                "source_channel_pair": {
+                    "awc": "aviationweather_metar",
+                    "ogimet": "ogimet_metar_katl",
+                },
             },
             "_edli_day0_probability_operator": expected["operator"],
             "_edli_day0_remaining_probability_sample_count": 500,
@@ -768,9 +922,20 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
             "_edli_day0_remaining_carrier_q": expected["q"],
             "_edli_day0_remaining_content_identity": expected["content_identity"],
+            "_edli_day0_remaining_vector_witness": {
+                "vector_id": "vector-id-1",
+                "expected_models": ["ecmwf_ifs"],
+                "actual_models": ["ecmwf_ifs"],
+                "capture_times_by_model_utc": {"ecmwf_ifs": cutoff},
+                "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": cutoff},
+                "provider_source_available_at_by_model_utc": {"ecmwf_ifs": cutoff},
+                "source_run_id_by_model": {"ecmwf_ifs": "source-run-1"},
+                "provider_run_id_by_model": {"ecmwf_ifs": "provider-run-1"},
+                "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
+            },
         }
         replay = era._day0_remaining_p_raw_vector(
-            np.asarray(future_c),
+            np.asarray(future_f),
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
             bins=[
@@ -781,8 +946,24 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             ],
             payload=payload,
             extra_member_sigma=0.0,
+            decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future_f[:-1] + (future_f[-1] + 1.0,)),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 79, "F", "79F or below"),
+                    Bin(80, 81, "F", "80-81F"),
+                    Bin(82, 83, "F", "82-83F"),
+                    Bin(84, None, "F", "84F or above"),
+                ],
+                payload=payload,
+                extra_member_sigma=0.0,
+                decision_time=decision_time,
+            )
         assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
     finally:

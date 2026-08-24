@@ -36,7 +36,12 @@ from src.data.replacement_forecast_readiness import (
     SOURCE_ID,
     ReplacementForecastReadinessDecision,
 )
-from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+from src.data.replacement_input_hwm import (
+    ReplacementInputHwmReadUnavailable,
+    latest_eligible_ensemble_input_cycle,
+    latest_live_input_cycle,
+    replacement_live_input_lag_reason,
+)
 from src.data.market_topology_rows import _table_columns
 
 
@@ -70,6 +75,12 @@ _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 class ReplacementForecastAuthorityPurpose(StrEnum):
     ENTRY = "entry"
     HELD_REDECISION = "held_redecision"
+
+
+class _HeldContinuityStatus(StrEnum):
+    READY = "ready"
+    RESET = "reset"
+    BLOCKED = "blocked"
 
 
 
@@ -178,6 +189,217 @@ def _decorrelated_providers_complete(provenance: Mapping[str, Any]) -> bool:
     return isinstance(fusion, Mapping) and fusion.get(
         "decorrelated_providers_complete"
     ) is True
+
+
+def _held_pinned_provenance_reason(
+    provenance: Mapping[str, Any],
+    *,
+    city: str,
+    metric: str,
+    decision_time: datetime,
+) -> str | None:
+    """Require the complete Day0 carrier witness before held pinning.
+
+    The reader must return the immutable carrier as-is; it may not synthesize
+    active/metric/unit/source or vector fields for the adapter.  This gate is
+    deliberately stricter than the generic posterior live-grade check.
+    """
+    provisional = provenance.get("day0_provisional_observation")
+    if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
+        return "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
+    if str(provisional.get("metric") or "").strip().lower() != metric:
+        return "REPLACEMENT_PINNED_DAY0_METRIC_MISMATCH"
+    city_obj = cities_by_name.get(city)
+    expected_unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    if not expected_unit or str(provisional.get("unit") or "").strip().upper() != expected_unit:
+        return "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH"
+    source = str(provisional.get("source") or "").strip().lower()
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+    expected_station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
+    expected_source_pair = {
+        "awc": "aviationweather_metar",
+        "ogimet": f"ogimet_metar_{expected_station.lower()}",
+    }
+
+    if (
+        city_obj is None
+        or str(getattr(city_obj, "settlement_source_type", "") or "").strip().lower()
+        != "noaa"
+        or not day0_is_noaa_preliminary_source(source)
+        or not expected_station
+        or source not in expected_source_pair.values()
+    ):
+        return "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"
+    likelihood = provenance.get("day0_preliminary_report_survival_likelihood")
+    if not isinstance(likelihood, Mapping):
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_MISSING"
+    if str(likelihood.get("semantics") or "").strip() not in {
+        "same_station_preliminary_report_survival_likelihood_v1",
+        "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+    }:
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SEMANTICS_MISMATCH"
+    if not str(likelihood.get("identity_hash") or "").strip():
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_IDENTITY_MISSING"
+    if str(likelihood.get("station_id") or "").strip().upper() != expected_station:
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_STATION_MISMATCH"
+    source_pair = likelihood.get("source_channel_pair")
+    if not isinstance(source_pair, Mapping) or dict(source_pair) != expected_source_pair:
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH"
+    identity_fields = (
+        "semantics",
+        "cutoff",
+        "successes",
+        "failures",
+        "unconfirmed_awc_ids",
+        "alpha",
+        "beta",
+        "station_id",
+        "source_channel_pair",
+    )
+    if "evidence_basis" in likelihood:
+        identity_fields = identity_fields + ("evidence_basis",)
+    identity = {field: likelihood.get(field) for field in identity_fields}
+    expected_identity_hash = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if str(likelihood.get("identity_hash") or "").strip().lower() != expected_identity_hash:
+        return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_IDENTITY_MISMATCH"
+    carrier_fields = (
+        "day0_remaining_carrier_content_identity",
+        "day0_remaining_carrier_operator",
+        "day0_remaining_carrier_q",
+        "day0_remaining_carrier_probability_samples",
+        "day0_remaining_carrier_sample_count",
+        "day0_remaining_carrier_future_extremes_c",
+        "day0_remaining_carrier_path_error_sigma_c",
+        "day0_remaining_carrier_probability_cutoff_utc",
+    )
+    if any(provenance.get(field) in (None, "") for field in carrier_fields):
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
+    if (
+        str(provenance.get("day0_remaining_carrier_operator"))
+        != "extreme_observed_then_noisy_future_v1"
+        or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
+    ):
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
+    samples = provenance.get("day0_remaining_carrier_probability_samples")
+    q = provenance.get("day0_remaining_carrier_q")
+    future = provenance.get("day0_remaining_carrier_future_extremes_c")
+    if (
+        not isinstance(q, (list, tuple))
+        or not q
+        or not isinstance(samples, (list, tuple))
+        or len(samples) != 500
+        or not isinstance(future, (list, tuple))
+        or not future
+    ):
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
+    if any(
+        not isinstance(row, (list, tuple)) or len(row) != len(q)
+        for row in samples
+    ):
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
+    try:
+        cutoff = _parse_utc(
+            str(provenance["day0_remaining_carrier_probability_cutoff_utc"]),
+            field_name="day0_remaining_carrier_probability_cutoff_utc",
+        )
+        path_sigma = float(provenance["day0_remaining_carrier_path_error_sigma_c"])
+    except (TypeError, ValueError, KeyError):
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_CLOCK_INVALID"
+    if cutoff > decision_time or not math.isfinite(path_sigma) or path_sigma < 0.0:
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_CLOCK_INVALID"
+    witness = provenance.get("day0_remaining_vector_witness")
+    required_witness = (
+        "vector_id",
+        "expected_models",
+        "actual_models",
+        "capture_times_by_model_utc",
+        "provider_source_cycle_time_by_model_utc",
+        "provider_source_available_at_by_model_utc",
+        "source_run_id_by_model",
+        "provider_run_id_by_model",
+        "request_hash_by_model",
+    )
+    if not isinstance(witness, Mapping) or any(
+        not witness.get(field) for field in required_witness
+    ):
+        return "REPLACEMENT_PINNED_DAY0_VECTOR_WITNESS_INCOMPLETE"
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
+    if not isinstance(shape, Mapping) or not isinstance(serving, Mapping):
+        return "REPLACEMENT_PINNED_DAY0_SOURCE_CLOCK_WITNESS_INCOMPLETE"
+    if not str(shape.get("source_cycle_time") or "").strip() or not str(
+        shape.get("member_values_hash") or ""
+    ).strip():
+        return "REPLACEMENT_PINNED_DAY0_SOURCE_CLOCK_WITNESS_INCOMPLETE"
+    if not serving or any(
+        not isinstance(item, Mapping)
+        or not item.get("raw_model_forecast_id")
+        or not item.get("served_cycle")
+        or not item.get("captured_at")
+        for item in serving.values()
+    ):
+        return "REPLACEMENT_PINNED_DAY0_SOURCE_CLOCK_WITNESS_INCOMPLETE"
+    return None
+
+
+def _latest_complete_held_continuity(
+    conn: sqlite3.Connection,
+    *,
+    row: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: datetime,
+) -> tuple[_HeldContinuityStatus, str | None]:
+    """Prove raw frontier lag while the eligible ENS/HWM cycle is unchanged."""
+    posterior_cycle = _parse_utc(str(row.get("source_cycle_time") or ""), field_name="source_cycle_time")
+    raw_frontier = latest_live_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    eligible_cycle = latest_eligible_ensemble_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if raw_frontier is None or raw_frontier[0] is None:
+        return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE"
+    if raw_frontier[0] <= posterior_cycle:
+        return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    consumed_cycle = (
+        current_evidence_shape_source_cycle_time(provenance)
+        if isinstance(shape, Mapping)
+        else None
+    )
+    if eligible_cycle is None or consumed_cycle is None:
+        return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_ELIGIBLE_ENS_HWM_UNAVAILABLE"
+    if eligible_cycle != consumed_cycle:
+        return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET"
+    lag_reason = replacement_live_input_lag_reason(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=row.get("source_cycle_time"),
+        posterior_computed_at=row.get("computed_at"),
+        posterior_provenance=provenance,
+        held_redecision=True,
+    )
+    if lag_reason is not None:
+        return _HeldContinuityStatus.BLOCKED, f"REPLACEMENT_PINNED_RAW_INPUT_HWM:{lag_reason}"
+    return _HeldContinuityStatus.READY, None
 
 
 def _normalize_probability_map(value: Mapping[str, Any], *, field_name: str, require_sum: bool = True) -> dict[str, float]:
@@ -937,6 +1159,9 @@ def read_pinned_replacement_forecast_bundle(
     temperature_metric: str,
     decision_time: datetime | str,
     current_bin_topology_hash: str | None = None,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
     authority_purpose: ReplacementForecastAuthorityPurpose = (
         ReplacementForecastAuthorityPurpose.HELD_REDECISION
     ),
@@ -953,6 +1178,11 @@ def read_pinned_replacement_forecast_bundle(
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED",
+        )
+    if raw_input_hwm_conn is None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE",
         )
     try:
         posterior_id = int(posterior_id)
@@ -1017,7 +1247,10 @@ def read_pinned_replacement_forecast_bundle(
         decision_time=decision_time,
         require_baseline_bundle=False,
         current_bin_topology_hash=current_bin_topology_hash,
-        enforce_raw_input_hwm=False,
+        enforce_raw_input_hwm=raw_input_hwm_conn is not None,
+        raw_input_hwm_conn=raw_input_hwm_conn,
+        raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+        raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
         authority_purpose=authority_purpose,
     )
 
@@ -1030,6 +1263,9 @@ def read_prior_complete_replacement_forecast_bundle(
     temperature_metric: str,
     decision_time: datetime | str,
     current_bin_topology_hash: str | None = None,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
     authority_purpose: ReplacementForecastAuthorityPurpose = (
         ReplacementForecastAuthorityPurpose.HELD_REDECISION
     ),
@@ -1045,6 +1281,11 @@ def read_prior_complete_replacement_forecast_bundle(
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED",
+        )
+    if raw_input_hwm_conn is None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE",
         )
     metric = _metric(temperature_metric)
     target_date_text = _date_text(target_date)
@@ -1123,6 +1364,97 @@ def read_prior_complete_replacement_forecast_bundle(
         field_name="provenance_json",
     )
     if _decorrelated_providers_complete(latest_provenance):
+        if raw_input_hwm_conn is not None:
+            try:
+                provenance_reason = _held_pinned_provenance_reason(
+                    latest_provenance,
+                    city=city,
+                    metric=metric,
+                    decision_time=decision_utc,
+                )
+                if provenance_reason is not None:
+                    return ReplacementForecastBundleReadResult(
+                        "BLOCKED", provenance_reason
+                    )
+                hwm_deadline = raw_input_hwm_deadline_monotonic
+                if raw_input_hwm_read_max_seconds is not None:
+                    stage_deadline = time.monotonic() + max(
+                        0.0, float(raw_input_hwm_read_max_seconds)
+                    )
+                    hwm_deadline = (
+                        stage_deadline
+                        if hwm_deadline is None
+                        else min(hwm_deadline, stage_deadline)
+                    )
+                if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+                    return ReplacementForecastBundleReadResult(
+                        "BLOCKED", "REPLACEMENT_RAW_INPUT_HWM:basis=HWM_READ_DEADLINE"
+                    )
+                deadline_holder: list[float | None] = [hwm_deadline]
+                handler_installed = False
+                if hwm_deadline is not None and hasattr(
+                    raw_input_hwm_conn, "set_progress_handler"
+                ):
+                    raw_input_hwm_conn.set_progress_handler(
+                        lambda: int(
+                            deadline_holder[0] is not None
+                            and time.monotonic() >= deadline_holder[0]
+                        ),
+                        1_000,
+                    )
+                    handler_installed = True
+                try:
+                    continuity_status, continuity_reason = _latest_complete_held_continuity(
+                        raw_input_hwm_conn,
+                        row=latest,
+                        provenance=latest_provenance,
+                        city=city,
+                        target_date=target_date_text,
+                        metric=metric,
+                        decision_time=decision_utc,
+                    )
+                finally:
+                    if handler_installed:
+                        raw_input_hwm_conn.set_progress_handler(None, 0)
+            except ReplacementInputHwmReadUnavailable as exc:
+                return ReplacementForecastBundleReadResult(
+                    "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{exc.blocker_reason()}"
+                )
+            except sqlite3.OperationalError as exc:
+                return ReplacementForecastBundleReadResult(
+                    "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:basis=hwm_read_failed:{exc}"
+                )
+            if continuity_status is _HeldContinuityStatus.READY:
+                result = read_pinned_replacement_forecast_bundle(
+                    conn,
+                    posterior_id=latest_id,
+                    city=city,
+                    target_date=target_date_text,
+                    temperature_metric=metric,
+                    decision_time=decision_time,
+                    current_bin_topology_hash=current_bin_topology_hash,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=authority_purpose,
+                )
+                if result.ok:
+                    return ReplacementForecastBundleReadResult(
+                        READY_STATUS,
+                        "REPLACEMENT_PINNED_LATEST_COMPLETE_POSTERIOR_READY",
+                        result.bundle,
+                    )
+                return result
+            if continuity_status is _HeldContinuityStatus.BLOCKED:
+                return ReplacementForecastBundleReadResult(
+                    "BLOCKED",
+                    continuity_reason or "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+                )
+            if continuity_status is _HeldContinuityStatus.RESET:
+                return ReplacementForecastBundleReadResult(
+                    "NOT_APPLICABLE",
+                    continuity_reason or "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+                )
         return ReplacementForecastBundleReadResult(
             "NOT_APPLICABLE",
             "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
@@ -1203,6 +1535,18 @@ def read_prior_complete_replacement_forecast_bundle(
             "NOT_APPLICABLE",
             "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
         )
+    candidate_provenance = _json_mapping(
+        candidate.get("provenance_json"),
+        field_name="provenance_json",
+    )
+    candidate_reason = _held_pinned_provenance_reason(
+        candidate_provenance,
+        city=city,
+        metric=metric,
+        decision_time=decision_utc,
+    )
+    if candidate_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", candidate_reason)
     result = read_pinned_replacement_forecast_bundle(
         conn,
         posterior_id=int(candidate["posterior_id"]),
@@ -1211,6 +1555,9 @@ def read_prior_complete_replacement_forecast_bundle(
         temperature_metric=metric,
         decision_time=decision_time,
         current_bin_topology_hash=current_bin_topology_hash,
+        raw_input_hwm_conn=raw_input_hwm_conn,
+        raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+        raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
         authority_purpose=authority_purpose,
     )
     if result.ok:

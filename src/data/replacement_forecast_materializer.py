@@ -1242,7 +1242,10 @@ def _day0_noaa_preliminary_carrier(
     if future_members_c is None or len(future_members_c) == 0:
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING")
     from src.config import runtime_cities_by_name
-    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier,
+        day0_remaining_carrier_identity_inputs,
+    )
     from src.data.day0_observation_reader import (
         same_station_preliminary_report_survival_likelihood,
     )
@@ -1265,6 +1268,42 @@ def _day0_noaa_preliminary_carrier(
         # redecision; the adapter's ENTRY seam rejects that basis explicitly.
         allow_prior_only=True,
     )
+    expected_source_pair = {
+        "awc": "aviationweather_metar",
+        "ogimet": f"ogimet_metar_{station.lower()}",
+    }
+    if source not in expected_source_pair.values():
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_CHANNEL_INVALID")
+    identity_fields = (
+        "semantics",
+        "cutoff",
+        "successes",
+        "failures",
+        "unconfirmed_awc_ids",
+        "alpha",
+        "beta",
+        "station_id",
+        "source_channel_pair",
+    )
+    if "evidence_basis" in likelihood:
+        identity_fields = identity_fields + ("evidence_basis",)
+    likelihood_identity = {
+        field: likelihood.get(field) for field in identity_fields
+    }
+    expected_likelihood_hash = hashlib.sha256(
+        json.dumps(
+            likelihood_identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        str(likelihood.get("station_id") or "").strip().upper() != station
+        or likelihood.get("source_channel_pair") != expected_source_pair
+        or str(likelihood.get("identity_hash") or "").strip().lower()
+        != expected_likelihood_hash
+    ):
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_IDENTITY_INVALID")
     survival = float(likelihood["boundary_survival_probability"])
     if not 0.0 < survival < 1.0:
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SURVIVAL_INVALID")
@@ -1309,14 +1348,15 @@ def _day0_noaa_preliminary_carrier(
         bin_bounds_c=native_bounds,
         n_point=ensemble_n_mc(),
         n_samples=500,
-        identity_inputs={
-            "city": request.city,
-            "unit": carrier_unit,
-            "preliminary_survival_identity": str(likelihood["identity_hash"]),
-            "probability_cutoff_utc": _to_utc(
+        identity_inputs=day0_remaining_carrier_identity_inputs(
+            city=request.city,
+            unit=carrier_unit,
+            decision_time_utc=_to_utc(
                 request.computed_at, field_name="computed_at"
             ).isoformat(),
-        },
+            station_id=station,
+            preliminary_survival_identity=str(likelihood["identity_hash"]),
+        ),
     )
     return carrier, likelihood
 

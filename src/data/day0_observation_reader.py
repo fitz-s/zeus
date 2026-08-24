@@ -769,12 +769,15 @@ def same_station_preliminary_report_survival_likelihood(
     target = date.fromisoformat(str(target_date)[:10])
     cutoff = decision_time.astimezone(timezone.utc)
     start = cutoff - timedelta(days=7)
+    awc_channel = "aviationweather_metar"
+    ogimet_channel = f"ogimet_metar_{station.lower()}"
+    source_channel_pair = {"awc": awc_channel, "ogimet": ogimet_channel}
     query = """
         SELECT id, source_channel, publish_ts_utc, value_native, unit,
                fetched_at_utc, raw_report
           FROM {table}
          WHERE city = ? AND upper(station_id) = ?
-           AND source_channel IN ('aviationweather_metar', ?)
+           AND source_channel IN (?, ?)
            AND julianday(fetched_at_utc) < julianday(?)
            AND julianday(publish_ts_utc) < julianday(?)
            AND julianday(publish_ts_utc) >= julianday(?)
@@ -791,7 +794,8 @@ def same_station_preliminary_report_survival_likelihood(
             (
                 city,
                 station,
-                f"ogimet_metar_{station.lower()}",
+                awc_channel,
+                ogimet_channel,
                 cutoff.isoformat(),
                 cutoff.isoformat(),
                 start.isoformat(),
@@ -810,7 +814,7 @@ def same_station_preliminary_report_survival_likelihood(
             value = float(value_raw)
         except (TypeError, ValueError):
             continue
-        if str(channel).strip().lower() == "ogimet_metar_" + station.lower():
+        if str(channel).strip().lower() == ogimet_channel:
             # The canonical OGIMET ledger stores the mirror's publication clock
             # as its native hourly observation instant; its raw_report is often
             # intentionally NULL.  AWC retains the report-issued METAR clock.
@@ -827,7 +831,7 @@ def same_station_preliminary_report_survival_likelihood(
         ):
             continue
         digest = hashlib.sha256(str(raw or "").encode()).hexdigest()
-        if str(channel) == "aviationweather_metar":
+        if str(channel).strip().lower() == awc_channel:
             awc[observed.astimezone(timezone.utc)] = (int(row_id), value, fetched.astimezone(timezone.utc), digest)
         else:
             ogimet.setdefault(observed.astimezone(timezone.utc), []).append((int(row_id), value, fetched.astimezone(timezone.utc), digest))
@@ -869,6 +873,8 @@ def same_station_preliminary_report_survival_likelihood(
             "alpha": alpha,
             "beta": beta,
             "evidence_basis": "no_confirmed_same_station_transitions",
+            "station_id": station,
+            "source_channel_pair": source_channel_pair,
         }
         return {
             **identity,
@@ -878,7 +884,17 @@ def same_station_preliminary_report_survival_likelihood(
             ).hexdigest(),
         }
     alpha, beta = successes + 0.5, failed + 0.5
-    identity = {"semantics": "same_station_preliminary_report_survival_likelihood_v1", "cutoff": cutoff.isoformat(), "successes": confirmations, "failures": failures, "unconfirmed_awc_ids": unconfirmed, "alpha": alpha, "beta": beta}
+    identity = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+        "cutoff": cutoff.isoformat(),
+        "successes": confirmations,
+        "failures": failures,
+        "unconfirmed_awc_ids": unconfirmed,
+        "alpha": alpha,
+        "beta": beta,
+        "station_id": station,
+        "source_channel_pair": source_channel_pair,
+    }
     return {**identity, "boundary_survival_probability": alpha / (alpha + beta), "identity_hash": hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
