@@ -47,18 +47,9 @@ STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat bud
 # that cadence so ``max_instances=1`` cannot preserve a blocked scan forever.
 COMPOSITE_COMPUTE_TIMEOUT_SECONDS = 45.0
 _COMPOSITE_STATE_DIR_ENV = "ZEUS_LIVE_HEALTH_COMPOSITE_STATE_DIR"
-_COMPOSITE_PARENT_PID_ENV = "ZEUS_LIVE_HEALTH_PARENT_PID"
-_COMPOSITE_PARENT_MODE_ENV = "ZEUS_LIVE_HEALTH_PARENT_MODE"
 _COMPOSITE_CHILD_CODE = (
     "import os; from pathlib import Path; "
     "from src.control.live_health import compute_composite_live_health; "
-    "from src.observability.status_summary import write_cycle_pulse; "
-    "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
-    "process_identity={'pid': int(os.environ["
-    + repr(_COMPOSITE_PARENT_PID_ENV)
-    + "]), 'mode': os.environ["
-    + repr(_COMPOSITE_PARENT_MODE_ENV)
-    + "]}); "
     "compute_composite_live_health("
     + "state_dir=Path(os.environ["
     + repr(_COMPOSITE_STATE_DIR_ENV)
@@ -208,6 +199,9 @@ def refresh_composite_live_health_bounded(
     invocation starts a fresh child. RESET: a zero-exit child publishes its
     normal full result; failure replaces any old healthy receipt with degraded
     evidence.
+
+    ``parent_pid`` and ``parent_mode`` remain accepted for call compatibility;
+    the read-only child intentionally does not use them to publish a pulse.
     """
 
     sd = _state_dir(state_dir)
@@ -216,10 +210,6 @@ def refresh_composite_live_health_bounded(
     child_env["ZEUS_PRIMARY_ROOT"] = str(sd.parent)
     if "ZEUS_TEST_STATE_ROOT" in child_env:
         child_env["ZEUS_TEST_STATE_ROOT"] = str(sd)
-    child_env[_COMPOSITE_PARENT_PID_ENV] = str(
-        os.getpid() if parent_pid is None else parent_pid
-    )
-    child_env[_COMPOSITE_PARENT_MODE_ENV] = str(parent_mode or "live")
     command = [sys.executable, "-c", _COMPOSITE_CHILD_CODE]
     try:
         completed = subprocess.run(

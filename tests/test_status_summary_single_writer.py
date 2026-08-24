@@ -23,8 +23,9 @@ Invariants tested:
 from __future__ import annotations
 
 import json
+import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,24 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 CONTROL_PLANE = PROJECT_ROOT / "src" / "control" / "control_plane.py"
 POST_TRADE_CAPITAL = PROJECT_ROOT / "src" / "execution" / "post_trade_capital.py"
+
+
+def _configured_execution_capability() -> dict:
+    return {
+        action: {
+            "status": "available",
+            "global_allow_submit": True,
+            "unavailable_components": [],
+            "components": [],
+        }
+        for action in ("entry", "exit")
+    }
+
+
+def _status_summary_digest(path: Path) -> tuple[int, int, str, bytes]:
+    stat = path.stat()
+    content = path.read_bytes()
+    return stat.st_ino, stat.st_mtime_ns, hashlib.sha256(content).hexdigest(), content
 
 
 class TestRequestStatusNoLongerWritesStatusSummary:
@@ -107,6 +126,73 @@ class TestRequestStatusNoLongerWritesStatusSummary:
         ]
         non_comment_content = "\n".join(non_comment_lines)
         assert "write_cycle_pulse" not in non_comment_content
+
+
+class TestCompositeChildReadsDaemonStatusSummary:
+    """The bounded composite child must never become a second status writer."""
+
+    def _run_composite(self, state_dir: Path):
+        from src.control import live_health
+
+        return live_health.refresh_composite_live_health_bounded(
+            state_dir=state_dir,
+            timeout_seconds=20.0,
+        )
+
+    def test_child_code_does_not_import_or_call_write_cycle_pulse(self):
+        from src.control import live_health
+
+        assert "write_cycle_pulse" not in live_health._COMPOSITE_CHILD_CODE
+        assert "src.observability.status_summary" not in live_health._COMPOSITE_CHILD_CODE
+
+    def test_composite_child_preserves_fresh_configured_daemon_status(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        status_path = state_dir / "status_summary.json"
+        status_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "execution_capability": _configured_execution_capability(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        before = _status_summary_digest(status_path)
+
+        result = self._run_composite(state_dir)
+
+        assert result["surfaces"]["execution_capability"]["ok"] is True
+        assert _status_summary_digest(status_path) == before
+
+    def test_composite_child_keeps_stale_status_fail_closed(self, tmp_path):
+        from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        status_path = state_dir / "status_summary.json"
+        status_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": (
+                        datetime.now(timezone.utc)
+                        - timedelta(seconds=STATUS_FRESH_BUDGET_SECONDS + 1)
+                    ).isoformat(),
+                    "execution_capability": _configured_execution_capability(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        result = self._run_composite(state_dir)
+
+        assert result["status"] == "DEGRADED"
+        assert result["surfaces"]["status_summary"]["ok"] is False
+        assert result["surfaces"]["status_summary"]["issue"].startswith(
+            "STATUS_SUMMARY_STALE"
+        )
 
 
 class TestRequestStatusApplyCommandBehavior:
