@@ -12819,23 +12819,40 @@ def _schedule_exit_monitor_status_pulse(summary: Mapping[str, object]) -> None:
         global _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
         global _EXIT_MONITOR_STATUS_PULSE_PENDING
 
-        while True:
-            with _EXIT_MONITOR_STATUS_PULSE_LOCK:
-                payload = _EXIT_MONITOR_STATUS_PULSE_PENDING
-                _EXIT_MONITOR_STATUS_PULSE_PENDING = None
-                if payload is None:
+        completed_normally = False
+        try:
+            while True:
+                with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+                    payload = _EXIT_MONITOR_STATUS_PULSE_PENDING
+                    _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+                    if payload is None:
+                        _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+                        completed_normally = True
+                        return
+                try:
+                    write_cycle_pulse(payload)
+                except Exception:  # noqa: BLE001 - derived status must not pin exit cadence.
+                    logger.exception("exit_monitor status pulse failed in advisory drain")
+        finally:
+            if not completed_normally:
+                with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+                    _EXIT_MONITOR_STATUS_PULSE_PENDING = None
                     _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
-                    return
-            try:
-                write_cycle_pulse(payload)
-            except Exception:  # noqa: BLE001 - derived status must not pin exit cadence.
-                logger.exception("exit_monitor status pulse failed in advisory drain")
 
-    threading.Thread(
-        target=_drain,
-        name="exit-monitor-status-pulse",
-        daemon=True,
-    ).start()
+    try:
+        worker = threading.Thread(
+            target=_drain,
+            name="exit-monitor-status-pulse",
+            daemon=True,
+        )
+        worker.start()
+    except BaseException as exc:
+        with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+            _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+            _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+        logger.exception("exit_monitor status pulse drain failed to start")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
 
 
 def run_exit_monitor_cycle(
@@ -13167,6 +13184,11 @@ def run_exit_monitor_cycle(
     # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
     # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
     # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
+    outcome = None
+    if not succeeded:
+        outcome = _exit_monitor_failure_outcome(summary)
+        summary["held_monitor_failure_outcome"] = outcome
+
     if target_families is None:
         _schedule_exit_monitor_status_pulse(summary)
 
@@ -13179,8 +13201,6 @@ def run_exit_monitor_cycle(
                 "exits": summary.get("exits", 0),
             },
         )
-    if not succeeded:
-        outcome = _exit_monitor_failure_outcome(summary)
-        summary["held_monitor_failure_outcome"] = outcome
+    if outcome is not None:
         _report_exit_monitor_failure(outcome, failure_outcome_sink)
     return succeeded

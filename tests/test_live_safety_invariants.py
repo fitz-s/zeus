@@ -22119,6 +22119,7 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
     active = threading.Event()
     outcomes = []
     persisted_summary = {}
+    pulse_payloads = []
     portfolio = SimpleNamespace(
         positions=[SimpleNamespace(trade_id="oldest-overdue")],
         daily_baseline_total=0.0,
@@ -22167,8 +22168,9 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
         ),
     )
     monkeypatch.setattr(
-        "src.observability.status_summary.write_cycle_pulse",
-        lambda *_args: None,
+        exit_lifecycle,
+        "_schedule_exit_monitor_status_pulse",
+        lambda payload: pulse_payloads.append(dict(payload)),
     )
     monkeypatch.setattr(
         "src.observability.scheduler_health._write_scheduler_health",
@@ -22182,6 +22184,7 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
         failure_outcome_sink=outcomes.append,
     ) is False
     assert persisted_summary["held_monitor_failure_outcome"] == "COVERAGE_INCOMPLETE"
+    assert pulse_payloads[-1]["held_monitor_failure_outcome"] == "COVERAGE_INCOMPLETE"
     assert outcomes == ["COVERAGE_INCOMPLETE"]
     assert not active.is_set()
     conn.close()
@@ -22313,6 +22316,7 @@ def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
     active = threading.Event()
     pulse_started = threading.Event()
     release_pulse = threading.Event()
+    pulse_finished = threading.Event()
     portfolio = SimpleNamespace(
         positions=[],
         daily_baseline_total=0.0,
@@ -22322,6 +22326,7 @@ def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
     def blocked_pulse(_summary):
         pulse_started.set()
         assert release_pulse.wait(timeout=1.0)
+        pulse_finished.set()
 
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
@@ -22364,7 +22369,113 @@ def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
         assert not active.is_set()
     finally:
         release_pulse.set()
+        assert pulse_finished.wait(timeout=1.0)
         conn.close()
+
+
+def test_exit_monitor_status_pulse_start_failure_resets_for_retry(monkeypatch):
+    """A failed advisory-thread start cannot strand the coalescing marker."""
+    from src.execution import exit_lifecycle
+    from src.observability import status_summary
+
+    captured = []
+
+    class ConstructionFails:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("thread construction refused")
+
+    class StartFails:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread start refused")
+
+    class InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", captured.append)
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", ConstructionFails)
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 0})
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", StartFails)
+
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 1})
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda _payload: (_ for _ in ()).throw(SystemExit(7)),
+    )
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", InlineThread)
+    with pytest.raises(SystemExit):
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 3})
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", captured.append)
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 2})
+
+    assert captured == [{"attempt": 2}]
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+
+def test_exit_monitor_status_pulse_coalesces_concurrent_updates(monkeypatch):
+    """One blocked pulse drains only the latest subsequent monitor summary."""
+    from src.execution import exit_lifecycle
+    from src.observability import status_summary
+
+    started = threading.Event()
+    release_first = threading.Event()
+    delivered_latest = threading.Event()
+    payloads = []
+
+    def pulse(payload):
+        payloads.append(dict(payload))
+        if payload["generation"] == 1:
+            started.set()
+            assert release_first.wait(timeout=1.0)
+        elif payload["generation"] == 3:
+            delivered_latest.set()
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", pulse)
+
+    try:
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 1})
+        assert started.wait(timeout=1.0)
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 2})
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 3})
+        release_first.set()
+        assert delivered_latest.wait(timeout=1.0)
+        for _ in range(100):
+            with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+                if not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT:
+                    break
+            time.sleep(0.01)
+        assert payloads == [{"generation": 1}, {"generation": 3}]
+    finally:
+        release_first.set()
 
 
 @pytest.mark.parametrize(
