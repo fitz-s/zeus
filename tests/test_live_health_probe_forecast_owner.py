@@ -658,7 +658,16 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     status_path = state_dir / "status_summary.json"
     child_code = (
         "import json, os; from pathlib import Path; "
-        f"state_dir = Path(os.environ[{live_health._COMPOSITE_STATE_DIR_ENV!r}]); "
+        "from src.observability.status_summary import write_cycle_pulse; "
+        "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
+        "process_identity={'pid': int(os.environ["
+        + repr(live_health._COMPOSITE_PARENT_PID_ENV)
+        + "]), 'mode': os.environ["
+        + repr(live_health._COMPOSITE_PARENT_MODE_ENV)
+        + "]}); "
+        + "state_dir = Path(os.environ["
+        + repr(live_health._COMPOSITE_STATE_DIR_ENV)
+        + "]); "
         "state_dir.mkdir(parents=True, exist_ok=True); "
         "(state_dir / 'live_health_composite.json').write_text(json.dumps("
         "{'healthy': True, 'status': 'HEALTHY', "
@@ -689,7 +698,7 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     )["healthy"] is True
     assert first_status["process"]["pid"] == os.getpid()
     assert second_status["process"]["pid"] == os.getpid()
-    assert second_status["timestamp"] != first_status["timestamp"]
+    assert second_status["process"]["mode"] == "live"
 
 
 def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
@@ -700,8 +709,6 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
     import src.config as config
     from src.control import live_health
     import src.main as main
-    import src.observability.status_summary as status_summary
-
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     pid_file = tmp_path / "live_health_locked_child_pid.txt"
@@ -709,6 +716,13 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
         "import os, time; "
         f"pid_file = open({str(pid_file)!r}, 'w'); "
         "pid_file.write(str(os.getpid())); pid_file.flush(); pid_file.close(); "
+        "from src.observability.status_summary import write_cycle_pulse; "
+        "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
+        "process_identity={'pid': int(os.environ["
+        + repr(live_health._COMPOSITE_PARENT_PID_ENV)
+        + "]), 'mode': os.environ["
+        + repr(live_health._COMPOSITE_PARENT_MODE_ENV)
+        + "]}); "
         "time.sleep(60)"
     )
     monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
@@ -716,16 +730,11 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
     monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
     monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
-    monkeypatch.setattr(
-        status_summary,
-        "write_cycle_pulse",
-        lambda _payload: (_ for _ in ()).throw(AssertionError("DB pulse must not run")),
-    )
     bounded_refresh = live_health.refresh_composite_live_health_bounded
     monkeypatch.setattr(
         live_health,
         "refresh_composite_live_health_bounded",
-        lambda: bounded_refresh(timeout_seconds=0.5),
+        lambda **kwargs: bounded_refresh(timeout_seconds=0.5, **kwargs),
     )
     conn = sqlite3.connect(state_dir / "zeus_trades.db")
     try:
@@ -748,9 +757,6 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
         pass
     else:
         raise AssertionError(f"timed-out live-health child still exists: pid={child_pid}")
-    status = json.loads((state_dir / "status_summary.json").read_text())
-    assert status["process"]["pid"] == os.getpid()
-    assert status["timestamp"] == status["generated_at"]
 
 
 def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(

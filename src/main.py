@@ -32,7 +32,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import faulthandler
@@ -2062,47 +2061,6 @@ def _stop_boot_process_heartbeat(
     _write_heartbeat()
 
 
-def _write_parent_live_health_status_pulse() -> None:
-    """Atomically refresh only the parent-owned status heartbeat.
-
-    SCOPE: the derived status-summary process identity and freshness timestamps.
-    DRAIN: this performs no DB query or lock acquisition, so composite DB work
-    remains inside the killable child. RESET: every scheduler tick replaces this
-    tiny pulse with the current daemon PID and wall clock.
-    """
-
-    from src.config import state_path
-
-    status_path = state_path("status_summary.json")
-    try:
-        payload = json.loads(status_path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    process = payload.get("process")
-    if not isinstance(process, dict):
-        process = {}
-    process.update({"pid": os.getpid(), "mode": get_mode()})
-    payload["process"] = process
-    now = datetime.now(timezone.utc).isoformat()
-    payload["timestamp"] = now
-    payload["generated_at"] = now
-
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(status_path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(payload, handle, sort_keys=True)
-        os.replace(tmp, status_path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 @_scheduler_job("live_health_composite")
 def _live_health_composite_cycle() -> None:
     """Refresh composite live-health without blocking the heartbeat pulse."""
@@ -2118,13 +2076,12 @@ def _live_health_composite_cycle() -> None:
     ):
         return
 
-    # This must remain in the daemon parent. A child-process pulse would publish
-    # its ``python -c`` PID as the live daemon and invalidate code attestation.
-    _write_parent_live_health_status_pulse()
-
     from src.control.live_health import refresh_composite_live_health_bounded
 
-    refresh_composite_live_health_bounded()
+    refresh_composite_live_health_bounded(
+        parent_pid=os.getpid(),
+        parent_mode=get_mode(),
+    )
 
 
 def _status_summary_refresh_can_defer() -> bool:

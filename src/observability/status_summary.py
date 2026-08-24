@@ -205,16 +205,29 @@ def write_cycle_result(cycle_summary: dict) -> None:
     _write_cycle_status(cycle_summary, refresh_runtime=False)
 
 
-def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
-    """Update live progress plus the minimal DB-derived runtime read model."""
+def write_cycle_pulse(
+    cycle_summary: dict | None = None,
+    *,
+    process_identity: dict | None = None,
+) -> None:
+    """Update live progress plus the minimal DB-derived runtime read model.
 
-    _write_cycle_status(cycle_summary, refresh_runtime=True)
+    ``process_identity`` lets an isolated worker publish the daemon process
+    that owns the status projection instead of its disposable child PID.
+    """
+
+    _write_cycle_status(
+        cycle_summary,
+        refresh_runtime=True,
+        process_identity=process_identity,
+    )
 
 
 def _write_cycle_status(
     cycle_summary: dict | None,
     *,
     refresh_runtime: bool,
+    process_identity: dict | None = None,
 ) -> None:
 
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -228,9 +241,20 @@ def _write_cycle_status(
         except Exception:
             prior = {}
     status = dict(prior)
+    if process_identity is None:
+        process_pid = os.getpid()
+        process_mode = get_mode()
+    else:
+        try:
+            process_pid = int(process_identity["pid"])
+            process_mode = str(process_identity["mode"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("status pulse process identity is invalid") from exc
+        if process_pid <= 0 or not process_mode:
+            raise ValueError("status pulse process identity is invalid")
     status["process"] = {
-        "pid": os.getpid(),
-        "mode": get_mode(),
+        "pid": process_pid,
+        "mode": process_mode,
         "version": "zeus_v2",
     }
     # A BOOT_BLOCKED payload is written only when startup exits before the

@@ -47,11 +47,22 @@ STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat bud
 # that cadence so ``max_instances=1`` cannot preserve a blocked scan forever.
 COMPOSITE_COMPUTE_TIMEOUT_SECONDS = 45.0
 _COMPOSITE_STATE_DIR_ENV = "ZEUS_LIVE_HEALTH_COMPOSITE_STATE_DIR"
+_COMPOSITE_PARENT_PID_ENV = "ZEUS_LIVE_HEALTH_PARENT_PID"
+_COMPOSITE_PARENT_MODE_ENV = "ZEUS_LIVE_HEALTH_PARENT_MODE"
 _COMPOSITE_CHILD_CODE = (
     "import os; from pathlib import Path; "
     "from src.control.live_health import compute_composite_live_health; "
+    "from src.observability.status_summary import write_cycle_pulse; "
+    "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
+    "process_identity={'pid': int(os.environ["
+    + repr(_COMPOSITE_PARENT_PID_ENV)
+    + "]), 'mode': os.environ["
+    + repr(_COMPOSITE_PARENT_MODE_ENV)
+    + "]}); "
     "compute_composite_live_health("
-    f"state_dir=Path(os.environ[{_COMPOSITE_STATE_DIR_ENV!r}]))"
+    + "state_dir=Path(os.environ["
+    + repr(_COMPOSITE_STATE_DIR_ENV)
+    + "]))"
 )
 FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS = STATUS_FRESH_BUDGET_SECONDS
 DAY0_DECISION_TRACE_LOOKBACK_SECONDS = 3600
@@ -187,6 +198,8 @@ def refresh_composite_live_health_bounded(
     *,
     state_dir: Optional[Path] = None,
     timeout_seconds: float = COMPOSITE_COMPUTE_TIMEOUT_SECONDS,
+    parent_pid: int | None = None,
+    parent_mode: str | None = None,
 ) -> dict:
     """Run composite computation in a killable one-shot child.
 
@@ -200,6 +213,13 @@ def refresh_composite_live_health_bounded(
     sd = _state_dir(state_dir)
     child_env = os.environ.copy()
     child_env[_COMPOSITE_STATE_DIR_ENV] = str(sd)
+    child_env["ZEUS_PRIMARY_ROOT"] = str(sd.parent)
+    if "ZEUS_TEST_STATE_ROOT" in child_env:
+        child_env["ZEUS_TEST_STATE_ROOT"] = str(sd)
+    child_env[_COMPOSITE_PARENT_PID_ENV] = str(
+        os.getpid() if parent_pid is None else parent_pid
+    )
+    child_env[_COMPOSITE_PARENT_MODE_ENV] = str(parent_mode or "live")
     command = [sys.executable, "-c", _COMPOSITE_CHILD_CODE]
     try:
         completed = subprocess.run(
