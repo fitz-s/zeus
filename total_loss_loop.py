@@ -699,7 +699,8 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
     if "no_bid_episode_open" not in quote_columns:
         conn.execute(
             "ALTER TABLE position_quote_state "
-            "ADD COLUMN no_bid_episode_open INTEGER NOT NULL DEFAULT 0"
+            "ADD COLUMN no_bid_episode_open INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (no_bid_episode_open IN (0,1))"
         )
     debt_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(controller_debt)")}
     for name, definition in (
@@ -2194,14 +2195,14 @@ def _phase_heartbeat(cfg: Mapping[str, Any], phase: str, **extra: Any) -> None:
 
 def _bounded_floor_price(cfg: Mapping[str, Any], deadline: float) -> float:
     if time.monotonic() >= deadline:
-        raise sqlite3.OperationalError("interrupted: trigger budget")
+        raise sqlite3.OperationalError("interrupted: floor-price budget")
     path = Path(str(cfg["paths"]["settings"]))
     try:
         payload = json.loads(path.read_bytes())
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError("active execution floor unavailable: settings unreadable") from exc
     if time.monotonic() >= deadline or not isinstance(payload, Mapping):
-        raise sqlite3.OperationalError("interrupted: trigger budget")
+        raise sqlite3.OperationalError("interrupted: floor-price budget")
     current: Any = payload
     for part in str(cfg["loop"]["floor_config_key"]).split("."):
         if not isinstance(current, Mapping) or part not in current:
