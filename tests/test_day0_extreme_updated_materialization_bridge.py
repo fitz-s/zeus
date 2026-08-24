@@ -799,7 +799,7 @@ def test_newer_day0_identity_replaces_visible_drained_owner(tmp_path, monkeypatc
     )
     conn.commit()
 
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -1062,7 +1062,7 @@ def test_cycle_advance_recovers_committed_staging_after_publish_crash(tmp_path) 
     ) is True
     conn.commit()
 
-    decision = cycle_advance._enqueue_decision(
+    assert cycle_advance._already_enqueued(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
