@@ -43,6 +43,7 @@ _STARTUP_BUDGET: dict[str, Any] | None = None
 _STARTUP_RUN_QUEUE: dict[str, list[Path]] = {}
 _STARTUP_RUN_CURSOR: dict[str, int] = {}
 _STARTUP_RUN_REMAINING: dict[str, bool] = {}
+_STARTUP_RUN_BATCH_LIMIT: dict[str, int] = {}
 _EVIDENCE_BUILD_CONTEXT: dict[str, Any] | None = None
 _LAST_EVIDENCE_CYCLE: dict[str, Any] = {}
 _EVIDENCE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
@@ -383,6 +384,169 @@ CREATE TABLE IF NOT EXISTS loop_versions (
 """
 
 
+_STARTUP_SCHEMA_TABLES = frozenset(
+    {
+        "meta",
+        "incidents",
+        "incident_transitions",
+        "position_quote_state",
+        "backfill_quote_state",
+        "roots",
+        "incident_root_links",
+        "fixes",
+        "deployments",
+        "evaluations",
+        "model_runs",
+        "spawn_intents",
+        "controller_debt",
+        "settlement_backfill_state",
+        "workspace_writer_leases",
+        "loop_versions",
+    }
+)
+_STARTUP_SCHEMA_COLUMNS = {
+    "meta": {"key", "value", "updated_at"},
+    "incidents": {
+        "incident_id", "kind", "position_id", "crossing_evidence_id", "crossing_kind",
+        "held_token_id", "held_direction", "t_floor", "floor_price", "observed_bid",
+        "detected_at", "priority", "status", "stage", "evidence_revision",
+        "diagnosis_session_id", "repair_session_id", "root_relation", "root_id",
+        "earliest_preventable_time", "avoidable_loss_usd", "updated_at",
+    },
+    "incident_transitions": {
+        "transition_id", "incident_id", "from_stage", "to_stage", "run_id", "reason", "created_at",
+    },
+    "position_quote_state": {
+        "position_id", "evidence_id", "quote_seen_at", "best_bid", "quote_status", "below_floor", "updated_at",
+    },
+    "backfill_quote_state": {
+        "position_id", "exposure_fingerprint", "last_quote_seen_at", "last_rowid", "last_bid",
+        "below_floor", "completed", "updated_at",
+    },
+    "roots": {
+        "root_id", "causal_seam", "mechanism_fingerprint", "earliest_divergence", "affected_symbols_json",
+        "reproduction", "repair_sha", "relationship_test", "deployed_sha", "recurrence_count",
+        "measured_avoided_loss_usd", "utility", "updated_at",
+    },
+    "incident_root_links": {"incident_id", "root_id", "relation", "confidence", "created_at"},
+    "fixes": {"fix_id", "root_id", "commit_sha", "pr_url", "relationship_test", "status", "created_at", "updated_at"},
+    "deployments": {"deployment_id", "fix_id", "merge_sha", "loaded_sha", "deployed_at", "verification_json"},
+    "evaluations": {
+        "evaluation_id", "incident_id", "fix_id", "information_lead_seconds", "decision_lead_seconds",
+        "actuation_lead_seconds", "execution_lead_seconds", "avoidable_loss_usd", "false_exit_cost_usd",
+        "recurrence", "observed_at",
+    },
+    "model_runs": {
+        "run_id", "incident_id", "stage", "session_id", "model", "reasoning_effort", "started_at",
+        "completed_at", "status", "usage_json", "events_path",
+    },
+    "spawn_intents": {
+        "run_id", "incident_id", "stage", "owner_pid", "child_pid", "witness_path", "state", "created_at", "updated_at",
+    },
+    "controller_debt": {
+        "debt_id", "kind", "status", "reason", "updated_at", "fingerprint", "config_fingerprint",
+        "capacity_fingerprint", "data_fingerprint", "attempts",
+    },
+    "settlement_backfill_state": {"position_id", "fingerprint", "completed", "updated_at"},
+    "workspace_writer_leases": {"cwd", "run_id", "stage", "owner_pid", "child_pid", "lock_path", "acquired_at"},
+    "loop_versions": {"version_id", "code_sha", "config_hash", "benchmark_json", "activated_at"},
+}
+
+
+def _startup_index_contract(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    name: str,
+    unique: bool,
+    columns: tuple[str, ...],
+    descending: tuple[bool, ...],
+) -> bool:
+    """Verify one index's table, uniqueness, SQL, order, and DESC flags."""
+    _startup_guard()
+    index_row = next(
+        (
+            row
+            for row in conn.execute(f"PRAGMA index_list({table})").fetchall()
+            if str(row[1]) == name
+        ),
+        None,
+    )
+    if index_row is None or bool(index_row[2]) is not unique:
+        return False
+    catalog = conn.execute(
+        "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
+        (name,),
+    ).fetchone()
+    if catalog is None or str(catalog[0]) != table or not catalog[1]:
+        return False
+    normalized_sql = re.sub(r"\s+", " ", str(catalog[1]).strip()).lower()
+    normalized_sql = re.sub(r"\s*,\s*", ",", normalized_sql)
+    expected_sql = re.sub(
+        r"\s+",
+        " ",
+        (
+            "CREATE UNIQUE INDEX " if unique else "CREATE INDEX "
+        ) + name + " ON " + table + "(" + ",".join(
+            f"{column}{' DESC' if is_desc else ''}" for column, is_desc in zip(columns, descending)
+        ) + ")",
+    ).lower()
+    if normalized_sql != expected_sql:
+        return False
+    _startup_guard()
+    detail = [
+        row
+        for row in conn.execute(f"PRAGMA index_xinfo({name})").fetchall()
+        if int(row[5]) == 1
+    ]
+    if len(detail) != len(columns):
+        return False
+    return all(
+        str(row[2]) == column and bool(row[3]) is is_desc
+        for row, column, is_desc in zip(detail, columns, descending)
+    )
+
+
+def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
+    """Verify the existing schema with catalog-only reads before startup DDL."""
+    _startup_guard()
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if not _STARTUP_SCHEMA_TABLES.issubset(tables):
+        return False
+    for table, required in _STARTUP_SCHEMA_COLUMNS.items():
+        _startup_guard()
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not required.issubset(columns):
+            return False
+    _startup_guard()
+    return (
+        _startup_index_contract(
+            conn,
+            table="incidents",
+            name="idx_incident_crossing",
+            unique=True,
+            columns=("position_id", "crossing_evidence_id", "kind"),
+            descending=(False, False, False),
+        )
+        and _startup_index_contract(
+            conn,
+            table="incidents",
+            name="idx_incident_queue",
+            unique=False,
+            columns=("status", "stage", "kind", "priority", "detected_at"),
+            descending=(False, False, False, True, False),
+        )
+    )
+
+
 def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
     path = runtime_dir(cfg) / "memory.db"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +556,12 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
     conn = sqlite3.connect(path, timeout=startup_timeout)
     conn.row_factory = sqlite3.Row
     _startup_sql_budget(conn)
+    if _STARTUP_BUDGET is not None:
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if journal_mode == "wal" and _startup_schema_complete(conn):
+            conn.execute("PRAGMA foreign_keys=ON")
+            _startup_guard()
+            return _ClosingConnection(conn)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(MEMORY_SCHEMA)
@@ -426,6 +596,19 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
     ):
         if name not in debt_columns:
             conn.execute(f"ALTER TABLE controller_debt ADD COLUMN {name} {definition}")
+    if not _startup_index_contract(
+        conn,
+        table="incidents",
+        name="idx_incident_crossing",
+        unique=True,
+        columns=("position_id", "crossing_evidence_id", "kind"),
+        descending=(False, False, False),
+    ):
+        conn.execute("DROP INDEX IF EXISTS idx_incident_crossing")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_incident_crossing "
+            "ON incidents(position_id,crossing_evidence_id,kind)"
+        )
     conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
     conn.execute(
         "CREATE INDEX idx_incident_queue "
@@ -4021,11 +4204,19 @@ def _finish_spawn_intent(cfg: Mapping[str, Any], run_id: str, state: str) -> Non
 
 def _new_startup_budget(cfg: Mapping[str, Any]) -> dict[str, Any]:
     settings = cfg["loop"]
+    configured_batch = max(1, int(settings.get("startup_run_batch_size", 64)))
+    key = str(runtime_dir(cfg).resolve())
     return {
         "deadline": time.monotonic() + max(0.01, float(settings.get("startup_maintenance_budget_ms", 250))) / 1000.0,
         "max_run_json_bytes": max(16 * 1024, int(settings.get("startup_max_run_json_bytes", 256 * 1024))),
-        "run_batch_size": max(1, int(settings.get("startup_run_batch_size", 64))),
+        "run_batch_size": min(configured_batch, _STARTUP_RUN_BATCH_LIMIT.get(key, configured_batch)),
     }
+
+
+def _shrink_startup_batch(cfg: Mapping[str, Any]) -> None:
+    key = str(runtime_dir(cfg).resolve())
+    current = int(_STARTUP_RUN_BATCH_LIMIT.get(key, cfg["loop"].get("startup_run_batch_size", 64)))
+    _STARTUP_RUN_BATCH_LIMIT[key] = max(1, current // 2)
 
 
 def _startup_sql_budget(conn: sqlite3.Connection) -> None:
@@ -4210,6 +4401,7 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
         if row.get("status") == "running" and row.get("incident_id"):
             runs_by_incident.setdefault(str(row["incident_id"]), []).append((path, row))
     reclaimed: list[str] = []
+    orphaned_runs: list[tuple[Path, dict[str, Any]]] = []
     with _startup_reconcile_memory(cfg) as mem:
         _startup_guard()
         protected_incidents: set[str] = set()
@@ -4261,10 +4453,7 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
                 run["status"] = "orphaned"
                 run["completed_at"] = iso()
                 run["error"] = "orphaned_running_incident"
-                try:
-                    atomic_json(path, run)
-                except OSError:
-                    pass
+                orphaned_runs.append((path, run))
                 mem.execute(
                     "UPDATE model_runs SET status='failed',completed_at=? "
                     "WHERE run_id=? AND status='running'",
@@ -4280,6 +4469,14 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
             )
             reclaimed.append(incident_id)
         mem.commit()
+    # File witnesses follow the committed DB transition.  A DB timeout must
+    # leave the batch's source run records marked running so the next slice can
+    # retry the same incident instead of losing its only witness.
+    for path, run in orphaned_runs:
+        try:
+            atomic_json(path, run)
+        except OSError:
+            pass
     if _STARTUP_BUDGET is not None:
         key = str(runtime_dir(cfg).resolve())
         _startup_checkpoint(
@@ -6054,6 +6251,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         stopping = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    bootstrap_complete = False
     atomic_json(
         run / "status.json",
         {
@@ -6062,6 +6260,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             "at": iso(),
             "phase": "startup",
             "startup_maintenance": "starting",
+            "startup_bootstrap": "pending",
             "startup_error": None,
             "created": [],
             "dispatch_worker_pid": None,
@@ -6076,6 +6275,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     _STARTUP_BUDGET = _new_startup_budget(cfg)
     try:
         bootstrap(cfg)
+        bootstrap_complete = True
         reconcile_orphan_incidents(cfg)
         startup_pending = _startup_reconcile_remaining(cfg)
         if startup_pending:
@@ -6085,6 +6285,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             _record_startup_debt(cfg, "startup_maintenance_complete", status="resolved")
     except StartupMaintenanceDeferred as exc:
         startup_error = str(exc)
+        if bootstrap_complete:
+            _shrink_startup_batch(cfg)
         _record_startup_debt(cfg, startup_error)
     finally:
         _STARTUP_BUDGET = None
@@ -6106,6 +6308,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "at": iso(),
                 "phase": "startup_maintenance" if startup_pending else "cycle",
                 "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_bootstrap": "complete" if bootstrap_complete else "pending",
                 "startup_error": startup_error,
                 "created": [],
                 "evidence_maintenance": "starting",
@@ -6120,7 +6323,9 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         if startup_pending:
             _STARTUP_BUDGET = _new_startup_budget(cfg)
             try:
-                bootstrap(cfg)
+                if not bootstrap_complete:
+                    bootstrap(cfg)
+                    bootstrap_complete = True
                 reconcile_orphan_incidents(cfg)
                 startup_pending = _startup_reconcile_remaining(cfg)
                 startup_error = (
@@ -6135,6 +6340,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 )
             except StartupMaintenanceDeferred as exc:
                 startup_error = str(exc)
+                if bootstrap_complete:
+                    _shrink_startup_batch(cfg)
                 _record_startup_debt(cfg, startup_error)
             finally:
                 _STARTUP_BUDGET = None
@@ -6148,6 +6355,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "at": iso(),
                 "phase": "startup_maintenance" if startup_pending else "cycle",
                 "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_bootstrap": "complete" if bootstrap_complete else "pending",
                 "startup_error": startup_error,
                 "created": [],
                 "evidence_maintenance": "starting",
