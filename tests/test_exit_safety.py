@@ -577,6 +577,53 @@ def _seed_hold_monitor_rows(c, *, position_id: str, count: int) -> None:
     )
 
 
+def _seed_v4_monitor_lineage(
+    c,
+    *,
+    position_id: str,
+    q_identity: str,
+    selection_epoch_identity: str,
+    sell_book_witness_identity: str,
+    occurred_at: str = "2026-08-02T07:04:47+00:00",
+) -> str:
+    """Append one canonical monitor cut with the exact V4 witnesses."""
+    sequence_no = c.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    event_id = f"{position_id}:monitor_refreshed:{sequence_no}"
+    payload = json.dumps(
+        {
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.21,
+            "held_sell_full_depth_action_authority": True,
+            "day0_monitor_probability_receipt": {
+                "probability_content_identity": q_identity,
+            },
+            "held_sell_reauction_monitor_lineage": {
+                "monitor_event_id": event_id,
+                "selection_epoch_identity": selection_epoch_identity,
+                "sell_book_witness_identity": sell_book_witness_identity,
+            },
+        },
+        sort_keys=True,
+    )
+    c.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                  'forecast_qkernel_entry', 'src.engine.cycle_runtime', ?, 'test')
+        """,
+        (event_id, position_id, sequence_no, occurred_at, payload),
+    )
+    return event_id
+
+
 def _ack_exit(c, command_id: str = "cmd-exit-1", venue_order_id: str = "ord-1") -> None:
     from src.state.venue_command_repo import append_event
 
@@ -12604,6 +12651,16 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
         entered_at="2026-07-29T10:00:00+00:00",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    position._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-karachi-restarted-current"
+    }
+    monitor_event_id = _seed_v4_monitor_lineage(
+        conn,
+        position_id=position.trade_id,
+        q_identity="q-karachi-restarted-current",
+        selection_epoch_identity="epoch-karachi-canonical",
+        sell_book_witness_identity="book-karachi-canonical",
+    )
     _seed_exit_intent_event(
         conn,
         position_id=position.trade_id,
@@ -12635,7 +12692,10 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
     ).fetchone()
     obligation = json.loads(stored["payload_json"])["held_sell_reauction_obligation"]
     assert obligation["book_state"] == "UNKNOWN"
-    assert obligation["probability_content_identity"] == ""
+    assert obligation["probability_content_identity"] == "q-karachi-restarted-current"
+    assert obligation["monitor_event_id"] == monitor_event_id
+    assert obligation["selection_epoch_identity"] == "epoch-karachi-canonical"
+    assert obligation["sell_book_witness_identity"] == "book-karachi-canonical"
     assert conn.in_transaction is False
 
     # Fresh process/runtime object: only canonical event state supplies the debt.
@@ -12672,6 +12732,10 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
                 held_best_bid=restored["held_best_bid"],
                 bid_observed_at=restored["bid_observed_at"],
                 book_state=restored["book_state"],
+                selection_epoch_identity=restored["selection_epoch_identity"],
+                sell_book_witness_identity=restored["sell_book_witness_identity"],
+                debt_event_id=restored["debt_event_id"],
+                monitor_event_id=restored["monitor_event_id"],
                 generation=restored["generation"],
                 scope_identity=restored["scope_identity"],
                 wake_path=wake_path,
@@ -12866,6 +12930,36 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
     assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
 
+    pending_path = tmp_path / f"{position_id}-pending-wake.json"
+    pending = reactor.request_global_auction_completion(
+        reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        position_id=position.trade_id,
+        family=(position.city, position.target_date, position.temperature_metric),
+        probability_content_identity="q-before-canonical-monitor",
+        held_token_id=token_id,
+        held_best_bid=0.06,
+        bid_observed_at=(now + timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now + timedelta(seconds=1)).isoformat(),
+        schema_version=4,
+        wake_path=pending_path,
+        return_request=True,
+    )
+    assert pending[0] is False
+    assert pending[1] is not None
+    assert pending[1].lineage_status == "PENDING_CANONICAL_LINEAGE"
+    assert not pending_path.exists()
+    position._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-after-fak-no-fill"
+    }
+    monitor_event_id = _seed_v4_monitor_lineage(
+        conn,
+        position_id=position.trade_id,
+        q_identity="q-after-fak-no-fill",
+        selection_epoch_identity="epoch-fak-recovery",
+        sell_book_witness_identity="book-fak-recovery",
+        occurred_at=(now + timedelta(seconds=1)).isoformat(),
+    )
+
     wake_path = tmp_path / f"{position_id}-wake.json"
     requests = []
 
@@ -12886,6 +12980,10 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
             probability_observed_at=(now + timedelta(seconds=1)).isoformat(),
             completion_deadline_at=(now - timedelta(seconds=1)).isoformat(),
             book_state="EXECUTABLE",
+            selection_epoch_identity=obligation["selection_epoch_identity"],
+            sell_book_witness_identity=obligation["sell_book_witness_identity"],
+            debt_event_id=obligation["debt_event_id"],
+            monitor_event_id=obligation["monitor_event_id"] or monitor_event_id,
             generation=str(obligation["generation"]),
             scope_identity=str(obligation["scope_identity"]),
             wake_path=wake_path,
@@ -12925,6 +13023,163 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert selected is not None
     assert selected != day0
     assert selected.held_sell_reauction_requests == (request,)
+
+
+def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineage(
+    conn,
+    monkeypatch,
+    tmp_path,
+):
+    """The real cycle-runtime debt requester refreshes only the monitor witness."""
+    import logging
+
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.events import reactor
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="cycle-runtime-force-new-v4",
+        market_id="condition-cycle-runtime-force-new",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-24",
+        temperature_metric="high",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id="cycle-runtime-force-new-token",
+        no_token_id="cycle-runtime-force-new-token-no",
+        condition_id="condition-cycle-runtime-force-new",
+        state="holding",
+        chain_state="synced",
+        shares=4.0,
+        chain_shares=4.0,
+        order_status="filled",
+        strategy_key="forecast_qkernel_entry",
+        env="test",
+        entered_at="2026-08-24T11:00:00+00:00",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    old_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    _seed_v4_monitor_lineage(
+        conn,
+        position_id=position.trade_id,
+        q_identity="q-cycle-old",
+        selection_epoch_identity="epoch-cycle-old",
+        sell_book_witness_identity="book-cycle-old",
+        occurred_at=old_at,
+    )
+    position._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-cycle-old"
+    }
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        error="global_sell_exit_executable_snapshot_unavailable",
+        conn=conn,
+    )
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=lambda _position, _force: False,
+    ) is True
+    conn.commit()
+
+    new_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    position._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-cycle-new"
+    }
+    latest_monitor_id = _seed_v4_monitor_lineage(
+        conn,
+        position_id=position.trade_id,
+        q_identity="q-cycle-new",
+        selection_epoch_identity="epoch-cycle-new",
+        sell_book_witness_identity="book-cycle-new",
+        occurred_at=new_at,
+    )
+    conn.commit()
+    wake_path = tmp_path / "cycle-runtime-force-new-wake.json"
+    captured: list[object] = []
+    real_request = reactor.request_global_auction_completion
+
+    def request_with_test_path(**kwargs):
+        kwargs["wake_path"] = wake_path
+        result = real_request(**kwargs)
+        captured.append(result[1] if isinstance(result, tuple) else None)
+        return result
+
+    monkeypatch.setattr(reactor, "request_global_auction_completion", request_with_test_path)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT,
+    )
+
+    def recover_with_real_nested_request(position, *, conn, requester, **_kwargs):
+        return requester(position, True)
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover_with_real_nested_request,
+    )
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_cycle_runtime_force_new"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
+        },
+    )
+    artifact = type("Artifact", (), {"add_monitor_result": lambda *_args: None})()
+    tracker = type("Tracker", (), {"record_exit": lambda *_args: None})()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        PortfolioState(positions=[position]),
+        artifact,
+        tracker,
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=2.0,
+    )
+
+    request = captured[-1]
+    assert request is not None
+    assert request.probability_content_identity == "q-cycle-new"
+    assert request.monitor_event_id == latest_monitor_id
+    assert request.selection_epoch_identity == "epoch-cycle-new"
+    assert request.sell_book_witness_identity == "book-cycle-new"
+    assert ":exit_retry_released:" in request.debt_event_id
+    assert request.debt_event_id != latest_monitor_id
+    assert reactor_wake.latest_v4_held_sell_reauction_request(
+        request.scope_identity,
+        path=wake_path,
+    ) == request
 
 
 def test_same_turn_reauction_release_commit_failure_restores_runtime(monkeypatch):
