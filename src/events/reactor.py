@@ -6959,6 +6959,10 @@ def request_global_auction_completion(
     book_state: str | None = None,
     probability_observed_at: str = "",
     completion_deadline_at: str = "",
+    selection_epoch_identity: str = "",
+    sell_book_witness_identity: str = "",
+    debt_event_id: str = "",
+    monitor_event_id: str = "",
     generation: str | None = None,
     scope_identity: str = "",
     schema_version: int = 4,
@@ -6999,6 +7003,7 @@ def request_global_auction_completion(
         held_request = None
         held_request_material_identity = ""
         held_request_kwargs = None
+        lineage_upgrade = False
         if held_token_id:
             inferred_book_state = str(book_state or "").strip().upper()
             if not inferred_book_state:
@@ -7033,6 +7038,14 @@ def request_global_auction_completion(
                 "book_state": inferred_book_state,
                 "probability_observed_at": probability_observed_at,
                 "completion_deadline_at": completion_deadline_at,
+                "selection_epoch_identity": str(
+                    selection_epoch_identity or ""
+                ).strip(),
+                "sell_book_witness_identity": str(
+                    sell_book_witness_identity or ""
+                ).strip(),
+                "debt_event_id": str(debt_event_id or "").strip(),
+                "monitor_event_id": str(monitor_event_id or "").strip(),
             }
             if generation:
                 held_request_kwargs["generation"] = generation
@@ -7040,7 +7053,15 @@ def request_global_auction_completion(
                 **{
                     key: value
                     for key, value in held_request_kwargs.items()
-                    if key not in {"generation", "completion_deadline_at"}
+                    if key
+                    not in {
+                        "generation",
+                        "completion_deadline_at",
+                        "selection_epoch_identity",
+                        "sell_book_witness_identity",
+                        "debt_event_id",
+                        "monitor_event_id",
+                    }
                 }
             )
 
@@ -7058,6 +7079,29 @@ def request_global_auction_completion(
                 raise ValueError("HELD_SELL_REAUCTION_GENERATION_CONFLICT")
             if existing_v4 is not None and not generation and not force_new_generation:
                 held_request_kwargs["generation"] = existing_v4.generation
+            lineage_upgrade = False
+            if existing_v4 is not None:
+                for field in (
+                    "selection_epoch_identity",
+                    "sell_book_witness_identity",
+                    "debt_event_id",
+                    "monitor_event_id",
+                ):
+                    supplied = str(held_request_kwargs.get(field) or "").strip()
+                    existing = str(getattr(existing_v4, field, "") or "").strip()
+                    if (
+                        supplied
+                        and existing
+                        and supplied != existing
+                        and not force_new_generation
+                    ):
+                        raise ValueError(
+                            "HELD_SELL_REAUCTION_LINEAGE_WITNESS_CONFLICT"
+                        )
+                    if supplied and not existing:
+                        lineage_upgrade = True
+                    if not supplied and existing:
+                        held_request_kwargs[field] = existing
             held_request = make_held_sell_reauction_request(**held_request_kwargs)
             if existing_v4 is not None and (
                 existing_v4.position_id != held_request.position_id
@@ -7081,6 +7125,7 @@ def request_global_auction_completion(
             if (
                 existing_request_is_queued
                 and not context_upgrade
+                and not lineage_upgrade
                 and not force_new_generation
             ):
                 # SCOPE: one outstanding position/token SELL obligation.
@@ -7144,6 +7189,10 @@ def request_global_auction_completion(
                             if key not in {
                                 "generation",
                                 "completion_deadline_at",
+                                "selection_epoch_identity",
+                                "sell_book_witness_identity",
+                                "debt_event_id",
+                                "monitor_event_id",
                             }
                         }
                     )
@@ -7206,6 +7255,22 @@ def request_global_auction_completion(
                 > max(_context_rank(request) for request in matching_versioned_requests)
             )
             attempt_refresh = False
+        if (
+            held_request is not None
+            and int(getattr(held_request, "schema_version", 1) or 1) == 4
+            and getattr(held_request, "lineage_status", "COMPLETE")
+            != "COMPLETE"
+        ):
+            # SCOPE: this position/token's V4 wake only. DRAIN: the next
+            # canonical MONITOR_REFRESHED cut supplies all four lineage
+            # witnesses and retries this request. RESET: a complete request
+            # is the only state allowed to publish or reserve a wake.
+            logging.getLogger("zeus.events.reactor").warning(
+                "held SELL reauction pending canonical lineage: "
+                "position_id=%s reason=HELD_SELL_REAUCTION_CANONICAL_LINEAGE_PENDING",
+                str(position_id or "unknown"),
+            )
+            return (False, held_request) if return_request else False
     except ValueError:
         logging.getLogger("zeus.events.reactor").error(
             "held SELL reauction request rejected before durable publish: "
@@ -7242,7 +7307,12 @@ def request_global_auction_completion(
         # RESET: the canonical terminal receipt or position-no-longer-exposed
         # proof retires this same request generation.
         return (True, held_request) if return_request else True
-    if not durable_request_exists or context_upgrade or attempt_refresh:
+    if (
+        not durable_request_exists
+        or context_upgrade
+        or attempt_refresh
+        or lineage_upgrade
+    ):
         try:
             publish_reactor_wake(
                 source="held_position_monitor",
@@ -7382,6 +7452,17 @@ def _held_sell_reauction_receipts_from_global_cut(
         request_schema_version = int(getattr(request, "schema_version", 1) or 1)
         request_position_id = str(getattr(request, "position_id", "") or "")
         request_token_id = str(getattr(request, "held_token_id", "") or "")
+        request_deadline_lineage = {
+            field: str(getattr(request, field, "") or "").strip()
+            for field in (
+                "position_id",
+                "held_token_id",
+                "debt_event_id",
+                "monitor_event_id",
+                "selection_epoch_identity",
+                "sell_book_witness_identity",
+            )
+        }
         for cut in getattr(result, "global_held_sell_completion_cuts", ()):
             cut_bindings = tuple(getattr(cut, "request_bindings", ()) or ())
             exact_cut_binding = any(
@@ -7410,6 +7491,14 @@ def _held_sell_reauction_receipts_from_global_cut(
             ):
                 continue
             if str(getattr(cut, "outcome", "") or "") == DEADLINE_EXPIRED:
+                if request_schema_version != 4 or not all(
+                    request_deadline_lineage.values()
+                ):
+                    # SCOPE: this exact held SELL attempt. DRAIN: rebuild the
+                    # request lineage and retry the global cut. RESET: only a
+                    # fully-bound terminal receipt may clear the debt.
+                    # Never mint an anonymous deadline receipt.
+                    continue
                 receipts.append(
                     HeldSellReauctionReceipt(
                         **receipt_identity,
@@ -7422,6 +7511,7 @@ def _held_sell_reauction_receipts_from_global_cut(
                         ),
                         status=DEADLINE_EXPIRED,
                         reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+                        **request_deadline_lineage,
                     )
                 )
                 break

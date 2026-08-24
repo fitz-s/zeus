@@ -3462,6 +3462,29 @@ def _emit_monitor_refreshed_canonical_if_available(
                             False,
                         )
                     )
+                    monitor_lineage = getattr(
+                        pos,
+                        "_held_sell_reauction_monitor_lineage",
+                        None,
+                    )
+                    if isinstance(monitor_lineage, dict):
+                        payload["held_sell_reauction_monitor_lineage"] = {
+                            "monitor_event_id": str(
+                                event.get("event_id") or ""
+                            ).strip(),
+                            "selection_epoch_identity": str(
+                                monitor_lineage.get(
+                                    "selection_epoch_identity", ""
+                                )
+                                or ""
+                            ).strip(),
+                            "sell_book_witness_identity": str(
+                                monitor_lineage.get(
+                                    "sell_book_witness_identity", ""
+                                )
+                                or ""
+                            ).strip(),
+                        }
                     event["payload_json"] = json.dumps(
                         payload,
                         default=str,
@@ -6850,6 +6873,10 @@ def execute_monitoring_phase(
             "bid_observed_at",
             "book_state",
             "schema_version",
+            "selection_epoch_identity",
+            "sell_book_witness_identity",
+            "debt_event_id",
+            "monitor_event_id",
         )
         obligation = {
             field: getattr(request, field, None)
@@ -6898,15 +6925,21 @@ def execute_monitoring_phase(
                 )
             from src.events.reactor import request_global_auction_completion
 
-            obligation = getattr(position, "_held_sell_reauction_obligation", {})
-            obligation = obligation if isinstance(obligation, dict) else {}
-            def load_canonical_monitor_cut() -> tuple[str, dict[str, object]]:
+            obligation = latest_held_sell_reauction_obligation(conn, position)
+            if not isinstance(obligation, dict) or not obligation:
+                obligation = getattr(
+                    position,
+                    "_held_sell_reauction_obligation",
+                    {},
+                )
+                obligation = obligation if isinstance(obligation, dict) else {}
+            def load_canonical_monitor_cut() -> tuple[str, dict[str, object], str]:
                 if not force_new_generation or conn is None:
-                    return "", {}
+                    return "", {}, ""
                 try:
                     monitor_rows = conn.execute(
                         """
-                        SELECT sequence_no, occurred_at, payload_json
+                        SELECT event_id, sequence_no, occurred_at, payload_json
                           FROM position_events
                          WHERE position_id = ?
                            AND event_type = 'MONITOR_REFRESHED'
@@ -6925,24 +6958,29 @@ def execute_monitoring_phase(
                         (
                             row
                             for row in monitor_rows
-                            if _parse_utc_timestamp(row[1]) is not None
+                            if _parse_utc_timestamp(row[2]) is not None
                         ),
                         key=lambda row: (
-                            _parse_utc_timestamp(row[1]),
-                            int(row[0]),
+                            _parse_utc_timestamp(row[2]),
+                            int(row[1]),
                         ),
                         default=None,
                     )
                     if monitor_row is not None:
-                        monitor_at = str(monitor_row[1] or "")
-                        decoded = json.loads(str(monitor_row[2] or "{}"))
+                        monitor_event_id = str(monitor_row[0] or "").strip()
+                        monitor_at = str(monitor_row[2] or "")
+                        decoded = json.loads(str(monitor_row[3] or "{}"))
                         if isinstance(decoded, dict):
-                            return monitor_at, decoded
+                            return monitor_at, decoded, monitor_event_id
                 except (sqlite3.Error, TypeError, json.JSONDecodeError):
                     pass
-                return "", {}
+                return "", {}, ""
 
-            canonical_monitor_at, canonical_monitor_payload = (
+            (
+                canonical_monitor_at,
+                canonical_monitor_payload,
+                canonical_monitor_event_id,
+            ) = (
                 load_canonical_monitor_cut()
             )
             canonical_receipt = canonical_monitor_payload.get(
@@ -7027,7 +7065,11 @@ def execute_monitoring_phase(
                     raise ValueError(
                         "GLOBAL_SELL_REAUCTION_CURRENT_MONITOR_WITNESS_UNAVAILABLE"
                     )
-                canonical_monitor_at, canonical_monitor_payload = (
+                (
+                    canonical_monitor_at,
+                    canonical_monitor_payload,
+                    canonical_monitor_event_id,
+                ) = (
                     load_canonical_monitor_cut()
                 )
                 canonical_receipt = canonical_monitor_payload.get(
@@ -7182,6 +7224,44 @@ def execute_monitoring_phase(
                 probability_observed_at=probability_observed_at,
                 completion_deadline_at=(
                     global_sell_reauction_completion_deadline_at()
+                ),
+                selection_epoch_identity=str(
+                    (
+                        canonical_monitor_payload.get(
+                            "held_sell_reauction_monitor_lineage", {}
+                        ).get("selection_epoch_identity", "")
+                        if force_new_generation
+                        and isinstance(
+                            canonical_monitor_payload.get(
+                                "held_sell_reauction_monitor_lineage", {}
+                            ),
+                            dict,
+                        )
+                        else obligation.get("selection_epoch_identity") or ""
+                    )
+                ),
+                sell_book_witness_identity=str(
+                    (
+                        canonical_monitor_payload.get(
+                            "held_sell_reauction_monitor_lineage", {}
+                        ).get("sell_book_witness_identity", "")
+                        if force_new_generation
+                        and isinstance(
+                            canonical_monitor_payload.get(
+                                "held_sell_reauction_monitor_lineage", {}
+                            ),
+                            dict,
+                        )
+                        else obligation.get("sell_book_witness_identity") or ""
+                    )
+                ),
+                debt_event_id=str(obligation.get("debt_event_id") or ""),
+                monitor_event_id=str(
+                    (
+                        canonical_monitor_event_id
+                        if force_new_generation
+                        else obligation.get("monitor_event_id") or ""
+                    )
                 ),
                 book_state=book_state,
                 generation=request_generation or None,
@@ -9812,6 +9892,29 @@ def execute_monitoring_phase(
                     # monitor decision or canonical payload.
                     if coverage_result is not None:
                         global_holding_coverage = coverage_result
+            coverage_lineage = getattr(global_holding_coverage, "coverage", None)
+            setattr(
+                pos,
+                "_held_sell_reauction_monitor_lineage",
+                {
+                    "selection_epoch_identity": str(
+                        getattr(
+                            coverage_lineage,
+                            "selection_epoch_identity",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "sell_book_witness_identity": str(
+                        getattr(
+                            coverage_lineage,
+                            "sell_book_witness_identity",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                },
+            )
             if statistical_sell_requires_global and global_holding_coverage.covered:
                 coverage = global_holding_coverage.coverage
                 coverage_receipt_id = global_holding_coverage.decision_log_id
@@ -9846,6 +9949,41 @@ def execute_monitoring_phase(
                     request_global_auction_completion,
                 )
 
+                existing_reauction_obligation = (
+                    latest_held_sell_reauction_obligation(conn, pos)
+                )
+                if not isinstance(existing_reauction_obligation, dict):
+                    existing_reauction_obligation = {}
+                monitor_lineage = getattr(
+                    pos,
+                    "_held_sell_reauction_monitor_lineage",
+                    {},
+                )
+                if not isinstance(monitor_lineage, dict):
+                    monitor_lineage = {}
+                request_selection_epoch = str(
+                    monitor_lineage.get("selection_epoch_identity", "")
+                    or existing_reauction_obligation.get(
+                        "selection_epoch_identity", ""
+                    )
+                    or ""
+                ).strip()
+                request_book_witness = str(
+                    monitor_lineage.get("sell_book_witness_identity", "")
+                    or existing_reauction_obligation.get(
+                        "sell_book_witness_identity", ""
+                    )
+                    or ""
+                ).strip()
+                request_debt_event_id = str(
+                    existing_reauction_obligation.get("debt_event_id", "")
+                    or ""
+                ).strip()
+                request_monitor_event_id = str(
+                    existing_reauction_obligation.get("monitor_event_id", "")
+                    or ""
+                ).strip()
+
                 completion_result = request_global_auction_completion(
                     reason=(
                         "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
@@ -9875,6 +10013,10 @@ def execute_monitoring_phase(
                     completion_deadline_at=(
                         global_sell_reauction_completion_deadline_at()
                     ),
+                    selection_epoch_identity=request_selection_epoch,
+                    sell_book_witness_identity=request_book_witness,
+                    debt_event_id=request_debt_event_id,
+                    monitor_event_id=request_monitor_event_id,
                     return_request=True,
                     prepare_only=True,
                 )

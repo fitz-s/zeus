@@ -903,6 +903,7 @@ def _held_sell_reauction_obligation(
     position: Position,
     *,
     generation_material: Mapping[str, object],
+    canonical_monitor_lineage: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the V4 durable scope without treating a missing book as a price."""
 
@@ -951,6 +952,21 @@ def _held_sell_reauction_obligation(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    monitor_lineage = (
+        canonical_monitor_lineage
+        if isinstance(canonical_monitor_lineage, Mapping)
+        else {}
+    )
+    event_type = str(generation_material.get("event_type") or "").strip()
+    sequence_no = generation_material.get("sequence_no")
+    try:
+        debt_event_id = (
+            f"{position_id}:{event_type.lower()}:{int(sequence_no)}"
+            if event_type and sequence_no is not None
+            else ""
+        )
+    except (TypeError, ValueError):
+        debt_event_id = ""
     return {
         "schema_version": 4,
         "scope_identity": scope_identity,
@@ -965,6 +981,18 @@ def _held_sell_reauction_obligation(
         "held_best_bid": None,
         "bid_observed_at": "",
         "book_state": "UNKNOWN",
+        # These are copied only from canonical event/debt construction. Missing
+        # inputs remain typed pending; no monitor/book identity is synthesized.
+        "debt_event_id": debt_event_id,
+        "monitor_event_id": str(
+            monitor_lineage.get("monitor_event_id") or ""
+        ).strip(),
+        "selection_epoch_identity": str(
+            monitor_lineage.get("selection_epoch_identity") or ""
+        ).strip(),
+        "sell_book_witness_identity": str(
+            monitor_lineage.get("sell_book_witness_identity") or ""
+        ).strip(),
     }
 
 
@@ -1060,6 +1088,11 @@ def _held_sell_reauction_recovery_due(
         return False
     scope_identity = str(obligation.get("scope_identity") or "").strip()
     deadline_text = str(obligation.get("completion_deadline_at") or "").strip()
+    if durable_reserved and not deadline_text:
+        # SCOPE: the already durable reserved wake. DRAIN: its persisted
+        # deadline or exact terminal receipt is read on the next recovery
+        # pass. RESET: do not requeue before that reservation's deadline.
+        return False
     if not scope_identity or not deadline_text:
         return True
     try:
@@ -10662,6 +10695,7 @@ def _build_exit_retry_released_event_and_projection(
     release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
     caused_by: str = "exit_retry_cooldown_expired",
     base_projection: Mapping[str, object] | None = None,
+    canonical_monitor_lineage: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict] | None:
     """Build one retry-release event and its final active projection.
 
@@ -10717,6 +10751,7 @@ def _build_exit_retry_released_event_and_projection(
                 "previous_error": previous_error,
                 "release_reason": release_reason,
             },
+            canonical_monitor_lineage=canonical_monitor_lineage,
         )
         if not obligation:
             return None
@@ -10798,6 +10833,42 @@ def _dual_write_exit_retry_released_if_available(
                 else dict(zip((item[0] for item in cursor.description), current))
             )
 
+        canonical_monitor_lineage: dict[str, object] = {}
+        if event_type == "EXIT_RETRY_RELEASED":
+            try:
+                monitor_row = conn.execute(
+                    """
+                    SELECT event_id, payload_json
+                      FROM position_events
+                     WHERE position_id = ?
+                       AND event_type = 'MONITOR_REFRESHED'
+                     ORDER BY sequence_no DESC
+                     LIMIT 1
+                    """,
+                    (trade_id,),
+                ).fetchone()
+                monitor_payload = (
+                    json.loads(str(monitor_row[1] or "{}"))
+                    if monitor_row is not None
+                    else {}
+                )
+                monitor_lineage = (
+                    monitor_payload.get("held_sell_reauction_monitor_lineage")
+                    if isinstance(monitor_payload, dict)
+                    else None
+                )
+                if isinstance(monitor_lineage, dict) and monitor_row is not None:
+                    canonical_monitor_lineage = {
+                        "monitor_event_id": str(monitor_row[0] or "").strip(),
+                        "selection_epoch_identity": str(
+                            monitor_lineage.get("selection_epoch_identity") or ""
+                        ).strip(),
+                        "sell_book_witness_identity": str(
+                            monitor_lineage.get("sell_book_witness_identity") or ""
+                        ).strip(),
+                    }
+            except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+                canonical_monitor_lineage = {}
         built = _build_exit_retry_released_event_and_projection(
             position,
             sequence_no=_next_canonical_sequence_no(conn, trade_id),
@@ -10808,6 +10879,7 @@ def _dual_write_exit_retry_released_if_available(
             release_reason=release_reason,
             caused_by=caused_by,
             base_projection=base_projection,
+            canonical_monitor_lineage=canonical_monitor_lineage,
         )
         if built is None:
             return False
@@ -10849,6 +10921,19 @@ def record_global_sell_reauction_reserved(
             if isinstance(current, sqlite3.Row)
             else dict(zip((item[0] for item in cursor.description), current))
         )
+        canonical_obligation = latest_held_sell_reauction_obligation(
+            conn,
+            position,
+        )
+        if canonical_obligation:
+            # The EXIT_RETRY_RELEASED row is the durable debt owner. Reload its
+            # exact lineage before writing the reserve acknowledgement so a
+            # process-local request can never silently replace canonical IDs.
+            setattr(
+                position,
+                "_held_sell_reauction_obligation",
+                canonical_obligation,
+            )
         phase = str(projection.get("phase") or "")
         if phase == LifecyclePhase.PENDING_EXIT.value:
             obligation = getattr(
@@ -11136,14 +11221,15 @@ def recover_global_sell_snapshot_reauction_debt(
         deadline_text = str(
             obligation.get("completion_deadline_at") or ""
         ).strip()
-        try:
-            original_deadline = datetime.fromisoformat(
-                deadline_text.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-        except (ValueError, AttributeError):
-            return False
-        if _utcnow().astimezone(timezone.utc) >= original_deadline:
-            return False
+        if deadline_text:
+            try:
+                original_deadline = datetime.fromisoformat(
+                    deadline_text.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (ValueError, AttributeError):
+                return False
+            if _utcnow().astimezone(timezone.utc) >= original_deadline:
+                return False
     if not record_global_sell_reauction_reserved(conn, position):
         conn.rollback()
         return False
