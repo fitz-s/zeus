@@ -26,6 +26,7 @@ and MUST pass after the fix.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -47,7 +48,6 @@ def test_safe_cycle_poll_detects_release_within_one_minute():
         for _fn, trigger, kwargs in specs
         if kwargs.get("id") == daemon.FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID
     ]
-
     assert poll_specs == [
         (
             "interval",
@@ -60,6 +60,46 @@ def test_safe_cycle_poll_detects_release_within_one_minute():
             },
         )
     ]
+
+
+def test_safe_cycle_dispatch_does_not_let_one_track_block_its_sibling():
+    """A running LOW fetch cannot suppress the next HIGH release check."""
+
+    from src.ingest import forecast_live_daemon as daemon
+
+    completed_high: Future[dict] = Future()
+    completed_high.set_result({"status": "current_cycle_already_journaled"})
+    running_low: Future[dict] = Future()
+    inflight = {
+        "mx2t6_high": completed_high,
+        "mn2t6_low": running_low,
+    }
+
+    class RecordingExecutor:
+        def __init__(self):
+            self.submitted: list[str] = []
+
+        def submit(self, _runner, track: str) -> Future[dict]:
+            self.submitted.append(track)
+            return Future()
+
+    executor = RecordingExecutor()
+    report = daemon._dispatch_due_opendata_tracks(
+        _runner=lambda track: {"status": track},
+        _executor=executor,
+        _inflight=inflight,
+    )
+
+    assert executor.submitted == ["mx2t6_high"]
+    assert report == {
+        "mx2t6_high": {
+            "status": "submitted",
+            "previous_status": "current_cycle_already_journaled",
+        },
+        "mn2t6_low": {"status": "in_flight"},
+    }
+    assert inflight["mn2t6_low"] is running_low
+    assert inflight["mx2t6_high"] is not completed_high
 
 
 # ---------------------------------------------------------------------------

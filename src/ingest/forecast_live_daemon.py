@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-24
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -169,6 +169,8 @@ FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS: set[str] = set()
+_OPENDATA_SAFE_CYCLE_EXECUTOR: ThreadPoolExecutor | None = None
+_OPENDATA_SAFE_CYCLE_FUTURES: dict[str, Any] = {}
 _OPENDATA_WAKE_TERMINAL_STATUSES = frozenset(
     {
         "CYCLE_ADVANCE_TRIGGER",
@@ -1003,6 +1005,90 @@ def _run_due_opendata_tracks(
         return {track: futures[track].result() for track in tracks}
 
 
+def _safe_cycle_executor() -> ThreadPoolExecutor:
+    global _OPENDATA_SAFE_CYCLE_EXECUTOR
+    if _OPENDATA_SAFE_CYCLE_EXECUTOR is None:
+        _OPENDATA_SAFE_CYCLE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="opendata-safe-track",
+        )
+    return _OPENDATA_SAFE_CYCLE_EXECUTOR
+
+
+def _dispatch_due_opendata_tracks(
+    *,
+    _runner: Callable[[str], dict] | None = None,
+    _executor: Any | None = None,
+    _inflight: dict[str, Any] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Keep HIGH and LOW release work independent across scheduler ticks.
+
+    A track download can legitimately outlive the one-minute detection cadence.
+    The scheduler callback must therefore dispatch at most one future per track
+    and return immediately; otherwise one slow track occupies the single
+    forecast-source scheduler lane and suppresses release checks for its sibling.
+    Track file locks and source-run identities remain the execution/journal
+    singleton authority.
+    """
+
+    runner = _runner or _run_journaled_opendata_track_if_due
+    executor = _executor or _safe_cycle_executor()
+    inflight = (
+        _inflight if _inflight is not None else _OPENDATA_SAFE_CYCLE_FUTURES
+    )
+    reports: dict[str, dict[str, object]] = {}
+
+    for track in ("mx2t6_high", "mn2t6_low"):
+        previous = inflight.get(track)
+        if previous is not None and not previous.done():
+            reports[track] = {"status": "in_flight"}
+            continue
+
+        completed: dict[str, object] | None = None
+        if previous is not None:
+            try:
+                result = previous.result()
+                completed = (
+                    result
+                    if isinstance(result, dict)
+                    else {"status": "invalid_result"}
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate the sibling track
+                logger.error(
+                    "forecast-live OpenData %s async poll failed: %s",
+                    track,
+                    exc,
+                    exc_info=True,
+                )
+                completed = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}:{exc}",
+                }
+
+        try:
+            inflight[track] = executor.submit(runner, track)
+        except Exception as exc:  # noqa: BLE001 - keep the sibling dispatchable
+            reports[track] = {
+                "status": "failed",
+                "error": f"submit:{type(exc).__name__}:{exc}",
+            }
+            continue
+
+        if (
+            completed is not None
+            and str(completed.get("status") or "").lower()
+            in _TRUTHFUL_FAIL_STATUSES
+        ):
+            reports[track] = {**completed, "resubmitted": True}
+        else:
+            reports[track] = {
+                "status": "submitted",
+                "previous_status": completed.get("status") if completed is not None else None,
+            }
+
+    return reports
+
+
 @_scheduler_job(FORECAST_LIVE_DAILY_HIGH_JOB_ID)
 def _opendata_mx2t6_cycle() -> dict:
     """00z cron trigger: fires at 08:10 UTC, after the 08:05 UTC safe_fetch window."""
@@ -1035,8 +1121,11 @@ def _opendata_startup_catch_up() -> dict:
 
 
 @_scheduler_job(FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID)
-def _opendata_safe_cycle_poll() -> dict:
-    results = _run_due_opendata_tracks()
+def _opendata_safe_cycle_poll(
+    *,
+    _dispatcher: Callable[[], dict[str, dict[str, object]]] | None = None,
+) -> dict:
+    results = (_dispatcher or _dispatch_due_opendata_tracks)()
     failed, reason = _classify_result({"tracks": results})
     return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
 
