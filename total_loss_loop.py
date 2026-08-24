@@ -1508,7 +1508,7 @@ def refresh_precursor(
     return precursor_id
 
 
-def detect(cfg: Mapping[str, Any]) -> list[str]:
+def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
     detector_deadline = time.monotonic() + max(
         0.001,
         float(cfg["loop"].get("detector_budget_ms", 200.0)) / 1000.0,
@@ -1655,6 +1655,56 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(created))
 
 
+def _detect_trigger(cfg: Mapping[str, Any]) -> list[str]:
+    """Persist newly observed hard crossings before maintenance can delay them."""
+
+    floor = floor_price(cfg)
+    history_days = int(cfg["loop"].get("history_days", 7))
+    cutoff = iso(now() - timedelta(days=history_days))
+    created: list[str] = []
+    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades, memory(cfg) as mem:
+        try:
+            positions = tracked_positions(trades, history_days=history_days)
+            open_positions = [
+                row for row in positions.values()
+                if row.get("phase") in OPEN_PHASES and has_material_share_precision(row)
+            ]
+            latest = _latest_quotes(trades, open_positions)
+            for position in open_positions:
+                quote = latest.get(str(position["position_id"]))
+                if quote is None:
+                    continue
+                observed_quote = quote.get("_current_quote", quote)
+                if observed_quote is None:
+                    continue
+                incident_id = _observe_quote(mem, position, observed_quote, floor)
+                if incident_id:
+                    created.append(incident_id)
+            mem.commit()
+        except sqlite3.OperationalError as exc:
+            mem.rollback()
+            if "interrupted" not in str(exc).lower():
+                raise
+    return list(dict.fromkeys(created))
+
+
+def detect(cfg: Mapping[str, Any]) -> list[str]:
+    trigger_created = _detect_trigger(cfg)
+    # Both trigger connections are closed before this independent local
+    # snapshot transaction begins.
+    _capture_hard_evidence(cfg, trigger_created)
+    try:
+        created = _detect_maintenance(cfg)
+    except sqlite3.OperationalError as exc:
+        if "interrupted" not in str(exc).lower():
+            raise
+        _capture_hard_evidence(cfg, trigger_created, scan_all=True)
+        return list(dict.fromkeys(trigger_created))
+    created.extend(trigger_created)
+    _capture_hard_evidence(cfg, created, scan_all=True)
+    return list(dict.fromkeys(created))
+
+
 EVIDENCE_SCHEMA = """
 CREATE TABLE incident(key TEXT PRIMARY KEY,value_json TEXT NOT NULL);
 CREATE TABLE position(position_id TEXT PRIMARY KEY,row_json TEXT NOT NULL);
@@ -1695,11 +1745,17 @@ def _json_number(payload: Mapping[str, Any], names: Iterable[str]) -> float | No
     return None
 
 
-def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
+def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
     run = runtime_dir(cfg)
     incident_dir = run / "incidents" / incident_id
     incident_dir.mkdir(parents=True, exist_ok=True)
-    evidence = incident_dir / "evidence.db"
+    generation_id = digest(incident_id, iso(), time.monotonic_ns())
+    generation_dir = incident_dir / "generations" / generation_id
+    generation_dir.mkdir(parents=True, exist_ok=False)
+    evidence = generation_dir / ".evidence.db.tmp"
+    final_evidence = generation_dir / "evidence.db"
+    manifest_path = generation_dir / "manifest.json"
+    manifest_tmp = generation_dir / ".manifest.json.tmp"
     evidence.unlink(missing_ok=True)
     with memory(cfg) as mem:
         incident_row = mem.execute("SELECT * FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
@@ -1859,15 +1915,136 @@ def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
         "crossing_evidence_id": incident["crossing_evidence_id"],
         "t_floor": incident["t_floor"],
         "floor_price": incident["floor_price"],
-        "evidence_db": str(evidence),
+        "evidence_db": str(final_evidence),
         "row_limit_per_table": row_limit,
         "coverage": _evidence_coverage(evidence),
         "loaded_sha": _active_loaded_sha(cfg),
         "created_at": iso(),
         "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
     }
-    atomic_json(incident_dir / "manifest.json", manifest)
-    return evidence
+    manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    os.replace(evidence, final_evidence)
+    os.replace(manifest_tmp, manifest_path)
+    pointer_tmp = incident_dir / f".CURRENT.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    pointer_tmp.write_text(generation_id + "\n")
+    os.replace(pointer_tmp, incident_dir / "CURRENT")
+    return final_evidence
+
+
+def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
+    try:
+        return _build_evidence_snapshot(cfg, incident_id)
+    except BaseException:
+        incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+        for pattern in ("generations/*/.evidence.db.tmp", "generations/*/.manifest.json.tmp", ".CURRENT.*.tmp", ".*.evidence.db.*.tmp", ".*.manifest.json.*.tmp"):
+            for path in incident_dir.glob(pattern):
+                path.unlink(missing_ok=True)
+        raise
+
+
+def _evidence_debt_id(incident_id: str) -> str:
+    return f"evidence_snapshot:{incident_id}"
+
+
+def _record_evidence_debt(cfg: Mapping[str, Any], incident_id: str, reason: str) -> None:
+    stamp = iso()
+    with memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at",
+            (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp),
+        )
+        mem.execute(
+            "UPDATE incidents SET stage='evidence',status=CASE WHEN status IN ('queued','retry_pending','observing') THEN 'blocked' ELSE status END,updated_at=? WHERE incident_id=?",
+            (stamp, incident_id),
+        )
+        mem.commit()
+
+
+def _resolve_evidence_debt(cfg: Mapping[str, Any], incident_id: str) -> None:
+    stamp = iso()
+    with memory(cfg) as mem:
+        mem.execute(
+            "UPDATE controller_debt SET status='resolved',reason='evidence_snapshot_complete',updated_at=? WHERE debt_id=?",
+            (stamp, _evidence_debt_id(incident_id)),
+        )
+        mem.execute(
+            "UPDATE incidents SET stage='blind',status='queued',updated_at=? WHERE incident_id=? AND stage='evidence' AND status='blocked'",
+            (stamp, incident_id),
+        )
+        mem.commit()
+
+
+def _evidence_pair_paths(cfg: Mapping[str, Any], incident_id: str) -> tuple[Path, Path] | None:
+    incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+    pointer = incident_dir / "CURRENT"
+    try:
+        generation = pointer.read_text().strip()
+    except OSError:
+        return None
+    if not generation or Path(generation).name != generation:
+        return None
+    snapshot_dir = incident_dir / "generations" / generation
+    return snapshot_dir / "evidence.db", snapshot_dir / "manifest.json"
+
+
+def _evidence_pair_valid(cfg: Mapping[str, Any], incident_id: str) -> bool:
+    pair = _evidence_pair_paths(cfg, incident_id)
+    if pair is None:
+        return False
+    evidence, manifest_path = pair
+    manifest = read_json(manifest_path, None)
+    if not evidence.is_file() or not isinstance(manifest, Mapping):
+        return False
+    if str(manifest.get("incident_id") or "") != incident_id:
+        return False
+    try:
+        if Path(str(manifest.get("evidence_db") or "")).resolve() != evidence.resolve():
+            return False
+        if hashlib.sha256(evidence.read_bytes()).hexdigest() != str(manifest.get("sha256") or ""):
+            return False
+        with sqlite3.connect(evidence) as conn:
+            row = conn.execute("SELECT value_json FROM incident WHERE key='incident_id'").fetchone()
+        return row is not None and json.loads(str(row[0])) == incident_id
+    except (OSError, sqlite3.Error, json.JSONDecodeError):
+        return False
+
+
+def _capture_hard_evidence(cfg: Mapping[str, Any], incident_ids: Iterable[str] = (), *, scan_all: bool = False) -> None:
+    candidates = {str(value) for value in incident_ids if str(value)}
+    with memory(cfg) as mem:
+        if scan_all:
+            rows = mem.execute(
+                "SELECT incident_id FROM incidents WHERE kind='hard'"
+            ).fetchall()
+            candidates.update(str(row[0]) for row in rows)
+        debts = mem.execute(
+            "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending'"
+        ).fetchall()
+        candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
+    if not candidates:
+        return
+    with memory(cfg) as mem:
+        hard = {
+            str(row[0]) for row in mem.execute(
+                "SELECT incident_id FROM incidents WHERE kind='hard' AND incident_id IN "
+                f"({','.join('?' for _ in candidates)})", tuple(candidates)
+            ).fetchall()
+        }
+    for incident_id in sorted(hard):
+        if _evidence_pair_valid(cfg, incident_id):
+            _resolve_evidence_debt(cfg, incident_id)
+            continue
+        try:
+            build_evidence(cfg, incident_id)
+        except RuntimeError as exc:
+            if "position missing" in str(exc):
+                continue
+            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}")
+        except Exception as exc:
+            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}")
+        else:
+            _resolve_evidence_debt(cfg, incident_id)
 
 
 def _active_loaded_sha(cfg: Mapping[str, Any]) -> str | None:
@@ -3738,6 +3915,7 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
 def dispatch(cfg: Mapping[str, Any]) -> list[str]:
     reconcile_orphan_incidents(cfg)
     if _provider_backoff(cfg) is not None:
+        _capture_hard_evidence(cfg, scan_all=True)
         return []
     if current_capabilities(cfg) is None:
         ensure_capability_probe(cfg)
@@ -3772,8 +3950,16 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
             incident_id = str(incident["incident_id"])
             try:
                 evidence = build_evidence(cfg, incident_id)
+                pair = _evidence_pair_paths(cfg, incident_id)
+                expected_evidence = pair[0] if pair is not None else None
+                if expected_evidence is None or Path(evidence) != expected_evidence:
+                    _record_evidence_debt(cfg, incident_id, "evidence_snapshot_path_mismatch")
+                    continue
+                if not _evidence_pair_valid(cfg, incident_id):
+                    _record_evidence_debt(cfg, incident_id, "evidence_snapshot_pair_invalid")
+                    continue
                 incident_dir = runtime_dir(cfg) / "incidents" / incident_id
-                if not read_json(incident_dir / "manifest.json", {}).get("loaded_sha"):
+                if not read_json(pair[1], {}).get("loaded_sha"):
                     with memory(cfg) as mem:
                         transition(
                             mem,
@@ -3787,7 +3973,7 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
                 output = incident_dir / "diagnosis.json"
                 events = incident_dir / "codex-diagnosis.jsonl"
                 schema = _schema_file(cfg, "diagnosis", DIAGNOSIS_SCHEMA)
-                prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nBLIND PHASE: historical root memory is intentionally unavailable.\n" + f"incident_id={incident_id}\nevidence_db={evidence}\nmanifest={incident_dir / 'manifest.json'}\n"
+                prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nBLIND PHASE: historical root memory is intentionally unavailable.\n" + f"incident_id={incident_id}\nevidence_db={evidence}\nmanifest={pair[1]}\n"
                 command = _codex_exec_base(cfg, sandbox="read-only", cwd=ROOT, schema=schema, output=output, persistent=True)
                 _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="diagnosis", command=command, cwd=ROOT, prompt=prompt, output=output, events=events)
             except (OSError, RuntimeError, sqlite3.Error) as exc:

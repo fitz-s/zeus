@@ -581,15 +581,65 @@ def test_provider_backoff_suppresses_global_launch_but_detector_continues(
         )
         mem.commit()
     _queue_blind_dispatch_debt(cfg, incident_id="blocked-by-provider")
+    _position(cfg)
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("provider backoff must block all new model runs"))
     assert loop.dispatch(cfg) == []
     assert loop._dispatch_has_eligible_debt(cfg, []) is False
+    provider_incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / "blocked-by-provider"
+    assert (provider_incident_dir / "CURRENT").is_file()
+    assert loop._evidence_pair_valid(cfg, "blocked-by-provider")
 
-    _position(cfg)
     _quote(cfg, "provider-detector-q", "2026-08-22T09:00:02+00:00", 0.01)
     assert loop.detect(cfg)
     assert any(row["incident_id"] == "blocked-by-provider" for row in _incidents(cfg))
+
+
+def test_evidence_failure_debt_recovers_same_incident_without_spawn(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "capture-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    original = loop.build_evidence
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: (_ for _ in ()).throw(OSError("snapshot disk")))
+    incident_id = loop.detect(cfg)[0]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT kind,status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()
+    assert tuple(debt) == ("evidence_snapshot", "retry_pending")
+    monkeypatch.setattr(loop, "build_evidence", original)
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE incident_id=?", (incident_id,)
+        ).fetchone()[0] == 1
+        assert mem.execute(
+            "SELECT status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()[0] == "resolved"
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pointer_replace_failure_keeps_previous_pair_valid(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pointer-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    original_replace = loop.os.replace
+    def fail_pointer(src, dst):
+        if Path(dst).name == "CURRENT":
+            raise OSError("pointer replace")
+        original_replace(src, dst)
+    monkeypatch.setattr(loop.os, "replace", fail_pointer)
+    with pytest.raises(OSError, match="pointer replace"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert loop._evidence_pair_valid(cfg, incident_id)
 
 
 def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -600,16 +650,79 @@ def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkey
             json.dumps({"kind": "provider_quota_limit", "reason": "quota", "next_retry_at": "2000-01-01T00:00:00+00:00"}),
         )
         mem.commit()
+    _position(cfg)
     _queue_blind_dispatch_debt(cfg, incident_id="cooldown-expired")
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: [])
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
     monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
     monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
     monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
-    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    claimed = {"value": False}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claimed["value"]:
+            return None
+        claimed["value"] = True
+        return {"incident_id": incident_id, "kind": "hard"}
+    monkeypatch.setattr(loop, "_claim", claim_once)
+    claim_count = {"hard": 0}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claim_count["hard"]:
+            return None
+        claim_count["hard"] = 1
+        return {"incident_id": "cooldown-expired", "kind": "hard"}
+    monkeypatch.setattr(loop, "_claim", claim_once)
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda cfg, incident_id: Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda cfg, incident_id: (
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "resumed"})
     assert loop.dispatch(cfg) == ["cooldown-expired"]
+
+
+def test_dispatch_uses_real_current_generation_pair_and_loaded_sha(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "dispatch-generation-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    generation = (incident_dir / "CURRENT").read_text().strip()
+    generation_evidence = incident_dir / "generations" / generation / "evidence.db"
+    generation_manifest = incident_dir / "generations" / generation / "manifest.json"
+    assert generation_evidence.is_file() and generation_manifest.is_file()
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        loop,
+        "_spawn_run",
+        lambda _cfg, **kwargs: launched.append(kwargs["incident_id"]) or {"run_id": "generation-run"},
+    )
+    original_read_json = loop.read_json
+    def loaded_generation(path, default=None):
+        if Path(path).name == "manifest.json" and "generations" in Path(path).parts:
+            payload = original_read_json(path, default)
+            payload["loaded_sha"] = "sha"
+            return payload
+        return original_read_json(path, default)
+    monkeypatch.setattr(loop, "read_json", loaded_generation)
+    assert loop.dispatch(cfg) == [incident_id]
+    assert launched == [incident_id]
 
 
 def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
@@ -625,6 +738,39 @@ def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
         assert loop._parse_terminal_failure(path) is None
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_dispatch_path_mismatch_records_debt_without_spawn(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="path-mismatch")
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: [])
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    claim_count = {"hard": 0}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claim_count["hard"]:
+            return None
+        claim_count["hard"] = 1
+        return {"incident_id": "path-mismatch", "kind": "hard"}
+    monkeypatch.setattr(
+        loop,
+        "_claim",
+        claim_once,
+    )
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/not-current-generation.db"))
+    monkeypatch.setattr(loop, "_evidence_pair_paths", lambda *_args: (Path("/tmp/current-generation.db"), Path("/tmp/current-generation.json")))
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("path mismatch must not spawn"))
+    assert loop.dispatch(cfg) == []
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT kind,status,reason FROM controller_debt WHERE debt_id=?",
+            ("evidence_snapshot:path-mismatch",),
+        ).fetchone()
+    assert tuple(row) == ("evidence_snapshot", "retry_pending", "evidence_snapshot_path_mismatch")
 
 
 def test_terminal_failure_is_turn_scoped_and_structured_codes_win(
@@ -947,7 +1093,20 @@ def test_dispatch_claims_hard_blind_before_repair_waiting(cfg: dict, monkeypatch
     monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
     monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
     monkeypatch.setattr(loop, "_claim", lambda _cfg, kind: order.append(f"claim:{kind}") or (None if kind == "precursor" else {"incident_id": "hard", "kind": "hard"}))
-    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda cfg, incident_id: Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda cfg, incident_id: (
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "hard-run"})
     monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: order.append("repair") or None)
@@ -2024,7 +2183,16 @@ def test_controller_retry_consumes_its_kind_slot_without_blocking_precursor(
             else None
         ),
     )
-    monkeypatch.setattr(loop, "build_evidence", lambda _cfg, incident_id: runtime / f"{incident_id}.db")
+    monkeypatch.setattr(loop, "build_evidence", lambda _cfg, incident_id: runtime / "incidents" / incident_id / "evidence.db")
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda _cfg, incident_id: (
+            runtime / "incidents" / incident_id / "evidence.db",
+            runtime / "incidents" / incident_id / "manifest.json",
+            ),
+        )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     original_read_json = loop.read_json
     monkeypatch.setattr(
         loop,
