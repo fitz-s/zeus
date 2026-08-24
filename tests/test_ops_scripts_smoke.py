@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-07; last_reused=2026-08-07
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
@@ -4128,6 +4128,100 @@ def test_deploy_live_paused_entry_backlog_rejects_nonterminal_sell_debt(
 
     assert ok is False
     assert "expected_parked=nonterminal_sell_commands=1" in detail
+
+
+@pytest.mark.parametrize("phase", ("pending_entry", "active", "day0_window", "pending_exit"))
+def test_deploy_live_loaded_restart_blocks_every_open_capital_phase(
+    monkeypatch, tmp_path, phase
+):
+    dl = _load(f"deploy_live_restart_open_{phase}", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-open', ?, 7, 7, 'synced')",
+        (phase,),
+    )
+    world.close()
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is False
+    assert "open_positions=1" in detail
+    assert "pos-open" in detail
+
+
+def test_deploy_live_loaded_restart_blocks_nonterminal_command_without_position(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_nonterminal_command", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    trade.execute("INSERT INTO venue_commands VALUES ('buy-live', 'BUY', 'ACKED')")
+    world.close()
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is False
+    assert "nonterminal_commands=1" in detail
+    assert "buy-live" in detail
+
+
+def test_deploy_live_absent_daemon_bootstrap_restores_monitoring_with_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_absent_recovery", "deploy_live.py")
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=False,
+    )
+
+    assert ok is True
+    assert "absent-daemon recovery" in detail
+
+
+def test_deploy_live_command_refuses_before_entry_pause_when_capital_is_open(
+    monkeypatch, capsys
+):
+    dl = _load("deploy_live_restart_refusal_order", "deploy_live.py")
+    monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (False, "open_positions=1"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_with_stuck_live_recovery",
+        lambda *_args, **_kwargs: pytest.fail("pause must not run before refusal"),
+    )
+
+    rc = dl._cmd_restart_locked(
+        types.SimpleNamespace(
+            daemon="live-trading",
+            allow_dirty=False,
+            allow_unpushed=False,
+        )
+    )
+
+    assert rc == 1
+    assert "continuous monitoring" in capsys.readouterr().out
 
 
 def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(

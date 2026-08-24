@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -974,6 +974,116 @@ def _canonical_unresolved_position_count(trade_db: Path) -> int:
             conn.close()
         except UnboundLocalError:
             pass
+
+
+def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
+    """Return capital obligations that make a loaded-daemon restart unsafe.
+
+    A healthy open position is not an error, but it still needs uninterrupted
+    probability and exit monitoring. Likewise, a non-terminal venue command
+    can fill while the process is absent. This is deliberately stricter than
+    ``_canonical_unresolved_position_count``.
+    """
+
+    from src.execution.command_bus import TERMINAL_STATES
+
+    if not trade_db.exists():
+        raise RuntimeError("LIVE_RESTART_TRADE_DB_MISSING")
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        position_columns = _sqlite_table_columns(conn, "position_current")
+        if not {"position_id", "phase"}.issubset(position_columns):
+            raise RuntimeError("LIVE_RESTART_POSITION_PROJECTION_UNREADABLE")
+        command_columns = _sqlite_table_columns(conn, "venue_commands")
+        if not {"command_id", "state"}.issubset(command_columns):
+            raise RuntimeError("LIVE_RESTART_COMMAND_PROJECTION_UNREADABLE")
+
+        open_phases = ("pending_entry", "active", "day0_window", "pending_exit")
+        phase_placeholders = ", ".join("?" for _ in open_phases)
+        position_ids = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT position_id
+                  FROM position_current
+                 WHERE LOWER(COALESCE(phase, '')) IN ({phase_placeholders})
+                 ORDER BY position_id
+                """,
+                open_phases,
+            ).fetchall()
+        )
+
+        terminal_states = sorted(
+            {state.value for state in TERMINAL_STATES} | {"CANCELED", "FAILED"}
+        )
+        terminal_placeholders = ", ".join("?" for _ in terminal_states)
+        command_ids = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE UPPER(COALESCE(state, '')) NOT IN ({terminal_placeholders})
+                 ORDER BY command_id
+                """,
+                tuple(terminal_states),
+            ).fetchall()
+        )
+        return {
+            "open_position_count": len(position_ids),
+            "open_position_ids": position_ids[:10],
+            "nonterminal_command_count": len(command_ids),
+            "nonterminal_command_ids": command_ids[:10],
+        }
+    except sqlite3.Error as exc:
+        raise RuntimeError("LIVE_RESTART_CANONICAL_OBLIGATIONS_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _loaded_live_restart_obligation_gate(
+    labels: list[str],
+    *,
+    live_was_loaded: bool,
+) -> tuple[bool, str]:
+    """Refuse to create a monitoring blackout over live capital.
+
+    SCOPE: a requested restart that would stop an already-loaded live-trading
+    daemon. DRAIN: positions reach a terminal lifecycle and venue commands
+    reach terminal command states under the still-running daemon. RESET: the
+    next deploy invocation re-reads canonical TRADE truth; bootstrapping an
+    already-absent daemon remains allowed because it restores monitoring rather
+    than interrupting it.
+    """
+
+    if LIVE_TRADING_LABEL not in labels:
+        return True, "live restart obligation gate not required for this daemon"
+    if not live_was_loaded:
+        return True, "live restart obligation gate permits absent-daemon recovery"
+    trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
+    try:
+        obligations = _canonical_live_restart_obligations(trade_db)
+    except RuntimeError as exc:
+        return False, f"canonical live restart obligations unreadable: {exc}"
+    open_count = int(obligations["open_position_count"])
+    command_count = int(obligations["nonterminal_command_count"])
+    if open_count or command_count:
+        return (
+            False,
+            "loaded live-trading restart would interrupt capital monitoring: "
+            f"open_positions={open_count} "
+            f"nonterminal_commands={command_count} "
+            f"position_sample={list(obligations['open_position_ids'])} "
+            f"command_sample={list(obligations['nonterminal_command_ids'])}",
+        )
+    return (
+        True,
+        "loaded live-trading restart obligation gate verified: "
+        "open_positions=0 nonterminal_commands=0",
+    )
 
 
 def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
@@ -2022,6 +2132,15 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    obligation_ok, obligation_detail = _loaded_live_restart_obligation_gate(
+        labels,
+        live_was_loaded=live_was_loaded_before,
+    )
+    if not obligation_ok:
+        print("REFUSING to restart — live capital still requires continuous monitoring:")
+        print(obligation_detail)
+        return 1
+    print(obligation_detail)
     expected_live_sha = head_sha(short=False) if includes_live_trading else ""
 
     pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
