@@ -43,6 +43,7 @@ _STARTUP_BUDGET: dict[str, Any] | None = None
 _STARTUP_RUN_QUEUE: dict[str, list[Path]] = {}
 _STARTUP_RUN_CURSOR: dict[str, int] = {}
 _STARTUP_RUN_REMAINING: dict[str, bool] = {}
+_STARTUP_RUN_BATCH_LIMIT: dict[str, int] = {}
 _EVIDENCE_BUILD_CONTEXT: dict[str, Any] | None = None
 _LAST_EVIDENCE_CYCLE: dict[str, Any] = {}
 _EVIDENCE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
@@ -4203,11 +4204,19 @@ def _finish_spawn_intent(cfg: Mapping[str, Any], run_id: str, state: str) -> Non
 
 def _new_startup_budget(cfg: Mapping[str, Any]) -> dict[str, Any]:
     settings = cfg["loop"]
+    configured_batch = max(1, int(settings.get("startup_run_batch_size", 64)))
+    key = str(runtime_dir(cfg).resolve())
     return {
         "deadline": time.monotonic() + max(0.01, float(settings.get("startup_maintenance_budget_ms", 250))) / 1000.0,
         "max_run_json_bytes": max(16 * 1024, int(settings.get("startup_max_run_json_bytes", 256 * 1024))),
-        "run_batch_size": max(1, int(settings.get("startup_run_batch_size", 64))),
+        "run_batch_size": min(configured_batch, _STARTUP_RUN_BATCH_LIMIT.get(key, configured_batch)),
     }
+
+
+def _shrink_startup_batch(cfg: Mapping[str, Any]) -> None:
+    key = str(runtime_dir(cfg).resolve())
+    current = int(_STARTUP_RUN_BATCH_LIMIT.get(key, cfg["loop"].get("startup_run_batch_size", 64)))
+    _STARTUP_RUN_BATCH_LIMIT[key] = max(1, current // 2)
 
 
 def _startup_sql_budget(conn: sqlite3.Connection) -> None:
@@ -6242,6 +6251,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         stopping = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    bootstrap_complete = False
     atomic_json(
         run / "status.json",
         {
@@ -6250,6 +6260,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             "at": iso(),
             "phase": "startup",
             "startup_maintenance": "starting",
+            "startup_bootstrap": "pending",
             "startup_error": None,
             "created": [],
             "dispatch_worker_pid": None,
@@ -6264,6 +6275,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     _STARTUP_BUDGET = _new_startup_budget(cfg)
     try:
         bootstrap(cfg)
+        bootstrap_complete = True
         reconcile_orphan_incidents(cfg)
         startup_pending = _startup_reconcile_remaining(cfg)
         if startup_pending:
@@ -6273,6 +6285,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             _record_startup_debt(cfg, "startup_maintenance_complete", status="resolved")
     except StartupMaintenanceDeferred as exc:
         startup_error = str(exc)
+        if bootstrap_complete:
+            _shrink_startup_batch(cfg)
         _record_startup_debt(cfg, startup_error)
     finally:
         _STARTUP_BUDGET = None
@@ -6294,6 +6308,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "at": iso(),
                 "phase": "startup_maintenance" if startup_pending else "cycle",
                 "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_bootstrap": "complete" if bootstrap_complete else "pending",
                 "startup_error": startup_error,
                 "created": [],
                 "evidence_maintenance": "starting",
@@ -6308,7 +6323,9 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         if startup_pending:
             _STARTUP_BUDGET = _new_startup_budget(cfg)
             try:
-                bootstrap(cfg)
+                if not bootstrap_complete:
+                    bootstrap(cfg)
+                    bootstrap_complete = True
                 reconcile_orphan_incidents(cfg)
                 startup_pending = _startup_reconcile_remaining(cfg)
                 startup_error = (
@@ -6323,6 +6340,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 )
             except StartupMaintenanceDeferred as exc:
                 startup_error = str(exc)
+                if bootstrap_complete:
+                    _shrink_startup_batch(cfg)
                 _record_startup_debt(cfg, startup_error)
             finally:
                 _STARTUP_BUDGET = None
@@ -6336,6 +6355,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "at": iso(),
                 "phase": "startup_maintenance" if startup_pending else "cycle",
                 "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_bootstrap": "complete" if bootstrap_complete else "pending",
                 "startup_error": startup_error,
                 "created": [],
                 "evidence_maintenance": "starting",

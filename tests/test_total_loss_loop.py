@@ -980,6 +980,15 @@ def test_startup_schema_fast_path_handles_live_scale_without_repeating_ddl(
     cfg["loop"].update(startup_run_batch_size=128, startup_maintenance_budget_ms=250)
     observed_cursors: list[int] = []
     spawned: list[object] = []
+    bootstrap_calls = {"value": 0}
+    real_sleep = loop.time.sleep
+    original_bootstrap_memory = loop._bootstrap_memory_version
+
+    def intentionally_slow_first_bootstrap(local_cfg: dict) -> None:
+        bootstrap_calls["value"] += 1
+        if bootstrap_calls["value"] == 1:
+            real_sleep(0.3)
+        original_bootstrap_memory(local_cfg)
 
     def fake_detect(_cfg: dict) -> list[str]:
         status = json.loads((runtime / "status.json").read_text())
@@ -997,6 +1006,7 @@ def test_startup_schema_fast_path_handles_live_scale_without_repeating_ddl(
         return []
 
     monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "_bootstrap_memory_version", intentionally_slow_first_bootstrap)
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
@@ -1014,6 +1024,7 @@ def test_startup_schema_fast_path_handles_live_scale_without_repeating_ddl(
     )
     assert observed_cursors[-1] == 3377
     assert spawned == []
+    assert bootstrap_calls["value"] == 2
 
 
 def test_startup_missing_schema_uses_bounded_migration_not_fast_path(
