@@ -5405,9 +5405,17 @@ def _edli_market_channel_token_metadata_reloader(
                 seed_first_token_ids=seed_first_token_ids,
                 depth_repair_token_ids=depth_repair_token_ids,
             )
-        finally:
+        except BaseException:
+            # Cancellation is checked before and around the blocking broad
+            # scan inside the try; re-checking in finally would override a
+            # successful return (or mask the real exception) when the
+            # deadline flips during cleanup (PR#503 review finding). A
+            # completed hydration stays completed.
             if _edli_market_channel_universe_reload_cancelled(generation):
-                raise TimeoutError("market-channel universe reload deadline")
+                raise TimeoutError(
+                    "market-channel universe reload deadline"
+                ) from None
+            raise
 
     def _reload():
         global _market_channel_universe_reload_generation
