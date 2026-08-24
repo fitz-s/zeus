@@ -95,6 +95,15 @@ tier0:
   # closed (pauses entries via the control plane) — see
   # src/strategy/tier0_policy.py::check_tier0_drawdown_kill.
   drawdown_kill_pct: 0.10
+  # Episode selector for the durable start-equity seed (control_overrides
+  # override_id "tier0:start_equity:epoch:<epoch>", trades DB). The seed is
+  # written ONCE per epoch and reused across restarts (including a flag
+  # off->on flip, since the flag itself is boot-time-fixed and toggling it
+  # already requires a restart). Bump this via a reviewed commit to force a
+  # fresh Tier-0 episode (new start-equity baseline, new drawdown clock) —
+  # e.g. after manually investigating a drawdown-kill breach and resuming.
+  # See src/strategy/tier0_policy.py::tier0_start_equity_override_id.
+  epoch: 1
 
 # ---------------------------------------------------------------------------
 # reversal_plan_tier0_2026-08-24 item 10 — single bounded Tier-1 ceilings.

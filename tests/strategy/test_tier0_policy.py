@@ -15,11 +15,16 @@ from src.strategy.tier0_policy import (
     TIER0_REJECT_MAKER_REST,
     TIER0_REJECT_PRICE_TOO_HIGH,
     Tier0CandidateFacts,
+    Tier0ClosedPositionFacts,
+    build_tier0_seed_value,
     check_tier0_drawdown_kill,
     load_tier0_risk_ceilings,
+    parse_tier0_seed,
     tier0_admission_reason,
     tier0_drawdown_kill_breached,
     tier0_flat_stake_shares,
+    tier0_realized_pnl_usd,
+    tier0_start_equity_override_id,
 )
 
 
@@ -232,12 +237,27 @@ def test_load_tier0_risk_ceilings_reads_tracked_yaml(tmp_path):
         "tier0:\n"
         "  aggregate_open_loss_pct_ceiling: 0.02\n"
         "  drawdown_kill_pct: 0.10\n"
+        "  epoch: 3\n"
     )
     ceilings = load_tier0_risk_ceilings(path=artifact)
     assert ceilings == {
         "aggregate_open_loss_pct_ceiling": 0.02,
         "drawdown_kill_pct": 0.10,
+        "epoch": 3,
+        "policy_version": "2",
     }
+
+
+def test_load_tier0_risk_ceilings_epoch_defaults_to_one_when_absent(tmp_path):
+    artifact = tmp_path / "risk_policy.yaml"
+    artifact.write_text(
+        "policy_version: \"2\"\n"
+        "tier0:\n"
+        "  aggregate_open_loss_pct_ceiling: 0.02\n"
+        "  drawdown_kill_pct: 0.10\n"
+    )
+    ceilings = load_tier0_risk_ceilings(path=artifact)
+    assert ceilings["epoch"] == 1
 
 
 def test_load_tier0_risk_ceilings_missing_file_falls_back_to_documented_defaults(tmp_path):
@@ -245,6 +265,8 @@ def test_load_tier0_risk_ceilings_missing_file_falls_back_to_documented_defaults
     assert ceilings == {
         "aggregate_open_loss_pct_ceiling": 0.02,
         "drawdown_kill_pct": 0.10,
+        "epoch": 1,
+        "policy_version": "",
     }
 
 
@@ -269,3 +291,109 @@ def test_load_tier0_risk_ceilings_out_of_range_fails_closed(tmp_path):
     )
     with pytest.raises(ValueError):
         load_tier0_risk_ceilings(path=artifact)
+
+
+# Start-equity override_id (episode selector).
+def test_start_equity_override_id_includes_epoch():
+    assert tier0_start_equity_override_id(1) == "tier0:start_equity:epoch:1"
+    assert tier0_start_equity_override_id(2) == "tier0:start_equity:epoch:2"
+    assert tier0_start_equity_override_id("3") == "tier0:start_equity:epoch:3"
+
+
+def test_start_equity_override_id_differs_across_epochs():
+    # A bumped epoch is a DIFFERENT override_id -- no seed found under it,
+    # so the caller's SELECT-before-write naturally re-seeds. This is the
+    # whole "new episode = re-seed" mechanism; no other code path needed.
+    assert tier0_start_equity_override_id(1) != tier0_start_equity_override_id(2)
+
+
+# Seed encode/decode round trip.
+def test_build_and_parse_tier0_seed_round_trips():
+    value = build_tier0_seed_value(
+        started_at_utc="2026-08-24T09:00:00+00:00",
+        start_equity_usd=268.0,
+        policy_version="3",
+        epoch=1,
+    )
+    seed = parse_tier0_seed(value)
+    assert seed == {
+        "started_at_utc": "2026-08-24T09:00:00+00:00",
+        "start_equity_usd": 268.0,
+        "policy_version": "3",
+        "epoch": 1,
+    }
+
+
+def test_build_tier0_seed_value_rejects_nonpositive_equity():
+    with pytest.raises(ValueError):
+        build_tier0_seed_value(
+            started_at_utc="2026-08-24T09:00:00+00:00",
+            start_equity_usd=0.0,
+            policy_version="3",
+            epoch=1,
+        )
+
+
+def test_build_tier0_seed_value_rejects_empty_started_at():
+    with pytest.raises(ValueError):
+        build_tier0_seed_value(
+            started_at_utc="",
+            start_equity_usd=100.0,
+            policy_version="3",
+            epoch=1,
+        )
+
+
+def test_parse_tier0_seed_rejects_malformed_json():
+    with pytest.raises(ValueError):
+        parse_tier0_seed("not json at all")
+
+
+def test_parse_tier0_seed_rejects_missing_fields():
+    with pytest.raises(ValueError):
+        parse_tier0_seed('{"started_at_utc": "2026-08-24T09:00:00+00:00"}')
+
+
+def test_parse_tier0_seed_rejects_nonpositive_equity():
+    with pytest.raises(ValueError):
+        parse_tier0_seed(
+            '{"started_at_utc": "2026-08-24T09:00:00+00:00", '
+            '"start_equity_usd": -5.0, "epoch": 1}'
+        )
+
+
+# Realized-P&L reducer: recomputes fresh via compute_realized_pnl_usd, never
+# reads a pre-stored realized_pnl_usd aggregate.
+def test_tier0_realized_pnl_usd_sums_local_economics():
+    positions = [
+        Tier0ClosedPositionFacts(shares=100.0, exit_price=1.0, cost_basis_usd=15.0, entry_price=0.15),
+        Tier0ClosedPositionFacts(shares=50.0, exit_price=0.0, cost_basis_usd=10.0, entry_price=0.20),
+    ]
+    # position 1: 100*1.0 - 15.0 = 85.0 (won); position 2: 50*0.0 - 10.0 = -10.0 (lost)
+    assert tier0_realized_pnl_usd(closed_positions=positions) == 75.0
+
+
+def test_tier0_realized_pnl_usd_prefers_chain_economics_over_local():
+    positions = [
+        Tier0ClosedPositionFacts(
+            shares=100.0,
+            exit_price=1.0,
+            cost_basis_usd=999.0,  # wrong local bookkeeping
+            entry_price=0.15,
+            chain_shares=100.0,
+            chain_cost_basis_usd=15.0,  # correct chain-verified basis
+            chain_avg_price=0.15,
+        ),
+    ]
+    assert tier0_realized_pnl_usd(closed_positions=positions) == 85.0
+
+
+def test_tier0_realized_pnl_usd_excludes_unsettled_position():
+    positions = [
+        Tier0ClosedPositionFacts(shares=100.0, exit_price=None, cost_basis_usd=15.0, entry_price=0.15),
+    ]
+    assert tier0_realized_pnl_usd(closed_positions=positions) == 0.0
+
+
+def test_tier0_realized_pnl_usd_empty_is_zero():
+    assert tier0_realized_pnl_usd(closed_positions=()) == 0.0

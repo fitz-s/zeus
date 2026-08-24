@@ -164,3 +164,46 @@ def test_flag_on_different_cluster_not_blocked(monkeypatch):
         held_families=(("Miami", "2026-08-25", "high"),),
     )
     assert reason is None
+
+
+# Once-per-cycle start-equity seed / drawdown-kill hook (reversal_plan_tier0
+# item 6 follow-up). Gating happens at adapter CONSTRUCTION time (a plain
+# statement in event_bound_live_adapter_from_trade_conn's body), before any
+# per-candidate closures run -- so building the adapter is enough to observe
+# whether the hook fired, with no event/candidate drive needed.
+def test_flag_off_start_equity_hook_not_called(monkeypatch):
+    monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: False)
+    calls = []
+    monkeypatch.setattr(
+        "src.engine.tier0_drawdown_hook.tier0_seed_and_check_drawdown_kill",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+
+    era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        auction_capital_authority=SimpleNamespace(),
+    )
+
+    assert calls == []
+
+
+def test_flag_on_start_equity_hook_called_once_per_adapter_construction(monkeypatch):
+    monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        "src.engine.tier0_drawdown_hook.tier0_seed_and_check_drawdown_kill",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    trade_conn = sqlite3.connect(":memory:")
+
+    era.event_bound_live_adapter_from_trade_conn(
+        trade_conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        auction_capital_authority=SimpleNamespace(),
+    )
+
+    assert len(calls) == 1
+    (args, kwargs) = calls[0]
+    assert args == (trade_conn,)
+    assert "bankroll_usd_provider" in kwargs

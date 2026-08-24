@@ -18,8 +18,9 @@ aggregate/drawdown state — and get back a typed verdict or None (admit).
 
 from __future__ import annotations
 
+import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -318,6 +319,159 @@ def check_tier0_drawdown_kill(
 
 
 # ---------------------------------------------------------------------------
+# Tier-0 start-equity seed (durable, restart-safe) + realized-P&L reducer.
+#
+# Storage choice: config/risk_policy.yaml.tier0.epoch (int, operator-bumped,
+# default 1) selects a control_overrides_history override_id
+# ("tier0:start_equity:epoch:<N>") in the trades DB. control_overrides_history
+# is the repo's existing generic, append-only, content-addressed-by-history-id
+# KV mechanism (B070; same table entries_paused already uses) — it survives
+# restart trivially (a DB row, not in-memory state) and is already the place
+# ops looks for control-plane facts. This module never touches the DB itself
+# (see the module docstring); build_tier0_seed_value/parse_tier0_seed are the
+# pure encode/decode halves, the caller (event_reactor_adapter.py) does the
+# SELECT/upsert_control_override I/O.
+#
+# Seed-once / re-seed semantics: the seed is written ONCE per override_id and
+# never overwritten while that override_id exists — "seed exists" is checked
+# by SELECT before every write attempt. tier0_research_mode is a
+# feature_flags.* value loaded once at Settings() construction (process
+# boot), so a bare flag off->on flip already requires a daemon restart in
+# this codebase; a restart alone (flag staying on, or a quick off->on cycle
+# with epoch unchanged) intentionally REUSES the existing seed — that is the
+# "restart survival" the flag alone should give. A genuine new Tier-0
+# episode (operator wants a fresh start-equity baseline and drawdown clock,
+# e.g. after manually investigating a breach) requires bumping
+# config/risk_policy.yaml's tier0.epoch via a reviewed commit — a new
+# override_id, so no prior seed is found and a fresh one is written. This
+# mirrors the repo's existing pattern of gating risk-relevant resets behind
+# a tracked, reviewed config change rather than an implicit runtime signal.
+# ---------------------------------------------------------------------------
+
+TIER0_START_EQUITY_OVERRIDE_ID_PREFIX = "tier0:start_equity:epoch:"
+
+
+def tier0_start_equity_override_id(epoch: int | str) -> str:
+    return f"{TIER0_START_EQUITY_OVERRIDE_ID_PREFIX}{int(epoch)}"
+
+
+def build_tier0_seed_value(
+    *,
+    started_at_utc: str,
+    start_equity_usd: float | int,
+    policy_version: str,
+    epoch: int,
+) -> str:
+    """Encode the Tier-0 start-equity seed as the control_overrides ``value``."""
+
+    equity = float(start_equity_usd)
+    if not math.isfinite(equity) or equity <= 0.0:
+        raise ValueError(f"tier0 start_equity_usd must be positive, got {start_equity_usd!r}")
+    if not str(started_at_utc or "").strip():
+        raise ValueError("tier0 started_at_utc must be non-empty")
+    return json.dumps(
+        {
+            "started_at_utc": str(started_at_utc),
+            "start_equity_usd": equity,
+            "policy_version": str(policy_version),
+            "epoch": int(epoch),
+        },
+        sort_keys=True,
+    )
+
+
+def parse_tier0_seed(value_json: str) -> dict[str, object]:
+    """Decode a control_overrides ``value`` back into the seed fields.
+
+    Fail-closed (ValueError) on anything malformed — a corrupt seed must
+    never silently produce a wrong drawdown baseline.
+    """
+
+    try:
+        payload = json.loads(value_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"TIER0_SEED_MALFORMED: not valid JSON: {value_json!r}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"TIER0_SEED_MALFORMED: must be a JSON object, got {type(payload).__name__}"
+        )
+    try:
+        started_at_utc = str(payload["started_at_utc"])
+        start_equity_usd = float(payload["start_equity_usd"])
+        epoch = int(payload["epoch"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"TIER0_SEED_MALFORMED: missing/invalid fields: {value_json!r}"
+        ) from exc
+    if not started_at_utc.strip() or not math.isfinite(start_equity_usd) or start_equity_usd <= 0.0:
+        raise ValueError(f"TIER0_SEED_MALFORMED: invalid values: {value_json!r}")
+    return {
+        "started_at_utc": started_at_utc,
+        "start_equity_usd": start_equity_usd,
+        "policy_version": str(payload.get("policy_version", "")),
+        "epoch": epoch,
+    }
+
+
+@dataclass(frozen=True)
+class Tier0ClosedPositionFacts:
+    """One closed position's economics, as needed to recompute realized P&L.
+
+    Chain fields default to 0.0 (absent); when ``chain_shares > 0`` they are
+    preferred over the local ``shares``/``cost_basis_usd``/``entry_price``
+    fields (chain truth over local bookkeeping — same precedence the
+    convex-hold-to-settle work already applies via EffectiveExposure).
+    """
+
+    shares: float
+    exit_price: float | None
+    cost_basis_usd: float
+    entry_price: float | None
+    chain_shares: float = 0.0
+    chain_cost_basis_usd: float = 0.0
+    chain_avg_price: float = 0.0
+
+
+def tier0_realized_pnl_usd(
+    *,
+    closed_positions: Sequence[Tier0ClosedPositionFacts],
+) -> float:
+    """Sum realized P&L across closed positions via the canonical formula.
+
+    Recomputes fresh from each position's own shares/exit_price/cost_basis
+    (chain-preferred) via ``src.state.close_economics.compute_realized_pnl_usd``
+    — the repo's single source of truth for this math — rather than trusting
+    any pre-stored aggregate (``position_current.realized_pnl_usd`` is never
+    read here; the caller must not pass it in either). A position with no
+    ``exit_price`` has not actually settled and contributes 0.0.
+    """
+
+    from src.state.close_economics import compute_realized_pnl_usd
+
+    total = 0.0
+    for position in closed_positions:
+        if position.exit_price is None:
+            continue
+        if position.chain_shares > 0.0:
+            shares = position.chain_shares
+            cost_basis_usd = position.chain_cost_basis_usd
+            entry_price = (
+                position.chain_avg_price if position.chain_avg_price > 0.0 else position.entry_price
+            )
+        else:
+            shares = position.shares
+            cost_basis_usd = position.cost_basis_usd
+            entry_price = position.entry_price
+        total += compute_realized_pnl_usd(
+            shares=shares,
+            exit_price=float(position.exit_price),
+            cost_basis_usd=cost_basis_usd,
+            entry_price=entry_price,
+        )
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Tier-0 risk ceilings loader.
 #
 # config/risk_policy.yaml's ``assert_risk_policy_artifact`` (src/main.py) only
@@ -347,20 +501,30 @@ TIER0_DEFAULT_AGGREGATE_OPEN_LOSS_PCT_CEILING: float = 0.02
 TIER0_DEFAULT_DRAWDOWN_KILL_PCT: float = 0.10
 
 
+TIER0_DEFAULT_EPOCH: int = 1
+
+
 def load_tier0_risk_ceilings(
     path: Path = RISK_POLICY_ARTIFACT_PATH,
-) -> dict[str, float]:
+) -> dict[str, object]:
     """Read the ``tier0:`` block from the tracked risk-policy artifact.
 
     Fail-closed to the plan's documented defaults only when the artifact or
     the ``tier0:`` block is entirely absent (e.g. a pre-Tier-0 checkout) —
     never silently substitutes a default for a present-but-malformed value.
+
+    ``epoch`` (int, default 1) selects the Tier-0 start-equity override_id
+    (see ``tier0_start_equity_override_id``) — bump it via a reviewed commit
+    to force a fresh Tier-0 episode. ``policy_version`` is the artifact's
+    top-level version string, carried through for the seed's provenance.
     """
 
     if not path.exists():
         return {
             "aggregate_open_loss_pct_ceiling": TIER0_DEFAULT_AGGREGATE_OPEN_LOSS_PCT_CEILING,
             "drawdown_kill_pct": TIER0_DEFAULT_DRAWDOWN_KILL_PCT,
+            "epoch": TIER0_DEFAULT_EPOCH,
+            "policy_version": "",
         }
     import yaml  # local import: matches src/risk_allocator/governor.py::load_cap_policy idiom
 
@@ -368,11 +532,14 @@ def load_tier0_risk_ceilings(
     loaded = yaml.safe_load(raw) or {}
     if not isinstance(loaded, Mapping):
         raise ValueError(f"TIER0_RISK_POLICY_MALFORMED: {path} must parse to a mapping")
+    policy_version = str(loaded.get("policy_version") or "")
     tier0 = loaded.get("tier0")
     if tier0 is None:
         return {
             "aggregate_open_loss_pct_ceiling": TIER0_DEFAULT_AGGREGATE_OPEN_LOSS_PCT_CEILING,
             "drawdown_kill_pct": TIER0_DEFAULT_DRAWDOWN_KILL_PCT,
+            "epoch": TIER0_DEFAULT_EPOCH,
+            "policy_version": policy_version,
         }
     if not isinstance(tier0, Mapping):
         raise ValueError(f"TIER0_RISK_POLICY_MALFORMED: {path} tier0 block must be a mapping")
@@ -389,7 +556,18 @@ def load_tier0_risk_ceilings(
             f"TIER0_RISK_POLICY_MALFORMED: {path} tier0 ceilings must be in (0, 1]: "
             f"aggregate_open_loss_pct_ceiling={ceiling}, drawdown_kill_pct={kill_pct}"
         )
+    raw_epoch = tier0.get("epoch", TIER0_DEFAULT_EPOCH)
+    try:
+        epoch = int(raw_epoch)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"TIER0_RISK_POLICY_MALFORMED: {path} tier0.epoch must be an int, got {raw_epoch!r}"
+        ) from exc
+    if epoch < 1:
+        raise ValueError(f"TIER0_RISK_POLICY_MALFORMED: {path} tier0.epoch must be >= 1, got {epoch}")
     return {
         "aggregate_open_loss_pct_ceiling": ceiling,
         "drawdown_kill_pct": kill_pct,
+        "epoch": epoch,
+        "policy_version": policy_version,
     }
