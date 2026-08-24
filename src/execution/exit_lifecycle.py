@@ -75,6 +75,13 @@ _MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS = 250
 _MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS = 500
 _MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS = 5_000
 
+# Status is derived observability, never monitor-claim work. One daemon-owned
+# drain coalesces completed monitor summaries so an unhealthy status read model
+# cannot consume APScheduler's single exit-monitor instance indefinitely.
+_EXIT_MONITOR_STATUS_PULSE_LOCK = threading.Lock()
+_EXIT_MONITOR_STATUS_PULSE_PENDING: dict[str, object] | None = None
+_EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+
 
 class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
     """Bounded monitor classification of one durable global SELL debt."""
@@ -12782,6 +12789,55 @@ def _report_exit_monitor_failure(
         sink(outcome if outcome in _MONITOR_FAILURE_OUTCOMES else "UNKNOWN")
 
 
+def _schedule_exit_monitor_status_pulse(summary: Mapping[str, object]) -> None:
+    """Drain the latest completed full-book monitor pulse off the scheduler slot.
+
+    The canonical artifact and monitor-claim release have already happened when
+    this runs. SCOPE: derived status projection only. DRAIN: one daemon thread
+    serializes pulses and retains at most the newest pending summary. RESET:
+    when the status writer returns and no newer pulse arrived, the in-flight
+    marker clears. A blocked pulse cannot retain the next monitor scheduler
+    instance or its capital-protection claim.
+    """
+
+    global _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+    global _EXIT_MONITOR_STATUS_PULSE_PENDING
+
+    try:
+        from src.observability.status_summary import write_cycle_pulse
+    except Exception:  # noqa: BLE001 - observability cannot retain exit cadence.
+        logger.exception("exit_monitor status pulse import failed in advisory drain")
+        return
+
+    with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+        _EXIT_MONITOR_STATUS_PULSE_PENDING = dict(summary)
+        if _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT:
+            return
+        _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = True
+
+    def _drain() -> None:
+        global _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        global _EXIT_MONITOR_STATUS_PULSE_PENDING
+
+        while True:
+            with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+                payload = _EXIT_MONITOR_STATUS_PULSE_PENDING
+                _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+                if payload is None:
+                    _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+                    return
+            try:
+                write_cycle_pulse(payload)
+            except Exception:  # noqa: BLE001 - derived status must not pin exit cadence.
+                logger.exception("exit_monitor status pulse failed in advisory drain")
+
+    threading.Thread(
+        target=_drain,
+        name="exit-monitor-status-pulse",
+        daemon=True,
+    ).start()
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -13112,15 +13168,7 @@ def run_exit_monitor_cycle(
     # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
     # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
     if target_families is None:
-        try:
-            from src.observability.status_summary import write_cycle_pulse
-            write_cycle_pulse(summary)
-        except Exception as exc:
-            logger.error(
-                "exit_monitor: status pulse failed (non-fatal): %s",
-                exc,
-                exc_info=True,
-            )
+        _schedule_exit_monitor_status_pulse(summary)
 
         _write_scheduler_health(
             "exit_monitor",

@@ -22298,6 +22298,75 @@ def test_exit_monitor_releases_claim_before_slow_portfolio_export(monkeypatch):
     assert not active.is_set()
 
 
+def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
+    """A slow derived status pulse cannot occupy the next monitor scheduler slot."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.observability import scheduler_health, status_summary
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    pulse_started = threading.Event()
+    release_pulse = threading.Event()
+    portfolio = SimpleNamespace(
+        positions=[],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    def blocked_pulse(_summary):
+        pulse_started.set()
+        assert release_pulse.wait(timeout=1.0)
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda *_args, **_kwargs: (False, False),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda *_args, **_kwargs: (True, 1),
+    )
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", blocked_pulse)
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    try:
+        assert exit_lifecycle.run_exit_monitor_cycle(
+            held_position_monitor_active=active,
+            mark_held_position_monitor_complete=active.clear,
+            monitor_deadline_monotonic=time.monotonic() + 30.0,
+        ) is True
+        assert pulse_started.wait(timeout=1.0)
+        assert not active.is_set()
+    finally:
+        release_pulse.set()
+        conn.close()
+
+
 @pytest.mark.parametrize(
     ("summary", "expected"),
     [
