@@ -652,7 +652,6 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     import src.config as config
     from src.control import live_health
     import src.main as main
-    import src.observability.status_summary as status_summary
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -667,42 +666,6 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
         "'failing_surfaces': [], 'surfaces': {}}))"
     )
     monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
-    monkeypatch.setattr(status_summary, "STATUS_PATH", status_path)
-    monkeypatch.setattr(
-        status_summary,
-        "_refresh_minimal_runtime_read_model_for_status",
-        lambda _status: True,
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "_get_execution_capability_status",
-        lambda: {"entry": {"status": "requires_intent"}},
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "_refresh_current_open_entry_orders_for_status",
-        lambda _status: None,
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "_refresh_control_status_for_pulse",
-        lambda _status: None,
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "_refresh_pulse_infrastructure_status",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "_project_recommended_commands",
-        lambda _status: None,
-    )
-    monkeypatch.setattr(
-        status_summary,
-        "annotate_truth_payload",
-        lambda payload, *_args, **_kwargs: payload,
-    )
     monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
     monkeypatch.setattr(
         main,
@@ -727,6 +690,67 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     assert first_status["process"]["pid"] == os.getpid()
     assert second_status["process"]["pid"] == os.getpid()
     assert second_status["timestamp"] != first_status["timestamp"]
+
+
+def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
+    tmp_path, monkeypatch
+):
+    import time
+
+    import src.config as config
+    from src.control import live_health
+    import src.main as main
+    import src.observability.status_summary as status_summary
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    pid_file = tmp_path / "live_health_locked_child_pid.txt"
+    child_code = (
+        "import os, time; "
+        f"pid_file = open({str(pid_file)!r}, 'w'); "
+        "pid_file.write(str(os.getpid())); pid_file.flush(); pid_file.close(); "
+        "time.sleep(60)"
+    )
+    monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: False)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("DB pulse must not run")),
+    )
+    bounded_refresh = live_health.refresh_composite_live_health_bounded
+    monkeypatch.setattr(
+        live_health,
+        "refresh_composite_live_health_bounded",
+        lambda: bounded_refresh(timeout_seconds=0.5),
+    )
+    conn = sqlite3.connect(state_dir / "zeus_trades.db")
+    try:
+        conn.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        try:
+            main._live_health_composite_cycle.__wrapped__()
+        except RuntimeError as exc:
+            assert str(exc) == "COMPOSITE_COMPUTE_TIMEOUT:0.5s"
+        else:
+            raise AssertionError("slow child unexpectedly completed")
+        assert time.monotonic() - started < 2.0
+    finally:
+        conn.close()
+
+    child_pid = int(pid_file.read_text())
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError(f"timed-out live-health child still exists: pid={child_pid}")
+    status = json.loads((state_dir / "status_summary.json").read_text())
+    assert status["process"]["pid"] == os.getpid()
+    assert status["timestamp"] == status["generated_at"]
 
 
 def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(
