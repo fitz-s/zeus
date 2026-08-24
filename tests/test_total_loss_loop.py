@@ -941,6 +941,127 @@ def test_startup_budget_bounds_real_locked_memory_subprocess_and_settings_io(
         loop._STARTUP_BUDGET = None
 
 
+def test_startup_schema_fast_path_handles_live_scale_without_repeating_ddl(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    with loop.memory(cfg) as mem:
+        for index in range(3377):
+            mem.execute(
+                "INSERT INTO model_runs(run_id,incident_id,stage,session_id,model,reasoning_effort,"
+                "started_at,status,usage_json,events_path) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"live-run-{index}", f"live-incident-{index}", "blind", None,
+                    "test-model", "high", "2026-08-22T09:00:00+00:00", "completed",
+                    "x" * 256, str(runtime / "events.jsonl"),
+                ),
+            )
+        mem.commit()
+    for index in range(3377):
+        (runs / f"live-scale-run-{index:04d}.json").write_text(
+            json.dumps(
+                {
+                    "run_id": f"live-scale-run-{index}",
+                    "incident_id": "none",
+                    "pid": 999999,
+                    "status": "completed",
+                    "metadata_padding": "x" * 1024,
+                }
+            )
+            + "\n"
+        )
+    codex_home = tmp_path / "fast-path-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(loop, "MEMORY_SCHEMA", "THIS MUST NOT EXECUTE")
+    cfg["loop"].update(startup_run_batch_size=128, startup_maintenance_budget_ms=250)
+    observed_cursors: list[int] = []
+    spawned: list[object] = []
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        status = json.loads((runtime / "status.json").read_text())
+        cursor_path = runtime / "startup-cursor.json"
+        if cursor_path.is_file():
+            observed_cursors.append(int(json.loads(cursor_path.read_text())["cursor"]))
+        assert status["alive"] is True
+        assert status["provider_backoff"] is None
+        if status.get("startup_maintenance") == "complete":
+            debt = json.loads((runtime / "startup-debt.json").read_text())
+            checkpoint = json.loads(cursor_path.read_text())
+            assert debt["status"] == "resolved"
+            assert checkpoint["cursor"] == 3377
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: False)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+    assert loop.daemon(cfg) == 0
+    assert observed_cursors
+    assert 0 < observed_cursors[0] <= 2 * cfg["loop"]["startup_run_batch_size"]
+    assert observed_cursors == sorted(set(observed_cursors))
+    assert all(
+        later - earlier <= cfg["loop"]["startup_run_batch_size"]
+        for earlier, later in zip(observed_cursors, observed_cursors[1:])
+    )
+    assert observed_cursors[-1] == 3377
+    assert spawned == []
+
+
+def test_startup_missing_schema_uses_bounded_migration_not_fast_path(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute("DROP TABLE loop_versions")
+        mem.commit()
+    codex_home = tmp_path / "migration-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    cfg["loop"]["startup_maintenance_budget_ms"] = 500
+    loop._STARTUP_BUDGET = loop._new_startup_budget(cfg)
+    try:
+        loop.bootstrap(cfg)
+    finally:
+        loop._STARTUP_BUDGET = None
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='loop_versions'"
+        ).fetchone() is not None
+
+
+def test_startup_wrong_index_contract_is_migrated_before_fast_path(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute("DROP INDEX idx_incident_crossing")
+        mem.execute("CREATE INDEX idx_incident_crossing ON incidents(status)")
+        mem.commit()
+    cfg["loop"]["startup_maintenance_budget_ms"] = 500
+    loop._STARTUP_BUDGET = loop._new_startup_budget(cfg)
+    try:
+        with loop.memory(cfg) as mem:
+            assert loop._startup_schema_complete(mem) is True
+            detail = [
+                row
+                for row in mem.execute("PRAGMA index_xinfo(idx_incident_crossing)").fetchall()
+                if int(row[5]) == 1
+            ]
+            assert [str(row[2]) for row in detail] == [
+                "position_id", "crossing_evidence_id", "kind"
+            ]
+    finally:
+        loop._STARTUP_BUDGET = None
+
+
 def test_startup_debt_fail_closed_blocks_external_dispatch_paths(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
