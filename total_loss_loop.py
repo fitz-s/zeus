@@ -44,6 +44,8 @@ _STARTUP_RUN_QUEUE: dict[str, list[Path]] = {}
 _STARTUP_RUN_CURSOR: dict[str, int] = {}
 _STARTUP_RUN_REMAINING: dict[str, bool] = {}
 _STARTUP_RUN_BATCH_LIMIT: dict[str, int] = {}
+_TRIGGER_DEADLINE: float | None = None
+_MAINTENANCE_DEADLINE: float | None = None
 _EVIDENCE_BUILD_CONTEXT: dict[str, Any] | None = None
 _LAST_EVIDENCE_CYCLE: dict[str, Any] = {}
 _EVIDENCE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
@@ -59,6 +61,19 @@ class SettlementBasisPending(RuntimeError):
 
 class StartupMaintenanceDeferred(RuntimeError):
     """Startup maintenance exceeded its bounded slice and must resume later."""
+
+
+class SchemaMaintenanceDeferred(StartupMaintenanceDeferred):
+    """Existing memory schema is incomplete; explicit migration must retry."""
+
+
+class _MaintenanceOutcome(list[str]):
+    """Committed maintenance IDs remain observable after a late deadline."""
+
+    def __init__(self, values: Iterable[str] = (), *, postcommit_deferred: bool = False) -> None:
+        super().__init__(values)
+        self.committed = True
+        self.postcommit_deferred = postcommit_deferred
 
 
 def now() -> datetime:
@@ -182,11 +197,22 @@ class _ClosingConnection:
         return False
 
 
-def open_ro(path: Path) -> _ClosingConnection:
-    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=2.0)
+def open_ro(path: Path, *, timeout: float = 2.0) -> _ClosingConnection:
+    active_deadlines = [value for value in (_TRIGGER_DEADLINE, _MAINTENANCE_DEADLINE) if value is not None]
+    if _EVIDENCE_BUILD_CONTEXT is not None:
+        active_deadlines.append(float(_EVIDENCE_BUILD_CONTEXT["deadline"]))
+    if active_deadlines:
+        remaining = min(active_deadlines) - time.monotonic()
+        if remaining <= 0:
+            if _EVIDENCE_BUILD_CONTEXT is not None:
+                raise EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+            raise sqlite3.OperationalError("interrupted: bounded database deadline")
+        timeout = min(float(timeout), remaining)
+    timeout = max(0.001, float(timeout))
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
-    conn.execute("PRAGMA busy_timeout=2000")
+    conn.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
     return _ClosingConnection(conn)
 
 
@@ -241,6 +267,8 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_incident_crossing
     ON incidents(position_id, crossing_evidence_id, kind);
+CREATE INDEX IF NOT EXISTS idx_evidence_queue
+    ON incidents(kind,status,priority DESC,detected_at,incident_id);
 CREATE TABLE IF NOT EXISTS incident_transitions (
     transition_id TEXT PRIMARY KEY,
     incident_id TEXT NOT NULL,
@@ -257,6 +285,8 @@ CREATE TABLE IF NOT EXISTS position_quote_state (
     best_bid REAL,
     quote_status TEXT NOT NULL DEFAULT 'unknown',
     below_floor INTEGER NOT NULL CHECK (below_floor IN (0,1)),
+    no_bid_episode_generation INTEGER NOT NULL DEFAULT 0,
+    no_bid_episode_open INTEGER NOT NULL DEFAULT 0 CHECK (no_bid_episode_open IN (0,1)),
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS backfill_quote_state (
@@ -419,7 +449,8 @@ _STARTUP_SCHEMA_COLUMNS = {
         "transition_id", "incident_id", "from_stage", "to_stage", "run_id", "reason", "created_at",
     },
     "position_quote_state": {
-        "position_id", "evidence_id", "quote_seen_at", "best_bid", "quote_status", "below_floor", "updated_at",
+        "position_id", "evidence_id", "quote_seen_at", "best_bid", "quote_status", "below_floor",
+        "no_bid_episode_generation", "no_bid_episode_open", "updated_at",
     },
     "backfill_quote_state": {
         "position_id", "exposure_fingerprint", "last_quote_seen_at", "last_rowid", "last_bid",
@@ -554,24 +585,88 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             columns=("incident_id", "state"),
             descending=(False, False),
         )
+        and _startup_index_contract(
+            conn,
+            table="incidents",
+            name="idx_evidence_queue",
+            unique=False,
+            columns=("kind", "status", "priority", "detected_at", "incident_id"),
+            descending=(False, False, True, False, False),
+        )
     )
 
 
-def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
+def _record_schema_debt(cfg: Mapping[str, Any], conn: sqlite3.Connection, reason: str) -> None:
+    atomic_json(
+        runtime_dir(cfg) / "schema-debt.json",
+        {"kind": "memory_schema", "status": "retry_pending", "reason": reason, "updated_at": iso()},
+    )
+    try:
+        conn.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(debt_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at",
+            ("memory_schema", "schema_migration", "retry_pending", reason, iso()),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+
+
+def _install_memory_deadline(conn: sqlite3.Connection) -> None:
+    deadlines = [value for value in (_TRIGGER_DEADLINE, _MAINTENANCE_DEADLINE)]
+    if _EVIDENCE_BUILD_CONTEXT is not None:
+        deadlines.append(float(_EVIDENCE_BUILD_CONTEXT["deadline"]))
+    deadlines = [value for value in deadlines if value is not None]
+    if not deadlines:
+        return
+    deadline = min(deadlines)
+    remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+    conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
+    conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+
+
+def _memory_deadline_guard() -> None:
+    deadlines = [value for value in (_TRIGGER_DEADLINE, _MAINTENANCE_DEADLINE) if value is not None]
+    if deadlines and time.monotonic() >= min(deadlines):
+        raise sqlite3.OperationalError("interrupted: bounded memory deadline")
+
+
+def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _ClosingConnection:
     path = runtime_dir(cfg) / "memory.db"
+    if _EVIDENCE_BUILD_CONTEXT is not None:
+        _evidence_guard()
+    _memory_deadline_guard()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if _EVIDENCE_BUILD_CONTEXT is not None:
+        _evidence_guard()
+    _memory_deadline_guard()
+    fresh = not path.exists()
     startup_timeout = 5.0
     if _STARTUP_BUDGET is not None:
         startup_timeout = max(0.001, float(_STARTUP_BUDGET["deadline"]) - time.monotonic())
+    elif _TRIGGER_DEADLINE is not None or _MAINTENANCE_DEADLINE is not None or _EVIDENCE_BUILD_CONTEXT is not None:
+        deadlines = [value for value in (_TRIGGER_DEADLINE, _MAINTENANCE_DEADLINE)]
+        if _EVIDENCE_BUILD_CONTEXT is not None:
+            deadlines.append(float(_EVIDENCE_BUILD_CONTEXT["deadline"]))
+        deadlines = [value for value in deadlines if value is not None]
+        startup_timeout = max(0.001, min(deadlines) - time.monotonic())
+    _memory_deadline_guard()
     conn = sqlite3.connect(path, timeout=startup_timeout)
     conn.row_factory = sqlite3.Row
     _startup_sql_budget(conn)
-    if _STARTUP_BUDGET is not None:
+    _install_memory_deadline(conn)
+    if _EVIDENCE_BUILD_CONTEXT is not None:
+        _apply_evidence_sql_budget(conn, _EVIDENCE_BUILD_CONTEXT)
+    if _STARTUP_BUDGET is not None or (not fresh and not allow_schema_migration):
         journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         if journal_mode == "wal" and _startup_schema_complete(conn):
             conn.execute("PRAGMA foreign_keys=ON")
             _startup_guard()
             return _ClosingConnection(conn)
+    if not fresh and not allow_schema_migration and _STARTUP_BUDGET is None:
+        _record_schema_debt(cfg, conn, "memory_schema_incomplete_or_index_contract")
+        conn.close()
+        raise SchemaMaintenanceDeferred("memory_schema_deferred:explicit_migration_required")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(MEMORY_SCHEMA)
@@ -595,6 +690,16 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
         conn.execute(
             "ALTER TABLE position_quote_state "
             "ADD COLUMN quote_status TEXT NOT NULL DEFAULT 'unknown'"
+        )
+    if "no_bid_episode_generation" not in quote_columns:
+        conn.execute(
+            "ALTER TABLE position_quote_state "
+            "ADD COLUMN no_bid_episode_generation INTEGER NOT NULL DEFAULT 0"
+        )
+    if "no_bid_episode_open" not in quote_columns:
+        conn.execute(
+            "ALTER TABLE position_quote_state "
+            "ADD COLUMN no_bid_episode_open INTEGER NOT NULL DEFAULT 0"
         )
     debt_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(controller_debt)")}
     for name, definition in (
@@ -632,11 +737,19 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
             "CREATE INDEX idx_spawn_intents_incident_state "
             "ON spawn_intents(incident_id,state)"
         )
-    conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
-    conn.execute(
-        "CREATE INDEX idx_incident_queue "
-        "ON incidents(status,stage,kind,priority DESC,detected_at)"
-    )
+    if not _startup_index_contract(
+        conn,
+        table="incidents",
+        name="idx_incident_queue",
+        unique=False,
+        columns=("status", "stage", "kind", "priority", "detected_at"),
+        descending=(False, False, False, True, False),
+    ):
+        conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
+        conn.execute(
+            "CREATE INDEX idx_incident_queue "
+            "ON incidents(status,stage,kind,priority DESC,detected_at)"
+        )
     return _ClosingConnection(conn)
 
 
@@ -996,6 +1109,7 @@ def _insert_incident(
     floor: float,
     kind: str,
     priority: float,
+    allow_new_episode: bool = False,
 ) -> str | None:
     position_id = str(position["position_id"])
     incident_id = digest(position_id, evidence_id) if kind == "hard" else digest(kind, position_id)
@@ -1018,7 +1132,7 @@ def _insert_incident(
                 (evidence_id, crossing_kind, quote_seen_at, bid, iso(), existing[0]),
             )
             return str(existing[0])
-        if existing:
+        if existing and not allow_new_episode:
             return None
     before = conn.total_changes
     conn.execute(
@@ -1065,14 +1179,32 @@ def _observe_quote(
     below = bid is not None and bid < floor
     no_bid = quote_status == "no_bid"
     previous = mem.execute(
-        "SELECT below_floor,quote_seen_at,best_bid,quote_status "
+        "SELECT below_floor,quote_seen_at,best_bid,quote_status,"
+        "no_bid_episode_generation,no_bid_episode_open "
         "FROM position_quote_state WHERE position_id=?",
         (position_id,),
     ).fetchone()
     created = None
+    episode_generation = int(previous[4]) if previous is not None else 0
+    episode_open = bool(previous[5]) if previous is not None else False
     previous_at = parse_time(str(previous[1])) if previous else None
     seen_time = parse_time(seen_at)
     out_of_order = previous_at is not None and seen_time is not None and seen_time < previous_at
+    no_bid_episode: sqlite3.Row | None = None
+    if no_bid:
+        no_bid_episode = mem.execute(
+            "SELECT incident_id FROM incidents WHERE position_id=? AND kind='hard' "
+            "AND crossing_kind='no_bid' ORDER BY updated_at DESC,detected_at DESC LIMIT 1",
+            (position_id,),
+        ).fetchone()
+        if (
+            episode_generation == 0
+            and not episode_open
+            and previous is not None
+            and previous[3] == "no_bid"
+            and no_bid_episode
+        ):
+            episode_open = True
     if below:
         earliest = mem.execute(
             "SELECT incident_id,t_floor,status FROM incidents "
@@ -1090,9 +1222,16 @@ def _observe_quote(
                 (evidence_id, seen_at, bid, int(reopen), int(reopen), iso(), earliest[0]),
             )
             created = str(earliest[0])
+    if created is None and no_bid and episode_open and no_bid_episode is not None and not out_of_order:
+        mem.execute(
+            "UPDATE incidents SET crossing_evidence_id=?,evidence_revision=evidence_revision+1,"
+            "updated_at=? WHERE incident_id=?",
+            (evidence_id, iso(), no_bid_episode[0]),
+        )
+        created = str(no_bid_episode[0])
     if created is None and (
         (below and (previous is None or not bool(previous[0])))
-        or (no_bid and (previous is None or previous[3] != "no_bid"))
+        or (no_bid and (not episode_open or no_bid_episode is None))
     ):
         created = _insert_incident(
             mem,
@@ -1103,24 +1242,39 @@ def _observe_quote(
             floor=floor,
             kind="hard",
             priority=1_000_000.0,
+            allow_new_episode=bool(no_bid and not episode_open and no_bid_episode is not None),
         )
     if out_of_order:
         return created
     state_bid = reconciled_bid
     state_below = int(below)
+    state_quote_status = quote_status
+    if quote_status == "executable" and bid is not None and bid >= floor and episode_open:
+        episode_open = False
+        episode_generation += 1
     if quote_status == "quote_incomplete" and previous is not None:
         state_bid = previous[2]
         state_below = int(previous[0])
+        if episode_open:
+            # An incomplete book is not recovery. Preserve the durable
+            # no-bid episode marker across restarts and malformed quotes.
+            state_quote_status = "no_bid"
+    if no_bid:
+        episode_open = True
     mem.execute(
         """
-        INSERT INTO position_quote_state(position_id,evidence_id,quote_seen_at,best_bid,quote_status,below_floor,updated_at)
-        VALUES (?,?,?,?,?,?,?)
+        INSERT INTO position_quote_state(
+            position_id,evidence_id,quote_seen_at,best_bid,quote_status,below_floor,
+            no_bid_episode_generation,no_bid_episode_open,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?)
         ON CONFLICT(position_id) DO UPDATE SET
             evidence_id=excluded.evidence_id,
             quote_seen_at=excluded.quote_seen_at,
             best_bid=excluded.best_bid,
             quote_status=excluded.quote_status,
             below_floor=excluded.below_floor,
+            no_bid_episode_generation=excluded.no_bid_episode_generation,
+            no_bid_episode_open=excluded.no_bid_episode_open,
             updated_at=excluded.updated_at
         """,
         (
@@ -1128,17 +1282,28 @@ def _observe_quote(
             evidence_id,
             seen_at,
             state_bid,
-            quote_status,
+            state_quote_status,
             state_below,
+            episode_generation,
+            int(episode_open),
             iso(),
         ),
     )
     return created
 
 
-def _latest_quotes(trades: sqlite3.Connection, positions: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+def _latest_quotes(
+    trades: sqlite3.Connection,
+    positions: Iterable[Mapping[str, Any]],
+    *,
+    deadline: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise sqlite3.OperationalError("interrupted: maintenance budget")
     result: dict[str, dict[str, Any]] = {}
     for position in positions:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise sqlite3.OperationalError("interrupted: maintenance budget")
         row = trades.execute(
             """
             SELECT evidence_id,token_id,direction,quote_seen_at,best_bid_before,
@@ -1576,6 +1741,7 @@ def _settlement_backfill_positions(
     mem: sqlite3.Connection,
     *,
     history_days: int,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     loop_cfg = cfg["loop"]
     range_days = max(
@@ -1586,6 +1752,8 @@ def _settlement_backfill_positions(
     )
     cutoff = iso(now() - timedelta(days=range_days))
     limit = max(1, int(loop_cfg.get("settlement_backfill_positions_per_cycle", 32)))
+    if deadline is not None and time.monotonic() >= deadline:
+        raise sqlite3.OperationalError("interrupted: maintenance budget")
     rows = trades.execute(
         "SELECT * FROM position_current WHERE phase='settled' "
         "AND COALESCE(settled_at,updated_at) >= ? "
@@ -1594,6 +1762,8 @@ def _settlement_backfill_positions(
     ).fetchall()
     result: list[dict[str, Any]] = []
     for raw in rows:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise sqlite3.OperationalError("interrupted: maintenance budget")
         position = dict(raw)
         terminal = trades.execute(
             "SELECT event_id,occurred_at,payload_json FROM position_events "
@@ -1697,9 +1867,13 @@ def refresh_precursor(
     open_positions: list[dict[str, Any]],
     latest: Mapping[str, Mapping[str, Any]],
     floor: float,
+    *,
+    deadline: float | None = None,
 ) -> str | None:
     if not open_positions:
         return None
+    if deadline is not None and time.monotonic() >= deadline:
+        raise sqlite3.OperationalError("interrupted: maintenance budget")
     pending_hard_positions = {
         str(row[0])
         for row in mem.execute(
@@ -1709,6 +1883,8 @@ def refresh_precursor(
     }
     ranked: list[tuple[float, dict[str, Any], Mapping[str, Any]]] = []
     for position in open_positions:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise sqlite3.OperationalError("interrupted: maintenance budget")
         if str(position["position_id"]) in pending_hard_positions:
             continue
         quote = latest.get(str(position["position_id"]))
@@ -1782,27 +1958,49 @@ def refresh_precursor(
     return precursor_id
 
 
-def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
-    detector_deadline = time.monotonic() + max(
+@contextmanager
+def _maintenance_connections(cfg: Mapping[str, Any], deadline: float):
+    global _MAINTENANCE_DEADLINE
+    previous = _MAINTENANCE_DEADLINE
+    _MAINTENANCE_DEADLINE = deadline
+    try:
+        remaining = max(0.001, deadline - time.monotonic())
+        with open_ro(Path(str(cfg["paths"]["trades_db"])), timeout=remaining) as trades, memory(cfg) as mem:
+            with _sqlite_deadline(trades, deadline), _sqlite_deadline(mem, deadline):
+                yield trades, mem
+    finally:
+        _MAINTENANCE_DEADLINE = previous
+
+
+def _maintenance_guard() -> None:
+    if _MAINTENANCE_DEADLINE is not None and time.monotonic() >= _MAINTENANCE_DEADLINE:
+        raise sqlite3.OperationalError("interrupted: maintenance budget")
+
+
+def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -> list[str]:
+    detector_deadline = deadline or (time.monotonic() + max(
         0.001,
         float(cfg["loop"].get("detector_budget_ms", 200.0)) / 1000.0,
-    )
-    floor = floor_price(cfg)
+    ))
+    floor = _bounded_floor_price(cfg, detector_deadline)
     history_days = int(cfg["loop"].get("history_days", 7))
     cutoff = iso(now() - timedelta(days=history_days))
     created: list[str] = []
-    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades, memory(cfg) as mem:
+    with _maintenance_connections(cfg, detector_deadline) as (trades, mem):
+        _maintenance_guard()
         revalidate_blind_hard_incidents(mem, trades)
+        _maintenance_guard()
         positions = tracked_positions(trades, history_days=history_days)
         # Settlement is an independent terminal truth path.  It must run even
         # after quote backfill is exhausted: a settled full loss with no quote
         # row is still dispatchable, but never gets a fabricated floor time.
         settlement_positions = dict(positions)
         for position in _settlement_backfill_positions(
-            cfg, trades, mem, history_days=history_days
+            cfg, trades, mem, history_days=history_days, deadline=detector_deadline
         ):
             settlement_positions[str(position["position_id"])] = position
         for position in settlement_positions.values():
+            _maintenance_guard()
             capability_failed = False
             try:
                 candidate = _settlement_full_loss_candidate(trades, position)
@@ -1854,6 +2052,7 @@ def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
                 )
         by_token: dict[str, list[dict[str, Any]]] = {}
         for position in positions.values():
+            _maintenance_guard()
             by_token.setdefault(str(position["held_token_id"]), []).append(position)
         raw_cursor = meta_get(mem, "quote_cursor", "")
         if raw_cursor == "":
@@ -1872,6 +2071,7 @@ def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
                 limit=max(1, int(cfg["loop"].get("quote_batch_size", 2000))),
             )
         for quote in quote_rows:
+            _maintenance_guard()
             for position in by_token.get(str(quote["token_id"]), []):
                 ident = _observe_quote(mem, position, quote, floor)
                 if ident:
@@ -1883,8 +2083,9 @@ def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
             if row.get("phase") in OPEN_PHASES
             and has_material_share_precision(row)
         ]
-        latest = _latest_quotes(trades, open_positions)
+        latest = _latest_quotes(trades, open_positions, deadline=detector_deadline)
         for position in open_positions:
+            _maintenance_guard()
             quote = latest.get(str(position["position_id"]))
             if quote:
                 observed_quote = quote.get("_current_quote", quote)
@@ -1904,6 +2105,7 @@ def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
             else 0
         )
         for _ in range(backfill_positions):
+            _maintenance_guard()
             remaining_ms = (backfill_deadline - time.monotonic()) * 1000.0
             if remaining_ms <= 1.0:
                 break
@@ -1919,66 +2121,358 @@ def _detect_maintenance(cfg: Mapping[str, Any]) -> list[str]:
                 )
             )
         precursor = (
-            refresh_precursor(mem, trades, open_positions, latest, floor)
+            refresh_precursor(mem, trades, open_positions, latest, floor, deadline=detector_deadline)
             if time.monotonic() < detector_deadline
             else None
         )
         if precursor:
             created.append(precursor)
         mem.commit()
-    return list(dict.fromkeys(created))
+        postcommit_deferred = time.monotonic() >= detector_deadline
+    return _MaintenanceOutcome(
+        list(dict.fromkeys(created)),
+        postcommit_deferred=postcommit_deferred,
+    )
 
 
-def _detect_trigger(cfg: Mapping[str, Any]) -> list[str]:
+def _detect_trigger(
+    cfg: Mapping[str, Any], deadline: float | None = None, floor: float | None = None
+) -> list[str]:
     """Persist newly observed hard crossings before maintenance can delay them."""
 
-    floor = floor_price(cfg)
+    global _TRIGGER_DEADLINE
+    deadline = deadline or (
+        time.monotonic() + max(0.01, float(cfg["loop"].get("trigger_budget_ms", 100.0))) / 1000.0
+    )
+    _TRIGGER_DEADLINE = deadline
     history_days = int(cfg["loop"].get("history_days", 7))
-    cutoff = iso(now() - timedelta(days=history_days))
     created: list[str] = []
-    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades, memory(cfg) as mem:
-        try:
-            positions = tracked_positions(trades, history_days=history_days)
-            open_positions = [
-                row for row in positions.values()
-                if row.get("phase") in OPEN_PHASES and has_material_share_precision(row)
-            ]
-            latest = _latest_quotes(trades, open_positions)
-            for position in open_positions:
-                quote = latest.get(str(position["position_id"]))
-                if quote is None:
-                    continue
-                observed_quote = quote.get("_current_quote", quote)
-                if observed_quote is None:
-                    continue
-                incident_id = _observe_quote(mem, position, observed_quote, floor)
-                if incident_id:
-                    created.append(incident_id)
-            mem.commit()
-        except sqlite3.OperationalError as exc:
-            mem.rollback()
-            if "interrupted" not in str(exc).lower():
-                raise
+    committed = False
+    try:
+        if floor is None:
+            floor = floor_price(cfg)
+        remaining = max(0.001, deadline - time.monotonic())
+        with open_ro(Path(str(cfg["paths"]["trades_db"])), timeout=remaining) as trades, memory(cfg) as mem:
+            with _sqlite_deadline(trades, deadline), _sqlite_deadline(mem, deadline):
+                positions = tracked_positions(trades, history_days=history_days)
+                open_positions = [
+                    row for row in positions.values()
+                    if row.get("phase") in OPEN_PHASES and has_material_share_precision(row)
+                ]
+                latest = _latest_quotes(trades, open_positions, deadline=deadline)
+                for position in open_positions:
+                    quote = latest.get(str(position["position_id"]))
+                    if quote is None:
+                        continue
+                    observed_quote = quote.get("_current_quote", quote)
+                    if observed_quote is None:
+                        continue
+                    incident_id = _observe_quote(mem, position, observed_quote, floor)
+                    if incident_id:
+                        created.append(incident_id)
+                mem.commit()
+                committed = True
+    except sqlite3.OperationalError as exc:
+        if not any(token in str(exc).lower() for token in ("interrupted", "locked")):
+            raise
+        if not committed:
+            created.clear()
+    finally:
+        _TRIGGER_DEADLINE = None
     return list(dict.fromkeys(created))
+
+
+def _phase_heartbeat(cfg: Mapping[str, Any], phase: str, **extra: Any) -> None:
+    try:
+        atomic_json(
+            runtime_dir(cfg) / "status.json",
+            {"alive": True, "pid": os.getpid(), "at": iso(), "phase": phase, **extra},
+        )
+    except OSError:
+        pass
+
+
+def _bounded_floor_price(cfg: Mapping[str, Any], deadline: float) -> float:
+    if time.monotonic() >= deadline:
+        raise sqlite3.OperationalError("interrupted: trigger budget")
+    path = Path(str(cfg["paths"]["settings"]))
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("active execution floor unavailable: settings unreadable") from exc
+    if time.monotonic() >= deadline or not isinstance(payload, Mapping):
+        raise sqlite3.OperationalError("interrupted: trigger budget")
+    current: Any = payload
+    for part in str(cfg["loop"]["floor_config_key"]).split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            raise RuntimeError(f"active execution floor unavailable: missing {part}")
+        current = current[part]
+    value = float(current)
+    if not math.isfinite(value) or not 0 < value < 1:
+        raise RuntimeError("active execution floor unavailable: out-of-range value")
+    return value
+
+
+def _receipt_guard(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("committed receipt debt deadline")
+
+
+def _receipt_read_json(path: Path, deadline: float) -> Any:
+    _receipt_guard(deadline)
+    payload = read_json(path, {})
+    _receipt_guard(deadline)
+    return payload
+
+
+def _receipt_atomic_json(path: Path, payload: Any, deadline: float) -> None:
+    _receipt_guard(deadline)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _receipt_guard(deadline)
+    atomic_json(path, payload)
+    _receipt_guard(deadline)
+
+
+def _receipt_debt_deadline(cfg: Mapping[str, Any], deadline: float | None) -> float:
+    now_value = time.monotonic()
+    if deadline is not None and deadline > now_value:
+        return deadline
+    # A post-commit failure must still get a small, independent persistence
+    # slice; it cannot inherit an already-expired trigger slice.
+    return now_value + max(
+        0.01, float(cfg["loop"].get("receipt_debt_budget_ms", 50.0)) / 1000.0
+    )
+
+
+def _record_committed_receipt_debt(
+    cfg: Mapping[str, Any], incident_ids: Iterable[str], reason: str, *, deadline: float | None = None
+) -> None:
+    ids = list(dict.fromkeys(str(value) for value in incident_ids if str(value)))
+    if not ids:
+        return
+    debt_id = "trigger_receipt:" + digest(*ids)
+    receipt_deadline = _receipt_debt_deadline(cfg, deadline)
+    receipt_payload = {
+        "debt_id": debt_id,
+        "kind": "trigger_receipt",
+        "status": "retry_pending",
+        "incident_ids": ids,
+        "reason": reason,
+        "deadline": receipt_deadline,
+    }
+    global _TRIGGER_DEADLINE
+    previous_deadline = _TRIGGER_DEADLINE
+    _TRIGGER_DEADLINE = receipt_deadline
+    json_ok = False
+    try:
+        debt_dir = runtime_dir(cfg) / "trigger-receipt-debts"
+        _receipt_guard(receipt_deadline)
+        debt_dir.mkdir(parents=True, exist_ok=True)
+        _receipt_atomic_json(debt_dir / f"{debt_id}.json", receipt_payload, receipt_deadline)
+        json_ok = True
+        try:
+            _receipt_atomic_json(runtime_dir(cfg) / "trigger-receipt-debt.json", receipt_payload, receipt_deadline)
+        except (OSError, TimeoutError):
+            pass
+    except (OSError, TimeoutError):
+        json_ok = False
+    db_ok = False
+    try:
+        _receipt_guard(receipt_deadline)
+        with memory(cfg) as mem:
+            _receipt_guard(receipt_deadline)
+            durable_reason = reason[:650] + "|incident_ids=" + ",".join(ids)
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(debt_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at",
+                (debt_id, "trigger_receipt", "retry_pending", durable_reason[:1000], iso()),
+            )
+            _receipt_guard(receipt_deadline)
+            mem.commit()
+            db_ok = True
+    except (OSError, TimeoutError, sqlite3.Error, StartupMaintenanceDeferred):
+        db_ok = False
+    finally:
+        _TRIGGER_DEADLINE = previous_deadline
+    if not json_ok and not db_ok:
+        raise OSError("committed_receipt_pending:durable_state_unavailable")
+
+
+def _publish_trigger_receipt(cfg: Mapping[str, Any], incident_ids: Iterable[str], deadline: float) -> None:
+    ids = list(dict.fromkeys(str(value) for value in incident_ids if str(value)))
+    if not ids:
+        return
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("trigger receipt deadline")
+        atomic_json(
+            runtime_dir(cfg) / "trigger-committed.json",
+            {"at": iso(), "incident_ids": ids, "status": "committed"},
+        )
+        if time.monotonic() >= deadline:
+            raise TimeoutError("trigger receipt deadline")
+    except (OSError, TimeoutError) as exc:
+        _record_committed_receipt_debt(
+            cfg,
+            ids,
+            f"committed_receipt_pending:{type(exc).__name__}:{exc}",
+            deadline=deadline,
+        )
+
+
+def _retry_committed_receipt(cfg: Mapping[str, Any], deadline: float) -> None:
+    global _TRIGGER_DEADLINE
+    previous_deadline = _TRIGGER_DEADLINE
+    _TRIGGER_DEADLINE = deadline
+    try:
+        _receipt_guard(deadline)
+        pending: dict[str, tuple[list[str], Path | None]] = {}
+        debt_dir = runtime_dir(cfg) / "trigger-receipt-debts"
+        _receipt_guard(deadline)
+        debt_paths: list[Path] = []
+        if debt_dir.is_dir():
+            for path in debt_dir.iterdir():
+                _receipt_guard(deadline)
+                if path.suffix == ".json":
+                    debt_paths.append(path)
+                if len(debt_paths) >= 32:
+                    break
+        for path in debt_paths:
+            payload = _receipt_read_json(path, deadline)
+            ids = payload.get("incident_ids") if isinstance(payload, Mapping) else None
+            debt_id = str(payload.get("debt_id") or path.stem) if isinstance(payload, Mapping) else path.stem
+            if isinstance(ids, list) and ids and str(payload.get("status")) != "resolved":
+                pending[debt_id] = ([str(value) for value in ids], path)
+        legacy = _receipt_read_json(runtime_dir(cfg) / "trigger-receipt-debt.json", deadline)
+        if isinstance(legacy, Mapping) and isinstance(legacy.get("incident_ids"), list) and str(legacy.get("status")) != "resolved":
+            debt_id = str(legacy.get("debt_id") or "trigger_receipt:" + digest(*legacy["incident_ids"]))
+            pending.setdefault(debt_id, ([str(value) for value in legacy["incident_ids"]], runtime_dir(cfg) / "trigger-receipt-debt.json"))
+        pending_rows: list[sqlite3.Row] = []
+        try:
+            _receipt_guard(deadline)
+            with memory(cfg) as mem:
+                _receipt_guard(deadline)
+                pending_rows = mem.execute(
+                    "SELECT debt_id,reason FROM controller_debt WHERE kind='trigger_receipt' AND "
+                    "(status='retry_pending' OR (status='resolved' AND reason LIKE '%projection_pending%')) "
+                    "ORDER BY updated_at LIMIT 32"
+                ).fetchall()
+                _receipt_guard(deadline)
+        except (sqlite3.Error, StartupMaintenanceDeferred):
+            pending_rows = []
+        for row in pending_rows:
+            marker = "incident_ids="
+            reason = str(row[1])
+            ids = [value for value in reason.split(marker, 1)[1].split(",") if value] if marker in reason else []
+            if ids:
+                pending.setdefault(str(row[0]), (ids, None))
+        if not pending:
+            return
+        ids = list(dict.fromkeys(value for values, _path in pending.values() for value in values))
+        _receipt_atomic_json(
+            runtime_dir(cfg) / "trigger-committed.json",
+            {"at": iso(), "incident_ids": ids, "status": "committed"},
+            deadline,
+        )
+        with memory(cfg) as mem:
+            stamp = iso()
+            for debt_id, (_ids, _path) in pending.items():
+                _receipt_guard(deadline)
+                durable_reason = "committed_receipt_complete|incident_ids=" + ",".join(_ids) + "|projection_pending"
+                updated = mem.execute(
+                    "UPDATE controller_debt SET status='resolved',reason=?,updated_at=? "
+                    "WHERE debt_id=? AND kind='trigger_receipt' AND status='retry_pending'",
+                    (durable_reason[:1000], stamp, debt_id),
+                ).rowcount
+                if not updated:
+                    mem.execute(
+                        "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(debt_id) DO NOTHING",
+                        (debt_id, "trigger_receipt", "resolved", durable_reason[:1000], stamp),
+                    )
+            _receipt_guard(deadline)
+            mem.commit()
+        resolved: list[str] = []
+        for debt_id, (_ids, path) in pending.items():
+            if path is None:
+                resolved.append(debt_id)
+                continue
+            target = path
+            _receipt_atomic_json(
+                target,
+                {"debt_id": debt_id, "incident_ids": _ids, "status": "resolved", "updated_at": iso()},
+                deadline,
+            )
+            resolved.append(debt_id)
+        if resolved:
+            with memory(cfg) as mem:
+                for debt_id in resolved:
+                    _receipt_guard(deadline)
+                    mem.execute(
+                        "UPDATE controller_debt SET reason='committed_receipt_complete',updated_at=? "
+                        "WHERE debt_id=? AND kind='trigger_receipt' AND status='resolved' AND reason LIKE '%projection_pending%'",
+                        (iso(), debt_id),
+                    )
+                _receipt_guard(deadline)
+                mem.commit()
+    except (OSError, TimeoutError, sqlite3.Error):
+        return
+    finally:
+        _TRIGGER_DEADLINE = previous_deadline
 
 
 def detect(cfg: Mapping[str, Any]) -> list[str]:
     global _LAST_EVIDENCE_CYCLE
     _LAST_EVIDENCE_CYCLE = {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
     budget = _new_evidence_budget(cfg)
-    trigger_created = _detect_trigger(cfg)
+    trigger_deadline = time.monotonic() + max(0.01, float(cfg["loop"].get("trigger_budget_ms", 100.0))) / 1000.0
+    _phase_heartbeat(cfg, "trigger_start")
+    floor = _bounded_floor_price(cfg, trigger_deadline)
+    trigger_created = _detect_trigger(cfg, trigger_deadline, floor)
+    if trigger_created:
+        _publish_trigger_receipt(cfg, trigger_created, trigger_deadline)
+    _phase_heartbeat(cfg, "trigger_committed", created=trigger_created)
+    receipt_deadline = time.monotonic() + max(0.01, float(cfg["loop"].get("receipt_budget_ms", 50.0))) / 1000.0
+    _retry_committed_receipt(cfg, receipt_deadline)
+    _phase_heartbeat(cfg, "evidence_start", created=trigger_created)
     # Both trigger connections are closed before this independent local
     # snapshot transaction begins.
-    _capture_hard_evidence(cfg, trigger_created, budget=budget)
+    evidence_summary = _capture_hard_evidence(cfg, trigger_created, budget=budget)
+    _phase_heartbeat(
+        cfg,
+        "evidence_deferred" if evidence_summary.get("deferred") else "evidence_committed",
+        created=trigger_created,
+        evidence_built=evidence_summary.get("built", []),
+        evidence_deferred=evidence_summary.get("deferred", []),
+    )
+    _phase_heartbeat(cfg, "maintenance_start", created=trigger_created)
+    maintenance_deadline = time.monotonic() + max(
+        0.001,
+        float(cfg["loop"].get("maintenance_budget_ms", cfg["loop"].get("detector_budget_ms", 200.0))) / 1000.0,
+    )
     try:
-        created = _detect_maintenance(cfg)
+        maintenance_result = _detect_maintenance(cfg, maintenance_deadline)
     except sqlite3.OperationalError as exc:
         if "interrupted" not in str(exc).lower():
             raise
-        _capture_hard_evidence(cfg, trigger_created, scan_all=True, budget=budget)
+        _capture_hard_evidence(cfg, trigger_created, budget=budget)
         return list(dict.fromkeys(trigger_created))
-    created.extend(trigger_created)
-    _capture_hard_evidence(cfg, created, scan_all=True, budget=budget)
+    maintenance_ids = list(maintenance_result)
+    created = list(dict.fromkeys([*maintenance_ids, *trigger_created]))
+    maintenance_deferred = bool(getattr(maintenance_result, "postcommit_deferred", False))
+    if maintenance_ids:
+        maintenance_receipt_deadline = time.monotonic() + max(
+            0.01, float(cfg["loop"].get("receipt_budget_ms", 50.0))
+        ) / 1000.0
+        _publish_trigger_receipt(cfg, maintenance_ids, maintenance_receipt_deadline)
+    _phase_heartbeat(
+        cfg,
+        "maintenance_committed",
+        created=created,
+        maintenance_created=maintenance_ids,
+        postcommit_deferred=maintenance_deferred,
+    )
+    _capture_hard_evidence(cfg, created, budget=budget)
     return list(dict.fromkeys(created))
 
 
@@ -2067,11 +2561,20 @@ def _budget_check(
     budget["bytes"] = max(int(budget.get("bytes", 0)), size)
 
 
+def _evidence_guard() -> None:
+    budget = _EVIDENCE_BUILD_CONTEXT
+    if budget is not None and time.monotonic() >= float(budget["deadline"]):
+        raise EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+
+
 def _apply_evidence_sql_budget(conn: sqlite3.Connection, budget: Mapping[str, Any] | None = None) -> None:
     budget = budget or _EVIDENCE_BUILD_CONTEXT
     if budget is None:
         return
-    remaining_ms = max(1, int((float(budget["deadline"]) - time.monotonic()) * 1000))
+    remaining = float(budget["deadline"]) - time.monotonic()
+    if remaining <= 0:
+        raise EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+    remaining_ms = max(1, int(remaining * 1000))
     conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
     conn.set_progress_handler(
         lambda: int(time.monotonic() >= float(budget["deadline"])),
@@ -2102,6 +2605,7 @@ def _reap_incomplete_generations(cfg: Mapping[str, Any], incident_id: str) -> No
         pass
     reap_after = max(0.0, float(cfg["loop"].get("evidence_generation_reap_age_seconds", 60)))
     for generation_dir in generations.iterdir():
+        _evidence_guard()
         if not generation_dir.is_dir() or generation_dir.name == pointer:
             continue
         if (generation_dir / "evidence.db").is_file() and (generation_dir / "manifest.json").is_file():
@@ -2387,6 +2891,7 @@ def _evidence_debt_id(incident_id: str) -> str:
 def _evidence_fingerprints(
     cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any]
 ) -> tuple[str, str, str, str]:
+    _evidence_guard()
     settings = cfg["loop"]
     config_payload = {
         "history_days": settings.get("history_days"),
@@ -2510,9 +3015,10 @@ def _evidence_fingerprints(
     return fingerprint, config_fp, capacity_fp, data_fp
 
 
-def _evidence_identity_fingerprints(
-    cfg: Mapping[str, Any], incident_id: str
+def _evidence_identity_fingerprints_inner(
+    cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any]
 ) -> tuple[str, str, str, str]:
+    _evidence_guard()
     settings = cfg["loop"]
     config_payload = {
         "history_days": settings.get("history_days"),
@@ -2526,23 +3032,45 @@ def _evidence_identity_fingerprints(
         "max_bytes": int(settings.get("evidence_max_bytes", 32 * 1024 * 1024)),
     }
     with memory(cfg) as mem:
+        _apply_evidence_sql_budget(mem, budget)
+        _evidence_guard()
         incident = mem.execute(
             "SELECT incident_id,position_id,crossing_evidence_id,held_token_id,evidence_revision,t_floor,detected_at "
             "FROM incidents WHERE incident_id=?",
             (incident_id,),
         ).fetchone()
+        _evidence_guard()
     if incident is None:
         raise KeyError(f"unknown incident {incident_id}")
-    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+    remaining = float(budget["deadline"]) - time.monotonic()
+    if remaining <= 0:
+        raise EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+    with open_ro(Path(str(cfg["paths"]["trades_db"])), timeout=remaining) as trades:
+        _apply_evidence_sql_budget(trades, budget)
+        _evidence_guard()
         position_row = trades.execute(
             "SELECT position_id,phase,city,target_date,temperature_metric,token_id,updated_at "
             "FROM position_current WHERE position_id=?",
             (str(incident["position_id"]),),
         ).fetchone()
+        _evidence_guard()
     data_fp = digest(json.dumps({"incident": dict(incident), "position": dict(position_row) if position_row else {}}, sort_keys=True, default=str), length=32)
     config_fp = digest(json.dumps(config_payload, sort_keys=True, default=str), length=32)
     capacity_fp = digest(json.dumps(capacity_payload, sort_keys=True, default=str), length=32)
     return digest(config_fp, capacity_fp, data_fp, length=32), config_fp, capacity_fp, data_fp
+
+
+def _evidence_identity_fingerprints(
+    cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any] | None = None
+) -> tuple[str, str, str, str]:
+    global _EVIDENCE_BUILD_CONTEXT
+    active = budget or _EVIDENCE_BUILD_CONTEXT or _new_evidence_budget(cfg)
+    previous = _EVIDENCE_BUILD_CONTEXT
+    _EVIDENCE_BUILD_CONTEXT = active
+    try:
+        return _evidence_identity_fingerprints_inner(cfg, incident_id, active)
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous
 
 
 def _has_capacity_failure_debt(cfg: Mapping[str, Any], incident_id: str) -> bool:
@@ -2689,7 +3217,7 @@ def _capture_pair_valid(
         return _evidence_pair_valid(cfg, incident_id)
 
 
-def _capture_hard_evidence(
+def _capture_hard_evidence_inner(
     cfg: Mapping[str, Any],
     incident_ids: Iterable[str] = (),
     *,
@@ -2698,34 +3226,50 @@ def _capture_hard_evidence(
 ) -> dict[str, Any]:
     global _EVIDENCE_BUILD_CONTEXT, _LAST_EVIDENCE_CYCLE
     budget = budget or _new_evidence_budget(cfg)
+    _evidence_guard()
     created_order = [str(value) for value in incident_ids if str(value)]
     candidates = set(created_order)
+    queue_limit = max(1, int(cfg["loop"].get("evidence_queue_batch_size", 32)))
+    queued_ids: list[str] = []
+    queue_cursor = 0
     with memory(cfg) as mem:
-        if scan_all:
-            rows = mem.execute(
-                "SELECT incident_id FROM incidents WHERE kind='hard'"
-            ).fetchall()
-            candidates.update(str(row[0]) for row in rows)
+        _evidence_guard()
+        try:
+            queue_cursor = max(0, int(meta_get(mem, "evidence_queue_cursor", "0")))
+            queued_ids = [str(value) for value in json.loads(meta_get(mem, "evidence_queue", "[]"))][:queue_limit]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            queued_ids = []
+        if scan_all or not queued_ids:
+            query = (
+                "SELECT incident_id FROM incidents WHERE kind='hard' "
+                "ORDER BY CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END, "
+                "priority DESC, detected_at DESC, incident_id LIMIT ? OFFSET ?"
+            )
+            queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, queue_cursor)).fetchall()]
+            if not queued_ids and queue_cursor:
+                queue_cursor = 0
+                queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, 0)).fetchall()]
+            meta_set(mem, "evidence_queue", json.dumps(queued_ids, separators=(",", ":")))
+            mem.commit()
+        candidates.update(queued_ids)
         debts = mem.execute(
-            "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending'"
+            "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
+            "ORDER BY updated_at DESC LIMIT ?", (queue_limit,)
         ).fetchall()
+        _evidence_guard()
         candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
     if not candidates:
         return {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
     with memory(cfg) as mem:
-        if scan_all:
-            rows = mem.execute(
-                "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard'"
-            ).fetchall()
-        else:
-            rows = []
-            candidate_list = list(candidates)
-            for offset in range(0, len(candidate_list), 900):
-                chunk = candidate_list[offset:offset + 900]
-                rows.extend(mem.execute(
-                    "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
-                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
-                ).fetchall())
+        _evidence_guard()
+        rows = []
+        candidate_list = list(candidates)
+        for offset in range(0, len(candidate_list), 900):
+            chunk = candidate_list[offset:offset + 900]
+            rows.extend(mem.execute(
+                "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
+                f"({','.join('?' for _ in chunk)})", tuple(chunk)
+            ).fetchall())
     positions: dict[str, dict[str, Any]] = {}
     try:
         with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
@@ -2761,7 +3305,9 @@ def _capture_hard_evidence(
         )
     ordered = sorted(row_by_id, key=priority)
     summary = {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
+    resolved_queue: set[str] = set()
     for incident_id in ordered:
+        _evidence_guard()
         _reap_incomplete_generations(cfg, incident_id)
         try:
             pair_valid = _capture_pair_valid(cfg, incident_id, budget)
@@ -2776,6 +3322,7 @@ def _capture_hard_evidence(
             continue
         if pair_valid:
             _resolve_evidence_debt(cfg, incident_id)
+            resolved_queue.add(incident_id)
             continue
         summary["validated"] += 1
         has_failure_debt = _has_capacity_failure_debt(cfg, incident_id)
@@ -2783,7 +3330,7 @@ def _capture_hard_evidence(
             summary["deferred"].append(incident_id)
             continue
         if not has_failure_debt and int(budget["remaining"]) <= 0:
-            fingerprints = _evidence_identity_fingerprints(cfg, incident_id)
+            fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
             _record_evidence_debt(
                 cfg,
                 incident_id,
@@ -2794,7 +3341,7 @@ def _capture_hard_evidence(
             summary["deferred"].append(incident_id)
             continue
         if not has_failure_debt and time.monotonic() >= float(budget["deadline"]):
-            fingerprints = _evidence_identity_fingerprints(cfg, incident_id)
+            fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
             _record_evidence_debt(
                 cfg,
                 incident_id,
@@ -2805,6 +3352,7 @@ def _capture_hard_evidence(
             summary["deferred"].append(incident_id)
             continue
         try:
+            _evidence_guard()
             fingerprints = _evidence_fingerprints(cfg, incident_id, budget)
         except Exception as exc:
             _record_evidence_debt(
@@ -2855,15 +3403,46 @@ def _capture_hard_evidence(
             _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
         else:
             _resolve_evidence_debt(cfg, incident_id)
+            resolved_queue.add(incident_id)
         finally:
             _EVIDENCE_BUILD_CONTEXT = None
+    if queued_ids and resolved_queue:
+        _evidence_guard()
+        with memory(cfg) as mem:
+            remaining = [value for value in queued_ids if value not in resolved_queue]
+            meta_set(mem, "evidence_queue", json.dumps(remaining, separators=(",", ":")))
+            if len(remaining) == 0:
+                meta_set(mem, "evidence_queue_cursor", str(queue_cursor + len(queued_ids)))
+            mem.commit()
     summary["bytes"] = int(budget.get("bytes", 0))
+    _evidence_guard()
     _LAST_EVIDENCE_CYCLE["built"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("built", []), *summary["built"]]))
     _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *summary["deferred"]]))
     _LAST_EVIDENCE_CYCLE["attempted"] = int(_LAST_EVIDENCE_CYCLE.get("attempted", 0)) + int(summary["attempted"])
     _LAST_EVIDENCE_CYCLE["validated"] = int(_LAST_EVIDENCE_CYCLE.get("validated", 0)) + int(summary["validated"])
     _LAST_EVIDENCE_CYCLE["bytes"] = max(int(_LAST_EVIDENCE_CYCLE.get("bytes", 0)), int(summary["bytes"]))
     return summary
+
+
+def _capture_hard_evidence(
+    cfg: Mapping[str, Any],
+    incident_ids: Iterable[str] = (),
+    *,
+    scan_all: bool = False,
+    budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the whole evidence slice under one absolute deadline."""
+
+    global _EVIDENCE_BUILD_CONTEXT
+    budget = budget or _new_evidence_budget(cfg)
+    previous = _EVIDENCE_BUILD_CONTEXT
+    _EVIDENCE_BUILD_CONTEXT = budget
+    try:
+        return _capture_hard_evidence_inner(
+            cfg, incident_ids, scan_all=scan_all, budget=budget
+        )
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous
 
 
 def _active_loaded_sha(cfg: Mapping[str, Any]) -> str | None:
@@ -3002,14 +3581,19 @@ def _copy_runtime_health(out: sqlite3.Connection) -> None:
         "market_channel": ROOT / "state" / "market-channel-continuity.json",
     }
     for name, path in candidates.items():
+        _budget_check(conn=out)
         payload = read_json(path, None)
         if payload is not None:
+            _budget_check(conn=out, extra_bytes=len(json.dumps(payload, default=str).encode()))
             observed = payload.get("at") or payload.get("observed_at") or payload.get("timestamp") if isinstance(payload, Mapping) else None
             out.execute("INSERT INTO daemon_health VALUES (?,?,?)", (name, observed, json.dumps(payload, default=str)))
 
 
 def _copy_versions_and_config(cfg: Mapping[str, Any], out: sqlite3.Connection) -> None:
-    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False)
+    _budget_check(conn=out)
+    budget = _EVIDENCE_BUILD_CONTEXT
+    timeout = max(0.01, float(budget["deadline"]) - time.monotonic()) if budget is not None else 5.0
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout)
     out.execute("INSERT INTO code_versions VALUES (?,?,?,?)", ("repo_head", proc.stdout.strip(), str(ROOT), iso()))
     loaded_path = Path(str(cfg["paths"]["trades_db"])).parent / "loaded_sha.json"
     loaded = read_json(loaded_path, {})
@@ -3022,6 +3606,7 @@ def _copy_versions_and_config(cfg: Mapping[str, Any], out: sqlite3.Connection) -
                 ("live_loaded", loaded_sha, str(loaded_path), loaded_at or iso()),
             )
     for name, path in (("loop", Path(str(cfg.get("_config_path") or CONFIG_PATH))), ("settings", Path(str(cfg["paths"]["settings"])))):
+        _budget_check(conn=out)
         try:
             raw = path.read_bytes()
         except OSError:
@@ -3031,7 +3616,9 @@ def _copy_versions_and_config(cfg: Mapping[str, Any], out: sqlite3.Connection) -
             value: Any = {key: parsed.get(key) for key in ("execution", "edli_v1", "monitor") if isinstance(parsed, Mapping) and key in parsed}
         else:
             value = raw.decode(errors="replace")
-        out.execute("INSERT INTO config_snapshot VALUES (?,?,?)", (name, json.dumps(value, default=str), hashlib.sha256(raw).hexdigest()))
+        raw_json = json.dumps(value, default=str)
+        _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
+        out.execute("INSERT INTO config_snapshot VALUES (?,?,?)", (name, raw_json, hashlib.sha256(raw).hexdigest()))
 
 
 DIAGNOSIS_SCHEMA: dict[str, Any] = {
@@ -4257,6 +4844,17 @@ def _startup_sql_budget(conn: sqlite3.Connection) -> None:
 def _startup_guard() -> None:
     if _STARTUP_BUDGET is not None and time.monotonic() >= float(_STARTUP_BUDGET["deadline"]):
         raise StartupMaintenanceDeferred("startup_maintenance_deferred:time_budget")
+
+
+@contextmanager
+def _sqlite_deadline(conn: sqlite3.Connection, deadline: float):
+    remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+    conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
+    conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    try:
+        yield conn
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
 def _startup_run_metadata(path: Path) -> dict[str, Any]:
@@ -6076,7 +6674,7 @@ def poll_runs(
 
 def _bootstrap_memory_version(cfg: Mapping[str, Any]) -> None:
     try:
-        with memory(cfg) as mem:
+        with memory(cfg, allow_schema_migration=True) as mem:
             code = _run_capture(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
             _startup_guard()
             config_hash = _startup_hash_file(Path(str(cfg.get("_config_path") or CONFIG_PATH)))
