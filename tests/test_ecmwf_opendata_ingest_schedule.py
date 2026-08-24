@@ -1,6 +1,6 @@
 # Created: 2026-05-23
-# Last reused/audited: 2026-05-23
-# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=2026-05-23
+# Last reused/audited: 2026-08-24
+# Lifecycle: created=2026-05-23; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Authority basis: a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md
 # Purpose: Regression antibody — ECMWF OpenData cron triggers must fire after safe_fetch windows for both 00z and 12z cycles.
 # Reuse: Run when forecast_live_daemon.py cron schedule or source_release_calendar.yaml safe_fetch lag changes.
@@ -32,6 +32,34 @@ import pytest
 
 from src.data.ecmwf_open_data import SOURCE_ID as ECMWF_SOURCE_ID
 from src.data.release_calendar import get_entry, cycle_profile_for_hour
+
+
+def test_safe_cycle_poll_detects_release_within_one_minute():
+    """Safe-fetch remains the gate; post-release detection is bounded to 60s."""
+
+    from src.ingest import forecast_live_daemon as daemon
+
+    specs = daemon.forecast_live_job_specs(
+        startup_run_date=datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)
+    )
+    poll_specs = [
+        (trigger, kwargs)
+        for _fn, trigger, kwargs in specs
+        if kwargs.get("id") == daemon.FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID
+    ]
+
+    assert poll_specs == [
+        (
+            "interval",
+            {
+                "seconds": 60,
+                "id": daemon.FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 120,
+            },
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

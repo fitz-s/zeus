@@ -159,7 +159,12 @@ REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 1
 REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
 _replacement_forecast_last_discovery_revision: tuple[object, ...] | None = None
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
-FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
+# Publication is the causal edge for time-sensitive market entry. The release
+# calendar still fails closed before safe_fetch_at; polling once per minute only
+# bounds the post-release detection delay instead of donating up to five minutes
+# of executable alpha to the market. Source-run journaling keeps repeated polls
+# idempotent after a cycle commits.
+FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
