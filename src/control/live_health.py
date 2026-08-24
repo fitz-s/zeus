@@ -20,6 +20,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
@@ -42,6 +43,18 @@ from src.contracts.strategy_capital_allocation import (
 logger = logging.getLogger(__name__)
 
 STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat budget
+# The health job runs every 60 seconds. Its child must finish materially before
+# that cadence so ``max_instances=1`` cannot preserve a blocked scan forever.
+COMPOSITE_COMPUTE_TIMEOUT_SECONDS = 45.0
+_COMPOSITE_STATE_DIR_ENV = "ZEUS_LIVE_HEALTH_COMPOSITE_STATE_DIR"
+_COMPOSITE_CHILD_CODE = (
+    "import os; from pathlib import Path; "
+    "from src.control.live_health import compute_composite_live_health; "
+    "from src.observability.status_summary import write_cycle_pulse; "
+    "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}); "
+    "compute_composite_live_health("
+    f"state_dir=Path(os.environ[{_COMPOSITE_STATE_DIR_ENV!r}]))"
+)
 FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS = STATUS_FRESH_BUDGET_SECONDS
 DAY0_DECISION_TRACE_LOOKBACK_SECONDS = 3600
 DAY0_DECISION_TRACE_SAMPLE_LIMIT = 50
@@ -134,6 +147,87 @@ def _state_dir(override: Optional[Path]) -> Path:
         return override
     from src.config import state_path
     return state_path("dummy").parent
+
+
+def _write_composite_result(state_dir: Path, result: dict) -> None:
+    """Atomically replace the composite receipt with one complete result."""
+
+    out_path = state_dir / "live_health_composite.json"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(result, f, indent=2, sort_keys=True)
+            os.replace(tmp, str(out_path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        logger.exception("live_health_composite: write failed")
+        raise
+
+
+def _persist_composite_compute_failure(state_dir: Path, issue: str) -> dict:
+    """Replace an old healthy receipt when the isolated compute cannot finish."""
+
+    result = {
+        "healthy": False,
+        "status": "DEGRADED",
+        "failing_surfaces": ["composite_compute"],
+        "surfaces": {"composite_compute": {"ok": False, "issue": issue}},
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_composite_result(state_dir, result)
+    return result
+
+
+def refresh_composite_live_health_bounded(
+    *,
+    state_dir: Optional[Path] = None,
+    timeout_seconds: float = COMPOSITE_COMPUTE_TIMEOUT_SECONDS,
+) -> dict:
+    """Run the composite pulse and compute in a killable one-shot child.
+
+    SCOPE: only the composite observability calculation and its pulse.
+    DRAIN: the parent kills/reaps a timed-out child and the next 60-second job
+    invocation starts a fresh child. RESET: a zero-exit child publishes its
+    normal full result; failure replaces any old healthy receipt with degraded
+    evidence.
+    """
+
+    sd = _state_dir(state_dir)
+    child_env = os.environ.copy()
+    child_env[_COMPOSITE_STATE_DIR_ENV] = str(sd)
+    command = [sys.executable, "-c", _COMPOSITE_CHILD_CODE]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(_repo_root()),
+            check=False,
+            timeout=timeout_seconds,
+            env=child_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        issue = f"COMPOSITE_COMPUTE_TIMEOUT:{timeout_seconds:.1f}s"
+        _persist_composite_compute_failure(sd, issue)
+        # subprocess.run kills and reaps the child before raising, so the next
+        # APScheduler invocation cannot inherit a DB-scanning worker.
+        raise RuntimeError(issue) from exc
+    if completed.returncode != 0:
+        issue = f"COMPOSITE_COMPUTE_CHILD_EXIT:{completed.returncode}"
+        _persist_composite_compute_failure(sd, issue)
+        raise RuntimeError(issue)
+
+    result = _read_json(sd / "live_health_composite.json")
+    if result is None:
+        issue = "COMPOSITE_COMPUTE_CHILD_NO_RESULT"
+        _persist_composite_compute_failure(sd, issue)
+        raise RuntimeError(issue)
+    return result
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -7708,25 +7802,6 @@ def compute_composite_live_health(
         "computed_at": now.isoformat(),
     }
 
-    # ------------------------------------------------------------------ #
-    # Persist atomically                                                   #
-    # ------------------------------------------------------------------ #
-    out_path = sd / "live_health_composite.json"
-    try:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(result, f, indent=2, sort_keys=True)
-            os.replace(tmp, str(out_path))
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-    except Exception:
-        logger.exception("live_health_composite: write failed")
-        raise
+    _write_composite_result(sd, result)
 
     return result

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-05-15; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -175,6 +175,9 @@ def _healthy_state(root: Path) -> None:
             "cycle": {
                 "mode": "opening_hunt",
                 "risk_level": "GREEN",
+                "candidates": 1,
+                "no_trades": 1,
+                "top_no_trade_reasons": {"fixture_no_trade": 1},
                 "ws_user_channel": {"connected": True, "subscription_state": "SUBSCRIBED"},
                 "block_registry": [],
             },
@@ -561,6 +564,9 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
     module = _load_module()
     root = tmp_path / "zeus"
     _healthy_state(root)
+    status = json.loads((root / "state" / "status_summary.json").read_text())
+    status["cycle"].update({"failed": True, "failure_reason": "health_cycle_timeout"})
+    _write_json(root / "state" / "status_summary.json", status)
     _write_json(
         root / "state" / "live_health_composite.json",
         {
@@ -592,8 +598,96 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
 
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
-    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_IN_PROGRESS_NO_COMPLETED_AT" in out
+    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
     assert "flags=all_healthy" not in out
+
+
+def test_live_probe_alerts_on_stale_composite_and_direct_business_failure(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    status = json.loads((root / "state" / "status_summary.json").read_text())
+    status["cycle"].update({"failed": True, "failure_reason": "health_cycle_timeout"})
+    _write_json(root / "state" / "status_summary.json", status)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": True,
+            "status": "HEALTHY",
+            "computed_at": "2026-01-01T00:00:00+00:00",
+            "failing_surfaces": [],
+            "surfaces": surfaces,
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_HEALTH_COMPOSITE_STALE=" in out
+    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
+
+
+def test_bounded_composite_timeout_replaces_healthy_receipt_and_allows_next_cycle(
+    tmp_path, monkeypatch
+):
+    from src.control import live_health
+
+    state_dir = tmp_path / "state"
+    _write_json(
+        state_dir / "live_health_composite.json",
+        {
+            "healthy": True,
+            "status": "HEALTHY",
+            "computed_at": "2026-01-01T00:00:00+00:00",
+            "failing_surfaces": [],
+            "surfaces": {},
+        },
+    )
+    calls = []
+
+    def timed_out_child(command, **kwargs):
+        calls.append((command, kwargs))
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(live_health.subprocess, "run", timed_out_child)
+
+    errors = []
+    for _ in range(2):
+        try:
+            live_health.refresh_composite_live_health_bounded(state_dir=state_dir)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    assert errors == ["COMPOSITE_COMPUTE_TIMEOUT:45.0s"] * 2
+    assert len(calls) == 2
+    assert all(
+        call[1]["timeout"] == live_health.COMPOSITE_COMPUTE_TIMEOUT_SECONDS
+        for call in calls
+    )
+    receipt = json.loads((state_dir / "live_health_composite.json").read_text())
+    assert receipt["healthy"] is False
+    assert receipt["status"] == "DEGRADED"
+    assert receipt["failing_surfaces"] == ["composite_compute"]
+    assert receipt["surfaces"]["composite_compute"]["issue"] == "COMPOSITE_COMPUTE_TIMEOUT:45.0s"
 
 
 def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(

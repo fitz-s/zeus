@@ -2076,11 +2076,9 @@ def _live_health_composite_cycle() -> None:
     ):
         return
 
-    from src.control.live_health import compute_composite_live_health
-    from src.observability.status_summary import write_cycle_pulse
+    from src.control.live_health import refresh_composite_live_health_bounded
 
-    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
-    compute_composite_live_health()
+    refresh_composite_live_health_bounded()
 
 
 def _status_summary_refresh_can_defer() -> bool:
