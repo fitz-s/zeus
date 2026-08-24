@@ -3361,6 +3361,59 @@ class OpportunityEventReactor:
                 # consume the event the way mark_processed would. There is NO
                 # attempt cap — the event requeues until a horizon terminal fires.
                 last_reason = self._last_transient_requeue_reason(event)
+                is_winner_target = str(event.source or "").startswith(
+                    "global_auction_winner_target:"
+                )
+                if is_winner_target and not _is_explicitly_transient_money_path_reason(
+                    last_reason
+                ):
+                    # GLOBAL_WINNER_CLAIM_FENCE_LOST incident (2026-08-17,
+                    # x205/14.26h): before that ONE reason base was registered
+                    # TERMINAL (commit 0a187736a, 2026-08-20), it fail-opened
+                    # TRANSIENT here (_is_transient_money_path_reason's UNKNOWN-
+                    # base default) and this carrier's sentinel
+                    # (GLOBAL_WINNER_TARGETED_CLAIM) was restored below —
+                    # immediately re-electable, re-losing the same gate, with no
+                    # backoff. That fail-open trap is a property of ANY
+                    # unregistered reason reaching a winner-target carrier, not
+                    # of that one string alone (gate 3/5's default
+                    # GLOBAL_PREFLIGHT_BATCH_BLOCKED fallthrough and the
+                    # GLOBAL_REAUCTION_*_UNSTABLE reauction-exhaustion verdicts
+                    # sit in the identical trap). SCOPE: a winner-target carrier
+                    # whose rejection reason is not EXPLICITLY registered
+                    # transient. DRAIN: terminalize this exact carrier via the
+                    # same regret/dead-letter path a registered-TERMINAL reason
+                    # already takes upstream — never requeue it. RESET: a fresh
+                    # producer/redecision carrier has a new event_id and
+                    # competes in the next auction under current truth; a
+                    # genuinely transient cause must be added to
+                    # TRANSIENT_MONEY_PATH_REASONS to requeue instead.
+                    self._transient_requeue_reasons.pop(event.event_id, None)
+                    self._transient_requeue_counts.pop(event.event_id, None)
+                    reason_label = (
+                        f"GLOBAL_WINNER_TARGET_UNREGISTERED_REASON:{last_reason}"
+                    )
+                    self._reject_event(
+                        event,
+                        "EXECUTOR_EXPRESSIBILITY",
+                        reason_label,
+                        result,
+                        decision_time=decision_time,
+                    )
+                    self._store.mark_dead_letter(
+                        event,
+                        failure_stage="GLOBAL_WINNER_TARGET_UNREGISTERED_REASON",
+                        error_message=(
+                            "winner-target carrier terminalized: rejection reason "
+                            f"{last_reason!r} is not explicitly registered transient "
+                            "— requeuing would re-arm this exact carrier for "
+                            "re-election with zero backoff (the "
+                            "GLOBAL_WINNER_CLAIM_FENCE_LOST livelock class)."
+                        ),
+                        created_at=decision_time.astimezone(UTC).isoformat(),
+                    )
+                    result.dead_lettered += 1
+                    return
                 retry_not_before = None
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
@@ -3393,9 +3446,7 @@ class OpportunityEventReactor:
                 self._note_transient_requeue(event)
                 processing_error = (
                     GLOBAL_WINNER_TARGETED_CLAIM
-                    if str(event.source or "").startswith(
-                        "global_auction_winner_target:"
-                    )
+                    if is_winner_target
                     else last_reason
                 )
                 if claim_generation and claim_attempt_count is not None:
@@ -4973,6 +5024,18 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # after that substrate advances.  The wrapper is itself the stable reactor
     # reason; inner telemetry are intentionally more specific and variable.
     "GLOBAL_FAMILY_INELIGIBLE",
+    # An UNEXPECTED exception (a code fault, not a gate verdict) crashed the
+    # whole global batch after claiming (event_reactor_adapter's
+    # process_global_batch, wrapped at reactor.py's claimed-event finalizer).
+    # This is a bug/infra-fault class, not an economic rejection of any one
+    # carrier: every claimed event in the batch gets this SAME wrapper
+    # regardless of its own merits, and the reason text is an arbitrary
+    # exception type+message, never a stable finite string a table could
+    # register meaningfully. Requeue — a live positive-EV carrier must not be
+    # silently burned by an infra hiccup or a transient bug; a genuinely
+    # persistent fault keeps failing and surfaces through monitoring/alerts,
+    # not through consuming the opportunity.
+    "GLOBAL_BATCH_FAILED",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -5099,6 +5162,18 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # in a complete current q/book/wealth auction without weakening the fence.
     "GLOBAL_WINNER_CLAIM_FENCE_LOST",
     "global_increment_binding",
+    # SCOPE: a winner carrier whose in-batch bounded reauction (market-
+    # authority or probability supersession, global_batch_runtime.py's
+    # _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS) exhausted its attempt
+    # cap without converging on a stable current cut. Exhaustion of a bounded
+    # retry is a genuine terminal verdict for THIS carrier, not a race to
+    # requeue — requeueing would re-attempt the exact reauction that just
+    # proved unstable, with no new evidence. DRAIN: terminalize this carrier;
+    # the reauction loop itself already tried the bounded number of times.
+    # RESET: a fresh producer/redecision carrier has a new event_id and
+    # competes in the next complete current q/book/wealth auction.
+    "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE",
+    "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE",
 })
 
 
@@ -5297,49 +5372,70 @@ def _global_auction_economic_no_trade_is_terminal(reason: str) -> bool:
     )
 
 
+def _classify_money_path_reason(reason: str | None) -> tuple[bool | None, str]:
+    """Shared core for the two money-path transient predicates below.
+
+    Returns ``(classification, effective_reason)``: ``classification`` is
+    True/False when ``reason``'s base is EXPLICITLY registered in
+    TRANSIENT_MONEY_PATH_REASONS / TERMINAL_MONEY_PATH_REASONS (recursing
+    through a transparent batch wrapper or the certificate-build-failed
+    sub-classifier as needed); it is ``None`` when the base is UNKNOWN to
+    both tables. ``effective_reason`` is the innermost reason actually
+    evaluated (after unwrapping any transparent wrapper) — the two callers
+    use it to agree on exactly which base was unregistered.
+
+    Decision order (mirrors the transient/terminal tables' contract):
+      1. Empty/None                                    -> (False, "").
+      2. ANY ':'-delimited segment in
+         TRANSIENT_MONEY_PATH_REASONS                   -> (True, reason).
+      3. Transparent batch wrapper                      -> recurse on inner.
+      4. EDLI_LIVE_CERTIFICATE_BUILD_FAILED:*            -> named sub-classifier.
+      5. base in TERMINAL_MONEY_PATH_REASONS             -> (False, reason).
+      6. UNKNOWN base                                    -> (None, reason).
+    """
+    if not reason:
+        return False, reason or ""
+    if _global_auction_economic_no_trade_is_terminal(reason):
+        return False, reason
+    # (2) Any nested transient segment wins (explicit segment membership).
+    segments = [seg.strip() for seg in reason.split(":")]
+    if any(seg in TRANSIENT_MONEY_PATH_REASONS for seg in segments):
+        return True, reason
+    base = _money_path_reason_base(reason)
+    if base in _TRANSPARENT_MONEY_PATH_REASON_WRAPPERS:
+        inner = reason.partition(":")[2].strip()
+        return _classify_money_path_reason(inner)
+    if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
+        return _certificate_build_failed_is_transient(reason), reason
+    if base in TERMINAL_MONEY_PATH_REASONS:
+        return False, reason
+    return None, reason
+
+
 def _is_transient_money_path_reason(reason: str | None) -> bool:
     """Classify a money-path rejection reason as TRANSIENT (requeue) vs TERMINAL
     (consume), via an EXPLICIT reactor-owned table — never substring soup.
 
-    Decision order:
-      1. Empty/None              -> TERMINAL (no reason to requeue).
-      2. ANY ':'-delimited segment in TRANSIENT_MONEY_PATH_REASONS -> TRANSIENT.
-         A reason can be a CHAIN where a transient cause is nested in a terminal-
-         looking wrapper, e.g.
-         "LIVE_INFERENCE_INPUTS_MISSING:...:SOURCE_CAPTURED_AFTER_DECISION_TIME":
-         a transient cause ANYWHERE in the chain means "re-decide on a fresh
-         substrate" and wins. This is an EXPLICIT segment membership check, not a
-         substring scan — each segment is matched against the closed transient set.
-      3. Transparent batch wrapper -> classify its inner reason.
-      4. EDLI_LIVE_CERTIFICATE_BUILD_FAILED:* -> named sub-classifier
-         (would_cross_book / db-lock = TRANSIENT; else TERMINAL).
-      5. base in TERMINAL_MONEY_PATH_REASONS  -> TERMINAL.
+    Decision order: see ``_classify_money_path_reason``, plus:
       6. UNKNOWN base -> LOUD log + default TRANSIENT (fail-open to requeue).
          A renamed/misspelled reason must never silently terminal-burn a
          live-positive-EV event; the loud log is the antibody that gets the
          table fixed. The event still terminalizes correctly later via an
          EVENT-HORIZON terminal (timeliness floor / operator disarm), so
          fail-open does not leak — it just refuses to BURN on a string typo.
+
+    NOTE: fail-open here means "requeue", not "the winner-target carrier stays
+    rediscoverable forever" — see ``_is_explicitly_transient_money_path_reason``
+    for the stricter predicate the global-winner sentinel-restoration gate uses
+    (``_finalize_disposition``), which does NOT fail open.
     """
-    if not reason:
-        return False
-    if _global_auction_economic_no_trade_is_terminal(reason):
-        return False
-    # (2) Any nested transient segment wins (explicit segment membership).
-    segments = [seg.strip() for seg in reason.split(":")]
-    if any(seg in TRANSIENT_MONEY_PATH_REASONS for seg in segments):
-        return True
-    base = _money_path_reason_base(reason)
-    if base in _TRANSPARENT_MONEY_PATH_REASON_WRAPPERS:
-        inner = reason.partition(":")[2].strip()
-        return _is_transient_money_path_reason(inner)
-    if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
-        return _certificate_build_failed_is_transient(reason)
-    if base in TERMINAL_MONEY_PATH_REASONS:
-        return False
+    classified, effective_reason = _classify_money_path_reason(reason)
+    if classified is not None:
+        return classified
     # UNKNOWN reason base — fail open to TRANSIENT, loudly. Dedup per-base
     # per-process (reuse the unregistered-base warn set so a flood of one renamed
     # reason logs once, not every cycle).
+    base = _money_path_reason_base(effective_reason)
     if base not in _UNREGISTERED_REJECTION_BASES_WARNED:
         _UNREGISTERED_REJECTION_BASES_WARNED.add(base)
         import logging as _logging
@@ -5349,9 +5445,33 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
             "table — defaulting TRANSIENT (fail-open requeue). Add it to "
             "TRANSIENT_MONEY_PATH_REASONS or TERMINAL_MONEY_PATH_REASONS. Full reason: %s",
             base,
-            reason,
+            effective_reason,
         )
     return True
+
+
+def _is_explicitly_transient_money_path_reason(reason: str | None) -> bool:
+    """True only when ``reason`` is EXPLICITLY registered TRANSIENT — never via
+    the fail-open UNKNOWN-base default that ``_is_transient_money_path_reason``
+    resolves to True.
+
+    GLOBAL_WINNER_CLAIM_FENCE_LOST incident (2026-08-17, ×205/14.26h): before
+    that reason base was registered TERMINAL (commit 0a187736a, 2026-08-20),
+    an UNKNOWN-base rejection on a ``global_auction_winner_target:*`` carrier
+    fail-opened TRANSIENT here, and ``_finalize_disposition``
+    (reactor.py, sentinel restoration) then re-armed that exact carrier's
+    rediscoverability (``last_error=GLOBAL_WINNER_TARGETED_CLAIM``) with zero
+    backoff — a livelock: reclaim, re-elect, re-lose the gate, repeat. Gate 1
+    (the CAS fence) was fixed by registering its specific reason base, but the
+    fail-open trap is a property of ANY unregistered reason reaching a
+    winner-target carrier, not of that one string — gates 3/5's default
+    ``GLOBAL_PREFLIGHT_BATCH_BLOCKED`` fallthrough and the ``_UNSTABLE``
+    reauction-exhaustion reasons sit in the identical trap today. Closing it
+    at this one chokepoint (the sentinel-restoration gate only re-arms a
+    winner-target carrier for an EXPLICITLY registered transient reason)
+    covers the whole class instead of enumerating every gate's string.
+    """
+    return _classify_money_path_reason(reason)[0] is True
 
 
 # ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Reason BASES that mean "this
