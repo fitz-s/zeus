@@ -41,6 +41,7 @@ from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
     align_day0_hourly_vectors_on_common_causal_grid,
+    build_day0_remaining_probability_carrier,
     fetch_day0_hourly_vectors,
     parse_openmeteo_hourly_payload,
     persist_day0_hourly_vectors,
@@ -62,6 +63,357 @@ UTC = timezone.utc
 # retention test still pins a target-day `now` so its 9-day-old "ancient" row is
 # correctly pruned and the fresh row is kept.
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_shared_remaining_carrier_has_coherent_500_rows_and_identity(metric):
+    future = [31.0 + (index % 5) * 0.25 for index in range(29)]
+    scenarios = ((33.0, 0.95), (None, 0.05)) if metric == "high" else ((29.0, 0.95), (None, 0.05))
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=future,
+        boundary_scenarios=scenarios,
+        metric=metric,
+        path_error_sigma_c=0.35,
+        instrument_sigma_c=0.25,
+        bin_bounds_c=[(None, 30), (31, 32), (33, None)],
+        n_point=1000,
+        n_samples=500,
+        identity_inputs={"city": "Tel Aviv", "unit": "C", "prior": "same_station_preliminary_report_survival_likelihood_v1"},
+    )
+    assert carrier["sample_count"] == 500
+    assert len(carrier["samples"]) == 500
+    assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
+    assert sum(carrier["q"]) == pytest.approx(1.0)
+    assert carrier["content_identity"] == build_day0_remaining_probability_carrier(
+        future_extremes_c=reversed(future),
+        boundary_scenarios=scenarios,
+        metric=metric,
+        path_error_sigma_c=0.35,
+        instrument_sigma_c=0.25,
+        bin_bounds_c=[(None, 30), (31, 32), (33, None)],
+        n_point=1000,
+        n_samples=500,
+        identity_inputs={"city": "Tel Aviv", "unit": "C", "prior": "same_station_preliminary_report_survival_likelihood_v1"},
+    )["content_identity"]
+
+
+@pytest.mark.parametrize(
+    ("identity", "bounds", "error"),
+    (
+        ({"city": "Tel Aviv", "unit": "K"}, [(None, 30), (31, None)], "DAY0_REMAINING_CARRIER_UNIT_INVALID"),
+        ({"city": "Tel Aviv", "unit": "C"}, [(None, 30), (32, None)], "DAY0_REMAINING_CARRIER_BIN_GAP_OR_OVERLAP"),
+        ({"city": "Tel Aviv", "unit": "C"}, [(None, 31), (31, None)], "DAY0_REMAINING_CARRIER_BIN_GAP_OR_OVERLAP"),
+        ({"city": "Tel Aviv", "unit": "C"}, [(None, None)], "DAY0_REMAINING_CARRIER_OPEN_OPEN_BIN_INVALID"),
+    ),
+)
+def test_shared_remaining_carrier_rejects_invalid_settlement_topology(identity, bounds, error):
+    with pytest.raises(ValueError, match=error):
+        build_day0_remaining_probability_carrier(
+            future_extremes_c=[31.0, 32.0],
+            boundary_scenarios=((33.0, 0.95), (None, 0.05)),
+            metric="high",
+            path_error_sigma_c=0.25,
+            instrument_sigma_c=0.25,
+            bin_bounds_c=bounds,
+            n_point=10,
+            n_samples=500,
+            identity_inputs=identity,
+        )
+
+
+def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
+    """The monitor-side replay must consume the materializer's exact carrier."""
+    import src.engine.event_reactor_adapter as era
+    from src.config import ensemble_n_mc, runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.types.temperature import TemperatureDelta
+
+    city = runtime_cities_by_name()["Tel Aviv"]
+    future = tuple(31.0 + (index % 5) * 0.25 for index in range(29))
+    cutoff = "2026-08-24T09:30:00+00:00"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "src.signal.ensemble_signal.sigma_instrument_for_city",
+        lambda _city: TemperatureDelta(0.25, "C"),
+    )
+    try:
+        expected = build_day0_remaining_probability_carrier(
+            future_extremes_c=future,
+            boundary_scenarios=((33.0, 0.95), (None, 1.0 - 0.95)),
+            metric="high",
+            path_error_sigma_c=float(np.std(np.asarray(future), ddof=0)),
+            instrument_sigma_c=0.25,
+            bin_bounds_c=[(None, 30), (31, 31), (32, 32), (33, None)],
+            n_point=ensemble_n_mc(),
+            n_samples=500,
+            identity_inputs={
+                "city": "Tel Aviv",
+                "unit": "C",
+                "probability_cutoff_utc": cutoff,
+                "preliminary_survival_identity": "priorhash",
+            },
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 33.0,
+            "settlement_source": "aviationweather_metar",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_probability_boundary_native": 33.0,
+            "_edli_day0_provisional_boundary_survival_probability": 0.95,
+            "_edli_day0_provisional_revision_likelihood": {
+                "identity_hash": "priorhash",
+                "boundary_survival_probability": 0.95,
+            },
+            "_edli_day0_probability_operator": expected["operator"],
+            "_edli_day0_remaining_probability_sample_count": 500,
+            "_edli_day0_remaining_probability_samples": expected["samples"],
+            "_edli_day0_remaining_carrier_future_extremes_c": list(future),
+            "_edli_day0_remaining_carrier_path_error_sigma_c": float(np.std(np.asarray(future), ddof=0)),
+            "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
+            "_edli_day0_remaining_carrier_q": expected["q"],
+            "_edli_day0_remaining_content_identity": expected["content_identity"],
+        }
+        replay = era._day0_remaining_p_raw_vector(
+            np.asarray(future),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[
+                Bin(None, 30, "C", "30C or below"),
+                Bin(31, 31, "C", "31C"),
+                Bin(32, 32, "C", "32C"),
+                Bin(33, None, "C", "33C or above"),
+            ],
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+        assert replay.tolist() == pytest.approx(expected["q"])
+        assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
+        assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
+        assert 1.0 - float(replay[-1]) < 0.16
+        assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
+        assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
+        assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
+        assert payload["_edli_day0_remaining_probability_sample_count"] == 500
+        likelihood_mismatch = dict(payload)
+        likelihood_mismatch["_edli_day0_provisional_revision_likelihood"] = {
+            **payload["_edli_day0_provisional_revision_likelihood"],
+            "boundary_survival_probability": 0.94,
+        }
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISMATCH"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 30, "C", "30C or below"),
+                    Bin(31, 31, "C", "31C"),
+                    Bin(32, 32, "C", "32C"),
+                    Bin(33, None, "C", "33C or above"),
+                ],
+                payload=likelihood_mismatch,
+                extra_member_sigma=0.0,
+            )
+        missing_vector = dict(payload)
+        missing_vector.pop("_edli_day0_remaining_carrier_future_extremes_c")
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 30, "C", "30C or below"),
+                    Bin(31, 31, "C", "31C"),
+                    Bin(32, 32, "C", "32C"),
+                    Bin(33, None, "C", "33C or above"),
+                ],
+                payload=missing_vector,
+                extra_member_sigma=0.0,
+            )
+        missing_likelihood = dict(payload)
+        missing_likelihood.pop("_edli_day0_provisional_revision_likelihood")
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISSING"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 30, "C", "30C or below"),
+                    Bin(31, 31, "C", "31C"),
+                    Bin(32, 32, "C", "32C"),
+                    Bin(33, None, "C", "33C or above"),
+                ],
+                payload=missing_likelihood,
+                extra_member_sigma=0.0,
+            )
+        payload["_edli_day0_remaining_probability_samples"] = [
+            [0.0, 1.0, 0.0, 0.0], *expected["samples"][1:]
+        ]
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_MISMATCH"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 30, "C", "30C or below"),
+                    Bin(31, 31, "C", "31C"),
+                    Bin(32, 32, "C", "32C"),
+                    Bin(33, None, "C", "33C or above"),
+                ],
+                payload=payload,
+                extra_member_sigma=0.0,
+            )
+        payload["_edli_day0_remaining_probability_samples"] = expected["samples"]
+        payload["_edli_day0_remaining_carrier_q"] = [0.0, 0.0, 0.0, 1.0]
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_Q_MISMATCH"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(future),
+                city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[
+                    Bin(None, 30, "C", "30C or below"),
+                    Bin(31, 31, "C", "31C"),
+                    Bin(32, 32, "C", "32C"),
+                    Bin(33, None, "C", "33C or above"),
+                ],
+                payload=payload,
+                extra_member_sigma=0.0,
+            )
+        for field, label in (
+            ("_edli_day0_remaining_content_identity", "IDENTITY"),
+            ("_edli_day0_remaining_carrier_q", "Q"),
+            ("_edli_day0_remaining_probability_samples", "SAMPLES"),
+            ("_edli_day0_remaining_probability_sample_count", "SAMPLE_COUNT"),
+            ("_edli_day0_remaining_carrier_probability_cutoff_utc", "CUTOFF"),
+            ("_edli_day0_remaining_carrier_future_extremes_c", "VECTOR"),
+            ("_edli_day0_remaining_carrier_path_error_sigma_c", "PATH_SIGMA"),
+            ("_edli_day0_provisional_revision_likelihood", "LIKELIHOOD"),
+            ("_edli_day0_probability_operator", "OPERATOR"),
+        ):
+            missing = dict(payload)
+            missing.pop(field, None)
+            with pytest.raises(
+                ValueError,
+                match=f"DAY0_NOAA_PRELIMINARY_CARRIER_{label}_MISSING",
+            ):
+                era._day0_remaining_p_raw_vector(
+                    np.asarray(future),
+                    city=city,
+                    settlement_semantics=SettlementSemantics.for_city(city),
+                    bins=[
+                        Bin(None, 30, "C", "30C or below"),
+                        Bin(31, 31, "C", "31C"),
+                        Bin(32, 32, "C", "32C"),
+                        Bin(33, None, "C", "33C or above"),
+                    ],
+                    payload=missing,
+                    extra_member_sigma=0.0,
+                )
+    finally:
+        monkeypatch.undo()
+
+
+def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
+    import src.engine.event_reactor_adapter as era
+    from src.config import ensemble_n_mc, runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    city = runtime_cities_by_name()["Atlanta"]
+    future_c = tuple(20.0 + (index % 5) * 0.25 for index in range(29))
+    future_f = tuple(value * (9.0 / 5.0) + 32.0 for value in future_c)
+    cutoff = "2026-08-24T09:30:00+00:00"
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    real_sigma = sigma_instrument_for_city(city)
+    assert real_sigma.unit == "F"
+    assert real_sigma.value == pytest.approx(0.5)
+    try:
+        expected = build_day0_remaining_probability_carrier(
+            future_extremes_c=future_f,
+            boundary_scenarios=((80.0, 0.95), (None, 1.0 - 0.95)),
+            metric="high",
+            path_error_sigma_c=float(np.std(np.asarray(future_c), ddof=0)) * 9.0 / 5.0,
+            instrument_sigma_c=0.5,
+            bin_bounds_c=[(None, 79), (80, 81), (82, 83), (84, None)],
+            n_point=ensemble_n_mc(),
+            n_samples=500,
+            identity_inputs={
+                "city": "Atlanta",
+                "unit": "F",
+                "probability_cutoff_utc": cutoff,
+                "preliminary_survival_identity": "priorhash-f",
+            },
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 80.0,
+            "settlement_source": "aviationweather_metar",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_probability_boundary_native": 80.0,
+            "_edli_day0_provisional_boundary_survival_probability": 0.95,
+            "_edli_day0_provisional_revision_likelihood": {
+                "identity_hash": "priorhash-f",
+                "boundary_survival_probability": 0.95,
+            },
+            "_edli_day0_probability_operator": expected["operator"],
+            "_edli_day0_remaining_probability_sample_count": 500,
+            "_edli_day0_remaining_probability_samples": expected["samples"],
+            "_edli_day0_remaining_carrier_future_extremes_c": list(future_c),
+            "_edli_day0_remaining_carrier_path_error_sigma_c": float(np.std(np.asarray(future_c), ddof=0)),
+            "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
+            "_edli_day0_remaining_carrier_q": expected["q"],
+            "_edli_day0_remaining_content_identity": expected["content_identity"],
+        }
+        replay = era._day0_remaining_p_raw_vector(
+            np.asarray(future_c),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[
+                Bin(None, 79, "F", "79F or below"),
+                Bin(80, 81, "F", "80-81F"),
+                Bin(82, 83, "F", "82-83F"),
+                Bin(84, None, "F", "84F or above"),
+            ],
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+        assert replay.tolist() == pytest.approx(expected["q"])
+        assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
+        assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
+    finally:
+        pass
+
+
+def test_day0_redecision_conditioning_copies_shared_carrier_fields():
+    import src.engine.event_reactor_adapter as era
+
+    samples = [[1.0, 0.0], [0.0, 1.0]]
+    bundle = SimpleNamespace(
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "metric": "high",
+                "unit": "C",
+            },
+            "day0_remaining_carrier_content_identity": "identity",
+            "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+            "day0_remaining_carrier_probability_samples": samples,
+            "day0_remaining_carrier_sample_count": 2,
+            "day0_remaining_carrier_future_extremes_c": [31.0, 32.0],
+            "day0_remaining_carrier_path_error_sigma_c": 0.25,
+            "day0_remaining_carrier_probability_cutoff_utc": "2026-08-24T09:30:00+00:00",
+        }
+    )
+    conditioning = era._day0_replacement_conditioning(
+        bundle,
+        provisional=True,
+        metric="high",
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 10, 0, tzinfo=UTC),
+        entry_authority=False,
+    )
+    assert conditioning["day0_remaining_carrier_content_identity"] == "identity"
+    assert conditioning["day0_remaining_carrier_probability_samples"] == samples
+    assert conditioning["day0_remaining_carrier_future_extremes_c"] == [31.0, 32.0]
 
 
 def test_live_hourly_fetch_persists_real_possession_clock_and_identity(

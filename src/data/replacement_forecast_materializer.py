@@ -1210,6 +1210,155 @@ def _day0_remaining_center_delta_c(
         return 0.0, None, None
 
 
+def _day0_noaa_preliminary_carrier(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    future_members_c: Sequence[float] | None,
+    bins: Sequence[object],
+    path_error_sigma_c: float,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Build the NOAA preliminary shared remaining-day carrier.
+
+    NOAA/AWC preliminary reports are a statistical boundary only.  The strict
+    same-station prior supplies the survival weight; the no-survival branch
+    leaves the future path unclamped.  Missing evidence or future members is a
+    family-scoped failure, never permission to use a full-day Normal.
+    """
+    source = str(request.day0_observed_extreme_source or "").strip().lower()
+    if not source.startswith("aviationweather_metar"):
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_INVALID")
+    observed = _day0_observed_extreme_c(request)
+    if observed is None:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_BOUNDARY_MISSING")
+    if future_members_c is None or len(future_members_c) == 0:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING")
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+    from src.data.day0_observation_reader import (
+        same_station_preliminary_report_survival_likelihood,
+    )
+    from src.config import ensemble_n_mc
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    city = runtime_cities_by_name().get(request.city)
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    if city is None or not station:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_STATION_MISSING")
+    likelihood = same_station_preliminary_report_survival_likelihood(
+        conn,
+        city=request.city,
+        station_id=station,
+        timezone_name=request.city_timezone,
+        target_date=_date_text(request.target_date),
+        temperature_metric=metric,
+        decision_time=_to_utc(request.computed_at, field_name="computed_at"),
+    )
+    survival = float(likelihood["boundary_survival_probability"])
+    if not 0.0 < survival < 1.0:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SURVIVAL_INVALID")
+    bounds = [
+        (
+            None if getattr(item, "lower_c", None) is None else float(item.lower_c),
+            None if getattr(item, "upper_c", None) is None else float(item.upper_c),
+        )
+        for item in bins
+    ]
+    carrier_unit = str(getattr(city, "settlement_unit", "C") or "C").strip().upper()
+    if carrier_unit not in {"C", "F"}:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
+    native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
+    native_offset = 0.0 if carrier_unit == "C" else 32.0
+    future_members_native = tuple(
+        float(value) * native_scale + native_offset for value in future_members_c
+    )
+    native_boundary_scenarios = tuple(
+        (
+            None if boundary is None else float(boundary) * native_scale + native_offset,
+            float(weight),
+        )
+        for boundary, weight in ((float(observed), survival), (None, 1.0 - survival))
+    )
+    native_bounds = tuple(
+        (
+            None if low is None else float(low) * native_scale + native_offset,
+            None if high is None else float(high) * native_scale + native_offset,
+        )
+        for low, high in bounds
+    )
+    instrument_sigma_native = float(
+        sigma_instrument_for_city(city).to(carrier_unit).value
+    )
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=future_members_native,
+        boundary_scenarios=native_boundary_scenarios,
+        metric=metric,
+        path_error_sigma_c=float(path_error_sigma_c) * native_scale,
+        instrument_sigma_c=instrument_sigma_native,
+        bin_bounds_c=native_bounds,
+        n_point=ensemble_n_mc(),
+        n_samples=500,
+        identity_inputs={
+            "city": request.city,
+            "unit": carrier_unit,
+            "preliminary_survival_identity": str(likelihood["identity_hash"]),
+            "probability_cutoff_utc": _to_utc(
+                request.computed_at, field_name="computed_at"
+            ).isoformat(),
+        },
+    )
+    return carrier, likelihood
+
+
+def _day0_noaa_future_vector_members(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> tuple[tuple[float, ...], float, str]:
+    """Read the exact complete hourly bundle at the materialization cutoff."""
+    observation_time = _day0_observed_extreme_time(request)
+    if observation_time is None:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_OBSERVATION_TIME_MISSING")
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        day0_hourly_models_for_city,
+        read_freshest_day0_hourly_vectors,
+        remaining_day_extremes_c,
+    )
+    city = runtime_cities_by_name().get(request.city)
+    if city is None:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CITY_MISSING")
+    cutoff = _to_utc(request.computed_at, field_name="computed_at")
+    expected = tuple(day0_hourly_models_for_city(city))
+    vectors = read_freshest_day0_hourly_vectors(
+        city=request.city,
+        target_date=_date_text(request.target_date),
+        now=cutoff,
+        expected_models=expected,
+        require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=observation_time,
+        require_complete_remaining_window=True,
+        conn=conn,
+    )
+    future = tuple(
+        float(value)
+        for value in remaining_day_extremes_c(
+            vectors,
+            target_date=_date_text(request.target_date),
+            now=cutoff,
+            metric=metric,
+            window_start=observation_time,
+        )
+    )
+    if not future:
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING")
+    return future, float(np.std(np.asarray(future), ddof=0)), cutoff.isoformat()
+
+
 def _day0_remaining_vector_witness(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -5625,6 +5774,9 @@ def _compute_posterior_payload(
     _day0_remaining_witness: dict[str, object] | None = None
     _fast_residual_likelihood: object | None = None
     _fast_residual_likelihood_payload: dict[str, object] | None = None
+    _day0_shared_carrier: dict[str, object] | None = None
+    _day0_shared_carrier_likelihood: dict[str, object] | None = None
+    _provisional_extreme_c: float | None = None
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -5636,15 +5788,22 @@ def _compute_posterior_payload(
             # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
+            _noaa_preliminary_source = str(
+                request.day0_observed_extreme_source or ""
+            ).strip().lower().startswith("aviationweather_metar")
             _day0_obs_extreme_c = (
-                _day0_absorbing_observed_extreme_c(request)
-                if _target_local_day_has_started(request)
-                else None
+                None
+                if _noaa_preliminary_source
+                else (
+                    _day0_absorbing_observed_extreme_c(request)
+                    if _target_local_day_has_started(request)
+                    else None
+                )
             )
             _provisional_extreme_c = (
                 _day0_observed_extreme_c(request)
                 if _target_local_day_has_started(request)
-                and _day0_obs_extreme_c is None
+                and (_day0_obs_extreme_c is None or _noaa_preliminary_source)
                 else None
             )
             if (
@@ -5710,6 +5869,30 @@ def _compute_posterior_payload(
                 if _current_shape is not None
                 else "fused_center_residual_std"
             )
+            if (
+                _provisional_extreme_c is not None
+                and str(request.day0_observed_extreme_source or "")
+                .strip()
+                .lower()
+                .startswith("aviationweather_metar")
+            ):
+                _carrier_future, _carrier_path_sigma, _carrier_cutoff = (
+                    _day0_noaa_future_vector_members(conn, request, metric=metric)
+                )
+                _day0_shared_carrier, _day0_shared_carrier_likelihood = (
+                    _day0_noaa_preliminary_carrier(
+                        conn,
+                        request,
+                        metric=metric,
+                        future_members_c=_carrier_future,
+                        bins=request.bins,
+                        path_error_sigma_c=_carrier_path_sigma,
+                    )
+                )
+                if not str(
+                    _day0_shared_carrier_likelihood.get("identity_hash") or ""
+                ):
+                    raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISSING")
             # C3 CALIBRATION SURFACE (2026-06-12) — FITTED σ_pred scale (k) + uniform-mixture (w).
             # OPERATOR LAW 2026-06-12: the correction factor must be FITTED by math, never hand-set.
             # k and w are read from state/sigma_scale_fit.json (MLE over settled cells; only
@@ -5869,21 +6052,40 @@ def _compute_posterior_payload(
                 _floor_value = float(_floor_steps) * float(request.settlement_step_c)
                 if math.isfinite(_floor_value) and _floor_value > _sigma_after_k:
                     sigma_floor_steps_applied = float(_floor_steps)
-            q_global, _capped_global, _uniform_applied_global = _build_scaled_normal_uniform_q(
-                mu=_mu_anchor,
-                sigma_pred=_sigma_pred_raw,
-                k=_k,
-                uniform_w=_uniform_w,
-                floor_steps=_floor_steps,
-                bins=request.bins,
-                half_step=_half_step,
-                rounding_rule=_rounding_rule,
-                day0_obs_extreme_c=_day0_obs_extreme_c,
-                settlement_step_c=float(request.settlement_step_c),
-                settlement_sigma_floor_c=settlement_sigma_floor_c,
-                city_unit=_city_unit,
-                metric=metric,
-            )
+            if _day0_shared_carrier is None:
+                q_global, _capped_global, _uniform_applied_global = _build_scaled_normal_uniform_q(
+                    mu=_mu_anchor,
+                    sigma_pred=_sigma_pred_raw,
+                    k=_k,
+                    uniform_w=_uniform_w,
+                    floor_steps=_floor_steps,
+                    bins=request.bins,
+                    half_step=_half_step,
+                    rounding_rule=_rounding_rule,
+                    day0_obs_extreme_c=_day0_obs_extreme_c,
+                    settlement_step_c=float(request.settlement_step_c),
+                    settlement_sigma_floor_c=settlement_sigma_floor_c,
+                    city_unit=_city_unit,
+                    metric=metric,
+                )
+            else:
+                carrier_q = tuple(float(value) for value in _day0_shared_carrier["q"])
+                carrier_samples = tuple(
+                    tuple(float(value) for value in row)
+                    for row in _day0_shared_carrier["samples"]
+                )
+                if (
+                    len(carrier_q) != len(request.bins)
+                    or len(carrier_samples) != 500
+                    or any(len(row) != len(request.bins) for row in carrier_samples)
+                ):
+                    raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SHAPE_INVALID")
+                q_global = {
+                    str(item.bin_id): carrier_q[index]
+                    for index, item in enumerate(request.bins)
+                }
+                q = q_global
+                q_shape = "day0_remaining_shared_carrier_v1"
             if set(q_global) != set(q):
                 raise ValueError(
                     f"fused-q bin keys != soft-anchor q keys ({sorted(q_global)[:3]}... vs "
@@ -5907,7 +6109,7 @@ def _compute_posterior_payload(
             # city (k_eb, floor) so its bounds integrate at the matching predictive width.
             _city_cand = (
                 None
-                if _current_shape is not None
+                if _current_shape is not None or _day0_shared_carrier is not None
                 else _replacement_city_candidate_lookup(
                     _city_unit, getattr(request, "city", None)
                 )
@@ -5980,19 +6182,23 @@ def _compute_posterior_payload(
             # edge confidence, and downstream CVaR all describe one probability
             # world.  Serving global-only draws beside a city-mixed q is forbidden.
             try:
-                _lcb_g, _ucb_g, _samples_g = _build_fused_q_bounds(
-                    mu_star=_mu_anchor,
-                    center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
-                    predictive_sigma_c=_sigma_used,
-                    bins=request.bins,
-                    half_step=_half_step,
-                    q_point=q_global,
-                    rounding_rule=_rounding_rule,
-                    day0_observed_extreme_c=_day0_obs_extreme_c,
-                    day0_metric=metric,
-                    evidence_members_c=_finite_evidence_members_c,
-                    return_samples=True,
-                )
+                if _day0_shared_carrier is not None:
+                    _lcb_g = _ucb_g = {}
+                    _samples_g = {}
+                else:
+                    _lcb_g, _ucb_g, _samples_g = _build_fused_q_bounds(
+                        mu_star=_mu_anchor,
+                        center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
+                        predictive_sigma_c=_sigma_used,
+                        bins=request.bins,
+                        half_step=_half_step,
+                        q_point=q_global,
+                        rounding_rule=_rounding_rule,
+                        day0_observed_extreme_c=_day0_obs_extreme_c,
+                        day0_metric=metric,
+                        evidence_members_c=_finite_evidence_members_c,
+                        return_samples=True,
+                    )
                 if _city_sigma_used is not None and _city_rho > 0.0:
                     _lcb_c, _ucb_c, _samples_c = _build_fused_q_bounds(
                         mu_star=_mu_anchor,
@@ -6075,6 +6281,38 @@ def _compute_posterior_payload(
                     )
                 except Exception:
                     pass
+            if _day0_shared_carrier is not None:
+                q_shape = "day0_remaining_shared_carrier_v1"
+                carrier_q = {
+                    str(item.bin_id): float(_day0_shared_carrier["q"][index])
+                    for index, item in enumerate(request.bins)
+                }
+                carrier_samples_by_bin = {
+                    str(item.bin_id): [
+                        float(row[index])
+                        for row in _day0_shared_carrier["samples"]
+                    ]
+                    for index, item in enumerate(request.bins)
+                }
+                q = carrier_q
+                q_lcb_map = {
+                    key: float(np.percentile(values, 5.0))
+                    for key, values in carrier_samples_by_bin.items()
+                }
+                q_ucb_map = {
+                    key: float(np.percentile(values, 95.0))
+                    for key, values in carrier_samples_by_bin.items()
+                }
+                q_lcb_map = {
+                    key: min(max(value, 0.0), q[key])
+                    for key, value in q_lcb_map.items()
+                }
+                q_ucb_map = {
+                    key: max(value, q[key])
+                    for key, value in q_ucb_map.items()
+                }
+                q_bootstrap_samples_by_bin = carrier_samples_by_bin
+                q_lcb_basis = _QLCB_BASIS
             if (
                 _fast_residual_likelihood is not None
                 and _provisional_extreme_c is not None
@@ -6157,6 +6395,16 @@ def _compute_posterior_payload(
                 )
             except Exception:
                 pass
+    if (
+        _target_local_day_has_started(request)
+        and _day0_observed_extreme_c(request) is not None
+        and str(request.day0_observed_extreme_source or "")
+        .strip()
+        .lower()
+        .startswith("aviationweather_metar")
+        and _day0_shared_carrier is None
+    ):
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNAVAILABLE")
     bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
@@ -6185,10 +6433,17 @@ def _compute_posterior_payload(
         == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
     ):
         posterior_config["day0_observation_state"] = request.day0_observation_state
+    _posterior_noaa_preliminary_source = str(
+        request.day0_observed_extreme_source or ""
+    ).strip().lower().startswith("aviationweather_metar")
     _posterior_day0_observed_extreme_c = (
-        _day0_absorbing_observed_extreme_c(request)
-        if _target_local_day_has_started(request)
-        else None
+        None
+        if _posterior_noaa_preliminary_source
+        else (
+            _day0_absorbing_observed_extreme_c(request)
+            if _target_local_day_has_started(request)
+            else None
+        )
     )
     _posterior_day0_provisional_extreme_c = (
         _day0_observed_extreme_c(request)
@@ -6352,6 +6607,38 @@ def _compute_posterior_payload(
         "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
         "q_point_json_role": "live_point_probability",
         "q_shape": q_shape,
+        **(
+            {
+                "day0_remaining_carrier_content_identity": str(
+                    _day0_shared_carrier["content_identity"]
+                ),
+                "day0_remaining_carrier_operator": str(
+                    _day0_shared_carrier["operator"]
+                ),
+                "day0_remaining_carrier_q": [
+                    float(value) for value in _day0_shared_carrier["q"]
+                ],
+                "day0_remaining_carrier_sample_count": int(
+                    _day0_shared_carrier["sample_count"]
+                ),
+                "day0_remaining_carrier_probability_samples": [
+                    [float(value) for value in row]
+                    for row in _day0_shared_carrier["samples"]
+                ],
+                "day0_remaining_carrier_future_extremes_c": [
+                    float(value) for value in _carrier_future
+                ],
+                "day0_remaining_carrier_path_error_sigma_c": float(
+                    _carrier_path_sigma
+                ),
+                "day0_remaining_carrier_probability_cutoff_utc": _carrier_cutoff,
+                "day0_preliminary_report_survival_likelihood": dict(
+                    _day0_shared_carrier_likelihood or {}
+                ),
+            }
+            if _day0_shared_carrier is not None
+            else {}
+        ),
         # FIX 1 (2026-06-09): explicit q-mode authority — the live gate reads THIS, not the q_shape
         # string. FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit.
         "replacement_q_mode": replacement_q_mode,

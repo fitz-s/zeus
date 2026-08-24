@@ -37,6 +37,7 @@ from src.data.day0_observation_reader import (
     hko_rollover_carryover_status,
     read_day0_observation_context_from_instants,
     read_day0_observed_extrema,
+    same_station_preliminary_report_survival_likelihood,
 )
 
 
@@ -1424,3 +1425,32 @@ class TestGapSuspect:
         )
         assert result.gap_suspect_metrics == ()
         assert result.coverage_status == COVERAGE_LOW  # 2 rows < 6
+
+
+def test_noaa_preliminary_survival_uses_only_prior_later_same_report_confirmation():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT, fetched_at_utc TEXT,
+        raw_report TEXT)""")
+    rows = (
+        (1, "aviationweather_metar", "2026-08-20T09:20:00+00:00", 33.0, "2026-08-20T09:21:00+00:00", "METAR LLBG 200920Z 00000KT 9999 SKC 33/20 Q1010"),
+        (2, "ogimet_metar_llbg", "2026-08-20T09:20:00+00:00", 33.0, "2026-08-20T09:25:00+00:00", "METAR LLBG 200920Z 00000KT 9999 SKC 33/20 Q1010"),
+        (3, "aviationweather_metar", "2026-08-21T09:20:00+00:00", 34.0, "2026-08-21T09:21:00+00:00", "METAR LLBG 210920Z 00000KT 9999 SKC 34/20 Q1010"),
+        (4, "ogimet_metar_llbg", "2026-08-21T09:20:00+00:00", 33.0, "2026-08-21T09:25:00+00:00", "METAR LLBG 210920Z 00000KT 9999 SKC 33/20 Q1010"),
+        # Future relative to the cut: cannot enter either numerator or denominator.
+        (5, "ogimet_metar_llbg", "2026-08-24T09:20:00+00:00", 35.0, "2026-08-24T09:40:00+00:00", "METAR LLBG 240920Z 00000KT 9999 SKC 35/20 Q1010"),
+        # The raw valid time is after the cut even though publication/fetch are before it.
+        (6, "aviationweather_metar", "2026-08-23T09:20:00+00:00", 35.0, "2026-08-23T09:21:00+00:00", "METAR LLBG 240920Z 00000KT 9999 SKC 35/20 Q1010"),
+    )
+    conn.executemany("INSERT INTO observation_prints VALUES (?, 'Tel Aviv', 'LLBG', ?, ?, ?, 'C', ?, ?)", rows)
+    result = same_station_preliminary_report_survival_likelihood(
+        conn, city="Tel Aviv", station_id="LLBG", timezone_name="Asia/Jerusalem",
+        target_date="2026-08-24", temperature_metric="high",
+        decision_time=datetime(2026, 8, 24, 9, 30, tzinfo=timezone.utc),
+    )
+    assert len(result["successes"]) == 1
+    assert len(result["failures"]) == 1
+    assert result["unconfirmed_awc_ids"] == []
+    assert result["boundary_survival_probability"] == pytest.approx(1.5 / 3.0)
+    assert result["identity_hash"]
