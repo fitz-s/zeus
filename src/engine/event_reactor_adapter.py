@@ -36363,6 +36363,7 @@ def _prepare_current_global_probability_family(
     provisional_day0_observation = False
     post_local_incomplete_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
+    physical_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
     probability_conditioning_is_provisional = False
     physical_frontier_requires_confirmation = False
@@ -36724,17 +36725,30 @@ def _prepare_current_global_probability_family(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
             if probability_conditioning_is_provisional:
+                # The provisional replacement posterior is conditioned on the
+                # physical Day0 source clock.  Keep the settlement-channel
+                # fact above for final/settlement authority; only the fast
+                # residual route is identified by its statistical fact.
+                provisional_identity_fact = (
+                    provisional_day0_fact
+                    if fast_residual_conditioning is not None
+                    else physical_day0_fact
+                )
                 _assert_provisional_day0_replacement_bundle(
                     bundle,
                     {
-                        "settlement_source": (provisional_day0_fact or {}).get(
+                        "settlement_source": (
+                            provisional_identity_fact or {}
+                        ).get(
                             "observation_source"
                         ),
-                        "observation_time": (provisional_day0_fact or {}).get(
+                        "observation_time": (
+                            provisional_identity_fact or {}
+                        ).get(
                             "observation_time"
                         ),
                         "observed_extreme_native": (
-                            provisional_day0_fact or {}
+                            provisional_identity_fact or {}
                         ).get("observed_extreme_native"),
                         "settlement_unit": getattr(city, "settlement_unit", "C"),
                     },
@@ -36943,9 +36957,30 @@ def _prepare_current_global_probability_family(
                         },
                     )
                 else:
+                    physical_value = (physical_day0_fact or {}).get(
+                        "observed_extreme_native"
+                    )
+                    physical_identity_payload = dict(current_day0_payload)
+                    physical_identity_payload.update(
+                        {
+                            "settlement_source": (
+                                physical_day0_fact or {}
+                            ).get("observation_source"),
+                            "observation_time": (
+                                physical_day0_fact or {}
+                            ).get("observation_time"),
+                            "observed_extreme_native": physical_value,
+                            "raw_value": physical_value,
+                            (
+                                "high_so_far"
+                                if str(family.metric).strip().lower() == "high"
+                                else "low_so_far"
+                            ): physical_value,
+                        }
+                    )
                     _assert_provisional_day0_replacement_bundle(
                         bundle,
-                        current_day0_payload,
+                        physical_identity_payload,
                     )
             if bundle is not None:
                 predictive_sigma_c = _amber_inflated_predictive_sigma_c(
