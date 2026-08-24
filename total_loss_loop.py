@@ -101,12 +101,44 @@ def runtime_dir(cfg: Mapping[str, Any]) -> Path:
     return Path(str(cfg["paths"]["runtime"]))
 
 
-def open_ro(path: Path) -> sqlite3.Connection:
+class _ClosingConnection:
+    """Transparent SQLite proxy whose context exit also releases the FD."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_closed", False)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"_conn", "_closed"}:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._conn.close()
+            object.__setattr__(self, "_closed", True)
+
+    def __enter__(self) -> "_ClosingConnection":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        try:
+            self._conn.__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+        return False
+
+
+def open_ro(path: Path) -> _ClosingConnection:
     conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=2.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=2000")
-    return conn
+    return _ClosingConnection(conn)
 
 
 def floor_price(cfg: Mapping[str, Any]) -> float:
@@ -297,7 +329,7 @@ CREATE TABLE IF NOT EXISTS loop_versions (
 """
 
 
-def memory(cfg: Mapping[str, Any]) -> sqlite3.Connection:
+def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
     path = runtime_dir(cfg) / "memory.db"
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5.0)
@@ -331,16 +363,16 @@ def memory(cfg: Mapping[str, Any]) -> sqlite3.Connection:
         "CREATE INDEX idx_incident_queue "
         "ON incidents(status,stage,kind,priority DESC,detected_at)"
     )
-    return conn
+    return _ClosingConnection(conn)
 
 
-def memory_ro(cfg: Mapping[str, Any]) -> sqlite3.Connection:
+def memory_ro(cfg: Mapping[str, Any]) -> _ClosingConnection:
     path = runtime_dir(cfg) / "memory.db"
     conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=2.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=2000")
-    return conn
+    return _ClosingConnection(conn)
 
 
 def transition(

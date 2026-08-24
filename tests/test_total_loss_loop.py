@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-08-22; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
 """Relationship antibodies for the event-time total-loss loop."""
@@ -103,6 +103,28 @@ def _forecast_db(path: Path) -> None:
             );
             """
         )
+
+
+def test_sqlite_factories_close_on_context_exit(cfg: dict) -> None:
+    connections = (
+        loop.open_ro(Path(cfg["paths"]["trades_db"])),
+        loop.memory(cfg),
+        loop.memory_ro(cfg),
+    )
+    for connection in connections:
+        with connection as active:
+            active.execute("SELECT 1").fetchone()
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
+
+
+def test_sqlite_factories_close_after_context_exception(cfg: dict) -> None:
+    connection = loop.memory(cfg)
+    with pytest.raises(RuntimeError, match="boom"):
+        with connection:
+            raise RuntimeError("boom")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
 
 
 @pytest.fixture
