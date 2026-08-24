@@ -151,6 +151,7 @@ _market_channel_bootstrap_connections: set[object] = set()
 MARKET_CHANNEL_BOOTSTRAP_READ_DEADLINE_SECONDS = 55.0
 MARKET_CHANNEL_BOOTSTRAP_RUNNER_DRAIN_SECONDS = 5.0
 MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS = 10.0
+CANONICAL_HELD_IDENTITY_DEBT_PREFIX = "canonical_held_identity_"
 _market_channel_universe_reload_lock = threading.Lock()
 _market_channel_universe_reload_generation: str | None = None
 _market_channel_universe_reload_deadline: float | None = None
@@ -2880,6 +2881,15 @@ def _m5_authority_deadline_check(deadline_monotonic: float) -> None:
         raise TimeoutError("m5_authority_proof_deadline_exhausted")
 
 
+def _edli_market_channel_universe_m5_failure_reason() -> str | None:
+    with _market_channel_bootstrap_lock:
+        universe_debt = _market_channel_universe_refresh_debt
+    reason = str((universe_debt or {}).get("reason", ""))
+    if reason.startswith(CANONICAL_HELD_IDENTITY_DEBT_PREFIX):
+        return CANONICAL_HELD_IDENTITY_DEBT_PREFIX.rstrip("_")
+    return None
+
+
 def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     """Run the bounded M5 user-channel/reconcile authority proof.
 
@@ -3135,7 +3145,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         if conn is not None:
             conn.close()
 
-    return {
+    result = {
         "scheduler_failed": False,
         "status": "m5_authority_proof_complete",
         "fill_authority": "user_channel_or_reconcile_only",
@@ -3143,6 +3153,14 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         "user_channel_messages": message_count,
         "venue_reconciliations": reconcile_count,
     }
+    # A registered sink is not canonical-ready if the current held identity
+    # could not be materialized.  Keep the daemon's canonical heartbeat in
+    # STARTING until the next M5 runs after that exact debt is drained.
+    universe_failure_reason = _edli_market_channel_universe_m5_failure_reason()
+    if universe_failure_reason:
+        result["scheduler_failed"] = True
+        result["scheduler_failure_reason"] = universe_failure_reason
+    return result
 
 
 def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
@@ -4237,6 +4255,20 @@ def _edli_canonical_open_held_token_ids(trade_conn) -> set[str]:
     }
 
 
+def _edli_canonical_held_metadata_gaps(
+    canonical_held_pairs: set[tuple[str, str]],
+    token_metadata: dict,
+) -> set[tuple[str, str]]:
+    """Return canonical held identities absent or mismatched in a refresh result."""
+
+    return {
+        (condition_id, token_id)
+        for condition_id, token_id in canonical_held_pairs
+        if token_id not in token_metadata
+        or str(getattr(token_metadata[token_id], "condition_id", "")) != condition_id
+    }
+
+
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
@@ -5243,43 +5275,23 @@ def _edli_market_channel_token_metadata_reloader(
     token_metadata = initial_token_metadata
     seed_first_token_ids = tuple(initial_seed_first_token_ids)
     depth_repair_token_ids = tuple(initial_depth_repair_token_ids)
+    fast_canonical_scope_pending = not bool(initial_token_metadata)
 
     def _reload_once(generation: str, deadline: float):
         nonlocal depth_repair_token_ids, fingerprint, seed_first_token_ids, token_metadata
+        nonlocal fast_canonical_scope_pending
         from src.state.db import (
-            ZEUS_WORLD_DB_PATH,
-            _connect_read_only,
-            get_forecasts_connection_read_only,
             get_trade_connection,
         )
 
-        world_read = None
-        forecasts_read = None
         trade_read = None
         reload_stack_owned = False
         try:
-            world_read = _connect_read_only(
-                ZEUS_WORLD_DB_PATH,
-                deadline_monotonic=deadline,
-            )
-            forecasts_read = get_forecasts_connection_read_only(
-                deadline_monotonic=deadline,
-            )
             trade_read = get_trade_connection(
                 write_class=None,
                 deadline_monotonic=deadline,
             )
             with contextlib.ExitStack() as reload_connections:
-                world_read = reload_connections.enter_context(
-                    _edli_market_channel_universe_reload_connection(
-                        world_read, generation
-                    )
-                )
-                forecasts_read = reload_connections.enter_context(
-                    _edli_market_channel_universe_reload_connection(
-                        forecasts_read, generation
-                    )
-                )
                 trade_read = reload_connections.enter_context(
                     _edli_market_channel_universe_reload_connection(
                         trade_read, generation
@@ -5289,12 +5301,12 @@ def _edli_market_channel_token_metadata_reloader(
                 return _reload_once_with_connections(
                     generation,
                     deadline,
-                    world_read,
-                    forecasts_read,
+                    None,
+                    None,
                     trade_read,
                 )
         finally:
-            for conn in (trade_read, forecasts_read, world_read):
+            for conn in (trade_read,):
                 if conn is not None:
                     # ExitStack owns the tracked close; this is only for a
                     # connection that failed before entering its context.
@@ -5310,24 +5322,157 @@ def _edli_market_channel_token_metadata_reloader(
         world_read,
         forecasts_read,
         trade_read,
+        *,
+        canonical_held_pairs=None,
     ):
         """Run the existing hydration reads under tracked connection ownership."""
 
         nonlocal depth_repair_token_ids, fingerprint, seed_first_token_ids, token_metadata
+        nonlocal fast_canonical_scope_pending
         from src.events.triggers.market_channel_ingestor import (
             MarketTokenUniverse,
             active_weather_token_metadata_for_tokens,
             active_weather_token_metadata_from_snapshots,
         )
+        from src.state.db import (
+            ZEUS_WORLD_DB_PATH,
+            _connect_read_only,
+            get_forecasts_connection_read_only,
+        )
         try:
             if _edli_market_channel_universe_reload_cancelled(generation):
                 raise TimeoutError("market-channel universe reload deadline")
+            # SCOPE: canonical held token identities only; broad snapshots and REST
+            # seed are explicitly outside this first post-registration tranche.
+            # DRAIN: the next reload cadence performs broad universe hydration and
+            # best-effort seed after this subscription has been published.
+            # RESET: a successful broad reload with matching generation clears debt.
+            first_tranche = canonical_held_pairs is None
+            if first_tranche:
+                try:
+                    canonical_held_pairs = _edli_canonical_open_held_pairs(trade_read)
+                except _CanonicalHeldScopeUnavailable as exc:
+                    _edli_publish_market_channel_universe_refresh_debt(
+                        generation, f"canonical_held_identity_unavailable: {exc}"
+                    )
+                    return MarketTokenUniverse(
+                        token_metadata=token_metadata or {},
+                        seed_first_token_ids=seed_first_token_ids,
+                        depth_repair_token_ids=depth_repair_token_ids,
+                    )
+            canonical_held_pairs = set(canonical_held_pairs or ())
+            held_token_ids = {token_id for _condition_id, token_id in canonical_held_pairs}
+            new_canonical_ids = held_token_ids - set(token_metadata or {})
+            previous_canonical_metadata = {
+                token_id: token_metadata[token_id]
+                for _condition_id, token_id in canonical_held_pairs
+                if token_metadata
+                and token_id in token_metadata
+                and not _edli_canonical_held_metadata_gaps(
+                    {(_condition_id, token_id)}, token_metadata
+                )
+            }
+            if first_tranche and (fast_canonical_scope_pending or new_canonical_ids) and held_token_ids:
+                try:
+                    held_metadata = active_weather_token_metadata_for_tokens(
+                        trade_read,
+                        token_ids=held_token_ids,
+                        purpose="exit",
+                    )
+                except Exception as exc:  # noqa: BLE001 - explicit held debt
+                    _edli_publish_market_channel_universe_refresh_debt(
+                        generation, f"canonical_held_identity_unavailable: {exc}"
+                    )
+                    return MarketTokenUniverse(
+                        token_metadata=token_metadata or {},
+                        seed_first_token_ids=(),
+                        depth_repair_token_ids=(),
+                    )
+                if not held_metadata:
+                    _edli_publish_market_channel_universe_refresh_debt(
+                        generation, "canonical_held_identity_unavailable"
+                    )
+                    return MarketTokenUniverse(
+                        token_metadata=token_metadata or {},
+                        seed_first_token_ids=(),
+                        depth_repair_token_ids=(),
+                    )
+                invalid_pairs = _edli_canonical_held_metadata_gaps(
+                    canonical_held_pairs, held_metadata
+                )
+                if invalid_pairs:
+                    _edli_publish_market_channel_universe_refresh_debt(
+                        generation,
+                        "canonical_held_identity_condition_mismatch",
+                    )
+                    return MarketTokenUniverse(
+                        token_metadata=token_metadata or {},
+                        seed_first_token_ids=seed_first_token_ids,
+                        depth_repair_token_ids=depth_repair_token_ids,
+                    )
+                fast_canonical_scope_pending = False
+                token_metadata = dict(held_metadata)
+                seed_first_token_ids = tuple(sorted(held_metadata))
+                depth_repair_token_ids = tuple(sorted(held_metadata))
+                # Leave fingerprint unset so the next cadence must perform the
+                # broad projection reload; this call is subscription-only.
+                return MarketTokenUniverse(
+                    token_metadata=token_metadata,
+                    seed_first_token_ids=seed_first_token_ids,
+                    depth_repair_token_ids=depth_repair_token_ids,
+                )
+            fast_canonical_scope_pending = False
+            if world_read is None or forecasts_read is None:
+                if _edli_market_channel_universe_reload_cancelled(generation):
+                    raise TimeoutError("market-channel universe reload deadline")
+                broad_world = None
+                broad_forecasts = None
+                broad_stack_owned = False
+                try:
+                    broad_world = _connect_read_only(
+                        ZEUS_WORLD_DB_PATH,
+                        deadline_monotonic=deadline,
+                    )
+                    broad_forecasts = get_forecasts_connection_read_only(
+                        deadline_monotonic=deadline,
+                    )
+                    with contextlib.ExitStack() as broad_connections:
+                        broad_world = broad_connections.enter_context(
+                            _edli_market_channel_universe_reload_connection(
+                                broad_world, generation
+                            )
+                        )
+                        broad_forecasts = broad_connections.enter_context(
+                            _edli_market_channel_universe_reload_connection(
+                                broad_forecasts, generation
+                            )
+                        )
+                        broad_stack_owned = True
+                        return _reload_once_with_connections(
+                            generation,
+                            deadline,
+                            broad_world,
+                            broad_forecasts,
+                            trade_read,
+                            canonical_held_pairs=canonical_held_pairs,
+                        )
+                finally:
+                    if not broad_stack_owned:
+                        for conn in (broad_forecasts, broad_world):
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:  # noqa: BLE001
+                                    pass
+            # Audit/residual exposure is intentionally outside the first tranche;
+            # it may enrich the lossless quote set only after canonical subscription.
+            _edli_publish_held_quote_audit_token_ids(
+                _edli_held_position_priority_token_ids(trade_read)
+            )
             candidate_priority_token_ids = _edli_candidate_priority_token_ids(
                 world_read,
                 limit=max(1, int(candidate_priority_limit)),
             )
-            held_token_ids = _edli_held_position_priority_token_ids(trade_read)
-            _edli_publish_held_quote_audit_token_ids(held_token_ids)
             open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
             day0_token_ids = _edli_current_day0_priority_token_ids(
                 trade_read,
@@ -5349,7 +5494,13 @@ def _edli_market_channel_token_metadata_reloader(
                 set(current_seed_first),
                 set(current_depth_repair),
             )
-            if token_metadata is not None and current_fingerprint == fingerprint:
+            with _market_channel_bootstrap_lock:
+                refresh_debt_pending = _market_channel_universe_refresh_debt is not None
+            if (
+                token_metadata is not None
+                and current_fingerprint == fingerprint
+                and not refresh_debt_pending
+            ):
                 return MarketTokenUniverse(
                     token_metadata=token_metadata,
                     seed_first_token_ids=seed_first_token_ids,
@@ -5395,6 +5546,34 @@ def _edli_market_channel_token_metadata_reloader(
                     purpose="exit",
                 )
             )
+            canonical_gaps = _edli_canonical_held_metadata_gaps(
+                canonical_held_pairs, refreshed
+            )
+            if canonical_gaps:
+                # A broad/partial result must never replace a still-held token
+                # with an audit candidate.  Keep every previously verified
+                # canonical identity, retain any useful broad rows, and leave
+                # typed debt set so M5 remains fail-closed until a full exact
+                # exit refresh succeeds on a later cadence.
+                retained = dict(refreshed)
+                retained.update(previous_canonical_metadata)
+                _edli_publish_market_channel_universe_refresh_debt(
+                    generation,
+                    f"{CANONICAL_HELD_IDENTITY_DEBT_PREFIX}coverage_missing",
+                )
+                token_metadata = retained
+                retained_ids = set(previous_canonical_metadata)
+                seed_first_token_ids = tuple(
+                    sorted(set(seed_first_token_ids) | retained_ids)
+                )
+                depth_repair_token_ids = tuple(
+                    sorted(set(depth_repair_token_ids) | retained_ids)
+                )
+                return MarketTokenUniverse(
+                    token_metadata=token_metadata,
+                    seed_first_token_ids=seed_first_token_ids,
+                    depth_repair_token_ids=depth_repair_token_ids,
+                )
             fingerprint = current_fingerprint
             token_metadata = refreshed
             seed_first_token_ids = current_seed_first
