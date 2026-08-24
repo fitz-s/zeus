@@ -2642,6 +2642,44 @@ scripts:
     required_tests: [tests/scripts/test_calibrator_walkforward_report.py, tests/calibration/test_market_anchored_residual.py]
     unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI; SELECT-only; prints markdown to stdout."
 
+  # --- reversal-plan tier0 item 7 (2026-08-24): preregistered selection-lift report ---
+  selection_lift_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the preregistered Tier-0 ordinal selection-lift test report (frozen
+      docs/operations/current/plans/tier0_selection_lift_preregistration_2026-08-24.md):
+      permutation p-value, city-date and date-block bootstrap CIs (larger
+      governs), and the decision-rule verdict, over src/analysis/
+      selection_lift.py (DB-agnostic pure computation). Refuses to print a
+      p-value below 100 qualifying observations (the evaluation lock);
+      --pilot-power-check prints only report-only cluster variance instead.
+      Prints "provenance table absent — 0 observations" cleanly if Item 3's
+      candidate-set persistence table (not yet landed as of 2026-08-24) is
+      absent. Idempotent read-only report; safe to re-run anytime. NOT wired
+      into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or treat
+      an accruing (pre-stopping-count) result as evidence — the frozen doc
+      forbids early peeks and this script enforces that by refusing to print
+      p before 100 observations. This script's output is offline analytics
+      only.
+    canonical_command: "python3 -m scripts.selection_lift_report [--root PATH] [--world PATH] [--n-perm N] [--n-boot N] [--seed N] [--pilot-power-check]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes; refuses a p-value before the frozen stopping count."
+    required_helpers: []
+    required_tests: [tests/scripts/test_selection_lift_report.py, tests/analysis/test_selection_lift.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
+
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,
   # scripts/ops/db_hygiene.sh, scripts/ops/loop_guard.py, scripts/ops/loop_enable.sh,

@@ -1015,6 +1015,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/scoreboard_panels.py",  # read_only_ro_uri: opens zeus-world.db + zeus_trades.db independently via file:...?mode=ro&immutable=0 uri; SELECT-only over settlement_attribution + venue_commands/venue_trade_facts; replaces the circular settlement_attribution.category scoreboard with price-anchored forecast/selection/execution/lifecycle panels; writes stdout only
         # --- reversal-plan tier0 item 9 (2026-08-24): market-anchored walk-forward calibrator report ---
         "scripts/calibrator_walkforward_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri; SELECT-only over settlement_attribution; runs the offline market-anchored residual calibrator (src/calibration/market_anchored_residual.py, not wired into the entry path) and reports paired log-loss of market p0 / raw q / calibrated r_hat; writes stdout only
+        # --- reversal-plan tier0 item 7 (2026-08-24): preregistered selection-lift report ---
+        "scripts/selection_lift_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri (scoreboard_panels.open_ro); SELECT-only over the (not-yet-landed, Item 3) candidate-set provenance table — prints "provenance table absent — 0 observations" cleanly when absent; runs src/analysis/selection_lift.py (DB-agnostic pure computation, no live wiring); writes stdout only
     }
 )
 
