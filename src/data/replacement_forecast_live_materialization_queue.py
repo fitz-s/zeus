@@ -44,6 +44,11 @@ from src.data.replacement_forecast_seed_discovery import (
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 30.0
+# One exact stale-q family protecting current capital gets enough wall time to
+# finish under ordinary SQLite contention; ordinary discovery remains bounded
+# by the global 30-second contract below.
+DEFAULT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS = 90.0
+CURRENT_CAPITAL_TIMEOUT_RESCUE_MAX_PRIOR_ATTEMPTS = 5
 DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS = 60.0
 # Every subprocess commits to the same SQLite forecast DB. Parallel commit
 # processes only multiply cold-page reads and writer contention. Keep one queue
@@ -140,6 +145,7 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -177,14 +183,43 @@ def _materialization_subprocess_timeout_seconds() -> float:
     return value
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _current_capital_materialization_timeout_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS"
+    )
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS "
+            "must be numeric"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS "
+            "must be > 0"
+        )
+    return value
+
+
+def _run_command(
+    argv: Sequence[str],
+    *,
+    timeout_seconds: float | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
         text=True,
-        timeout=_materialization_subprocess_timeout_seconds(),
+        timeout=(
+            _materialization_subprocess_timeout_seconds()
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        ),
     )
 
 
@@ -257,7 +292,9 @@ def _run_materialization_item(
     item: _PendingMaterialization,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return _run_command(item.command)
+        if item.timeout_seconds is None:
+            return _run_command(item.command)
+        return _run_command(item.command, timeout_seconds=item.timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         return _timeout_result(item.command, exc)
     except Exception as exc:
@@ -1021,6 +1058,58 @@ def _current_money_risk_families(
             exc,
         )
         return frozenset()
+
+
+def _current_probability_debt_families(
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return current-capital families whose held probability is not fresh."""
+
+    held = _current_money_risk_families(trade_db=trade_db)
+    if not held:
+        return frozenset()
+    try:
+        from src.state.db import _connect_read_only, _zeus_trade_db_path  # noqa: PLC0415
+
+        db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
+        conn = _connect_read_only(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT city, target_date, LOWER(temperature_metric)
+                  FROM position_current
+                 WHERE phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                   AND COALESCE(last_monitor_prob_is_fresh, 0) <> 1
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - unknown debt keeps ordinary timeout law
+        _LOG.error(
+            "replacement materialization probability-debt read failed; "
+            "retaining ordinary timeout/backoff: %s",
+            exc,
+        )
+        return frozenset()
+    stale = frozenset(
+        (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+        for row in rows
+    )
+    return held & stale
+
+
+def _request_family_scope(
+    payload: Mapping[str, object] | None,
+) -> tuple[str, str, str] | None:
+    if payload is None:
+        return None
+    scope = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    return scope if all(scope) else None
 
 
 def _cycle_advance_seed_priority_map(
@@ -2730,13 +2819,24 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     claimable: list[Path] = []
     inflight_deferred = 0
     timeout_retry_deferred = 0
+    probability_debt = _current_probability_debt_families()
     now = time.time()
     for path in requests:
-        _base, _attempt, retry_at = _timeout_retry_state(path)
-        if retry_at is not None and retry_at > now:
+        payload = _load_request_payload_for_coalescing(path)
+        _base, attempt, retry_at = _timeout_retry_state(path)
+        # SCOPE: only an exact chain-confirmed family whose held q is currently
+        # stale, and only through its fifth prior timeout. DRAIN: one bounded
+        # current-capital subprocess gets the longer timeout below. RESET: a
+        # fresh monitor q removes the family immediately; a sixth timeout
+        # restores normal exponential backoff so one impossible family cannot
+        # monopolize the sole writer forever.
+        rescue_current_capital = (
+            _request_family_scope(payload) in probability_debt
+            and attempt <= CURRENT_CAPITAL_TIMEOUT_RESCUE_MAX_PRIOR_ATTEMPTS
+        )
+        if retry_at is not None and retry_at > now and not rescue_current_capital:
             timeout_retry_deferred += 1
             continue
-        payload = _load_request_payload_for_coalescing(path)
         key = _request_coalescing_key(payload) if payload is not None else None
         if key is not None and key in active_keys:
             inflight_deferred += 1
@@ -2963,6 +3063,7 @@ def _process_claimed_materialization_batch(
             skipped_count=0,
             reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY",),
         )
+    probability_debt = _current_probability_debt_families()
     priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
     requests = tuple(
         sorted(
@@ -3131,6 +3232,11 @@ def _process_claimed_materialization_batch(
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
+                timeout_seconds=(
+                    _current_capital_materialization_timeout_seconds()
+                    if _request_family_scope(request_payload) in probability_debt
+                    else None
+                ),
             )
         )
     if runner is None:

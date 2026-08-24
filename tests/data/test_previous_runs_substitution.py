@@ -2131,6 +2131,90 @@ def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
     assert retried.processed_count == 1
 
 
+def test_probability_debt_request_gets_one_bounded_backoff_rescue(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    now = 1_000.0
+    monkeypatch.setattr(queue_mod.time, "time", lambda: now)
+    request = {
+        "city": "London",
+        "target_date": "2026-06-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-24T12:00:00+00:00",
+        "computed_at": "2026-06-24T20:20:45+00:00",
+        "baseline_source_run_id": "b0-run",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    retry_at_ns = int((now + 600.0) * 1_000_000_000)
+    debt = request_dir / (
+        "London.2026-06-25.high.timeout"
+        f".timeout-retry-5-{retry_at_ns}.json"
+    )
+    debt.write_text(json.dumps(request), encoding="utf-8")
+    ordinary = request_dir / "Paris.2026-06-25.high.json"
+    ordinary.write_text(
+        json.dumps({**request, "city": "Paris"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset({("London", "2026-06-25", "high")}),
+    )
+    spawned: list[str] = []
+
+    def runner(argv):
+        input_path = Path(argv[list(argv).index("--input-json") + 1])
+        spawned.append(input_path.name)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert report.processed_count == 1
+    assert spawned == [debt.name]
+    assert ordinary.exists()
+
+
+def test_probability_debt_item_uses_extended_timeout(monkeypatch, tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    captured: list[float | None] = []
+
+    def run(_argv, *, timeout_seconds=None):
+        captured.append(timeout_seconds)
+        return subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(queue_mod, "_run_command", run)
+    item = queue_mod._PendingMaterialization(
+        input_json=tmp_path / "London.json",
+        command=("materialize",),
+        request_payload=None,
+        marker_path=None,
+        attempt_fingerprint=None,
+        timeout_seconds=90.0,
+    )
+
+    result = queue_mod._run_materialization_item(item)
+
+    assert result.returncode == 0
+    assert captured == [90.0]
+
+
 def test_materialization_queue_default_timeout_bounds_one_family(monkeypatch) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
