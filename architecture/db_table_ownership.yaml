@@ -842,6 +842,23 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: tier0_candidate_set_provenance
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: row_id
+    notes: >
+      Per-auction candidate-set provenance (reversal_plan_tier0 item 3b,
+      SCHEMA_VERSION 45): every evaluated candidate of a completed
+      global_single_order_auction (selected + rejected) with decision-time
+      executable side price p0, lead bucket, and eligibility verdict.
+      Written by src/engine/global_batch_runtime.py::_persist_tier0_candidate_set
+      inside the same trade-DB transaction as the auction receipt (K1/INV-37).
+      Sole consumer: scripts/selection_lift_report.py (preregistered
+      selection-lift test, tier0_selection_lift_preregistration_2026-08-24.md).
+      Idempotent via UNIQUE(selection_epoch_identity, candidate_id).
+
   - name: forecasts
     db: world
     schema_class: world_class

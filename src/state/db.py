@@ -2033,7 +2033,7 @@ def assert_schema_epoch_not_mixed(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 44  # 2026-07-28: registered compact discovery snapshot journal; full executable evidence remains unchanged. Prior: 43 = T2b settlement/observation authority literal repair.
+SCHEMA_VERSION = 45  # 2026-08-24: tier0_candidate_set_provenance (per-auction candidate-set provenance for the preregistered selection-lift test, reversal_plan_tier0 item 3b). Prior: 44 = compact discovery snapshot journal.
 
 
 # ---------------------------------------------------------------------------
