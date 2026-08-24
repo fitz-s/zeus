@@ -6029,7 +6029,18 @@ def test_global_day0_fast_fact_is_statistical_and_causal(
             metric=metric,
         ),
         resolution=SimpleNamespace(measurement_unit="C", station_id="LFPB"),
-        conditioning=None,
+        conditioning={
+            "active": True,
+            "metric": metric,
+            "unit": "C",
+            "source": "wu_icao_history",
+            "observation_time": "2026-07-14T14:00:00+00:00",
+            "observed_extreme_c": settlement_value,
+            "day0_remaining_carrier_likelihood": {
+                "identity_hash": "likelihood-hash",
+                "boundary_survival_probability": 0.95,
+            },
+        },
         observation_conn=conn,
         decision_time=decision_time,
         posterior_id=29914,
@@ -6038,6 +6049,7 @@ def test_global_day0_fast_fact_is_statistical_and_causal(
     assert rebound["observation_time"] == "2026-07-14T14:00:00+00:00"
     assert rebound["settlement_source"] == "wu_icao_history"
     assert rebound["rounded_value"] == int(settlement_value)
+    assert rebound["_edli_day0_provisional_boundary_survival_probability"] == 0.95
     assert rebound["_edli_day0_physical_frontier_observation_time"] == (
         "2026-07-14T14:30:00+00:00"
     )
