@@ -1,6 +1,6 @@
 # Created: 2026-06-20
 # Last audited: 2026-07-30
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-24
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -180,7 +180,10 @@ def test_refresh_feasibility_write_targets_trade_main_without_world_writer(func_
 def test_refresh_seed_chunks_use_trade_only_gate(func_name):
     node = _func_node(func_name)
     write_gate_calls = _write_gate_keyword_call_names(node, "seed_rest_books_in_chunks")
-    assert write_gate_calls == ["_edli_price_channel_trade_write_gate"], (
+    expected = ["_edli_price_channel_trade_write_gate"] * (
+        2 if func_name == "_edli_refresh_held_position_quote_evidence" else 1
+    )
+    assert write_gate_calls == expected, (
         f"{func_name} must pass _edli_price_channel_trade_write_gate(...) as "
         f"seed_rest_books_in_chunks(write_gate=...), got {write_gate_calls!r}"
     )
@@ -560,6 +563,34 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
         conn.close()
 
 
+def test_held_quote_sqlite_deadline_interrupts_a_long_statement_after_connection_open():
+    """A returned SQLite connection cannot run past held capital-protection time."""
+    from src.ingest import price_channel_ingest as lane
+
+    conn = sqlite3.connect(":memory:")
+    deadline = time.monotonic() + 0.025
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="deadline elapsed during SQLite execution"):
+            with lane._held_quote_sqlite_deadline(
+                conn,
+                deadline_monotonic=deadline,
+            ):
+                conn.execute(
+                    """
+                    WITH RECURSIVE counter(value) AS (
+                        SELECT 0
+                        UNION ALL
+                        SELECT value + 1 FROM counter WHERE value < 100000000
+                    )
+                    SELECT sum(value) FROM counter
+                    """
+                ).fetchone()
+        assert time.monotonic() - started < 1.0
+    finally:
+        conn.close()
+
+
 def test_background_quote_connection_disables_sqlite_autocheckpoint():
     from src.ingest import price_channel_ingest as lane
 
@@ -714,6 +745,16 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
     ):
         pass
     with lane._edli_price_channel_trade_write_gate(
+        owner="price_channel_held_quote_refresh_audit",
+        priority="background_recovery",
+    ):
+        pass
+    with lane._edli_price_channel_trade_write_gate(
+        owner="price_channel_global_exit_audit",
+        priority="background_recovery",
+    ):
+        pass
+    with lane._edli_price_channel_trade_write_gate(
         owner="price_channel_market_quote",
         priority="background_recovery",
     ):
@@ -725,6 +766,8 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
 
     assert observed == [
         ("price_channel_held_quote_refresh", "monitor"),
+        ("price_channel_held_quote_refresh_audit", "background_recovery"),
+        ("price_channel_global_exit_audit", "background_recovery"),
         ("price_channel_market_quote", "background_recovery"),
         (
             "price_channel_snapshot_invalidate",
@@ -732,11 +775,22 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
         ),
     ]
 
-    lane_source = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
-    assert 'owner="price_channel_held_quote_refresh",\n                    priority="monitor"' in lane_source
-    assert 'owner="price_channel_global_exit_audit",\n                priority="monitor"' in lane_source
-    assert 'owner="price_channel_candidate_quote_refresh",\n                    priority="background_recovery"' in lane_source
-    assert 'owner="price_channel_market_quote",\n                        priority="background_recovery"' in lane_source
+    held_refresh = _func_node("_edli_refresh_held_position_quote_evidence")
+    held_gate_priorities = {
+        keywords["owner"].value: keywords["priority"].value
+        for call in ast.walk(held_refresh)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_edli_price_channel_trade_write_gate"
+        if (keywords := {keyword.arg: keyword.value for keyword in call.keywords})
+        and isinstance(keywords.get("owner"), ast.Constant)
+        and isinstance(keywords.get("priority"), ast.Constant)
+    }
+    assert held_gate_priorities == {
+        "price_channel_held_quote_refresh": "monitor",
+        "price_channel_held_quote_refresh_audit": "background_recovery",
+        "price_channel_global_exit_audit": "background_recovery",
+    }
 
 
 def test_submit_ack_retry_persists_after_a_180ms_legacy_sqlite_lock(tmp_path):
@@ -1009,16 +1063,19 @@ def test_held_refresh_uses_fair_deadline_bounded_trade_gate():
         and isinstance(sub.func, ast.Name)
         and sub.func.id == "_edli_price_channel_trade_write_gate"
     ]
-    assert len(calls) == 2
+    assert len(calls) == 3
+    expected_priorities = {
+        "price_channel_held_quote_refresh": "monitor",
+        "price_channel_held_quote_refresh_audit": "background_recovery",
+        "price_channel_global_exit_audit": "background_recovery",
+    }
     for call in calls:
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         assert isinstance(keywords["owner"], ast.Constant)
-        assert keywords["owner"].value in {
-            "price_channel_held_quote_refresh",
-            "price_channel_global_exit_audit",
-        }
+        owner = keywords["owner"].value
+        assert owner in expected_priorities
         assert isinstance(keywords["priority"], ast.Constant)
-        assert keywords["priority"].value == "monitor"
+        assert keywords["priority"].value == expected_priorities[owner]
         assert isinstance(keywords["deadline_ms"], ast.Name)
         assert (
             keywords["deadline_ms"].id

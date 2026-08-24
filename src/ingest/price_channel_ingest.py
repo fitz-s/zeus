@@ -582,6 +582,33 @@ def _bound_held_quote_sqlite_wait(
     )
 
 
+@contextlib.contextmanager
+def _held_quote_sqlite_deadline(conn, *, deadline_monotonic: float):
+    """Interrupt a held-refresh SQLite statement when its wall-clock claim expires."""
+
+    import sqlite3
+
+    _bound_held_quote_sqlite_wait(
+        conn,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+    def _interrupt_at_deadline() -> int:
+        return int(time.monotonic() >= deadline_monotonic)
+
+    conn.set_progress_handler(_interrupt_at_deadline, 1_000)
+    try:
+        yield
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline_monotonic and "interrupted" in str(exc).lower():
+            raise TimeoutError(
+                "price-channel held quote refresh deadline elapsed during SQLite execution"
+            ) from exc
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
 def _price_channel_clob_timeout(deadline_monotonic: float):
     """Return a per-request CLOB timeout bounded by the refresh wall-clock budget."""
 
@@ -3727,6 +3754,8 @@ def _edli_refresh_held_position_quote_evidence(
     performs its own JIT read.
     """
 
+    import sqlite3
+
     from src.data.polymarket_client import PolymarketClient
     from src.data.polymarket_request_governor import RequestPriority
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -3757,13 +3786,24 @@ def _edli_refresh_held_position_quote_evidence(
     deadline = started_monotonic + budget
     canonical_rest_refreshed_token_ids: set[str] = set()
 
-    trade_read = get_trade_connection(write_class=None)
+    # This is a capital-protection lane.  Binding the *connection bootstrap*
+    # to the same absolute deadline matters: get_trade_connection() establishes
+    # WAL mode and can otherwise spend its default SQLite wait before the first
+    # held-side quote request is even admitted.
+    trade_read = get_trade_connection(
+        write_class=None,
+        deadline_monotonic=deadline,
+    )
     try:
         try:
-            canonical_held_pairs = set(
-                _edli_canonical_open_held_pairs(trade_read)
-            )
-        except _CanonicalHeldScopeUnavailable as exc:
+            with _held_quote_sqlite_deadline(
+                trade_read,
+                deadline_monotonic=deadline,
+            ):
+                canonical_held_pairs = set(
+                    _edli_canonical_open_held_pairs(trade_read)
+                )
+        except (_CanonicalHeldScopeUnavailable, TimeoutError) as exc:
             return {
                 "canonical_held_scope_unavailable": True,
                 "canonical_held_scope_reason": str(exc),
@@ -3780,12 +3820,16 @@ def _edli_refresh_held_position_quote_evidence(
         canonical_held_token_ids = {
             token_id for _condition_id, token_id in canonical_held_pairs
         }
-        held_priority_token_ids = set(
-            _edli_held_position_priority_token_ids(trade_read)
-        )
-        exit_audit_token_ids = set(
-            _edli_unsettled_global_exit_audit_token_ids(trade_read)
-        )
+        with _held_quote_sqlite_deadline(
+            trade_read,
+            deadline_monotonic=deadline,
+        ):
+            held_priority_token_ids = set(
+                _edli_held_position_priority_token_ids(trade_read)
+            )
+            exit_audit_token_ids = set(
+                _edli_unsettled_global_exit_audit_token_ids(trade_read)
+            )
         held_token_ids = (
             canonical_held_token_ids
             | held_priority_token_ids
@@ -3809,30 +3853,38 @@ def _edli_refresh_held_position_quote_evidence(
                 maximum=60_000,
             )
         )
-        snapshot_refresh_report = _edli_held_snapshot_refresh_report(
+        with _held_quote_sqlite_deadline(
             trade_read,
-            canonical_held_pairs,
-            checked_at=checked_at,
-        )
-        rest_canonical_held_token_ids, canonical_ws_covered_tokens = (
-            _edli_tokens_requiring_rest_quote_refresh(
+            deadline_monotonic=deadline,
+        ):
+            snapshot_refresh_report = _edli_held_snapshot_refresh_report(
                 trade_read,
-                canonical_held_token_ids,
+                canonical_held_pairs,
                 checked_at=checked_at,
-                continuity_max_age=continuity_max_age,
-                evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
             )
-        )
+            rest_canonical_held_token_ids, canonical_ws_covered_tokens = (
+                _edli_tokens_requiring_rest_quote_refresh(
+                    trade_read,
+                    canonical_held_token_ids,
+                    checked_at=checked_at,
+                    continuity_max_age=continuity_max_age,
+                    evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
+                )
+            )
         residual_token_ids = held_token_ids - canonical_held_token_ids
-        rest_residual_token_ids, residual_ws_covered_tokens = (
-            _edli_tokens_requiring_rest_quote_refresh(
-                trade_read,
-                residual_token_ids,
-                checked_at=checked_at,
-                continuity_max_age=continuity_max_age,
-                evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
+        with _held_quote_sqlite_deadline(
+            trade_read,
+            deadline_monotonic=deadline,
+        ):
+            rest_residual_token_ids, residual_ws_covered_tokens = (
+                _edli_tokens_requiring_rest_quote_refresh(
+                    trade_read,
+                    residual_token_ids,
+                    checked_at=checked_at,
+                    continuity_max_age=continuity_max_age,
+                    evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
+                )
             )
-        )
         ws_covered_tokens = (
             canonical_ws_covered_tokens + residual_ws_covered_tokens
         )
@@ -3854,22 +3906,26 @@ def _edli_refresh_held_position_quote_evidence(
                 "budget_skipped_tokens": 0,
                 **snapshot_refresh_report,
             }
-        ordered_canonical_held_token_ids = (
-            _edli_order_token_ids_by_feasibility_age(
-                trade_read,
-                rest_canonical_held_token_ids,
+        with _held_quote_sqlite_deadline(
+            trade_read,
+            deadline_monotonic=deadline,
+        ):
+            ordered_canonical_held_token_ids = (
+                _edli_order_token_ids_by_feasibility_age(
+                    trade_read,
+                    rest_canonical_held_token_ids,
+                )
+                if rest_canonical_held_token_ids
+                else []
             )
-            if rest_canonical_held_token_ids
-            else []
-        )
-        ordered_residual_token_ids = (
-            _edli_order_token_ids_by_feasibility_age(
-                trade_read,
-                rest_residual_token_ids,
+            ordered_residual_token_ids = (
+                _edli_order_token_ids_by_feasibility_age(
+                    trade_read,
+                    rest_residual_token_ids,
+                )
+                if rest_residual_token_ids
+                else []
             )
-            if rest_residual_token_ids
-            else []
-        )
         max_tokens = _edli_quote_refresh_max_tokens(
             edli_cfg,
             "market_channel_held_quote_refresh_max_tokens_per_cycle",
@@ -3893,11 +3949,15 @@ def _edli_refresh_held_position_quote_evidence(
             if not batch:
                 continue
             scanned_held_token_ids.extend(batch)
-            batch_metadata = active_weather_token_metadata_for_tokens(
+            with _held_quote_sqlite_deadline(
                 trade_read,
-                token_ids=batch,
-                purpose="exit",
-            )
+                deadline_monotonic=deadline,
+            ):
+                batch_metadata = active_weather_token_metadata_for_tokens(
+                    trade_read,
+                    token_ids=batch,
+                    purpose="exit",
+                )
             token_metadata.update(batch_metadata)
             for token_id in batch:
                 metadata = batch_metadata.get(token_id)
@@ -3989,7 +4049,10 @@ def _edli_refresh_held_position_quote_evidence(
     try:
         # Quote evidence is TRADE truth. Derived WORLD redecision events use the
         # independently coordinated sink after this transaction commits.
-        conn = get_trade_connection(write_class="live")
+        conn = get_trade_connection(
+            write_class="live",
+            deadline_monotonic=deadline,
+        )
         _bound_held_quote_sqlite_wait(conn, deadline_monotonic=deadline)
 
         def _commit_quote_evidence() -> None:
@@ -4052,45 +4115,108 @@ def _edli_refresh_held_position_quote_evidence(
                 fetch_orderbook=fetch_orderbook,
                 fetch_orderbooks=fetch_orderbooks,
             )
-            written = service.seed_rest_books_in_chunks(
-                token_ids=ordered_metadata_tokens,
-                received_at=datetime.now(timezone.utc).isoformat(),
-                write_gate=_edli_price_channel_trade_write_gate(
-                    owner="price_channel_held_quote_refresh",
-                    priority="monitor",
-                    deadline_ms=(
-                        PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
-                    ),
+            # A canonical held-side quote cannot share its first REST/commit
+            # tranche with audit or residual tokens.  A slow or denied sibling
+            # batch used to consume the common budget before the held side
+            # reached durable feasibility evidence.  Finish the exact native
+            # scope first; only then spend the remaining budget on evidence
+            # collection that has no order authority.
+            canonical_metadata_tokens = [
+                token_id
+                for token_id in ordered_metadata_tokens
+                if token_id in canonical_held_token_ids
+            ]
+            residual_metadata_tokens = [
+                token_id
+                for token_id in ordered_metadata_tokens
+                if token_id not in canonical_held_token_ids
+            ]
+            written = 0
+            if canonical_metadata_tokens:
+                with _held_quote_sqlite_deadline(
+                    conn,
                     deadline_monotonic=deadline,
-                    on_enter=lambda: _bound_held_quote_sqlite_wait(
+                ):
+                    written = service.seed_rest_books_in_chunks(
+                        token_ids=canonical_metadata_tokens,
+                        received_at=datetime.now(timezone.utc).isoformat(),
+                        write_gate=_edli_price_channel_trade_write_gate(
+                            owner="price_channel_held_quote_refresh",
+                            priority="monitor",
+                            deadline_ms=(
+                                PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
+                            ),
+                            deadline_monotonic=deadline,
+                            on_enter=lambda: _bound_held_quote_sqlite_wait(
+                                conn,
+                                deadline_monotonic=deadline,
+                            ),
+                        ),
+                        commit=_commit_quote_evidence,
+                        logger=logger,
+                        chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
+                        deadline_monotonic=deadline,
+                        past_end_exit_refresh=True,
+                        post_commit_quote_sink=_post_commit_held_quote_actions,
+                    )
+            optional_refresh_error = None
+            if residual_metadata_tokens and time.monotonic() < deadline:
+                try:
+                    with _held_quote_sqlite_deadline(
                         conn,
                         deadline_monotonic=deadline,
-                    ),
-                ),
-                commit=_commit_quote_evidence,
-                logger=logger,
-                chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
-                deadline_monotonic=deadline,
-                past_end_exit_refresh=True,
-                post_commit_quote_sink=_post_commit_held_quote_actions,
-            )
+                    ):
+                        written += service.seed_rest_books_in_chunks(
+                            token_ids=residual_metadata_tokens,
+                            received_at=datetime.now(timezone.utc).isoformat(),
+                            write_gate=_edli_price_channel_trade_write_gate(
+                                owner="price_channel_held_quote_refresh_audit",
+                                priority="background_recovery",
+                                deadline_ms=(
+                                    PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
+                                ),
+                                deadline_monotonic=deadline,
+                                on_enter=lambda: _bound_held_quote_sqlite_wait(
+                                    conn,
+                                    deadline_monotonic=deadline,
+                                ),
+                            ),
+                            commit=_commit_quote_evidence,
+                            logger=logger,
+                            chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
+                            deadline_monotonic=deadline,
+                            past_end_exit_refresh=True,
+                            post_commit_quote_sink=_post_commit_held_quote_actions,
+                        )
+                except (TimeoutError, sqlite3.OperationalError) as exc:
+                    optional_refresh_error = f"{type(exc).__name__}: {exc}"
         audit_rows = 0
         if exit_audit_token_ids.intersection(token_metadata):
-            with _edli_price_channel_trade_write_gate(
-                owner="price_channel_global_exit_audit",
-                priority="monitor",
-                deadline_ms=PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
-                deadline_monotonic=deadline,
-                on_enter=lambda: _bound_held_quote_sqlite_wait(
+            try:
+                with _held_quote_sqlite_deadline(
                     conn,
                     deadline_monotonic=deadline,
-                ),
-            ):
-                audit_rows = _edli_append_global_exit_audit_quote_evidence(
-                    conn,
-                    exit_audit_token_ids.intersection(token_metadata),
+                ):
+                    with _edli_price_channel_trade_write_gate(
+                        owner="price_channel_global_exit_audit",
+                        priority="background_recovery",
+                        deadline_ms=PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+                        deadline_monotonic=deadline,
+                        on_enter=lambda: _bound_held_quote_sqlite_wait(
+                            conn,
+                            deadline_monotonic=deadline,
+                        ),
+                    ):
+                        audit_rows = _edli_append_global_exit_audit_quote_evidence(
+                            conn,
+                            exit_audit_token_ids.intersection(token_metadata),
+                        )
+                        conn.commit()
+            except (TimeoutError, sqlite3.OperationalError) as exc:
+                optional_refresh_error = (
+                    optional_refresh_error
+                    or f"{type(exc).__name__}: {exc}"
                 )
-                conn.commit()
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         result = {
             "held_priority_token_ids": len(held_token_ids),
@@ -4122,6 +4248,9 @@ def _edli_refresh_held_position_quote_evidence(
             result["backpressure"] = True
             result["write_backpressure_count"] = service.rest_seed_backpressure_count
             result["write_backpressure_reason"] = service.rest_seed_backpressure_reason
+        if optional_refresh_error:
+            result["audit_quote_refresh_degraded"] = True
+            result["audit_quote_refresh_degraded_reason"] = optional_refresh_error
         return result
     finally:
         try:

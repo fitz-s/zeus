@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-23 (bounded boot fill-bridge writer isolation)
+# Last reused or audited: 2026-08-24 (held quote absolute SQL deadline)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -3718,7 +3718,7 @@ def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch
     monkeypatch.setattr(
         state_db,
         "get_trade_connection",
-        lambda *, write_class=None: sqlite3.connect(":memory:"),
+        lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"),
     )
 
     result = lane._edli_refresh_held_position_quote_evidence()
@@ -3939,7 +3939,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     trade.commit()
     trade.close()
 
-    def _trade_conn(*, write_class=None):  # noqa: ARG001
+    def _trade_conn(*, write_class=None, deadline_monotonic=None):  # noqa: ARG001
         return sqlite3.connect(trade_path)
 
     def _world_conn(*, write_class=None):  # noqa: ARG001
@@ -4068,7 +4068,7 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
             for token_id in token_ids
         },
     )
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         state_db,
         "get_world_connection_with_trades_required",
@@ -4149,7 +4149,7 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
         def seed_rest_books_in_chunks(
             self, *, token_ids, post_commit_quote_sink, **kwargs  # noqa: ANN001, ANN003
         ):
-            seen["rest_seed"] = list(token_ids)
+            seen.setdefault("rest_seed_calls", []).append(list(token_ids))
             post_commit_quote_sink(
                 [
                     types.SimpleNamespace(
@@ -4181,7 +4181,7 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
     monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
     monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
     monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         state_db,
         "get_world_connection_with_trades_required",
@@ -4192,7 +4192,7 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
     result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
 
     assert seen["metadata"] == [["closed-old-1", "closed-old-2"], ["live-held-1", "live-held-2"]]
-    assert seen["rest_seed"] == ["live-held-1", "live-held-2"]
+    assert seen["rest_seed_calls"] == [["live-held-1", "live-held-2"]]
     assert result["held_priority_token_ids"] == 4
     assert result["held_token_metadata"] == 2
     assert result["held_quote_refresh_selected_tokens"] == 2
@@ -4274,7 +4274,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
     monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
     monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
     monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         state_db,
         "get_world_connection_with_trades_required",
@@ -4358,7 +4358,7 @@ def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(mo
         def seed_rest_books_in_chunks(
             self, *, token_ids, post_commit_quote_sink, **kwargs  # noqa: ANN001, ANN003
         ):
-            seen["rest_seed"] = list(token_ids)
+            seen.setdefault("rest_seed_calls", []).append(list(token_ids))
             post_commit_quote_sink(
                 [
                     types.SimpleNamespace(
@@ -4390,16 +4390,167 @@ def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(mo
     monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
     monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
     monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
 
     result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
 
-    assert set(seen["rest_seed"][:19]) == held
+    assert set(seen["rest_seed_calls"][0]) == held
+    assert set(seen["rest_seed_calls"][1]).issubset(audit)
+    assert len(seen["rest_seed_calls"][1]) == 13
     assert result["canonical_held_token_ids"] == 19
     assert result["canonical_held_freshness_debt_token_ids"] == []
     assert set(result["canonical_rest_refreshed_token_ids"]) == held
     assert result["held_quote_refresh_selected_tokens"] == 32
+
+
+def test_held_quote_refresh_binds_db_bootstrap_and_finishes_native_before_audit(monkeypatch):
+    """The held-side tranche cannot inherit a 30-second DB bootstrap wait."""
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+    from src.state import db as state_db
+
+    native, audit = "native-held", "audit-only"
+    opened_deadlines = []
+    seed_calls = []
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: {("condition-native", native)})
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {native, audit})
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: {audit})
+    monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda conn, tokens, **kwargs: (sorted(tokens), 0))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, tokens: sorted(tokens))
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_snapshot_refresh_report",
+        lambda *args, **kwargs: {
+            "held_snapshot_fresh_pairs": [], "held_snapshot_due_pairs": [],
+            "held_snapshot_refresh_debt_actions": [], "held_snapshot_refresh_actions_enqueued": 0,
+            "held_snapshot_refresh_enqueue_unavailable": [],
+            "held_snapshot_terminal_disposition_required": [],
+        },
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_enqueue_held_snapshot_refresh_actions",
+        lambda actions: {
+            "held_snapshot_refresh_actions_enqueued": len(actions),
+            "held_snapshot_refresh_enqueue_unavailable": [],
+        },
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, *, token_ids, purpose: {
+            token: MarketTokenMetadata(
+                condition_id=("condition-native" if token == native else f"condition-{token}"),
+                token_id=token, outcome_label="YES",
+                min_tick_size="0.01", min_order_size="5", neg_risk=False,
+                executable_snapshot_id=f"snapshot-{token}",
+            ) for token in token_ids
+        },
+    )
+    monkeypatch.setattr(market_channel_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+
+    class Service:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+        def seed_rest_books_in_chunks(self, *, token_ids, commit, post_commit_quote_sink, **kwargs):  # noqa: ANN001, ANN003
+            seed_calls.append(list(token_ids))
+            commit()
+            post_commit_quote_sink(
+                [types.SimpleNamespace(payload_json=json.dumps({"token_id": token_id})) for token_id in token_ids]
+            )
+            return len(token_ids)
+
+    class Client:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):  # noqa: ANN002
+            return False
+        def get_orderbook_snapshot(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return {}
+        def get_orderbook_snapshots(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return {}
+
+    def _connection(*, write_class=None, deadline_monotonic=None):  # noqa: ANN001
+        opened_deadlines.append(deadline_monotonic)
+        return sqlite3.connect(":memory:")
+
+    monkeypatch.setattr(market_channel_ingestor, "MarketChannelOnlineService", Service)
+    monkeypatch.setattr(state_db, "get_trade_connection", _connection)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", Client)
+    monkeypatch.setattr(lane, "_edli_append_global_exit_audit_quote_evidence", lambda *_args: (_ for _ in ()).throw(TimeoutError("audit blocked")))
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=5.0)
+
+    assert len(opened_deadlines) == 2
+    assert all(deadline is not None for deadline in opened_deadlines)
+    assert seed_calls == [[native], [audit]]
+    assert result["canonical_rest_refreshed_token_ids"] == [native]
+    assert result["audit_quote_refresh_degraded"] is True
+    assert "audit blocked" in result["audit_quote_refresh_degraded_reason"]
+
+    recorded = {}
+    monkeypatch.setattr(lane, "_edli_refresh_held_position_quote_evidence", lambda: result)
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda name, **kwargs: recorded.update(name=name, **kwargs),
+    )
+    assert lane._edli_held_quote_refresh_cycle() is result
+    assert recorded["failed"] is False
+
+
+def test_held_quote_refresh_turns_canonical_sql_deadline_into_truthful_debt(monkeypatch):
+    """A timed-out canonical read cannot be misreported as a healthy no-hold cycle."""
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+    from src.state import db as state_db
+
+    recorded = {}
+
+    def _canonical_long_query(conn):
+        conn.execute(
+            """
+            WITH RECURSIVE counter(value) AS (
+                SELECT 0
+                UNION ALL
+                SELECT value + 1 FROM counter WHERE value < 100000000
+            )
+            SELECT sum(value) FROM counter
+            """
+        ).fetchone()
+        return set()
+
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", _canonical_long_query)
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda name, **kwargs: recorded.update(name=name, **kwargs),
+    )
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=0.025)
+
+    assert result["canonical_held_scope_unavailable"] is True
+    assert result["canonical_held_freshness_debt_token_ids"] == [
+        "CANONICAL_HELD_SCOPE_UNAVAILABLE"
+    ]
+    monkeypatch.setattr(lane, "_edli_refresh_held_position_quote_evidence", lambda: result)
+    assert lane._edli_held_quote_refresh_cycle() is result
+    assert recorded["failed"] is True
+    assert recorded["reason"] == "canonical_held_scope_unavailable"
 
 
 def test_held_quote_refresh_reports_canonical_capacity_debt(monkeypatch):
@@ -4556,7 +4707,7 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
     monkeypatch.setattr(
         state_db,
         "get_trade_connection",
-        lambda *, write_class=None: sqlite3.connect(trade_path),
+        lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(trade_path),
     )
     monkeypatch.setattr(
         lane,
@@ -4802,13 +4953,13 @@ def test_held_quote_commit_tracks_exact_native_refresh_and_rejects_audit_only_co
             return {}
 
     monkeypatch.setattr(market_channel_ingestor, "MarketChannelOnlineService", FakeService)
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(scheduler_health, "_write_scheduler_health", lambda name, **kwargs: recorded.update(name=name, **kwargs))
 
     result = lane._edli_held_quote_refresh_cycle()
 
-    assert committed == [True]
+    assert committed == [True, True]
     assert result["canonical_held_freshness_debt_token_ids"] == []
     assert result["canonical_rest_due_token_ids"] == [native]
     assert result["canonical_rest_refreshed_token_ids"] == [native]
@@ -4827,7 +4978,7 @@ def test_held_quote_commit_tracks_exact_native_refresh_and_rejects_audit_only_co
     recorded.clear()
     audit_only = lane._edli_held_quote_refresh_cycle()
 
-    assert committed == [True, True]
+    assert committed == [True, True, True, True]
     assert audit_only["canonical_held_freshness_debt_token_ids"] == [native]
     assert audit_only["canonical_rest_due_token_ids"] == [native]
     assert audit_only["canonical_rest_refreshed_token_ids"] == []
@@ -4855,7 +5006,7 @@ def test_held_quote_refresh_fails_closed_when_canonical_scope_query_fails(monkey
 
     monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", _canonical_failure)
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", _broad_scope)
-    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         scheduler_health,
         "_write_scheduler_health",
