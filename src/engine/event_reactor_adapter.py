@@ -292,6 +292,7 @@ from src.config import (
     edge_n_bootstrap,
     runtime_cities_by_name,
     settings,
+    tier0_research_mode_enabled,
 )
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -7398,6 +7399,21 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    # reversal_plan_tier0_2026-08-24 item 6: Tier-0's diversification unit is
+    # the (city, target_date) CLUSTER, coarser than family_key (which also
+    # partitions by metric — weather_family_id(city, target_date, metric)).
+    # Populated alongside _global_entry_policy_by_family from the SAME event
+    # payload, zero extra queries; consumed only by _current_entry_candidate_policy
+    # below when tier0_research_mode is on.
+    _global_entry_cluster_by_family: dict[str, tuple[str, str]] = {}
+    # Same-cycle "pending" cluster occupancy. Tier-0 forbids MAKER_REST
+    # (taker-only), so there is no multi-cycle resting order to track — held
+    # positions (runtime-open) already cover every prior-cycle Tier-0 fill.
+    # This set closes the one remaining race: two candidates for the SAME
+    # (city, target_date) both evaluated within this one batch. Populated
+    # only on a real (non-proof-only) admit inside
+    # _current_entry_candidate_policy below.
+    _tier0_admitted_clusters_this_cycle: set[tuple[str, str]] = set()
     _global_entry_probability_revision_by_family: dict[str, str | None] = {}
     _global_claim_generations: Mapping[str, str] = {}
     _global_claim_attempt_counts: Mapping[str, int] = {}
@@ -7548,6 +7564,10 @@ def event_bound_live_adapter_from_trade_conn(
                 or ""
             ).strip(),
             day0_truth_by_bin_side,
+        )
+        _global_entry_cluster_by_family[family_key] = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
         )
         _global_entry_probability_revision_by_family[family_key] = (
             _prepared_global_probability_semantics_revision(
@@ -10810,6 +10830,52 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if day0_probability_reason is not None:
                 return day0_probability_reason
+            # reversal_plan_tier0_2026-08-24 item 6: price cap, taker-only, and
+            # one-per-(city,target_date)-cluster admission. NOOP when the flag
+            # is off. The aggregate open-loss ceiling and the flat-stake size
+            # are NOT decided here — they need the exact venue min_order_size
+            # and freshest portfolio state, both only available at the sizing
+            # chokepoint further down this adapter (search
+            # "TIER0_FLAT_MICRO_STAKE"); this gate only needs to be cheap and
+            # typed, and price/mode/cluster admissibility never depends on
+            # sizing-time facts.
+            if tier0_research_mode_enabled():
+                from src.engine.global_batch_runtime import (
+                    _current_held_weather_families,
+                )
+                from src.strategy.tier0_policy import (
+                    tier0_cluster_occupied_rejection_reason,
+                    tier0_execution_mode_rejection_reason,
+                    tier0_price_rejection_reason,
+                )
+
+                _tier0_cluster_key = _global_entry_cluster_by_family.get(
+                    family_key, ("", "")
+                )
+                _tier0_price = getattr(candidate, "limit_price", None)
+                tier0_reason = tier0_price_rejection_reason(
+                    execution_price=_tier0_price,
+                    limit_price=_tier0_price,
+                )
+                if tier0_reason is None:
+                    tier0_reason = tier0_execution_mode_rejection_reason(
+                        execution_mode=getattr(candidate, "execution_mode", None),
+                    )
+                if tier0_reason is None:
+                    _tier0_occupied_clusters = frozenset(
+                        (held_city, held_target_date)
+                        for held_city, held_target_date, _held_metric in (
+                            _current_held_weather_families(trade_conn)
+                        )
+                    ) | _tier0_admitted_clusters_this_cycle
+                    tier0_reason = tier0_cluster_occupied_rejection_reason(
+                        cluster_key=_tier0_cluster_key,
+                        occupied_clusters=_tier0_occupied_clusters,
+                    )
+                if tier0_reason is not None:
+                    return tier0_reason
+                if not proof_only:
+                    _tier0_admitted_clusters_this_cycle.add(_tier0_cluster_key)
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
@@ -16232,6 +16298,39 @@ def _global_buy_prefix_certificate_for_proof(
         ) from exc
 
 
+def _decision_p0_from_book_snapshot(
+    trade_conn: sqlite3.Connection | None,
+    *,
+    snapshot_id: str,
+    token_id: str,
+    action: str,
+) -> tuple[Decimal | None, str | None]:
+    """Decision-time EXPLICIT p0 (reversal_plan_tier0_2026-08-24 item 3a).
+
+    The immediately-executable side price an entry would lift, read from the
+    book snapshot the entry's sealed economics are bound to (never our own
+    limit price and never a fill price). For a BUY the executable side is the
+    venue ASK on the traded token; for a SELL it is the venue BID. Fail-closed:
+    a missing connection, missing snapshot row, token mismatch against the
+    snapshot's selected_outcome_token_id, or an absent side quote (one-sided
+    book) all return ``(None, None)`` rather than falling back to any guess.
+    Returns ``(decision_p0, decision_p0_source)`` where the source is the
+    snapshot_id the price was read from.
+    """
+
+    if trade_conn is None:
+        return None, None
+    snapshot = get_snapshot(trade_conn, snapshot_id)
+    if snapshot is None or snapshot.selected_outcome_token_id != token_id:
+        return None, None
+    side_quote = (
+        snapshot.orderbook_top_ask if action == "BUY" else snapshot.orderbook_top_bid
+    )
+    if side_quote is None:
+        return None, None
+    return side_quote, snapshot_id
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -16372,6 +16471,15 @@ def _global_actuation_selected_proof(
     ).strip().upper()
     if global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_ACTUATION_EXECUTION_MODE_INVALID")
+    # reversal_plan_tier0_2026-08-24 item 3a: decision-time EXPLICIT p0 — the
+    # immediately-executable side price an entry would lift, read from the SAME
+    # book snapshot the economics below are sealed to (rebound.book_snapshot_id).
+    decision_p0, decision_p0_source = _decision_p0_from_book_snapshot(
+        trade_conn,
+        snapshot_id=rebound.book_snapshot_id,
+        token_id=candidate.token_id,
+        action=str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+    )
     cert = _global_current_state_economics_seed(proof)
     cert.update(
         {
@@ -16447,6 +16555,8 @@ def _global_actuation_selected_proof(
             ),
             "global_max_spend_usd": str(decision.max_spend_usd),
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "decision_p0": str(decision_p0) if decision_p0 is not None else None,
+            "decision_p0_source": decision_p0_source,
         }
     )
     if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY":
@@ -18621,6 +18731,99 @@ def _build_event_bound_no_submit_receipt_core(
                     free_cash_usd=free_cash_usd,
                 )
             )
+        # reversal_plan_tier0_2026-08-24 item 6: Tier-0 flat-stake override + the
+        # aggregate open-loss ceiling, at the SAME single chokepoint the D1/D2
+        # comment below documents (overriding _robust_stake_usd here keeps the
+        # portfolio reservation, cost-basis hash, receipt kelly_size_usd,
+        # actionable cert, and USD->shares conversion coherent off one value).
+        # Placed BEFORE D1/D2 fill-up: a Tier-0-admitted candidate's cluster was
+        # already proven unoccupied by _current_entry_candidate_policy, so the
+        # residual/shift-lease fill-up machinery below is not expected to fire
+        # for it — Tier-0 structurally deletes scale-in, it does not rely on
+        # fill-up to no-op.
+        #
+        # candidate/price/execution-mode/cluster admissibility were already
+        # checked in _current_entry_candidate_policy (typed rejection, before
+        # this deep recapture ran at all). This block does two things that gate
+        # can't: (1) size the flat stake off the TRUE venue floor — ``row`` is
+        # this candidate's executable_market_snapshots row, whose
+        # ``min_order_size`` is in SHARES (the plan's corrected venue floor;
+        # sizing.min_order_usd is a $ soft floor and is NOT this value); (2) the
+        # aggregate open-loss ceiling needs the freshest portfolio/reservation
+        # state, only available here, not at the earlier candidate-policy gate.
+        if _recapture.may_submit and tier0_research_mode_enabled():
+            from src.strategy.tier0_policy import (
+                TIER0_REJECT_AGGREGATE_CEILING,
+                load_tier0_risk_ceilings,
+                tier0_aggregate_ceiling_rejection_reason,
+                tier0_flat_stake_shares,
+            )
+
+            _tier0_min_order_shares = (
+                _float_or_default(row.get("min_order_size"), 1.0)
+                if isinstance(row, Mapping) else 1.0
+            )
+            _tier0_flat_shares = tier0_flat_stake_shares(
+                min_order_size_shares=_tier0_min_order_shares,
+            )
+            _tier0_stake_price = float(getattr(_chosen_stake_price, "value", 0.0) or 0.0)
+            _tier0_flat_stake_usd = _tier0_flat_shares * _tier0_stake_price
+            if portfolio_state_provider is not None:
+                from src.state.portfolio import total_exposure_usd
+
+                _tier0_current_open_cost_usd = total_exposure_usd(
+                    portfolio_state_provider()
+                ) + sum(
+                    float(usd) for _, usd in (portfolio_reservation or [])
+                )
+            else:
+                _tier0_current_open_cost_usd = None
+            _tier0_ceilings = load_tier0_risk_ceilings()
+            if _tier0_current_open_cost_usd is None:
+                _tier0_agg_reason = (
+                    f"{TIER0_REJECT_AGGREGATE_CEILING}:portfolio_state_provider_missing"
+                )
+            else:
+                _tier0_agg_reason = tier0_aggregate_ceiling_rejection_reason(
+                    current_open_cost_usd=_tier0_current_open_cost_usd,
+                    candidate_open_cost_usd=_tier0_flat_stake_usd,
+                    conservative_settled_bankroll_usd=float(bankroll_usd),
+                    aggregate_open_loss_pct_ceiling=(
+                        _tier0_ceilings["aggregate_open_loss_pct_ceiling"]
+                    ),
+                )
+            if _tier0_agg_reason is not None:
+                return _finalize_receipt(EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=_tier0_agg_reason,
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=receipt_q_live,
+                    q_lcb_5pct=receipt_q_lcb,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                ))
+            # Monotone-safe: the flat stake is the venue-legal floor, which is
+            # already <= whatever this recapture just sized (Kelly/global-optimum
+            # sizing never sizes BELOW the venue min order) — this override can
+            # only shrink the committed stake, never grow it, consistent with the
+            # DIRECTION LAW already governing every other runtime override here.
+            _robust_stake_usd = _tier0_flat_stake_usd
+            _stake_floor_provenance["stake_authority"] = "TIER0_FLAT_MICRO_STAKE"
         # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): the local selector owns
         # family-total targets, so same-token selections become residual fill-up and
         # sibling selections become close-before-open SHIFT_BIN. A sealed global

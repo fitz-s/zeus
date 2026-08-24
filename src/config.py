@@ -721,3 +721,12 @@ def hold_value_exit_costs_enabled() -> bool:
     HoldValue.compute_with_exit_costs. See config/settings.json
     feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""
     return bool(settings["feature_flags"].get("HOLD_VALUE_EXIT_COSTS", False))
+
+
+def tier0_research_mode_enabled() -> bool:
+    """reversal_plan_tier0_2026-08-24 item 6: default OFF. When True, every
+    new ENTRY admission must clear src.strategy.tier0_policy's cheap-only /
+    taker-only / one-per-cluster / flat-stake gate. When False, behavior is
+    unchanged from pre-Tier-0 (and is moot anyway while entries are globally
+    paused). See config/settings.json feature_flags.TIER0_RESEARCH_MODE."""
+    return bool(settings["feature_flags"].get("TIER0_RESEARCH_MODE", False))
