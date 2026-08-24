@@ -30,8 +30,10 @@ Relationship pins:
 """
 from __future__ import annotations
 
-import json
 import importlib.util
+import fcntl
+import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -2939,7 +2941,14 @@ def test_materialization_queue_releases_lock_before_family_compute(
     )
     thread.start()
     assert first_started.wait(timeout=2.0)
-    assert not (tmp_path / ".materialization_queue.lock").exists()
+    # The lock pathname is persistent; only a non-blocking flock proves the
+    # first worker released ownership before family compute.
+    lock_fd = os.open(tmp_path / ".materialization_queue.lock", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
     second = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir,
@@ -2957,6 +2966,339 @@ def test_materialization_queue_releases_lock_before_family_compute(
     assert second.processed_count == 1
     assert reports[0].processed_count == 1
     assert not tuple(request_dir.glob("*.json"))
+
+
+def test_claim_read_deadline_releases_lock_for_priority_held_day0(tmp_path, monkeypatch):
+    """SQLite UDF timeout never owns flock or consumes held priority work."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    held = request_dir / "Istanbul.json"
+    held.write_text(json.dumps({
+        "city": "Istanbul", "target_date": "2026-08-24",
+        "temperature_metric": "high", "source_cycle_time": "2026-08-23T18:00:00+00:00",
+        "computed_at": "2026-08-24T07:25:13+00:00", "baseline_source_run_id": "b",
+        "openmeteo_source_run_id": "o", "openmeteo_payload_json": "p.json",
+        "precision_metadata_json": "m.json", "bins": [{"bin_id": "27C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-24T07:20:00+00:00",
+        "day0_observed_extreme_c": 27.0, "day0_observed_extreme_unit": "C",
+    }), encoding="utf-8")
+    forecast_db = tmp_path / "forecasts.db"
+    sqlite3.connect(forecast_db).close()
+    monkeypatch.setattr(queue_mod, "_MATERIALIZATION_CLAIM_DEADLINE_SECONDS", 0.01)
+    started = threading.Event()
+
+    def blocked_read(**_kwargs):
+        conn = queue_mod._queue_read_only_connection(forecast_db)
+        try:
+            def block(value):
+                started.set()
+                time.sleep(0.002)
+                return value
+
+            conn.create_function("block", 1, block)
+            try:
+                conn.execute(
+                    "WITH RECURSIVE n(value) AS "
+                    "(VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 10_000) "
+                    "SELECT sum(block(value)) FROM n"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                queue_mod._raise_if_claim_read_expired()
+                raise
+        finally:
+            conn.close()
+        return frozenset()
+
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", blocked_read)
+    reports = []
+    background = threading.Thread(
+        target=lambda: reports.append(
+            queue_mod.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir, processed_dir=tmp_path / "processed",
+                failed_dir=tmp_path / "failed", forecast_db=forecast_db,
+                discover=False, limit=1, lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
+            )
+        ),
+    )
+    background.start()
+    assert started.wait(timeout=1.0)
+    lock_fd = os.open(tmp_path / ".materialization_queue.lock", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+    background.join(timeout=1.0)
+    assert not background.is_alive()
+    deferred = reports[0]
+    assert deferred.status == "DEFERRED"
+    assert queue_mod._CLAIM_READ_DEFERRED_REASON in deferred.reason_codes
+    assert held.exists()
+
+    monkeypatch.setattr(
+        queue_mod, "_current_money_risk_families",
+        lambda **_kwargs: frozenset({("Istanbul", "2026-08-24", "high")}),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        lambda **_kwargs: pytest.fail("published priority request must not enter legacy seed claim"),
+    )
+    priority = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=forecast_db,
+        seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1,
+        discover=False, limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\\n", stderr=""),
+    )
+    assert priority.status == "PROCESSED"
+    assert priority.processed_count == 1
+
+
+def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monkeypatch):
+    """A same-family stale batch defers priority until the background drain restores it."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Istanbul", "target_date": "2026-08-24", "temperature_metric": "high",
+        "source_cycle_time": "2026-08-23T18:00:00+00:00",
+        "computed_at": "2026-08-24T07:25:13+00:00", "baseline_source_run_id": "b",
+        "openmeteo_source_run_id": "o", "openmeteo_payload_json": "p.json",
+        "precision_metadata_json": "m.json", "bins": [{"bin_id": "27C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-24T07:20:00+00:00",
+        "day0_observed_extreme_c": 27.0, "day0_observed_extreme_unit": "C",
+    }
+    held = request_dir / "Istanbul.json"
+    held.write_text(json.dumps(request), encoding="utf-8")
+    stale = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME / "stale"
+    stale.mkdir(parents=True)
+    (stale / "Istanbul.stale.json").write_text(json.dumps(request), encoding="utf-8")
+    (stale / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": "2000-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    legacy_claim = queue_mod._claim_replacement_forecast_live_materialization_queue_locked
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        lambda **_kwargs: pytest.fail("priority stale recovery must not enter legacy claim"),
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert report.status == "DEFERRED"
+    assert queue_mod._CLAIM_STALE_RECOVERY_DEFERRED_REASON in report.reason_codes
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_BATCH_stale" in report.reason_codes
+    assert held.exists()
+    assert (stale / "Istanbul.stale.json").exists()
+
+    monkeypatch.setattr(
+        queue_mod, "_claim_replacement_forecast_live_materialization_queue_locked", legacy_claim
+    )
+    background = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        limit=1, lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
+        runner=lambda _argv: pytest.fail("background recovery must not process priority request"),
+    )
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED" in background.reason_codes
+    assert not (stale / "Istanbul.stale.json").exists()
+
+    priority = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr=""),
+    )
+    assert priority.status == "PROCESSED"
+
+
+def test_priority_unrelated_stale_batch_does_not_block_held_request(tmp_path, monkeypatch):
+    """A stale batch only fences its own coalescing family."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Istanbul", "target_date": "2026-08-24", "temperature_metric": "high",
+        "source_cycle_time": "2026-08-23T18:00:00+00:00",
+        "computed_at": "2026-08-24T07:25:13+00:00", "baseline_source_run_id": "b",
+        "openmeteo_source_run_id": "o", "openmeteo_payload_json": "p.json",
+        "precision_metadata_json": "m.json", "bins": [{"bin_id": "27C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-24T07:20:00+00:00",
+        "day0_observed_extreme_c": 27.0, "day0_observed_extreme_unit": "C",
+    }
+    (request_dir / "Istanbul.json").write_text(json.dumps(request), encoding="utf-8")
+    stale = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME / "stale-other"
+    stale.mkdir(parents=True)
+    (stale / "Other.json").write_text(json.dumps({**request, "city": "Other"}), encoding="utf-8")
+    (stale / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": "2000-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        lambda **_kwargs: pytest.fail("unrelated stale batch must not enter legacy claim"),
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr=""),
+    )
+
+    assert report.status == "PROCESSED"
+    assert (stale / "Other.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "payload", "claimed_at"),
+    (
+        ("malformed", "{", "2026-08-24T07:25:13+00:00"),
+        ("missing-identity", json.dumps({"city": "Other"}), "2026-08-24T07:25:13+00:00"),
+        ("invalid-cycle", json.dumps({
+            "city": "Other", "target_date": "2026-08-24", "temperature_metric": "high",
+            "source_cycle_time": "not-a-time", "baseline_source_run_id": "b",
+            "openmeteo_source_run_id": "o",
+        }), "2000-01-01T00:00:00+00:00"),
+    ),
+)
+def test_priority_unknown_inflight_scope_defers_without_consuming_held(
+    tmp_path, monkeypatch, name, payload, claimed_at
+):
+    """Malformed, missing, and invalid inflight identities are global priority debt."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    held = request_dir / "Istanbul.json"
+    held.write_text(json.dumps({
+        "city": "Istanbul", "target_date": "2026-08-24", "temperature_metric": "high",
+        "source_cycle_time": "2026-08-23T18:00:00+00:00",
+        "computed_at": "2026-08-24T07:25:13+00:00", "baseline_source_run_id": "b",
+        "openmeteo_source_run_id": "o", "openmeteo_payload_json": "p.json",
+        "precision_metadata_json": "m.json", "bins": [{"bin_id": "27C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-24T07:20:00+00:00",
+        "day0_observed_extreme_c": 27.0, "day0_observed_extreme_unit": "C",
+    }), encoding="utf-8")
+    batch = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME / name
+    batch.mkdir(parents=True)
+    (batch / "unknown.json").write_text(payload, encoding="utf-8")
+    (batch / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": claimed_at}), encoding="utf-8"
+    )
+    legacy_claim = queue_mod._claim_replacement_forecast_live_materialization_queue_locked
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        lambda **_kwargs: pytest.fail("unknown inflight must not enter priority legacy claim"),
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert report.status == "DEFERRED"
+    assert queue_mod._CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON in report.reason_codes
+    assert f"REPLACEMENT_LIVE_MATERIALIZATION_UNKNOWN_INFLIGHT_BATCH_{name}" in report.reason_codes
+    assert held.exists()
+    assert (batch / "unknown.json").exists()
+    if claimed_at.startswith("2000-"):
+        monkeypatch.setattr(
+            queue_mod, "_claim_replacement_forecast_live_materialization_queue_locked", legacy_claim
+        )
+        queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir, processed_dir=tmp_path / "processed",
+            failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+            limit=1, lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
+            runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr=""),
+        )
+        assert not (batch / "unknown.json").exists()
+
+
+def test_priority_wal_commit_between_plan_and_apply_defers_without_claim(tmp_path, monkeypatch):
+    """A WAL-only commit invalidates the plan before any request move."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    held = request_dir / "Istanbul.json"
+    held.write_text(json.dumps({
+        "city": "Istanbul", "target_date": "2026-08-24", "temperature_metric": "high",
+        "source_cycle_time": "2026-08-23T18:00:00+00:00",
+        "computed_at": "2026-08-24T07:25:13+00:00", "baseline_source_run_id": "b",
+        "openmeteo_source_run_id": "o", "openmeteo_payload_json": "p.json",
+        "precision_metadata_json": "m.json", "bins": [{"bin_id": "27C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-24T07:20:00+00:00",
+        "day0_observed_extreme_c": 27.0, "day0_observed_extreme_unit": "C",
+    }), encoding="utf-8")
+    forecast_db = tmp_path / "forecasts.db"
+    writer = sqlite3.connect(forecast_db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE fence(value INTEGER)")
+    writer.commit()
+    original = queue_mod._claim_db_fingerprint
+    calls = []
+
+    def fingerprint_with_wal_commit(path):
+        result = original(path)
+        calls.append(result)
+        if len(calls) == 1:
+            writer.execute("INSERT INTO fence VALUES (1)")
+            writer.commit()
+        return result
+
+    monkeypatch.setattr(queue_mod, "_claim_db_fingerprint", fingerprint_with_wal_commit)
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        lambda **_kwargs: pytest.fail("WAL mismatch must not enter legacy claim"),
+    )
+    try:
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir, processed_dir=tmp_path / "processed",
+            failed_dir=tmp_path / "failed", forecast_db=forecast_db,
+            seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
+            seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+            limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        )
+    finally:
+        writer.close()
+
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert report.status == "DEFERRED"
+    assert held.exists()
+    assert not (tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME).exists()
 
 
 def test_materialization_queue_defers_same_family_while_inflight(tmp_path) -> None:
@@ -3111,7 +3453,12 @@ def test_materialization_queue_preserves_claim_when_runner_crashes(tmp_path) -> 
     assert len(batches) == 1
     assert (batches[0] / queue_mod._CLAIM_METADATA_NAME).exists()
     assert (batches[0] / "Madrid.json").exists()
-    assert not (tmp_path / ".materialization_queue.lock").exists()
+    lock_fd = os.open(tmp_path / ".materialization_queue.lock", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def test_materialization_timeout_isolated_to_its_own_request(
