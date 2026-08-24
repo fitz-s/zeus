@@ -3885,6 +3885,10 @@ def test_day0_extreme_bridge_fails_closed_for_zero_observation_state(
     assert report["status"] == "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
     assert report["enqueued"] is False
     assert captured == {}
+    # No retry is safe without a fresh complete identity; the next event must supply one.
+    assert cycle_advance._day0_bridge_status_retryable(
+        "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    ) is False
 
 
 def test_day0_extreme_bridge_config_lookup_failure_is_failsoft(monkeypatch) -> None:
@@ -4220,7 +4224,7 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     def _materialize(**kwargs):
         attempts.append(kwargs)
         if len(attempts) == 1:
-            return {"status": "CYCLE_ADVANCE_FAILSOFT_SKIPPED"}
+            return {"status": "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"}
         return {"status": "TEST_DONE"}
 
     monkeypatch.setattr(
@@ -4246,6 +4250,9 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     ) is True
     assert cycle_advance._day0_bridge_status_retryable(
         "CYCLE_ADVANCE_RETRY_PENDING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"
     ) is True
     assert cycle_advance._day0_bridge_status_retryable(
         "SAME_CYCLE_RECOMPUTE_RETRY_PENDING"
