@@ -669,7 +669,7 @@ def test_day0_physical_frontier_without_settlement_fact_blocks_entry_belief() ->
     ) is True
 
 
-def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
+def test_global_provisional_day0_uses_physical_source_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.data import replacement_forecast_bundle_reader as reader
@@ -722,19 +722,25 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
     observations.execute(
         "INSERT INTO observation_instants VALUES "
         "('Hong Kong','2026-06-09',27.0,'2026-06-09T10:00:00+00:00',"
-        "'2026-06-09T10:00:00+00:00','hko_hourly_accumulator','CAUSAL',"
+        "'2026-06-09T10:00:00+00:00','ogimet_metar_test','CAUSAL',"
         "'VERIFIED','settlement_channel',0)"
     )
 
-    fact_a = {
-        "observation_source": "hko_hourly_accumulator",
+    settlement_fact = {
+        "observation_source": "ogimet_metar_test",
+        "observation_time": "2026-06-09T10:01:00+00:00",
+        "observed_extreme_native": 28.0,
+    }
+    physical_fact = {
+        "observation_source": "aviationweather_metar",
         "observation_time": "2026-06-09T10:00:00+00:00",
         "observed_extreme_native": 27.0,
     }
     returned_b = {
-        "settlement_source": "hko_hourly_accumulator",
-        "observation_time": "2026-06-09T10:01:00+00:00",
-        "observed_extreme_native": 28.0,
+        "settlement_source": settlement_fact["observation_source"],
+        "observation_time": settlement_fact["observation_time"],
+        "observed_extreme_native": settlement_fact["observed_extreme_native"],
+        "high_so_far": settlement_fact["observed_extreme_native"],
         "settlement_unit": "C",
     }
     bundle = SimpleNamespace(
@@ -748,10 +754,11 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
             "day0_provisional_observation": {
                 "active": True,
                 "support_truncation": False,
-                "source": fact_a["observation_source"],
-                "observation_time": fact_a["observation_time"],
-                "observed_extreme_c": fact_a["observed_extreme_native"],
-            }
+                "source": physical_fact["observation_source"],
+                "observation_time": physical_fact["observation_time"],
+                "observed_extreme_c": physical_fact["observed_extreme_native"],
+            },
+            "bayes_precision_fusion": {"predictive_sigma_c": 2.0},
         },
     )
     monkeypatch.setattr(
@@ -761,6 +768,8 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
             "Hong Kong": SimpleNamespace(
                 timezone="UTC",
                 settlement_unit="C",
+                settlement_source_type="wu_icao",
+                wu_station="VHHH",
             )
         },
     )
@@ -769,11 +778,14 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
         "_final_daily_observation_extreme",
         lambda **_kwargs: None,
     )
-    monkeypatch.setattr(
-        target_plan,
-        "_latest_authorized_day0_fact",
-        lambda *_args, **_kwargs: fact_a,
-    )
+    fact_requests: list[bool] = []
+
+    def latest_fact(*_args, **kwargs):
+        settlement_channel = bool(kwargs["require_settlement_channel"])
+        fact_requests.append(settlement_channel)
+        return settlement_fact if settlement_channel else physical_fact
+
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", latest_fact)
     monkeypatch.setattr(
         readiness_reader,
         "latest_replacement_readiness",
@@ -797,19 +809,19 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
         event_type="DAY0_EXTREME_UPDATED",
         entity_key="Hong Kong|2026-06-09|high",
         source="test",
-        observed_at=fact_a["observation_time"],
-        available_at=fact_a["observation_time"],
-        received_at=fact_a["observation_time"],
+        observed_at=settlement_fact["observation_time"],
+        available_at=settlement_fact["observation_time"],
+        received_at=settlement_fact["observation_time"],
         payload={
             "city": "Hong Kong",
             "target_date": "2026-06-09",
             "metric": "high",
             "unit": "C",
-            "settlement_source": "hko_hourly_accumulator",
+            "settlement_source": settlement_fact["observation_source"],
             "settlement_unit": "C",
-            "observation_time": fact_a["observation_time"],
-            "raw_value": 27.0,
-            "rounded_value": 27,
+            "observation_time": settlement_fact["observation_time"],
+            "raw_value": settlement_fact["observed_extreme_native"],
+            "rounded_value": 28,
             "source_match_status": "MATCH",
             "local_date_status": "MATCH",
             "station_match_status": "MATCH",
@@ -822,46 +834,34 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
         causal_snapshot_id="day0-a",
     )
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
-    ):
-        adapter._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=datetime(
-                2026,
-                6,
-                9,
-                12,
-                tzinfo=timezone.utc,
-            ),
-            max_age=timedelta(seconds=30),
-            allow_provisional_day0_replacement=True,
-        )
+    prepare_kwargs = {
+        "forecast_conn": forecast,
+        "topology_conn": forecast,
+        "observation_conn": observations,
+        "decision_time": datetime(2026, 6, 9, 12, tzinfo=timezone.utc),
+        "max_age": timedelta(seconds=30),
+        "allow_provisional_day0_replacement": True,
+        "probability_use": adapter._CurrentProbabilityUse.HELD_MONITOR,
+    }
+    adapter._prepare_current_global_probability_family(event, **prepare_kwargs)
+    assert fact_requests[:2] == [True, False]
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+    for key, bad_value in (
+        ("observation_source", "aviationweather_other"),
+        ("observation_time", "2026-06-09T10:02:00+00:00"),
+        ("observed_extreme_native", 26.0),
     ):
-        adapter._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=datetime(
-                2026,
-                6,
-                9,
-                12,
-                tzinfo=timezone.utc,
-            ),
-            max_age=timedelta(seconds=30),
-            allow_provisional_day0_replacement=True,
-            probability_use=adapter._CurrentProbabilityUse.HELD_MONITOR,
-        )
+        original = physical_fact[key]
+        physical_fact[key] = bad_value
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        ):
+            adapter._prepare_current_global_probability_family(
+                event,
+                **prepare_kwargs,
+            )
+        physical_fact[key] = original
     forecast.close()
     observations.close()
 
