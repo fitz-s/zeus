@@ -53,6 +53,7 @@ from src.events.reactor import (
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
     _rank_forecast_wake_events,
+    _is_explicitly_transient_money_path_reason,
     _is_transient_money_path_reason,
 )
 from src.state.db import init_schema, world_write_mutex
@@ -2990,6 +2991,90 @@ def test_stale_global_winner_carrier_is_terminal_for_fresh_reset(caplog, reason)
         assert _is_transient_money_path_reason(reason) is False
 
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:GLOBAL_ACTUATION_BOOK_SUPERSEDED",
+        "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
+    ),
+)
+def test_reauction_exhaustion_reasons_are_terminal(caplog, reason):
+    """A bounded in-batch reauction (global_batch_runtime.py's
+    _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS) that exhausts its attempt
+    cap without converging is a genuine terminal verdict, not a race to requeue.
+    """
+    reason_base = reason.partition(":")[0]
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert reason_base in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+        assert _is_explicitly_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "EXECUTABLE_SNAPSHOT_BLOCKED",
+        "GLOBAL_REAUCTION_EPOCH_EXPIRED",
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:GLOBAL_BOOK_RESPONSE_INCOMPLETE",
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:would_cross_book:passive price crossed",
+    ),
+)
+def test_explicitly_transient_predicate_matches_registered_transient(reason):
+    """For every EXPLICITLY registered transient reason, the stricter winner-target
+    predicate agrees exactly with the general fail-open classifier — a registered
+    transient carrier must requeue identically whether or not it is a winner-target
+    carrier.
+    """
+    assert _is_transient_money_path_reason(reason) is True
+    assert _is_explicitly_transient_money_path_reason(reason) is True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_WINNER_CLAIM_FENCE_LOST:event_id=x",
+        "TRADE_SCORE_BLOCKED:below_floor",
+    ),
+)
+def test_explicitly_transient_predicate_matches_registered_terminal(reason):
+    """For every EXPLICITLY registered terminal reason, both predicates agree: False."""
+    assert _is_transient_money_path_reason(reason) is False
+    assert _is_explicitly_transient_money_path_reason(reason) is False
+
+
+def test_explicitly_transient_predicate_fails_closed_on_unregistered_base(caplog):
+    """The general classifier fail-opens TRANSIENT (loudly) on an unregistered
+    base; the stricter winner-target predicate fails CLOSED (False) on the exact
+    same input and never logs — this is the class-level fix for the
+    GLOBAL_WINNER_CLAIM_FENCE_LOST 2026-08-17 livelock (x205/14.26h): before that
+    one reason base was registered TERMINAL, an unregistered base fail-opened
+    TRANSIENT here and the winner-target sentinel-restoration gate
+    (_finalize_disposition) re-armed the carrier for immediate re-election with
+    zero backoff. Any OTHER unregistered reason sits in the identical trap unless
+    the winner-target gate uses this stricter predicate instead of the fail-open
+    one.
+    """
+    reason = "TEST_UNREGISTERED_REASON:synthetic_probe"
+    assert "TEST_UNREGISTERED_REASON" not in TERMINAL_MONEY_PATH_REASONS
+    assert "TEST_UNREGISTERED_REASON" not in TRANSIENT_MONEY_PATH_REASONS
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert _is_transient_money_path_reason(reason) is True
+        assert any(
+            "UNKNOWN money-path reason" in row.message for row in caplog.records
+        )
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert _is_explicitly_transient_money_path_reason(reason) is False
+        assert not any(
+            "UNKNOWN money-path reason" in row.message for row in caplog.records
+        )
 
 
 def test_global_no_reduce_only_family_is_terminal_for_completed_cut(caplog):
@@ -13083,6 +13168,141 @@ def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
         (event.event_id,),
     ).fetchone()
     assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
+
+
+def test_winner_target_carrier_terminalizes_on_unregistered_reason(caplog):
+    """GLOBAL_WINNER_CLAIM_FENCE_LOST livelock class fix: a winner-target carrier
+    whose rejection reason is NOT explicitly registered transient must
+    terminalize instead of requeuing with its GLOBAL_WINNER_TARGETED_CLAIM
+    sentinel restored. Restoring the sentinel on an unregistered reason is
+    exactly the 2026-08-17 (x205/14.26h) livelock: the carrier stays
+    rediscoverable as a winner target and gets immediately reclaimed/re-elected/
+    re-lost with zero backoff. The exact reason used here (a
+    GLOBAL_PREFLIGHT_BATCH_BLOCKED-wrapped GLOBAL_ACTUATION_BOOK_SUPERSEDED) is
+    gate 3's real default fallthrough — still unregistered and, before this fix,
+    still in the trap.
+    """
+    conn, store = _store()
+    event = replace(
+        _forecast_event(target_date="2026-05-25"),
+        source="global_auction_winner_target:upstream-winner:economics",
+    )
+    store.insert_or_ignore(event)
+    reactor = _retry_reactor(store, {"v": True})
+
+    def _row():
+        return conn.execute(
+            "SELECT processing_status, last_error FROM opportunity_event_processing "
+            "WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()
+
+    unregistered_reason = (
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:GLOBAL_ACTUATION_BOOK_SUPERSEDED"
+    )
+    reactor._transient_requeue_reasons[event.event_id] = unregistered_reason
+    res = ReactorResult()
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        reactor._finalize_disposition(
+            event,
+            "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+            decision_time=_DT_VENUE_OPEN,
+            result=res,
+        )
+
+    assert res.dead_lettered == 1
+    assert res.retried == 0
+    status, last_error = _row()
+    assert status == "dead_letter"
+    # NOT re-armed: the sentinel that makes a row rediscoverable as a global
+    # winner target must never appear here for an unregistered reason.
+    assert last_error != GLOBAL_WINNER_TARGETED_CLAIM
+    dead_letter_row = conn.execute(
+        "SELECT failure_stage FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert dead_letter_row[0] == "GLOBAL_WINNER_TARGET_UNREGISTERED_REASON"
+    regret_row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events "
+        "WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert regret_row is not None
+    assert regret_row[0] == "EXECUTOR_EXPRESSIBILITY"
+    assert unregistered_reason in regret_row[1]
+
+
+def test_winner_target_carrier_requeues_with_sentinel_on_registered_transient_reason():
+    """Regression guard: a winner-target carrier with an EXPLICITLY registered
+    transient reason must still requeue with its GLOBAL_WINNER_TARGETED_CLAIM
+    sentinel restored, exactly as before this fix — only UNREGISTERED reasons
+    change behavior.
+    """
+    conn, store = _store()
+    event = replace(
+        _forecast_event(target_date="2026-05-25"),
+        source="global_auction_winner_target:upstream-winner:economics",
+    )
+    store.insert_or_ignore(event)
+    reactor = _retry_reactor(store, {"v": True})
+
+    def _row():
+        return conn.execute(
+            "SELECT processing_status, last_error FROM opportunity_event_processing "
+            "WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()
+
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_OPEN,
+        result=res,
+    )
+
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    status, last_error = _row()
+    assert status == "pending"
+    assert last_error == GLOBAL_WINNER_TARGETED_CLAIM
+
+
+def test_non_winner_target_carrier_unaffected_by_unregistered_reason_gate():
+    """Regression guard: the new winner-target-only gate must not change
+    disposition for an ordinary (non-winner-target) carrier — an unregistered
+    reason still fails open to TRANSIENT/requeue exactly as before, with its
+    raw reason preserved as last_error (no sentinel involved).
+    """
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    assert not str(event.source or "").startswith("global_auction_winner_target:")
+    store.insert_or_ignore(event)
+    reactor = _retry_reactor(store, {"v": True})
+
+    def _row():
+        return conn.execute(
+            "SELECT processing_status, last_error FROM opportunity_event_processing "
+            "WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()
+
+    unregistered_reason = "TEST_UNREGISTERED_REASON:non_winner_target_probe"
+    reactor._transient_requeue_reasons[event.event_id] = unregistered_reason
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_OPEN,
+        result=res,
+    )
+
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    status, last_error = _row()
+    assert status == "pending"
+    assert last_error == unregistered_reason
 
 
 def test_source_captured_after_decision_time_is_retryable_not_consumed():
