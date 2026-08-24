@@ -23,6 +23,7 @@ import json
 import math
 import sqlite3
 import hashlib
+import numpy as np
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence

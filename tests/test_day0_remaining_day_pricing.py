@@ -334,6 +334,99 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
         monkeypatch.undo()
 
 
+def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Exercise the exact request-shaped materializer seam without injecting ``np``."""
+    from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest,
+        _day0_noaa_future_vector_members,
+        _day0_noaa_preliminary_carrier,
+    )
+    import src.data.day0_hourly_vectors as hourly
+
+    target = date(2026, 8, 24)
+    local_tz = ZoneInfo("Europe/Istanbul")
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    vectors = tuple(
+        Day0HourlyVector(
+            model=model,
+            city="Istanbul",
+            target_date=target.isoformat(),
+            timezone_name="Europe/Istanbul",
+            captured_at="2026-08-24T08:30:00+00:00",
+            times=times,
+            temps_c=tuple(20.0 + hour * (0.2 if model == "ecmwf_ifs" else 0.25) for hour in range(24)),
+        )
+        for model in ("ecmwf_ifs", "icon_global")
+    )
+    monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs", "icon_global"])
+    monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: list(vectors))
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
+        lambda *_args, **_kwargs: {
+            "identity_hash": "istanbul-prior-v1",
+            "boundary_survival_probability": 0.95,
+        },
+    )
+    anchor = OpenMeteoIfs9LocalDayAnchor(
+        city_timezone="Europe/Istanbul",
+        target_local_date=target,
+        high_c=25.0,
+        low_c=18.0,
+        sample_count=1,
+        contributing_local_times=(datetime(2026, 8, 24, 0, tzinfo=local_tz),),
+        contributing_valid_times_utc=(datetime(2026, 8, 23, 21, tzinfo=UTC),),
+        source_cycle_time=datetime(2026, 8, 24, 6, tzinfo=UTC),
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city="Istanbul",
+        city_id="Istanbul",
+        city_timezone="Europe/Istanbul",
+        target_date=target,
+        temperature_metric="high",
+        baseline_source_run_id="b0-istanbul",
+        baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        baseline_source_available_at="2026-08-24T08:00:00+00:00",
+        openmeteo_anchor=anchor,
+        openmeteo_source_run_id="om-istanbul",
+        openmeteo_source_available_at="2026-08-24T08:10:00+00:00",
+        bins=(
+            SimpleNamespace(lower_c=None, upper_c=29.0),
+            SimpleNamespace(lower_c=30.0, upper_c=30.0),
+            SimpleNamespace(lower_c=31.0, upper_c=None),
+        ),
+        source_cycle_time="2026-08-24T06:00:00+00:00",
+        computed_at="2026-08-24T09:30:00+00:00",
+        day0_observed_extreme_c=30.0,
+        day0_observed_extreme_source="ogimet_metar_ltfm",
+        day0_observed_extreme_observation_time="2026-08-24T09:00:00+00:00",
+        day0_observed_extreme_sample_count=24,
+        day0_observed_extreme_unit="C",
+    )
+    conn = sqlite3.connect(":memory:")
+    future, path_sigma, cutoff = _day0_noaa_future_vector_members(
+        conn, request, metric="high"
+    )
+    carrier, likelihood = _day0_noaa_preliminary_carrier(
+        conn,
+        request,
+        metric="high",
+        future_members_c=future,
+        bins=request.bins,
+        path_error_sigma_c=path_sigma,
+    )
+    assert cutoff == "2026-08-24T09:30:00+00:00"
+    assert len(future) == 2
+    assert path_sigma > 0.0
+    assert likelihood["identity_hash"] == "istanbul-prior-v1"
+    assert carrier["sample_count"] == 500
+    assert len(carrier["samples"]) == 500
+    assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
+    conn.close()
+
+
 def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
