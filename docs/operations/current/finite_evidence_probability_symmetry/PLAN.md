@@ -4,6 +4,13 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-24 — screen cancel obligation dispatch lease
+
+- **Design:** screen persists only a versioned exact command/order obligation; recovery selects only that marker, claims it with `CANCEL_DISPATCH_STARTED` in one `BEGIN IMMEDIATE` transaction, and performs no DB I/O across venue I/O. The claim carries obligation id, owner boot UUID/pid, generation, attempt id, and expiry. A stale claimant cannot finalize; expired claims require a fresh point-order witness before reclaim. Post-venue ACK/unknown uses a separate bounded reserve.
+- **SCOPE / DRAIN / RESET:** scope is one command/order obligation. Drain is the existing single-flight `edli_command_recovery` cadence. Reset is CANCEL_ACKED/CANCELLED, or an expired lease with fresh live terminal truth; malformed/legacy markers remain deferred and are never auto-upgraded.
+- **Acceptance:** deadline-bound selector; active/expired lease race; crash before HTTP; stale-finalizer rejection; post-success journal failure; terminal/filled/sub-min/multiple/legacy/malformed marker antibodies; no connection across network; compile, diff, topology planning-lock. Command-vocabulary expansion is review-only and requires human live-cutover gate.
+- **Rollback:** stop dispatching new screen markers; existing CANCEL_PENDING obligations remain reconciled by the established recovery lane. No deploy or live cutover is authorized by this packet amendment.
+
 ## 2026-08-23 — exact-market reconcile finding不得冻结全球资本
 
 - **实时反例：** `de9e5e204`完成24/24 held monitor coverage且probability stale为0，

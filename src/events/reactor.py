@@ -82,9 +82,88 @@ DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS = 300.0
 DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
+DEFAULT_EDLI_REDECISION_SCREEN_BUDGET_SECONDS = 60.0
+MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS = 85.0
 MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
 MARKET_CHANNEL_SINK_READINESS_FILENAME = "market-channel-action-sink-readiness.json"
 PRICE_CHANNEL_HEARTBEAT_FILENAME = "daemon-heartbeat-price-channel-ingest.json"
+_edli_redecision_screen_generation = 0
+
+
+def _edli_screen_deadline_check(deadline_fence: Any | None) -> None:
+    """Refuse a new screen side effect once its absolute fence has elapsed."""
+
+    if deadline_fence is not None and deadline_fence.expired():
+        raise sqlite3.OperationalError("interrupted")
+
+
+@contextlib.contextmanager
+def _edli_screen_bound_connection(factory: Callable[[], sqlite3.Connection], deadline_fence: Any | None):
+    """Open a short-lived helper connection under the caller's screen fence."""
+
+    _edli_screen_deadline_check(deadline_fence)
+    conn = factory()
+    try:
+        if deadline_fence is None:
+            yield conn
+        else:
+            from src.events.continuous_redecision import sqlite_deadline_bound
+
+            with sqlite_deadline_bound(conn, deadline_fence):
+                _edli_screen_deadline_check(deadline_fence)
+                yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _edli_redecision_screen_budget_seconds(edli_cfg: Mapping[str, Any]) -> float:
+    """Keep a screen tick safely below its 90-second scheduler cadence."""
+
+    try:
+        configured = float(
+            edli_cfg.get(
+                "continuous_redecision_screen_budget_seconds",
+                DEFAULT_EDLI_REDECISION_SCREEN_BUDGET_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured = DEFAULT_EDLI_REDECISION_SCREEN_BUDGET_SECONDS
+    return max(0.001, min(MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS, configured))
+
+
+def _next_edli_redecision_screen_generation() -> int:
+    global _edli_redecision_screen_generation
+    _edli_redecision_screen_generation += 1
+    return _edli_redecision_screen_generation
+
+
+def _edli_redecision_stage_receipt(
+    *,
+    stage: str,
+    status: str,
+    started_monotonic: float,
+    reason: str = "",
+) -> dict[str, object]:
+    """Typed, non-durable screen receipt; deadline deferral must not write DB state."""
+
+    if stage not in {
+        "belief_scan",
+        "price_screen",
+        "confirmation_refresh",
+        "emit_prune",
+    }:
+        raise ValueError(f"unknown redecision screen stage: {stage}")
+    if status not in {"completed", "deferred"}:
+        raise ValueError(f"unknown redecision screen receipt status: {status}")
+    return {
+        "stage": stage,
+        "status": status,
+        "reason": reason,
+        "elapsed_ms": max(0, int((time.monotonic() - started_monotonic) * 1_000)),
+    }
 
 
 def _portfolio_snapshot_submit_gate(
@@ -5366,7 +5445,7 @@ def _regret_bucket_for(reason: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _edli_reactor_held_family_provider():
+def _edli_reactor_held_family_provider(*, deadline_fence: Any | None = None):
     """ALWAYS-DECIDABLE invariant — ordering (operator correction 2026-06-12). Build the read-only,
     fail-soft provider of currently-HELD (city, target_date, metric) families so the reactor's
     refresh fan-out refreshes money-at-risk families FIRST (then liquidity-blind fair rotation —
@@ -5392,11 +5471,11 @@ def _edli_reactor_held_family_provider():
         p = _Path(str(trades_path))
         if not p.exists():
             return frozenset()
-        conn_t = _sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0)
-        try:
+        with _edli_screen_bound_connection(
+            lambda: _sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0),
+            deadline_fence,
+        ) as conn_t:
             return frozenset(_held_position_families(conn_t))
-        finally:
-            conn_t.close()
 
     return _provider
 
@@ -5444,7 +5523,9 @@ def _edli_held_sell_request_exposure_provider():
     return _provider
 
 
-def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
+def _edli_current_held_position_family_keys(
+    *, deadline_fence: Any | None = None
+) -> set[tuple[str, str, str]]:
     """Current held-position families for monitor and duplicate-entry suppression.
 
     Any family with real position_current exposure must keep receiving position-monitor
@@ -5456,11 +5537,21 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
     """
 
-    provider = _edli_reactor_held_family_provider()
+    provider = (
+        _edli_reactor_held_family_provider(deadline_fence=deadline_fence)
+        if deadline_fence is not None
+        else _edli_reactor_held_family_provider()
+    )
     if provider is None:
         return set()
     try:
         raw_families = provider()
+    except sqlite3.OperationalError:
+        if deadline_fence is not None and deadline_fence.expired():
+            raise
+        raise
+    except sqlite3.Error:
+        raise
     except Exception as exc:  # noqa: BLE001
         import logging as _logging
 
@@ -12478,13 +12569,13 @@ def _edli_policy_blocked_open_rest_commands(
     return blocked
 
 
-def _edli_cancel_rest_pulls(rest_pulls) -> int:
-    """Cancel screened maker rests through the one durable cancel journal."""
+def _edli_cancel_rest_pulls(rest_pulls, *, deadline_fence: Any | None = None) -> int:
+    """Queue screened maker-rest cancel debt; recovery owns venue side effects."""
 
     if not rest_pulls:
         return 0
-    from src.data.polymarket_client import PolymarketClient
-    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    _edli_screen_deadline_check(deadline_fence)
+    from src.execution.venue_cancel_journal import persist_screen_redecision_cancel_obligations
     from src.state.db import get_trade_connection
 
     to_cancel = [
@@ -12501,12 +12592,30 @@ def _edli_cancel_rest_pulls(rest_pulls) -> int:
         }
         for rest, decision in rest_pulls
     ]
-    stats = run_persisted_cancels_for_expired_rests(
-        to_cancel,
-        PolymarketClient(),
-        conn_factory=lambda: get_trade_connection(write_class="live"),
+    def _cancel_connection() -> sqlite3.Connection:
+        _edli_screen_deadline_check(deadline_fence)
+        conn = get_trade_connection(write_class="live")
+        if deadline_fence is not None:
+            remaining_ms = max(
+                1,
+                int((deadline_fence.deadline_monotonic - time.monotonic()) * 1_000),
+            )
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            conn.set_progress_handler(
+                lambda: int(deadline_fence.expired()), 1_000
+            )
+        return conn
+
+    obligation_deadline = min(
+        time.monotonic() + 2.0,
+        deadline_fence.deadline_monotonic if deadline_fence is not None else time.monotonic() + 2.0,
     )
-    return int(stats.get("cancelled", 0) or 0)
+    stats = persist_screen_redecision_cancel_obligations(
+        to_cancel,
+        conn_factory=_cancel_connection,
+        deadline_monotonic=obligation_deadline,
+    )
+    return int(stats.get("queued", 0) or 0)
 
 
 def _edli_family_key_from_belief(belief: Any) -> tuple[str, str, str] | None:
@@ -12633,7 +12742,12 @@ def _edli_family_key_from_rest(rest: Any) -> tuple[str, str, str] | None:
     return None
 
 
-def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) -> bool:
+def _edli_condition_latest_snapshot_executable(
+    trade_conn,
+    condition_id: str,
+    *,
+    deadline_fence: Any | None = None,
+) -> bool:
     """Return False only when the latest known substrate says this condition cannot trade."""
 
     clean_condition_id = str(condition_id or "").strip()
@@ -12645,6 +12759,8 @@ def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) ->
             for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
         }
     except sqlite3.Error:
+        if deadline_fence is not None:
+            raise
         return True
     required = {"condition_id", "captured_at", "snapshot_id"}
     if not required.issubset(cols):
@@ -12666,6 +12782,8 @@ def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) ->
             (clean_condition_id,),
         ).fetchone()
     except sqlite3.Error:
+        if deadline_fence is not None:
+            raise
         return True
     if row is None:
         return True
@@ -12688,7 +12806,9 @@ def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) ->
     return bool(not closed and enable_orderbook and accepting_orders)
 
 
-def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
+def _edli_current_held_position_condition_scope(
+    *, deadline_fence: Any | None = None
+) -> dict[tuple[str, str, str], set[str]]:
     """Current held-position condition_ids for scoped redecision freshness admission."""
     import logging as _logging
 
@@ -12697,35 +12817,25 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
     from src.state.db import get_trade_connection_read_only
 
     out: dict[tuple[str, str, str], set[str]] = {}
-    trade_ro = None
     try:
-        trade_ro = get_trade_connection_read_only()
-        try:
+        with _edli_screen_bound_connection(
+            get_trade_connection_read_only, deadline_fence
+        ) as trade_ro:
             cols = {
                 str(row[1])
                 for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
             }
-        except sqlite3.Error:
-            return {}
-        required = {
-            "city",
-            "target_date",
-            "temperature_metric",
-            "phase",
-            "condition_id",
-            "chain_state",
-            "chain_shares",
-        }
-        if not required.issubset(cols):
-            return {}
-        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+            required = {
+                "city", "target_date", "temperature_metric", "phase", "condition_id",
+                "chain_state", "chain_shares",
+            }
+            if not required.issubset(cols):
+                return {}
+            from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
-        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
-        # also OR in a phase='quarantined' branch — retired, DB CHECK no
-        # longer admits the literal post-migration.
-        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
-        chain_placeholders = ",".join("?" for _ in chain_state_values)
-        rows = trade_ro.execute(
+            chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+            chain_placeholders = ",".join("?" for _ in chain_state_values)
+            rows = trade_ro.execute(
             f"""
             SELECT city, target_date, temperature_metric, condition_id
               FROM position_current
@@ -12736,18 +12846,26 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
                AND COALESCE(chain_shares, 0) > 0.000001
             """,
             chain_state_values,
-        ).fetchall()
-        for row in rows:
-            family_key = (
-                str(row[0] or "").strip(),
-                str(row[1] or "").strip(),
-                str(row[2] or "").strip(),
-            )
-            condition_id = str(row[3] or "").strip()
-            if all(family_key) and family_key[2] in {"high", "low"} and condition_id:
-                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
-                    continue
-                out.setdefault(family_key, set()).add(condition_id)
+            ).fetchall()
+            for row in rows:
+                _edli_screen_deadline_check(deadline_fence)
+                family_key = (
+                    str(row[0] or "").strip(), str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                )
+                condition_id = str(row[3] or "").strip()
+                if all(family_key) and family_key[2] in {"high", "low"} and condition_id:
+                    if not _edli_condition_latest_snapshot_executable(
+                        trade_ro, condition_id, deadline_fence=deadline_fence
+                    ):
+                        continue
+                    out.setdefault(family_key, set()).add(condition_id)
+            _edli_screen_deadline_check(deadline_fence)
+            return out
+    except sqlite3.OperationalError:
+        if deadline_fence is not None and deadline_fence.expired():
+            raise
+        raise
     except Exception as exc:  # noqa: BLE001
         _log.warning(
             "edli_redecision_screen: held-position condition scope read failed; "
@@ -12755,15 +12873,11 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
             exc,
         )
         return {}
-    finally:
-        if trade_ro is not None:
-            try:
-                trade_ro.close()
-            except Exception:  # noqa: BLE001
-                pass
     return out
 def _edli_current_held_position_family_condition_scope(
     families: set[tuple[str, str, str]] | None = None,
+    *,
+    deadline_fence: Any | None = None,
 ) -> dict[tuple[str, str, str], set[str]]:
     """Full family condition scope for held-position redecision.
 
@@ -12776,7 +12890,7 @@ def _edli_current_held_position_family_condition_scope(
     _log = _logging.getLogger("zeus.events.reactor")
 
     held_families = (
-        set(_edli_current_held_position_condition_scope())
+        set(_edli_current_held_position_condition_scope(deadline_fence=deadline_fence))
         if families is None
         else set(families)
     )
@@ -12793,17 +12907,24 @@ def _edli_current_held_position_family_condition_scope(
     from src.data.market_topology_rows import _event_family_market_topology_rows
     from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
 
-    forecasts_ro = get_forecasts_connection_read_only()
-    trade_ro = get_trade_connection_read_only()
-    try:
+    with contextlib.ExitStack() as stack:
+        forecasts_ro = stack.enter_context(_edli_screen_bound_connection(
+            get_forecasts_connection_read_only, deadline_fence
+        ))
+        trade_ro = stack.enter_context(_edli_screen_bound_connection(
+            get_trade_connection_read_only, deadline_fence
+        ))
         out: dict[tuple[str, str, str], set[str]] = {}
         for family in sorted(clean_families):
+            _edli_screen_deadline_check(deadline_fence)
             city, target_date, metric = family
             try:
                 topology_rows = _event_family_market_topology_rows(
                     forecasts_ro,
                     {"city": city, "target_date": target_date, "metric": metric},
                 )
+            except sqlite3.Error:
+                raise
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
                     "edli_redecision_screen: held-family topology read failed; "
@@ -12819,23 +12940,18 @@ def _edli_current_held_position_family_condition_scope(
                 condition_id = str(row.get("condition_id") or "").strip()
                 if not condition_id:
                     continue
-                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
+                if not _edli_condition_latest_snapshot_executable(
+                    trade_ro, condition_id, deadline_fence=deadline_fence
+                ):
                     continue
                 out.setdefault(family, set()).add(condition_id)
+        _edli_screen_deadline_check(deadline_fence)
         return out
-    finally:
-        try:
-            forecasts_ro.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            trade_ro.close()
-        except Exception:  # noqa: BLE001
-            pass
 def _edli_families_with_fresh_scoped_executable_substrate(
     condition_scope: dict[tuple[str, str, str], set[str]],
     *,
     now_utc: datetime,
+    deadline_fence: Any | None = None,
 ) -> set[tuple[str, str, str]]:
     """Families whose scoped money-path conditions have fresh YES and NO books.
 
@@ -12869,18 +12985,16 @@ def _edli_families_with_fresh_scoped_executable_substrate(
     from src.state.db import get_trade_connection_read_only
 
     fresh_at_iso = now_utc.isoformat()
-    trade_ro = get_trade_connection_read_only()
-    try:
+    with _edli_screen_bound_connection(
+        get_trade_connection_read_only, deadline_fence
+    ) as trade_ro:
         out: set[tuple[str, str, str]] = set()
         for family, condition_ids in sorted(clean_scope.items()):
+            _edli_screen_deadline_check(deadline_fence)
             if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in sorted(condition_ids)):
                 out.add(family)
+        _edli_screen_deadline_check(deadline_fence)
         return out
-    finally:
-        try:
-            trade_ro.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _edli_selected_token_snapshot_is_fresh(
@@ -12942,6 +13056,7 @@ def _edli_refresh_continuous_money_path_families(
     families: set[tuple[str, str, str]],
     *,
     priority_condition_ids: Iterable[str] | None = None,
+    deadline_fence: Any | None = None,
 ) -> dict:
     """Prioritize current continuous-money-path families before redecision emit.
 
@@ -12968,6 +13083,7 @@ def _edli_refresh_continuous_money_path_families(
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
+    _edli_screen_deadline_check(deadline_fence)
     if not _edli_redecision_confirm_refresh_lock.acquire(blocking=False):
         return {
             "status": "skipped_lock_busy",
@@ -12978,12 +13094,18 @@ def _edli_refresh_continuous_money_path_families(
         try:
             from src.data.substrate_priority import mark_money_path_substrate_priority
 
+            _edli_screen_deadline_check(deadline_fence)
             request = mark_money_path_substrate_priority(
                 reason="continuous_redecision_confirm_refresh",
                 ttl_seconds=35.0,
                 families=clean_families,
                 condition_ids=priority_conditions,
             )
+            _edli_screen_deadline_check(deadline_fence)
+        except sqlite3.OperationalError:
+            if deadline_fence is not None and deadline_fence.expired():
+                raise
+            raise
         except Exception as exc:  # noqa: BLE001
             _log.debug(
                 "edli_redecision_screen: substrate priority marker write failed: %r",
@@ -13595,6 +13717,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     if not screen_lock.acquire(blocking=False):
         _log.info("edli_redecision_screen skipped: previous screen still running")
         return
+    screen_started = time.monotonic()
+    screen_stack: contextlib.ExitStack | None = None
+    screen_fence = None
     try:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
@@ -13606,6 +13731,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             screened_family_keys,
             screen_resting_orders,
             REDECISION_EVENT_TYPE,
+            SqliteDeadlineFence,
+            sqlite_deadline_bound,
         )
         from src.state.db import (
             get_world_connection_read_only,
@@ -13615,6 +13742,48 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             get_forecasts_connection_read_only,
         )
 
+        screen_fence = SqliteDeadlineFence(
+            deadline_monotonic=(
+                screen_started + _edli_redecision_screen_budget_seconds(edli_cfg)
+            ),
+            generation=_next_edli_redecision_screen_generation(),
+        )
+        screen_stack = contextlib.ExitStack()
+
+        def _screen_check_deadline() -> None:
+            if screen_fence.expired():
+                raise sqlite3.OperationalError("interrupted")
+
+        def _screen_connection(factory, *args, **kwargs):
+            _screen_check_deadline()
+            conn = factory(*args, **kwargs)
+            try:
+                screen_stack.enter_context(sqlite_deadline_bound(conn, screen_fence))
+            except BaseException:
+                conn.close()
+                raise
+            return conn
+
+        _open_world_ro = get_world_connection_read_only
+        _open_trade_ro = get_trade_connection_read_only
+        _open_trade_with_world = get_trade_connection_with_world_required
+        _open_world = get_world_connection
+        _open_forecasts_ro = get_forecasts_connection_read_only
+        def get_world_connection_read_only():
+            return _screen_connection(_open_world_ro)
+
+        def get_trade_connection_read_only():
+            return _screen_connection(_open_trade_ro)
+
+        def get_trade_connection_with_world_required(**kwargs):
+            return _screen_connection(_open_trade_with_world, **kwargs)
+
+        def get_world_connection():
+            return _screen_connection(_open_world)
+
+        def get_forecasts_connection_read_only():
+            return _screen_connection(_open_forecasts_ro)
+
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         min_edge = float(edli_cfg.get("redecision_screen_min_edge", 0.01))
@@ -13623,6 +13792,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         rd_cap = _EDLI_REDECISION_FAIR_BATCH
 
         # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
+        screen_fence.stage = "belief_scan"
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_with_world_required(write_class=None)
         trade_ro.execute("PRAGMA query_only=ON")
@@ -13632,6 +13802,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 world_ro,
                 decision_time=received_at,
                 forecast_only_admissible=True,
+                deadline_fence=screen_fence,
             )
             # Entry admission is forecast-phase scoped; management of an order
             # Zeus already submitted is not.  Day0 maker rests must remain
@@ -13640,7 +13811,18 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             management_beliefs = _all_latest_beliefs(
                 world_ro,
                 decision_time=received_at,
+                deadline_fence=screen_fence,
             )
+            _screen_check_deadline()
+            _log.info(
+                "edli_redecision_screen receipt=%s",
+                _edli_redecision_stage_receipt(
+                    stage="belief_scan",
+                    status="completed",
+                    started_monotonic=screen_started,
+                ),
+            )
+            screen_fence.stage = "price_screen"
             beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
                 all_beliefs,
                 max_families=rd_cap,
@@ -13732,6 +13914,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 management_beliefs,
             )
             rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
+            _screen_check_deadline()
+            _log.info(
+                "edli_redecision_screen receipt=%s",
+                _edli_redecision_stage_receipt(
+                    stage="price_screen",
+                    status="completed",
+                    started_monotonic=screen_started,
+                ),
+            )
         finally:
             try:
                 world_ro.close()
@@ -13747,8 +13938,11 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         # contention can defer the venue side effect.  A later allowed revision
         # re-enters through the ordinary fresh certificate path.
         policy_cancelled = 0
+        _screen_check_deadline()
         if policy_rest_pulls and get_mode() == "live":
-            policy_cancelled = _edli_cancel_rest_pulls(policy_rest_pulls)
+            policy_cancelled = _edli_cancel_rest_pulls(
+                policy_rest_pulls, deadline_fence=screen_fence
+            )
 
         # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
         # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
@@ -13762,7 +13956,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
-        held_families = _edli_current_held_position_family_keys()
+        held_families = _edli_current_held_position_family_keys(
+            deadline_fence=screen_fence
+        )
         family_keys = _edli_entry_redecision_family_keys(
             raw_entry_family_keys,
             held_families,
@@ -13774,7 +13970,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             decision_time=now,
         )
         held_condition_scope = _edli_current_held_position_family_condition_scope(
-            held_reemit_families
+            held_reemit_families, deadline_fence=screen_fence
         )
         all_families = set(family_keys) | rest_pull_families | held_reemit_families
         confirmed_entry_scope = set(family_keys) | entry_refresh_families
@@ -13788,14 +13984,17 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 entry_refresh_condition_scope,
             ),
             now_utc=now,
+            deadline_fence=screen_fence,
         )
         fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
             rest_condition_scope,
             now_utc=now,
+            deadline_fence=screen_fence,
         )
         fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
             held_condition_scope,
             now_utc=now,
+            deadline_fence=screen_fence,
         )
         fresh_confirmed_families = (
             fresh_entry_scope | fresh_rest_scope | fresh_held_scope
@@ -13804,8 +14003,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         missing_confirm_families = (
             requested_confirm_families - fresh_confirmed_families
         )
+        screen_fence.stage = "confirmation_refresh"
         confirm_refresh_summary: dict = {}
         if missing_confirm_families:
+            _screen_check_deadline()
             def _missing_scope(scope):
                 return {
                     family: condition_ids
@@ -13828,6 +14029,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
                 missing_confirm_families,
                 priority_condition_ids=priority_condition_ids,
+                deadline_fence=screen_fence,
             )
         elif requested_confirm_families:
             confirm_refresh_summary = {
@@ -13835,6 +14037,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 "families_requested": 0,
                 "executable_substrate_coverage_status": "FULL",
             }
+        _screen_check_deadline()
+        _log.info(
+            "edli_redecision_screen receipt=%s",
+            _edli_redecision_stage_receipt(
+                stage="confirmation_refresh",
+                status="completed",
+                started_monotonic=screen_started,
+            ),
+        )
         if requested_confirm_families:
             confirmed_entry_scope &= fresh_entry_scope
             confirmed_rest_scope &= fresh_rest_scope
@@ -13926,10 +14137,12 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     world_ro,
                     decision_time=received_at,
                     forecast_only_admissible=True,
+                    deadline_fence=screen_fence,
                 )
                 management_beliefs = _all_latest_beliefs(
                     world_ro,
                     decision_time=received_at,
+                    deadline_fence=screen_fence,
                 )
                 beliefs = _edli_filter_beliefs_to_family_keys(
                     all_beliefs,
@@ -13999,8 +14212,11 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 rest_pull_families &= _edli_families_with_fresh_scoped_executable_substrate(
                     rest_condition_scope,
                     now_utc=now,
+                    deadline_fence=screen_fence,
                 )
-            held_families = _edli_current_held_position_family_keys()
+            held_families = _edli_current_held_position_family_keys(
+                deadline_fence=screen_fence
+            )
             family_keys = _edli_entry_redecision_family_keys(
                 raw_entry_family_keys,
                 held_families,
@@ -14011,6 +14227,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 family_keys &= _edli_families_with_fresh_scoped_executable_substrate(
                     entry_condition_scope,
                     now_utc=now,
+                    deadline_fence=screen_fence,
                 )
             held_reemit_families = _edli_reemittable_held_position_family_keys(
                 held_families,
@@ -14019,8 +14236,11 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             held_reemit_families &= confirmed_held_scope
             if held_reemit_families:
                 held_reemit_families &= _edli_families_with_fresh_scoped_executable_substrate(
-                    _edli_current_held_position_family_condition_scope(held_reemit_families),
+                    _edli_current_held_position_family_condition_scope(
+                        held_reemit_families, deadline_fence=screen_fence
+                    ),
                     now_utc=now,
+                    deadline_fence=screen_fence,
                 )
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
@@ -14029,6 +14249,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
+            screen_fence.stage = "emit_prune"
+            _screen_check_deadline()
             expiry_ro = get_world_connection_read_only()
             try:
                 expiry_plan = _edli_plan_unadmitted_redecision_expiry(
@@ -14045,12 +14267,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             try:
                 emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                 if emit_acquired:
+                    _screen_check_deadline()
                     if _begin_world_write_without_convoy(world):
+                        _screen_check_deadline()
                         expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                             world,
                             expiry_plan,
                             decision_time=received_at,
                         )
+                        _screen_check_deadline()
                         world.commit()
                     else:
                         _log.info(
@@ -14096,6 +14321,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         )
         from src.state.db import world_write_mutex as _world_write_mutex
 
+        screen_fence.stage = "emit_prune"
+        _screen_check_deadline()
         forecasts_ro = get_forecasts_connection_read_only()
         world_scan_ro = None
         try:
@@ -14121,12 +14348,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                         prune_lock_timeout_s,
                     )
                     return
+                _screen_check_deadline()
                 if not _begin_world_write_without_convoy(world_prune):
                     _log.info(
                         "edli_redecision_screen: stale-pending prune yielded "
                         "to active SQLite WORLD writer"
                     )
                     return
+                _screen_check_deadline()
                 expired_stale_pending = _edli_apply_unadmitted_redecision_expiry(
                     world_prune,
                     stale_plan,
@@ -14139,6 +14368,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                         decision_time=received_at,
                     )
                 )
+                _screen_check_deadline()
                 world_prune.commit()
             finally:
                 if world_prune is not None:
@@ -14211,12 +14441,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     emit_lock_timeout_s,
                 )
                 return
+            _screen_check_deadline()
             if not _begin_world_write_without_convoy(world):
                 _log.info(
                     "edli_redecision_screen: redecision emit yielded "
                     "to active SQLite WORLD writer"
                 )
                 return
+            _screen_check_deadline()
             expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                 world,
                 expiry_plan,
@@ -14248,7 +14480,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     fresh_events.append(_redecision_event_with_origin(event, "held_position"))
                 elif event_family in family_keys:
                     fresh_events.append(_redecision_event_with_origin(event, "entry_screen"))
+            _screen_check_deadline()
             emitted = EventWriter(world).write_many(fresh_events)
+            _screen_check_deadline()
             world.commit()
         finally:
             if world is not None:
@@ -14263,7 +14497,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
         cancelled = 0
         if rest_pulls and get_mode() == "live":
-            cancelled = _edli_cancel_rest_pulls(rest_pulls)
+            _screen_check_deadline()
+            cancelled = _edli_cancel_rest_pulls(rest_pulls, deadline_fence=screen_fence)
 
         _log.info(
             "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
@@ -14287,7 +14522,34 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 "edli_redecision_screen: confirmation_refresh_summary=%r",
                 confirm_refresh_summary,
             )
+        _screen_check_deadline()
+        _log.info(
+            "edli_redecision_screen receipt=%s",
+            _edli_redecision_stage_receipt(
+                stage="emit_prune",
+                status="completed",
+                started_monotonic=screen_started,
+            ),
+        )
     except sqlite3.OperationalError as exc:
+        if (
+            screen_fence is not None
+            and screen_fence.expired()
+            and (
+                "interrupted" in str(exc).lower()
+                or _edli_is_sqlite_lock_error(exc)
+            )
+        ):
+            _log.info(
+                "edli_redecision_screen receipt=%s",
+                _edli_redecision_stage_receipt(
+                    stage=screen_fence.stage,
+                    status="deferred",
+                    started_monotonic=screen_started,
+                    reason="deadline_interrupted",
+                ),
+            )
+            return
         if not _edli_is_sqlite_lock_error(exc):
             raise
         _log.warning(
@@ -14296,6 +14558,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             exc,
         )
     finally:
+        if screen_fence is not None:
+            screen_fence.deactivate()
+        if screen_stack is not None:
+            screen_stack.close()
         screen_lock.release()
 
 

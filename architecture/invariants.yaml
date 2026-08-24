@@ -481,19 +481,25 @@ invariants:
       reconciliation) trust the same definitions. Catching drift at test time
       prevents the kind of silent translation loss flagged in Fitz Constraint #2.
     amendment:
-      id: GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10
+      id: GLOBAL-CAPITAL-NC18-SCREEN-CANCEL-DISPATCH-LEASE-2026-08-24
       status: incorporated
       receipt: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
-      supersedes_id: R3-M1-INV-29-2026-04-27
-      supersedes_receipt: docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/inv_29_amendment_2026-04-27.md
+      supersedes_id: GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10
+      supersedes_receipt: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
       scope: >
         Preserves the incorporated M1 command grammar and later proof-backed
         REVIEW_REQUIRED clearance events, then adds only two creation-only
         reconciliation facts: VENUE_ORDER_ADOPTED and
-        EXTERNAL_OPERATOR_CLOSE_ABSORBED. They may be written only by typed
+        EXTERNAL_OPERATOR_CLOSE_ABSORBED, plus the self-transition
+        CANCEL_DISPATCH_STARTED for the exact versioned screen-cancel
+        obligation lease. They may be written only by typed
         venue_command_repo creation helpers and are not normal transitions.
-        This does not authorize order/trade facts as CommandState values,
-        fabricated SUBMIT history, or a live venue side effect.
+        The lease event remains CANCEL_PENDING, carries exact obligation
+        identity, boot owner/pid, generation, attempt, expiry, and a fresh
+        point-order witness; recovery performs no DB I/O across venue I/O and
+        finalizes with a state/last_event/attempt CAS. This does not authorize
+        order/trade facts as CommandState values, fabricated SUBMIT history,
+        or a live venue side effect.
       command_state_values:
         - INTENT_CREATED
         - SNAPSHOT_BOUND
@@ -527,6 +533,7 @@ invariants:
         - PARTIAL_FILL_OBSERVED
         - FILL_CONFIRMED
         - CANCEL_REQUESTED
+        - CANCEL_DISPATCH_STARTED
         - CANCEL_ACKED
         - CANCEL_FAILED
         - CANCEL_REPLACE_BLOCKED

@@ -515,9 +515,15 @@ def get_trade_connection(
     )
 
 
-def get_trade_connection_read_only() -> sqlite3.Connection:
+def get_trade_connection_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Read-only trade DB connection (write_class=None)."""
-    return _connect_read_only(_zeus_trade_db_path())
+    return _connect_read_only(
+        _zeus_trade_db_path(),
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def get_world_connection(

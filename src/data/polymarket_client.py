@@ -1363,7 +1363,12 @@ class PolymarketClient:
 
         self._ensure_v2_adapter().prepare_order_truth_reader()
 
-    def cancel_order(self, order_id: str) -> Optional[dict]:
+    def cancel_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> Optional[dict]:
         """Cancel a pending order."""
         from src.control.cutover_guard import CutoverPending, gate_for_intent
         from src.execution.command_bus import IntentKind
@@ -1371,7 +1376,14 @@ class PolymarketClient:
         decision = gate_for_intent(IntentKind.CANCEL)
         if not decision.allow_cancel:
             raise CutoverPending(decision.block_reason or decision.state.value)
-        result = self._ensure_v2_adapter().cancel(order_id)
+        adapter = self._ensure_v2_adapter()
+        if deadline_monotonic is None:
+            result = adapter.cancel(order_id)
+        else:
+            result = adapter.cancel(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
         payload = {
             "orderID": result.order_id,
             "status": result.status,

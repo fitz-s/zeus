@@ -257,10 +257,10 @@ def test_inv_29_amendment_is_incorporated_with_planning_lock_receipt():
     inv29 = next(item for item in invariants["invariants"] if item["id"] == "INV-29")
     amendment = inv29["amendment"]
 
-    assert amendment["id"] == "GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10"
+    assert amendment["id"] == "GLOBAL-CAPITAL-NC18-SCREEN-CANCEL-DISPATCH-LEASE-2026-08-24"
     assert amendment["status"] == "incorporated"
     assert amendment["receipt"] == receipt_path
-    assert amendment["supersedes_id"] == "R3-M1-INV-29-2026-04-27"
+    assert amendment["supersedes_id"] == "GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10"
     assert set(amendment["command_state_values"]) == {state.value for state in CommandState}
     assert set(amendment["command_event_type_values"]) == {
         event.value for event in CommandEventType

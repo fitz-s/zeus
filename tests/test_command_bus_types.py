@@ -387,9 +387,9 @@ class TestEnumsAreClosed:
         assert len(list(CommandState)) == 17
 
     def test_command_event_type_count(self):
-        """24 events, including the two creation-only reconciliation facts."""
+        """25 events, including the screen-cancel dispatch lease event."""
         from src.execution.command_bus import CommandEventType
-        assert len(list(CommandEventType)) == 24
+        assert len(list(CommandEventType)) == 25
 
     def test_intent_kind_count(self):
         from src.execution.command_bus import IntentKind
