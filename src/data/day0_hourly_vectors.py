@@ -52,6 +52,8 @@ from functools import lru_cache
 from typing import Any, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import numpy as np
+
 from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,102 @@ class Day0HourlyVector:
     # separate fetch-start/fetch-complete possession clocks and source-run
     # identity; rows without it cannot sponsor held probability authority.
     source_run_meta_json: str | None = None
+
+
+def build_day0_remaining_probability_carrier(
+    *, future_extremes_c: Iterable[float], boundary_scenarios: Iterable[tuple[float | None, float]],
+    metric: str, path_error_sigma_c: float, instrument_sigma_c: float,
+    bin_bounds_c: Iterable[tuple[float | None, float | None]], n_point: int,
+    n_samples: int, identity_inputs: Mapping[str, object],
+) -> dict[str, object]:
+    """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
+
+    Boundary scenarios are a statistical report-survival likelihood, not final
+    settlement authority.  Noise is always applied to the future path first.
+    """
+    values = np.sort(
+        np.asarray(tuple(float(v) for v in future_extremes_c), dtype=float)
+    )
+    scenarios = tuple(
+        (None if b is None else float(b), float(w))
+        for b, w in boundary_scenarios
+    )
+    bounds = tuple(
+        (
+            None if low is None else float(low),
+            None if high is None else float(high),
+        )
+        for low, high in bin_bounds_c
+    )
+    unit = str(identity_inputs.get("unit") or "").strip().upper()
+    if unit not in {"C", "F"}:
+        raise ValueError("DAY0_REMAINING_CARRIER_UNIT_INVALID")
+    if any(
+        (low is not None and not math.isclose(low, round(low), abs_tol=1e-9))
+        or (high is not None and not math.isclose(high, round(high), abs_tol=1e-9))
+        or (low is not None and high is not None and low > high)
+        for low, high in bounds
+    ):
+        raise ValueError("DAY0_REMAINING_CARRIER_BIN_BOUNDS_INVALID")
+    if any(low is None and high is None for low, high in bounds):
+        raise ValueError("DAY0_REMAINING_CARRIER_OPEN_OPEN_BIN_INVALID")
+    ordered = sorted(bounds, key=lambda item: float("-inf") if item[0] is None else item[0])
+    if ordered != list(bounds) or (ordered and ordered[0][0] is not None) or (
+        ordered and ordered[-1][1] is not None
+    ):
+        raise ValueError("DAY0_REMAINING_CARRIER_SHOULDER_TOPOLOGY_INVALID")
+    for previous, current in zip(ordered, ordered[1:]):
+        if previous[1] is None or current[0] is None or current[0] != previous[1] + 1.0:
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_GAP_OR_OVERLAP")
+    if (metric not in {"high", "low"} or not values.size or not np.isfinite(values).all()
+            or not scenarios or not bounds or n_point < 1 or n_samples < 1
+            or path_error_sigma_c < 0 or instrument_sigma_c < 0
+            or not math.isclose(sum(w for _, w in scenarios), 1.0, abs_tol=1e-9)
+            or any(
+                (b is not None and not math.isfinite(b)) or w < 0
+                for b, w in scenarios
+            )):
+        raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
+    content = {"v": 1, "metric": metric, "future": sorted(values.tolist()), "scenarios": scenarios,
+               "path_sigma": path_error_sigma_c, "instrument_sigma": instrument_sigma_c,
+               "bins": bounds, "n_point": n_point, "n_samples": n_samples, "inputs": dict(identity_inputs)}
+    identity = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    sigma = math.hypot(path_error_sigma_c, instrument_sigma_c)
+    def draw(rows: int, seed: int) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        future = values + rng.normal(0.0, sigma, (rows, values.size))
+        scenario_i = rng.choice(len(scenarios), size=rows, p=[w for _, w in scenarios])
+        boundary = np.asarray(
+            [0.0 if scenarios[i][0] is None else scenarios[i][0] for i in scenario_i]
+        )[:, None]
+        has_boundary = np.asarray(
+            [scenarios[i][0] is not None for i in scenario_i], dtype=bool
+        )[:, None]
+        bounded = (
+            np.maximum(future, boundary)
+            if metric == "high"
+            else np.minimum(future, boundary)
+        )
+        final = np.where(has_boundary, bounded, future)
+        settled = np.floor(final + 0.5)
+        out = np.empty((rows, len(bounds)), dtype=float)
+        for i, (low, high) in enumerate(bounds):
+            mask = np.ones(settled.shape, dtype=bool)
+            if low is not None:
+                mask &= settled >= low
+            if high is not None:
+                mask &= settled <= high
+            out[:, i] = np.mean(mask, axis=1)
+        totals = out.sum(axis=1, keepdims=True)
+        if np.any(totals <= 0.0) or not np.isfinite(totals).all():
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+        out /= totals
+        return out
+    seed = int(identity[:16], 16)
+    point = draw(n_point, seed).mean(axis=0)
+    samples = draw(n_samples, seed ^ 0x9E3779B97F4A7C15)
+    return {"q": [float(x) for x in point], "samples": [[float(x) for x in row] for row in samples], "content_identity": identity,
+            "operator": "extreme_observed_then_noisy_future_v1", "sample_count": n_samples}
 
 
 @dataclass(frozen=True)

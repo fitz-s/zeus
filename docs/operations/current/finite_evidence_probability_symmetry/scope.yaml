@@ -223,6 +223,10 @@ in_scope:
 - scripts/ingest_grib_to_snapshots.py
 - scripts/obs_live_tick.py
 - tests/test_ingest_grib_source_run_context.py
+- src/execution/venue_cancel_journal.py
+- src/events/continuous_redecision.py
+- tests/execution/test_venue_cancel_journal.py
+- tests/events/test_continuous_redecision_emit.py
 out_of_scope:
 - state/zeus-world.db
 - state/zeus-world.db-*

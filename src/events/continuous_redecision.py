@@ -31,8 +31,10 @@ import logging
 import math
 import os
 import sqlite3
+import time
+from contextlib import contextmanager, nullcontext
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -43,6 +45,74 @@ from src.data.replacement_forecast_readiness import (
 from src.events.opportunity_event import OpportunityEvent
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SqliteDeadlineFence:
+    """One screen-cycle deadline; an old handler cannot interrupt a later cycle."""
+
+    deadline_monotonic: float
+    generation: int
+    stage: str = "belief_scan"
+    active_generation: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.active_generation = self.generation
+
+    def expired(self) -> bool:
+        return (
+            self.active_generation == self.generation
+            and time.monotonic() >= self.deadline_monotonic
+        )
+
+    def deactivate(self) -> None:
+        self.active_generation = -1
+
+
+_sqlite_deadline_state: dict[sqlite3.Connection, tuple[int, int, SqliteDeadlineFence]] = {}
+
+
+@contextmanager
+def sqlite_deadline_bound(
+    conn: sqlite3.Connection,
+    fence: SqliteDeadlineFence,
+):
+    """Bound busy waits and VM work, restoring an outer handler exactly once."""
+
+    if fence.expired():
+        raise sqlite3.OperationalError("interrupted")
+    nested = _sqlite_deadline_state.get(conn)
+    if nested is not None:
+        depth, previous_busy, outer_fence = nested
+        _sqlite_deadline_state[conn] = (depth + 1, previous_busy, outer_fence)
+        try:
+            if fence.expired():
+                raise sqlite3.OperationalError("interrupted")
+            yield
+        finally:
+            depth, previous_busy, outer_fence = _sqlite_deadline_state[conn]
+            _sqlite_deadline_state[conn] = (depth - 1, previous_busy, outer_fence)
+        return
+    previous_busy = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    remaining_ms = max(
+        1,
+        int((fence.deadline_monotonic - time.monotonic()) * 1_000),
+    )
+    conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+    conn.set_progress_handler(lambda: int(fence.expired()), 1_000)
+    _sqlite_deadline_state[conn] = (1, previous_busy, fence)
+    try:
+        yield
+    finally:
+        _sqlite_deadline_state.pop(conn, None)
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.set_progress_handler(None, 0)
+            conn.execute(f"PRAGMA busy_timeout = {previous_busy}")
+        except sqlite3.Error:
+            # The caller may have closed its short-lived RO connection first.
+            pass
 
 
 def _fee_at(price: float) -> float:
@@ -350,18 +420,32 @@ def ensure_belief_cache_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _has_condition_ids_column(conn: sqlite3.Connection) -> bool:
+def _has_condition_ids_column(
+    conn: sqlite3.Connection,
+    *,
+    deadline_fence: SqliteDeadlineFence | None = None,
+) -> bool:
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(probability_trace_fact)").fetchall()}
     except sqlite3.Error:
+        if deadline_fence is not None:
+            raise
         return False
     return "condition_ids_json" in cols
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+def _has_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    *,
+    deadline_fence: SqliteDeadlineFence | None = None,
+) -> bool:
     try:
         cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except sqlite3.Error:
+        if deadline_fence is not None:
+            raise
         return False
     return column in cols
 
@@ -575,10 +659,16 @@ def _stable_family_screen_key(belief: CachedBelief) -> FamilyRedecisionScreenKey
     return ("family", city, target_date, metric)
 
 
-def _has_temperature_metric_column(conn: sqlite3.Connection) -> bool:
+def _has_temperature_metric_column(
+    conn: sqlite3.Connection,
+    *,
+    deadline_fence: SqliteDeadlineFence | None = None,
+) -> bool:
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(probability_trace_fact)").fetchall()}
     except sqlite3.Error:
+        if deadline_fence is not None:
+            raise
         return False
     return "temperature_metric" in cols
 
@@ -781,16 +871,31 @@ def _all_latest_beliefs(
     scan_limit: int | None = None,
     forecast_only_admissible: bool = False,
     family_keys: set[tuple[str, str, str]] | None = None,
+    deadline_fence: SqliteDeadlineFence | None = None,
 ) -> list[CachedBelief]:
-    cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
-    if _has_condition_ids_column(conn):
-        cols += ", condition_ids_json"
-    if _has_temperature_metric_column(conn):
-        cols += ", temperature_metric"
-    if _has_column(conn, "probability_trace_fact", "q_lcb_yes_json"):
-        cols += ", q_lcb_yes_json"
-    if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
-        cols += ", q_lcb_no_json"
+    # Schema probes are SQLite work too: keep them behind the same absolute
+    # fence as the large trace query.  A fenced caller must see a real SQLite
+    # failure, never a silently fabricated "column absent" answer.
+    with (
+        sqlite_deadline_bound(conn, deadline_fence)
+        if deadline_fence is not None
+        else nullcontext()
+    ):
+        cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
+        if deadline_fence is not None and deadline_fence.expired():
+            raise sqlite3.OperationalError("interrupted")
+        if _has_condition_ids_column(conn, deadline_fence=deadline_fence):
+            cols += ", condition_ids_json"
+        if _has_temperature_metric_column(conn, deadline_fence=deadline_fence):
+            cols += ", temperature_metric"
+        if _has_column(
+            conn, "probability_trace_fact", "q_lcb_yes_json", deadline_fence=deadline_fence
+        ):
+            cols += ", q_lcb_yes_json"
+        if _has_column(
+            conn, "probability_trace_fact", "q_lcb_no_json", deadline_fence=deadline_fence
+        ):
+            cols += ", q_lcb_no_json"
     requested_families = None
     if family_keys is not None:
         requested_families = {
@@ -817,9 +922,14 @@ def _all_latest_beliefs(
         except (TypeError, ValueError):
             scan_limit = _DEFAULT_LATEST_BELIEF_SCAN_LIMIT
     scan_limit = max(1, int(scan_limit))
-    if requested_families is None:
-        rows = conn.execute(
-            f"""
+    with (
+        sqlite_deadline_bound(conn, deadline_fence)
+        if deadline_fence is not None
+        else nullcontext()
+    ):
+        if requested_families is None:
+            rows = conn.execute(
+                f"""
             WITH latest_trace AS MATERIALIZED (
                 SELECT trace_id, recorded_at
                   FROM probability_trace_fact
@@ -834,25 +944,27 @@ def _all_latest_beliefs(
                 ON p.trace_id = latest.trace_id
              ORDER BY latest.recorded_at DESC, latest.trace_id DESC
             """,
-            (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
-        ).fetchall()
-    else:
-        has_metric = _has_temperature_metric_column(conn)
-        requested = (
-            requested_families
-            if has_metric
-            else {(city, target_date) for city, target_date, _metric in requested_families}
-        )
-        request_columns = "city, target_date, metric" if has_metric else "city, target_date"
-        request_extract = (
-            "json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
-            "json_extract(value, '$[2]')"
-            if has_metric
-            else "json_extract(value, '$[0]'), json_extract(value, '$[1]')"
-        )
-        metric_join = "AND p.temperature_metric = r.metric" if has_metric else ""
-        rows = conn.execute(
-            f"""
+                (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
+            ).fetchall()
+        else:
+            has_metric = _has_temperature_metric_column(
+                conn, deadline_fence=deadline_fence
+            )
+            requested = (
+                requested_families
+                if has_metric
+                else {(city, target_date) for city, target_date, _metric in requested_families}
+            )
+            request_columns = "city, target_date, metric" if has_metric else "city, target_date"
+            request_extract = (
+                "json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
+                "json_extract(value, '$[2]')"
+                if has_metric
+                else "json_extract(value, '$[0]'), json_extract(value, '$[1]')"
+            )
+            metric_join = "AND p.temperature_metric = r.metric" if has_metric else ""
+            rows = conn.execute(
+                f"""
             WITH requested({request_columns}) AS (
                 SELECT {request_extract}
                   FROM json_each(?)
@@ -868,17 +980,21 @@ def _all_latest_beliefs(
              ORDER BY p.recorded_at DESC, p.trace_id DESC
              LIMIT ?
             """,
-            (
-                json.dumps(tuple(requested), separators=(",", ":")),
-                _BELIEF_PREFIX,
-                _prefix_upper_bound(_BELIEF_PREFIX),
-                scan_limit,
-            ),
-        ).fetchall()
+                (
+                    json.dumps(tuple(requested), separators=(",", ":")),
+                    _BELIEF_PREFIX,
+                    _prefix_upper_bound(_BELIEF_PREFIX),
+                    scan_limit,
+                ),
+            ).fetchall()
     decision_time_utc = _decision_time_utc(decision_time)
     seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []
-    for row in rows:
+    for row_index, row in enumerate(rows):
+        if deadline_fence is not None and (
+            row_index % 32 == 0 and deadline_fence.expired()
+        ):
+            raise sqlite3.OperationalError("interrupted")
         belief = _row_to_belief(row)
         if belief is None:
             continue
@@ -904,6 +1020,8 @@ def _all_latest_beliefs(
             continue
         seen.add(dedupe_key)
         out.append(belief)
+    if deadline_fence is not None and deadline_fence.expired():
+        raise sqlite3.OperationalError("interrupted")
     return out
 
 

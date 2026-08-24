@@ -25,6 +25,7 @@ import importlib.metadata
 import hashlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import sys
@@ -446,7 +447,12 @@ class PolymarketV2AdapterProtocol(Protocol):
         | None = None,
     ) -> SubmitResult: ...
 
-    def cancel(self, order_id: str) -> CancelResult: ...
+    def cancel(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> CancelResult: ...
 
     def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]: ...
 
@@ -526,6 +532,192 @@ class IncompleteOrderTruthError(V2ReadUnavailable):
     code = "ORDER_TRUTH_INCOMPLETE"
 
 
+def _bounded_cancel_request(client: Any, order_id: str, deadline_monotonic: float) -> Any:
+    """Issue one signed cancel with a private per-request httpx transport."""
+
+    try:
+        import httpx
+        from py_clob_client_v2.clob_types import RequestArgs
+        from py_clob_client_v2.endpoints import CANCEL, TIME
+        from py_clob_client_v2.exceptions import PolyApiException
+        from py_clob_client_v2.headers.headers import create_level_2_headers
+    except Exception as exc:  # pragma: no cover - installed SDK surface
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: bounded cancel transport unavailable"
+        ) from exc
+
+    assert_level_2_auth = getattr(client, "assert_level_2_auth", None)
+    if not callable(assert_level_2_auth):
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: L2 cancel authentication unavailable"
+        )
+    # Preserve the SDK's typed L2 auth failure before constructing RequestArgs
+    # or attempting any signed DELETE.
+    assert_level_2_auth()
+    body = {"orderID": order_id}
+    serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    timeout = float(deadline_monotonic) - time.monotonic()
+    if timeout <= 0.0:
+        raise IncompleteOrderTruthError("ORDER_TRUTH_INCOMPLETE: cancel deadline elapsed")
+    with httpx.Client(
+        http2=False,
+        timeout=httpx.Timeout(timeout, connect=timeout),
+    ) as transport:
+        timestamp = None
+        if bool(getattr(client, "use_server_time", False)):
+            timeout = float(deadline_monotonic) - time.monotonic()
+            if timeout <= 0.0:
+                raise IncompleteOrderTruthError("ORDER_TRUTH_INCOMPLETE: cancel deadline elapsed")
+            time_response = transport.get(
+                f"{str(client.host).rstrip('/')}{TIME}",
+                timeout=httpx.Timeout(timeout, connect=timeout),
+            )
+            if time_response.status_code != 200:
+                raise PolyApiException(time_response)
+            try:
+                time_payload = time_response.json()
+                timestamp = (
+                    (time_payload.get("time") or time_payload.get("timestamp"))
+                    if isinstance(time_payload, dict)
+                    else int(time_payload)
+                )
+                if timestamp is None:
+                    raise ValueError("server time missing")
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: invalid server time response"
+                ) from exc
+        headers = create_level_2_headers(
+            client.signer,
+            client.creds,
+            RequestArgs(
+                method="DELETE",
+                request_path=CANCEL,
+                body=body,
+                serialized_body=serialized,
+            ),
+            timestamp=timestamp,
+        )
+        timeout = float(deadline_monotonic) - time.monotonic()
+        if timeout <= 0.0:
+            raise IncompleteOrderTruthError("ORDER_TRUTH_INCOMPLETE: cancel deadline elapsed")
+        response = transport.request(
+            method="DELETE",
+            url=f"{str(client.host).rstrip('/')}{CANCEL}",
+            headers=headers,
+            content=serialized.encode("utf-8"),
+            timeout=httpx.Timeout(timeout, connect=timeout),
+        )
+        if response.status_code != 200:
+            raise PolyApiException(response)
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+
+def _bounded_heartbeat_request(client: Any, heartbeat_id: str, *, timeout_seconds: float) -> Any:
+    """Post one heartbeat through an adapter-owned native-timeout transport."""
+
+    try:
+        import httpx
+        from py_clob_client_v2.clob_types import RequestArgs
+        from py_clob_client_v2.endpoints import POST_HEARTBEAT, TIME
+        from py_clob_client_v2.exceptions import PolyApiException
+        from py_clob_client_v2.headers.headers import create_level_2_headers
+    except Exception as exc:  # pragma: no cover - installed SDK surface
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: bounded heartbeat transport unavailable"
+        ) from exc
+
+    assert_level_2_auth = getattr(client, "assert_level_2_auth", None)
+    if not callable(assert_level_2_auth):
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: heartbeat L2 authentication unavailable"
+        )
+    assert_level_2_auth()
+    try:
+        timeout = float(timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: invalid heartbeat transport timeout"
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise IncompleteOrderTruthError(
+            "ORDER_TRUTH_INCOMPLETE: invalid heartbeat transport timeout"
+        )
+    deadline_monotonic = time.monotonic() + timeout
+    body = {"heartbeat_id": str(heartbeat_id or "")}
+    serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    with httpx.Client(
+        http2=False,
+        timeout=httpx.Timeout(timeout, connect=timeout),
+    ) as transport:
+        timestamp = None
+        if bool(getattr(client, "use_server_time", False)):
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0.0:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: heartbeat deadline elapsed before server time"
+                )
+            time_response = transport.get(
+                f"{str(client.host).rstrip('/')}{TIME}",
+                timeout=httpx.Timeout(remaining, connect=remaining),
+            )
+            if time_response.status_code != 200:
+                raise PolyApiException(time_response)
+            try:
+                time_payload = time_response.json()
+                candidate = (
+                    (time_payload.get("time") or time_payload.get("timestamp"))
+                    if isinstance(time_payload, dict)
+                    else time_payload
+                )
+                if isinstance(candidate, bool):
+                    raise ValueError("server time must be an integer")
+                if isinstance(candidate, int):
+                    timestamp = candidate
+                elif isinstance(candidate, str) and candidate.strip().isdigit():
+                    timestamp = int(candidate.strip())
+                else:
+                    raise ValueError("server time must be an integer")
+                if timestamp <= 0:
+                    raise ValueError("server time must be positive")
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: invalid server time response"
+                ) from exc
+        headers = create_level_2_headers(
+            client.signer,
+            client.creds,
+            RequestArgs(
+                method="POST",
+                request_path=POST_HEARTBEAT,
+                body=body,
+                serialized_body=serialized,
+            ),
+            timestamp=timestamp,
+        )
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0.0:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: heartbeat deadline elapsed before POST"
+            )
+        response = transport.request(
+            method="POST",
+            url=f"{str(client.host).rstrip('/')}{POST_HEARTBEAT}",
+            headers=headers,
+            content=serialized.encode("utf-8"),
+            timeout=httpx.Timeout(remaining, connect=remaining),
+        )
+    if response.status_code != 200:
+        raise PolyApiException(response)
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
+
+
 class PolymarketV2Adapter:
     authenticated_point_reads_are_complete = True
 
@@ -581,30 +773,6 @@ class PolymarketV2Adapter:
 
     def _default_client_factory(self, **kwargs: Any) -> Any:
         from py_clob_client_v2.client import ClobClient
-
-        # 2026-05-31: bound py_clob_client_v2's process-wide httpx client.
-        # faulthandler proof: get_order()/balance reads hung 15+ min on an SSL
-        # read (http2 half-open stall) — the library default
-        # `httpx.Client(http2=True)` did NOT enforce its timeout on a stalled
-        # read, freezing exchange_reconcile.refresh_unresolved_reconcile_findings
-        # and starving the EDLI reactor's per-cycle _refresh_pending_family_snapshots
-        # (→ 0 receipts). A bounded HTTP/1.1 client makes a stalled venue read
-        # RAISE within ~15 s instead of hanging the scheduler cycle indefinitely.
-        # Idempotent: re-assigning the module global is safe (helpers.request()
-        # looks it up per call); non-fatal if the library layout changes.
-        try:
-            import httpx as _httpx
-            from py_clob_client_v2.http_helpers import helpers as _pcc_helpers
-
-            sdk_timeout = kwargs.get("network_timeout_seconds")
-            if sdk_timeout is not None:
-                sdk_timeout = max(0.01, float(sdk_timeout))
-                timeout = _httpx.Timeout(sdk_timeout, connect=sdk_timeout)
-            else:
-                timeout = _httpx.Timeout(15.0, connect=8.0)
-            _pcc_helpers._http_client = _httpx.Client(http2=False, timeout=timeout)
-        except Exception:  # noqa: BLE001 - non-fatal; library default retained
-            pass
 
         explicit_api_creds = kwargs.get("api_creds")
         effective_api_creds = explicit_api_creds
@@ -1104,16 +1272,28 @@ class PolymarketV2Adapter:
             signed_order_hash=signed_hash,
         )
 
-    def cancel(self, order_id: str) -> CancelResult:
-        client = self._sdk_client()
-        cancel = getattr(client, "cancel", None)
-        if not callable(cancel):
-            cancel_order = getattr(client, "cancel_order", None)
-            if not callable(cancel_order):
-                return CancelResult(status="rejected", order_id=order_id, error_code="CANCEL_UNSUPPORTED")
-            raw = cancel_order(_order_payload(order_id))
+    def cancel(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> CancelResult:
+        def _cancel_sdk_order() -> Any:
+            client = self._sdk_client()
+            cancel = getattr(client, "cancel", None)
+            if not callable(cancel):
+                cancel_order = getattr(client, "cancel_order", None)
+                if not callable(cancel_order):
+                    return {"status": "REJECTED", "errorCode": "CANCEL_UNSUPPORTED"}
+                return cancel_order(_order_payload(order_id))
+            return cancel(order_id)
+
+        if deadline_monotonic is None:
+            raw = _cancel_sdk_order()
         else:
-            raw = cancel(order_id)
+            self._order_truth_deadline_remaining(deadline_monotonic)
+            client = self._sdk_client()
+            raw = _bounded_cancel_request(client, order_id, deadline_monotonic)
         return _cancel_result_from_response(order_id, raw, check_envelope=True)
 
     def submit_batch(self, envelopes: list[VenueSubmissionEnvelope]) -> list[SubmitResult]:
@@ -3080,7 +3260,13 @@ class PolymarketV2Adapter:
         }
 
     def post_heartbeat(self, heartbeat_id: str) -> HeartbeatAck:
-        raw = self._sdk_client().post_heartbeat(heartbeat_id)
+        client = self._sdk_client()
+        timeout_seconds = self.network_timeout_seconds or 5.0
+        raw = _bounded_heartbeat_request(
+            client,
+            heartbeat_id,
+            timeout_seconds=timeout_seconds,
+        )
         return HeartbeatAck(ok=True, raw=dict(raw or {}))
 
     def submit_limit_order(

@@ -54,6 +54,7 @@ the settlement-metric-aware verdict for the live entry/monitor lanes.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
 import statistics
@@ -732,6 +733,153 @@ def wu_provisional_revision_likelihood(
         ),
         "boundary_survival_probability": survival_probability,
     }
+
+
+def same_station_preliminary_report_survival_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    station_id: str,
+    timezone_name: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    allow_prior_only: bool = False,
+) -> dict[str, object]:
+    """Strict-prior AWC→later-OGIMET report confirmation likelihood.
+
+    This is statistical survival evidence for an AWC preliminary report
+    confirmed by a later same-station OGIMET mirror, not a statement that
+    either mirror is final settlement truth.  An OGIMET-selected current
+    boundary is the confirming mirror side of this same pair contract; it
+    does not create a second independent probability regime.  Unpaired
+    reports are coverage debt and deliberately stay outside the Beta
+    denominator.  ``allow_prior_only`` is an explicit reduce-only policy;
+    ENTRY callers must leave it false when no confirmed transition history
+    exists.
+    """
+    from src.data.day0_fast_obs import metar_observation_time_from_raw
+
+    metric = str(temperature_metric).strip().lower()
+    station = str(station_id).strip().upper()
+    if metric not in {"high", "low"} or not station or decision_time.tzinfo is None:
+        raise ValueError("NOAA_PRELIMINARY_SURVIVAL_INPUT_INVALID")
+    if not isinstance(allow_prior_only, bool):
+        raise ValueError("NOAA_PRELIMINARY_SURVIVAL_PRIOR_POLICY_INVALID")
+    target = date.fromisoformat(str(target_date)[:10])
+    cutoff = decision_time.astimezone(timezone.utc)
+    start = cutoff - timedelta(days=7)
+    query = """
+        SELECT id, source_channel, publish_ts_utc, value_native, unit,
+               fetched_at_utc, raw_report
+          FROM {table}
+         WHERE city = ? AND upper(station_id) = ?
+           AND source_channel IN ('aviationweather_metar', ?)
+           AND julianday(fetched_at_utc) < julianday(?)
+           AND julianday(publish_ts_utc) < julianday(?)
+           AND julianday(publish_ts_utc) >= julianday(?)
+         ORDER BY julianday(fetched_at_utc), id
+    """
+    try:
+        table = "world.observation_prints"
+        conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+    except sqlite3.Error:
+        table = "observation_prints"
+    try:
+        rows = conn.execute(
+            query.format(table=table),
+            (
+                city,
+                station,
+                f"ogimet_metar_{station.lower()}",
+                cutoff.isoformat(),
+                cutoff.isoformat(),
+                start.isoformat(),
+            ),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError("NOAA_PRELIMINARY_SURVIVAL_EVIDENCE_UNAVAILABLE") from exc
+    awc: dict[datetime, tuple[int, float, datetime, str]] = {}
+    ogimet: dict[datetime, list[tuple[int, float, datetime, str]]] = {}
+    for row_id, channel, published_raw, value_raw, unit, fetched_raw, raw in rows:
+        if str(unit or "").upper() != "C":
+            continue
+        try:
+            published = datetime.fromisoformat(str(published_raw).replace("Z", "+00:00"))
+            fetched = datetime.fromisoformat(str(fetched_raw).replace("Z", "+00:00"))
+            value = float(value_raw)
+        except (TypeError, ValueError):
+            continue
+        if str(channel).strip().lower() == "ogimet_metar_" + station.lower():
+            # The canonical OGIMET ledger stores the mirror's publication clock
+            # as its native hourly observation instant; its raw_report is often
+            # intentionally NULL.  AWC retains the report-issued METAR clock.
+            observed = published
+        else:
+            observed = metar_observation_time_from_raw(
+                str(raw or ""), published_at=published
+            )
+        if (
+            observed is None
+            or observed.astimezone(timezone.utc) >= cutoff
+            or fetched.tzinfo is None
+            or fetched.astimezone(timezone.utc) >= cutoff
+        ):
+            continue
+        digest = hashlib.sha256(str(raw or "").encode()).hexdigest()
+        if str(channel) == "aviationweather_metar":
+            awc[observed.astimezone(timezone.utc)] = (int(row_id), value, fetched.astimezone(timezone.utc), digest)
+        else:
+            ogimet.setdefault(observed.astimezone(timezone.utc), []).append((int(row_id), value, fetched.astimezone(timezone.utc), digest))
+    confirmations: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    unconfirmed: list[int] = []
+    tz = ZoneInfo(timezone_name)
+    daily_extreme: dict[date, float] = {}
+    for observed, (awc_id, value, fetched, digest) in sorted(awc.items()):
+        local_day = observed.astimezone(tz).date()
+        if local_day >= target:
+            continue
+        previous = daily_extreme.get(local_day)
+        advance = previous is None or (metric == "high" and value > previous) or (metric == "low" and value < previous)
+        daily_extreme[local_day] = max(previous, value) if previous is not None and metric == "high" else min(previous, value) if previous is not None else value
+        if not advance:
+            continue
+        later = [item for item in ogimet.get(observed, ()) if item[2] > fetched]
+        if not later:
+            unconfirmed.append(awc_id)
+            continue
+        ogimet_id, confirmed, confirmed_at, confirmed_hash = later[0]
+        record = {"awc_id": awc_id, "ogimet_id": ogimet_id, "observed_at": observed.isoformat(), "awc_hash": digest, "ogimet_hash": confirmed_hash}
+        (confirmations if math.isclose(value, confirmed, abs_tol=1e-9) else failures).append(record)
+    successes, failed = len(confirmations), len(failures)
+    if successes + failed == 0:
+        if not allow_prior_only:
+            raise ValueError("NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT")
+        alpha = beta = 0.5
+        identity = {
+            "semantics": (
+                "same_station_preliminary_report_survival_likelihood_"
+                "jeffreys_prior_only_v1"
+            ),
+            "cutoff": cutoff.isoformat(),
+            "successes": confirmations,
+            "failures": failures,
+            "unconfirmed_awc_ids": unconfirmed,
+            "alpha": alpha,
+            "beta": beta,
+            "evidence_basis": "no_confirmed_same_station_transitions",
+        }
+        return {
+            **identity,
+            "boundary_survival_probability": 0.5,
+            "identity_hash": hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+    alpha, beta = successes + 0.5, failed + 0.5
+    identity = {"semantics": "same_station_preliminary_report_survival_likelihood_v1", "cutoff": cutoff.isoformat(), "successes": confirmations, "failures": failures, "unconfirmed_awc_ids": unconfirmed, "alpha": alpha, "beta": beta}
+    return {**identity, "boundary_survival_probability": alpha / (alpha + beta), "identity_hash": hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 _EXTREMA_SQL = """

@@ -82,6 +82,8 @@ from src.venue.response_contracts import (
     is_pre_sdk_no_side_effect_rejection,
 )
 
+_SCREEN_CANCEL_DISPATCH_BOOT_ID = f"{uuid.uuid4()}:{os.getpid()}"
+
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
 
@@ -26692,6 +26694,87 @@ def _reconcile_row(
         return "error"
 
 
+def drain_screen_redecision_cancel_obligations(
+    client,
+    *,
+    deadline_monotonic: float,
+) -> dict[str, int]:
+    """Execute only marked screen cancel debt in the bounded recovery lane.
+
+    SCOPE is one command/order marker. DRAIN is the scheduled command-recovery
+    cadence. RESET is the executor's ACKED/CANCELLED evidence; unstarted work
+    remains CANCEL_PENDING for the next cadence.
+    """
+
+    from src.execution.venue_cancel_journal import (
+        dispatch_screen_redecision_cancel_obligations,
+        find_screen_redecision_cancel_obligations,
+    )
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
+
+    summary = {"scanned": 0, "cancelled": 0, "deferred": 0, "errors": 0}
+    if time.monotonic() >= deadline_monotonic:
+        summary["deferred"] = 1
+        return summary
+    try:
+        read_conn = get_trade_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline_monotonic or "DB_CONNECTION_DEADLINE_EXPIRED" in str(exc):
+            summary["deferred"] = 1
+            return summary
+        raise
+    try:
+        remaining_ms = max(1, int((deadline_monotonic - time.monotonic()) * 1000))
+        read_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+        read_conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1000)
+        entries = find_screen_redecision_cancel_obligations(
+            read_conn,
+            deadline_monotonic=deadline_monotonic,
+        )
+    finally:
+        read_conn.close()
+    if not entries:
+        return summary
+    summary["scanned"] = len(entries)
+    obligation_deadline = min(time.monotonic() + 2.0, deadline_monotonic)
+
+    class _DeadlineClient:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def get_order(self, order_id, *, deadline_monotonic=None):
+            deadline = deadline_monotonic or obligation_deadline
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("screen_cancel_obligation_deadline_exhausted")
+            return self._wrapped.get_order(order_id, deadline_monotonic=deadline)
+
+        def cancel_order(self, order_id, *, deadline_monotonic=None):
+            deadline = deadline_monotonic or obligation_deadline
+            if time.monotonic() >= deadline:
+                raise TimeoutError("screen_cancel_obligation_deadline_exhausted")
+            return self._wrapped.cancel_order(
+                order_id,
+                deadline_monotonic=deadline,
+            )
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        entries,
+        _DeadlineClient(client),
+        conn_factory=lambda *, deadline_monotonic: get_trade_connection(
+            write_class="live",
+            deadline_monotonic=deadline_monotonic,
+        ),
+        deadline_monotonic=obligation_deadline,
+        owner=_SCREEN_CANCEL_DISPATCH_BOOT_ID,
+    )
+    summary["cancelled"] = int(stats.get("cancelled", 0) or 0)
+    summary["errors"] = int(stats.get("errors", 0) or 0) + int(stats.get("journal_failed", 0) or 0)
+    summary["deferred"] = int(stats.get("deferred", 0) or 0)
+    return summary
+
+
 def reconcile_unresolved_commands(
     conn: Optional[sqlite3.Connection] = None,
     client=None,
@@ -26758,10 +26841,25 @@ def reconcile_unresolved_commands(
 
     if client is None:
         from src.data.polymarket_client import PolymarketClient
-        client = PolymarketClient()
+        remaining = (
+            max(0.1, min(2.0, deadline_monotonic - time.monotonic()))
+            if deadline_monotonic is not None
+            else None
+        )
+        client = PolymarketClient(public_http_timeout=remaining)
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     started_at = _now_iso()
+
+    if conn is None and scope in {"live_tick", "full"} and deadline_monotonic is not None:
+        obligation_summary = drain_screen_redecision_cancel_obligations(
+            client,
+            deadline_monotonic=deadline_monotonic,
+        )
+        summary["screen_redecision_cancel_obligations"] = obligation_summary
+        summary["advanced"] += int(obligation_summary.get("cancelled", 0) or 0)
+        summary["stayed"] += int(obligation_summary.get("deferred", 0) or 0)
+        summary["errors"] += int(obligation_summary.get("errors", 0) or 0)
 
     if conn is None:
         # Scheduled-job lane: per-pass short connections, no conn across network.

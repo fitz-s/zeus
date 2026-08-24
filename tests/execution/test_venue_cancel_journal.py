@@ -16,7 +16,14 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
-from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+from src.execution.venue_cancel_journal import (
+    claim_screen_redecision_cancel_obligation,
+    dispatch_screen_redecision_cancel_obligations,
+    finalize_screen_redecision_cancel_obligation,
+    find_screen_redecision_cancel_obligations,
+    persist_screen_redecision_cancel_obligations,
+    run_persisted_cancels_for_expired_rests,
+)
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 3, 22, 0, 0, tzinfo=UTC)
@@ -125,12 +132,818 @@ def _entry(command_id: str, venue_order_id: str, **overrides) -> dict:
     return base
 
 
+def _witness(status: str, matched_size: str) -> dict:
+    return {
+        "status": status,
+        "matched_size": matched_size,
+        "source": "authenticated_point_order",
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def test_screen_cancel_obligation_persists_marker_without_venue_call(monkeypatch):
+    conn = _db()
+    _add_order(conn, command_id="screen-1", venue_order_id="order-1")
+    conn.commit()
+    stats = persist_screen_redecision_cancel_obligations(
+        [_entry("screen-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=__import__("time").monotonic() + 1.0,
+        close_connections=False,
+    )
+    assert stats == {"queued": 1, "deferred": 0, "terminal": 0, "errors": 0}
+    row = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'screen-1'"
+    ).fetchone()
+    assert row[0] == "CANCEL_PENDING"
+    payload = json.loads(conn.execute(
+        "SELECT payload_json FROM venue_command_events WHERE command_id = 'screen-1' "
+        "AND event_type = 'CANCEL_REQUESTED'"
+    ).fetchone()[0])
+    assert payload["cancel_request_kind"] == "screen_redecision_v1"
+    assert payload["dispatch_owner"] == "command_recovery"
+    conn.close()
+
+
+def test_deadline_expired_cancel_does_not_start_venue_call():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="expired-1", venue_order_id="order-1")
+    conn.commit()
+    client = MagicMock()
+    stats = run_persisted_cancels_for_expired_rests(
+        [_entry("expired-1", "order-1")],
+        client,
+        conn_factory=lambda: conn,
+        close_connections=False,
+        deadline_monotonic=time.monotonic() - 0.001,
+    )
+    assert stats["cancelled"] == 0
+    client.cancel_order.assert_not_called()
+    assert conn.execute("SELECT COUNT(*) FROM venue_command_events WHERE event_type='CANCEL_REQUESTED'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_screen_obligation_selector_ignores_legacy_cancel_requested():
+    conn = _db()
+    _add_order(conn, command_id="legacy-1", venue_order_id="order-1")
+    from src.state.venue_command_repo import append_event
+
+    append_event(
+        conn,
+        command_id="legacy-1",
+        event_type="CANCEL_REQUESTED",
+        occurred_at=NOW.isoformat(),
+        payload={"venue_order_id": "order-1", "source": "maker_rest_escalation"},
+    )
+    conn.commit()
+    assert find_screen_redecision_cancel_obligations(conn) == []
+    conn.close()
+
+
+def test_screen_lease_claim_requires_fresh_witness_and_stale_finalize_is_fenced():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="lease-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("lease-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    result = {}
+    assert claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="lease-1",
+        venue_order_id="order-1",
+        owner="boot-a:11",
+        generation=1,
+        attempt_id="attempt-a",
+        expires_at=(NOW + timedelta(seconds=5)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=result,
+    )
+    assert result["action"] == "dispatch"
+    assert result["generation"] == 1
+    assert not finalize_screen_redecision_cancel_obligation(
+        conn,
+        command_id="lease-1",
+        venue_order_id="order-1",
+        attempt_id="attempt-old",
+        expected_last_event_id=result["event_id"],
+        event_type="CANCEL_ACKED",
+        payload={"venue_order_id": "order-1"},
+    )
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='lease-1'").fetchone()[0] == "CANCEL_PENDING"
+    conn.close()
+
+
+def test_screen_lease_terminal_witness_acks_without_cancel_side_effect():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="terminal-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("terminal-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    result = {}
+    assert claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="terminal-1",
+        venue_order_id="order-1",
+        owner="boot-a:11",
+        generation=1,
+        attempt_id="attempt-a",
+        expires_at=(NOW + timedelta(seconds=5)).isoformat(),
+        fresh_witness=_witness("FILLED", "10"),
+        result=result,
+    )
+    assert result["action"] == "finalized"
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='terminal-1'").fetchone()[0] == "CANCELLED"
+    conn.close()
+
+
+def test_screen_dispatch_cancel_success_and_unknown_are_attempt_fenced():
+    import time
+
+    conn = _db()
+    conn.execute("PRAGMA busy_timeout = 321")
+    _add_order(conn, command_id="dispatch-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("dispatch-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    clob = _PointOrderClob(matched_size="0")
+    factory_deadlines = []
+
+    def deadline_conn_factory(*, deadline_monotonic):
+        factory_deadlines.append(deadline_monotonic)
+        return conn
+
+    deadline = time.monotonic() + 1
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        clob,
+        conn_factory=deadline_conn_factory,
+        deadline_monotonic=deadline,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+    assert stats["cancelled"] == 1
+    assert clob.cancelled == ["order-1"]
+    assert factory_deadlines and all(value == deadline for value in factory_deadlines)
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 321
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='dispatch-1'").fetchone()[0] == "CANCELLED"
+    conn.close()
+
+
+def test_screen_registered_owner_runs_marker_witness_claim_then_signed_delete(monkeypatch):
+    """The registered recovery owner must bind the marker to the signed cancel path."""
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingTransport:
+        calls = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **kwargs):
+            self.__class__.calls.append(kwargs)
+            return httpx.Response(200, json={"canceled": ["registered-order"]})
+
+    monkeypatch.setattr(httpx, "Client", RecordingTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        use_server_time=False,
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+    )
+    adapter.prepare_order_truth_reader()
+
+    calls = []
+
+    class RegisteredOwnerClient:
+        def get_order(self, order_id, *, deadline_monotonic):
+            calls.append(("get_order", order_id))
+            assert deadline_monotonic > time.monotonic()
+            return {
+                "orderID": order_id,
+                "status": "LIVE",
+                "original_size": "26.5",
+                "size_matched": "0",
+                "captured_at": datetime.now(UTC).isoformat(),
+                "source": "authenticated_point_order",
+            }
+
+        def cancel_order(self, order_id, *, deadline_monotonic):
+            calls.append(("cancel_order", order_id))
+            result = adapter.cancel(order_id, deadline_monotonic=deadline_monotonic)
+            return {
+                "orderID": result.order_id,
+                "status": result.status,
+                "raw_response_json": result.raw_response_json,
+            }
+
+    conn = _db()
+    _add_order(conn, command_id="registered-1", venue_order_id="registered-order")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("registered-1", "registered-order")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        RegisteredOwnerClient(),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-registered:11",
+        close_connections=False,
+    )
+
+    assert stats["cancelled"] == 1, (stats, calls)
+    assert calls == [("get_order", "registered-order"), ("cancel_order", "registered-order")]
+    assert RecordingTransport.calls[0]["method"] == "DELETE"
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM venue_command_events "
+            "WHERE command_id = 'registered-1' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0]
+    )
+    assert payload["obligation_id"] == "screen_redecision_v1:registered-1:registered-order"
+    assert payload["obligation_kind"] == "screen_redecision_cancel_v1"
+    assert payload["owner"] == "command_recovery"
+    conn.close()
+
+
+def test_edli_recovery_cycle_uses_prepared_registered_owner_for_screen_cancel(monkeypatch):
+    """The scheduled owner must route its selector and cancel through the prepared client."""
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import src.main as main_module
+    import src.execution.command_recovery as recovery_module
+    import src.state.db as state_db
+    from src.data.polymarket_client import PolymarketClient
+    from src.venue.polymarket_v2_adapter import OrderState, PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingTransport:
+        calls = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **kwargs):
+            self.__class__.calls.append(kwargs)
+            return httpx.Response(200, json={"canceled": ["cycle-order"]})
+
+    monkeypatch.setattr(httpx, "Client", RecordingTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        use_server_time=False,
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+    )
+    adapter._client = sdk_client
+    witness_calls = []
+
+    def prepared_get_order(order_id, *, deadline_monotonic=None):
+        witness_calls.append((order_id, deadline_monotonic))
+        return OrderState(
+            order_id=order_id,
+            status="LIVE",
+            raw={
+                "orderID": order_id,
+                "status": "LIVE",
+                "original_size": "26.5",
+                "size_matched": "0",
+                "captured_at": datetime.now(UTC).isoformat(),
+                "source": "authenticated_point_order",
+            },
+        )
+
+    adapter.get_order = prepared_get_order
+    conn = _db()
+    _add_order(conn, command_id="cycle-1", venue_order_id="cycle-order")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("cycle-1", "cycle-order")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+
+    class OwnedConn:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+        def set_progress_handler(self, *_args):
+            return None
+
+        def close(self):
+            return None
+
+    owned_conn = OwnedConn(conn)
+    observed = {}
+    def fake_reconcile(**kwargs):
+        observed.update(kwargs)
+        stats = dispatch_screen_redecision_cancel_obligations(
+            find_screen_redecision_cancel_obligations(conn),
+            kwargs["client"],
+            conn_factory=lambda **_kwargs: owned_conn,
+            deadline_monotonic=kwargs["deadline_monotonic"],
+            owner="cycle-owner:11",
+            close_connections=False,
+        )
+        return {
+            "scope": kwargs["scope"],
+            "scanned": stats["scanned"],
+            "advanced": stats["cancelled"],
+            "stayed": stats["deferred"],
+            "errors": stats["errors"] + stats["journal_failed"],
+        }
+
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 11)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 11)
+    monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", adapter)
+    monkeypatch.setattr(main_module, "_consume_edli_command_recovery_summary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(recovery_module, "scheduled_recovery_budget_seconds", lambda: 1.0)
+    monkeypatch.setattr(recovery_module, "capital_blocking_command_count", lambda _conn: 0)
+    monkeypatch.setattr(recovery_module, "reconcile_unresolved_commands", fake_reconcile)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic: owned_conn,
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert observed["scope"] == "live_tick"
+    assert isinstance(observed["client"], PolymarketClient)
+    assert observed["client"]._v2_adapter is adapter
+    assert witness_calls and witness_calls[0][1] > time.monotonic()
+    assert RecordingTransport.calls[0]["method"] == "DELETE"
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cycle-1'"
+    ).fetchone()[0] == "CANCELLED"
+    conn.close()
+
+
+def test_edli_recovery_cycle_defers_screen_debt_without_prepared_adapter(monkeypatch):
+    import src.main as main_module
+    import src.execution.command_recovery as recovery_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def set_progress_handler(self, *_args):
+            return None
+
+        def close(self):
+            return None
+
+    calls = []
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", None)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda *, deadline_monotonic: FakeConn())
+    monkeypatch.setattr(recovery_module, "capital_blocking_command_count", lambda _conn: 0)
+    monkeypatch.setattr(
+        recovery_module,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: calls.append(True),
+    )
+    from src.execution import venue_cancel_journal as journal_module
+
+    monkeypatch.setattr(
+        journal_module,
+        "find_screen_redecision_cancel_obligations",
+        lambda _conn: [{"command_id": "screen-debt", "venue_order_id": "order-debt"}],
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == []
+
+
+def test_edli_recovery_cycle_selector_uses_absolute_deadline_and_typed_defer(monkeypatch):
+    import sqlite3
+
+    import src.main as main_module
+    import src.execution.command_recovery as recovery_module
+    import src.state.db as state_db
+
+    observed = {}
+    calls = []
+
+    def bounded_readonly(*, deadline_monotonic):
+        observed["deadline"] = deadline_monotonic
+        raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", bounded_readonly)
+    monkeypatch.setattr(recovery_module, "scheduled_recovery_budget_seconds", lambda: 0.1)
+    monkeypatch.setattr(
+        recovery_module,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: calls.append(True),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert observed["deadline"] > 0
+    assert calls == []
+
+
+def test_screen_active_lease_defers_and_expired_lease_reclaims_next_generation():
+    import time
+
+    now = datetime.now(UTC)
+    conn = _db()
+    _add_order(conn, command_id="lease-2", venue_order_id="order-2")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("lease-2", "order-2")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    first = {}
+    assert claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="lease-2",
+        venue_order_id="order-2",
+        owner="boot-a:11",
+        generation=1,
+        attempt_id="attempt-a",
+        expires_at=(now + timedelta(seconds=60)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=first,
+    )
+    active = {}
+    assert not claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="lease-2",
+        venue_order_id="order-2",
+        owner="boot-b:22",
+        generation=2,
+        attempt_id="attempt-b",
+        expires_at=(now + timedelta(seconds=61)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=active,
+    )
+    assert active["action"] == "active_lease"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ? WHERE event_type = 'CANCEL_DISPATCH_STARTED'",
+        (json.dumps({
+            "schema_version": 1,
+            "obligation_id": "screen_redecision_v1:lease-2:order-2",
+            "obligation_kind": "screen_redecision_cancel_v1",
+            "owner": "command_recovery",
+            "owner_boot_id": "boot-a",
+            "owner_pid": "11",
+            "generation": 1,
+            "attempt_id": "attempt-a",
+            "expires_at": (now - timedelta(seconds=1)).isoformat(),
+            "venue_order_id": "order-2",
+        }),),
+    )
+    conn.commit()
+    expired = {}
+    assert claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="lease-2",
+        venue_order_id="order-2",
+        owner="boot-b:22",
+        generation=2,
+        attempt_id="attempt-b",
+        expires_at=(now + timedelta(seconds=61)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=expired,
+    )
+    assert expired["generation"] == 2
+    conn.close()
+
+
+def test_screen_two_connection_claims_are_single_flight(tmp_path):
+    import time
+
+    path = tmp_path / "trades.db"
+    first_conn = sqlite3.connect(path)
+    second_conn = sqlite3.connect(path)
+    first_conn.row_factory = sqlite3.Row
+    second_conn.row_factory = sqlite3.Row
+    schema = _db()
+    for statement in schema.iterdump():
+        if statement.startswith("BEGIN") or statement.startswith("COMMIT"):
+            continue
+        first_conn.execute(statement)
+    schema.close()
+    _add_order(first_conn, command_id="race-1", venue_order_id="order-1")
+    first_conn.commit()
+    persist_screen_redecision_cancel_obligations(
+        [_entry("race-1", "order-1")],
+        conn_factory=lambda: first_conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    first_conn.commit()
+    entry = find_screen_redecision_cancel_obligations(second_conn)[0]
+    first = {}
+    second = {}
+    assert claim_screen_redecision_cancel_obligation(
+        first_conn,
+        command_id="race-1",
+        venue_order_id="order-1",
+        owner="boot-a:11",
+        generation=1,
+        attempt_id="attempt-a",
+        expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=first,
+    )
+    assert not claim_screen_redecision_cancel_obligation(
+        second_conn,
+        command_id=entry["command_id"],
+        venue_order_id=entry["venue_order_id"],
+        owner="boot-b:22",
+        generation=1,
+        attempt_id="attempt-b",
+        expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+        fresh_witness=_witness("LIVE", "0"),
+        result=second,
+    )
+    assert second["action"] == "active_lease"
+    first_conn.close()
+    second_conn.close()
+
+
+def test_screen_witness_age_and_incompatible_client_are_fail_closed():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="age-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("age-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    stale = _witness("LIVE", "0")
+    stale["captured_at"] = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
+    result = {}
+    assert not claim_screen_redecision_cancel_obligation(
+        conn,
+        command_id="age-1",
+        venue_order_id="order-1",
+        owner="boot-a:11",
+        generation=1,
+        attempt_id="attempt-a",
+        expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+        fresh_witness=stale,
+        result=result,
+    )
+    assert result["action"] == "witness_stale"
+
+    class NoDeadlineClient:
+        def get_order(self, _order_id):
+            return {"orderID": "order-1", "status": "LIVE", "size_matched": "0"}
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        NoDeadlineClient(),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+    assert stats["deferred"] == 1
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='age-1'").fetchone()[0] == "CANCEL_PENDING"
+    conn.close()
+
+
+def test_screen_post_deadline_cancel_keeps_started_debt():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="late-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("late-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+
+    class LateCancel(_PointOrderClob):
+        def cancel_order(self, order_id: str, *, deadline_monotonic=None):
+            time.sleep(0.02)
+            raise TimeoutError("deadline")
+
+    deadline = time.monotonic() + 0.01
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        LateCancel(matched_size="0"),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=deadline,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+    assert stats["journal_failed"] == 1
+    row = conn.execute(
+        "SELECT state, event_type FROM venue_commands JOIN venue_command_events "
+        "ON venue_commands.last_event_id = venue_command_events.event_id WHERE venue_commands.command_id='late-1'"
+    ).fetchone()
+    assert tuple(row) == ("CANCEL_PENDING", "CANCEL_DISPATCH_STARTED")
+    conn.close()
+
+
+def test_screen_cancel_without_deadline_contract_never_falls_back_to_http():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="compat-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("compat-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+
+    class LateCallClient:
+        def get_order(self, _order_id, *, deadline_monotonic=None):
+            return {"orderID": "order-1", "status": "LIVE", "size_matched": "0"}
+
+        def cancel_order(self, _order_id):
+            raise AssertionError("deadline-incompatible cancel must not reach HTTP")
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        LateCallClient(),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+    assert stats["journal_failed"] == 1
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='compat-1'").fetchone()[0] == "CANCEL_PENDING"
+    conn.close()
+
+
+def test_screen_claim_lock_contention_is_deadline_deferred(tmp_path):
+    import threading
+    import time
+
+    path = tmp_path / "locked-trades.db"
+    first_conn = sqlite3.connect(path)
+    second_conn = sqlite3.connect(path, check_same_thread=False)
+    first_conn.row_factory = sqlite3.Row
+    second_conn.row_factory = sqlite3.Row
+    schema = _db()
+    for statement in schema.iterdump():
+        if statement.startswith("BEGIN") or statement.startswith("COMMIT"):
+            continue
+        first_conn.execute(statement)
+    schema.close()
+    _add_order(first_conn, command_id="lock-1", venue_order_id="order-1")
+    first_conn.commit()
+    persist_screen_redecision_cancel_obligations(
+        [_entry("lock-1", "order-1")],
+        conn_factory=lambda: first_conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    first_conn.commit()
+    first_conn.execute("BEGIN IMMEDIATE")
+    result = {}
+    worker = threading.Thread(
+        target=claim_screen_redecision_cancel_obligation,
+        kwargs={
+            "conn": second_conn,
+            "command_id": "lock-1",
+            "venue_order_id": "order-1",
+            "owner": "boot-b:22",
+            "generation": 1,
+            "attempt_id": "attempt-b",
+            "expires_at": (datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+            "fresh_witness": _witness("LIVE", "0"),
+            "result": result,
+            "deadline_monotonic": time.monotonic() + 0.03,
+        },
+    )
+    worker.start()
+    worker.join(timeout=1)
+    first_conn.rollback()
+    assert not worker.is_alive()
+    assert result["action"] == "sqlite_busy_deferred"
+    first_conn.close()
+    second_conn.close()
+
+
+def test_screen_expired_deadline_does_not_open_claim_connection():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="expired-open-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("expired-open-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    opened = []
+
+    def forbidden_factory(*, deadline_monotonic):
+        opened.append(deadline_monotonic)
+        raise AssertionError("expired deadline must not create a DB connection")
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        _PointOrderClob(matched_size="0"),
+        conn_factory=forbidden_factory,
+        deadline_monotonic=time.monotonic() - 0.001,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+    assert stats["deferred"] == 1
+    assert opened == []
+    conn.close()
+
+
 class _FakeClob:
     def __init__(self, fail_on: set[str] | None = None):
         self.cancelled: list[str] = []
         self._fail_on = fail_on or set()
 
-    def cancel_order(self, order_id: str):
+    def cancel_order(self, order_id: str, *, deadline_monotonic=None):
         if order_id in self._fail_on:
             raise RuntimeError("venue cancel error")
         self.cancelled.append(order_id)
@@ -142,7 +955,7 @@ class _PointOrderClob(_FakeClob):
         super().__init__()
         self.matched_size = matched_size
 
-    def get_order(self, order_id: str):
+    def get_order(self, order_id: str, *, deadline_monotonic=None):
         return {
             "orderID": order_id,
             "status": "LIVE",
@@ -214,7 +1027,7 @@ class TestPersistedRestCancel:
         _add_order(conn, command_id="c1", venue_order_id="o1")
 
         class FailingPointOrderClob(_FakeClob):
-            def get_order(self, _order_id: str):
+            def get_order(self, _order_id: str, *, deadline_monotonic=None):
                 raise TimeoutError("point-order timeout")
 
         clob = FailingPointOrderClob()

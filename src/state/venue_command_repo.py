@@ -200,6 +200,8 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMIT_REJECTED", "FILL_CONFIRMED"):        "FILLED",
 
     # from CANCEL_PENDING
+    # Durable dispatch lease: remains CANCEL_PENDING until venue terminal truth.
+    ("CANCEL_PENDING", "CANCEL_DISPATCH_STARTED"): "CANCEL_PENDING",
     ("CANCEL_PENDING", "CANCEL_ACKED"):       "CANCELLED",
     ("CANCEL_PENDING", "CANCEL_FAILED"):      "REVIEW_REQUIRED",
     ("CANCEL_PENDING", "CANCEL_REPLACE_BLOCKED"): "REVIEW_REQUIRED",

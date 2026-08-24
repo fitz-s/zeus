@@ -581,15 +581,542 @@ def test_provider_backoff_suppresses_global_launch_but_detector_continues(
         )
         mem.commit()
     _queue_blind_dispatch_debt(cfg, incident_id="blocked-by-provider")
+    _position(cfg)
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("provider backoff must block all new model runs"))
     assert loop.dispatch(cfg) == []
     assert loop._dispatch_has_eligible_debt(cfg, []) is False
+    provider_incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / "blocked-by-provider"
+    assert (provider_incident_dir / "CURRENT").is_file()
+    assert loop._evidence_pair_valid(cfg, "blocked-by-provider")
 
-    _position(cfg)
     _quote(cfg, "provider-detector-q", "2026-08-22T09:00:02+00:00", 0.01)
     assert loop.detect(cfg)
     assert any(row["incident_id"] == "blocked-by-provider" for row in _incidents(cfg))
+
+
+def test_hard_evidence_maintenance_is_capacity_bounded_and_prioritizes_new_active_tel_aviv(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(
+        evidence_builds_per_cycle=1,
+        evidence_build_budget_ms=5000,
+        evidence_max_bytes=1024 * 1024,
+    )
+    _position(cfg, position_id="tel-old")
+    _position(cfg, position_id="tel-new")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET city='Tel Aviv',updated_at=? WHERE position_id IN ('tel-old','tel-new')",
+            ("2026-08-22T12:00:00+00:00",),
+        )
+    with loop.memory(cfg) as mem:
+        for index in range(118):
+            position_id = "tel-new" if index == 0 else ("tel-old" if index == 1 else "p1")
+            detected_at = "2026-08-22T12:00:00+00:00" if index == 0 else (
+                "2026-08-22T11:00:00+00:00" if index == 1 else "2026-08-20T00:00:00+00:00"
+            )
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"historical-{index:03d}", "hard", position_id, f"evidence-{index:03d}",
+                    "below_floor", "yes-token", "sell_yes", 0.05, detected_at, 1.0,
+                    "queued", "blind", detected_at,
+                ),
+            )
+        mem.commit()
+
+    built: list[str] = []
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda _cfg, incident_id: built.append(incident_id)
+        or Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in built)
+
+    first = loop._capture_hard_evidence(cfg, scan_all=True)
+    assert first["built"] == ["historical-000"]
+    assert len(first["deferred"]) == 117
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending'"
+        ).fetchone()[0] == 117
+
+    second = loop._capture_hard_evidence(cfg, scan_all=True)
+    assert second["built"] == ["historical-001"]
+    assert built == ["historical-000", "historical-001"]
+
+
+def test_capacity_failure_consumes_attempt_and_fingerprint_defers_only_same_incident(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=5000, evidence_max_bytes=1)
+    _position(cfg, position_id="large-a")
+    _position(cfg, position_id="large-b")
+    with loop.memory(cfg) as mem:
+        for index, position_id in enumerate(("large-a", "large-b")):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"large-{index}", "hard", position_id, f"large-evidence-{index}", "below_floor",
+                    "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 2 - index,
+                    "queued", "blind", "2026-08-22T12:00:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    calls: list[str] = []
+    successful: set[str] = set()
+
+    def oversized_builder(_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        if incident_id == "large-0":
+            raise loop.EvidenceCapacityExceeded("evidence_snapshot_oversized:bytes=61865984")
+        successful.add(incident_id)
+        return Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db"
+
+    monkeypatch.setattr(loop, "build_evidence", oversized_builder)
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in successful)
+    trigger_batches = [["large-0"], []]
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+
+    assert loop.detect(cfg) == ["large-0"]
+    assert loop._LAST_EVIDENCE_CYCLE["attempted"] == 1
+    assert calls == ["large-0"]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT reason,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts "
+            "FROM controller_debt WHERE debt_id='evidence_snapshot:large-0'"
+        ).fetchone()
+    assert str(debt[0]).startswith("evidence_snapshot_capacity_failure:")
+    assert all(str(value) for value in debt[1:5])
+    assert debt[5] == 1
+
+    assert loop.detect(cfg) == []
+    assert loop._LAST_EVIDENCE_CYCLE["built"] == ["large-1"]
+    assert calls == ["large-0", "large-1"]
+
+
+def test_bounded_builder_installs_shared_progress_budget_before_canonical_queries(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_build_budget_ms=5000, evidence_max_bytes=8 * 1024 * 1024)
+    _position(cfg)
+    _quote(cfg, "budget-query", "2026-08-22T09:00:02+00:00", 0.01)
+    applied: list[object] = []
+    original = loop._apply_evidence_sql_budget
+
+    def traced(conn: sqlite3.Connection, budget=None) -> None:
+        applied.append(budget)
+        original(conn, budget)
+
+    monkeypatch.setattr(loop, "_apply_evidence_sql_budget", traced)
+    incident_id = loop.detect(cfg)[0]
+    assert incident_id
+    assert len(applied) >= 3
+    assert sum(item is not None for item in applied) >= 2
+
+
+def test_new_position_event_changes_data_fingerprint_and_retries_capacity_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=5000, evidence_max_bytes=1)
+    _position(cfg, position_id="fingerprint-position")
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "fingerprint-incident", "hard", "fingerprint-position", "fingerprint-evidence", "below_floor",
+                "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0,
+                "queued", "blind", "2026-08-22T12:00:00+00:00",
+            ),
+        )
+        mem.commit()
+    calls: list[str] = []
+    failed = {"fingerprint-incident"}
+    successful: set[str] = set()
+
+    def fail_once(_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        if incident_id in failed:
+            failed.remove(incident_id)
+            raise loop.EvidenceCapacityExceeded("evidence_snapshot_oversized:bytes=61865984")
+        successful.add(incident_id)
+        return Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db"
+
+    monkeypatch.setattr(loop, "build_evidence", fail_once)
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in successful)
+    loop._capture_hard_evidence(cfg, ["fingerprint-incident"])
+    assert calls == ["fingerprint-incident"]
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "new-fingerprint-event", "fingerprint-position", 1, "MONITOR_REFRESHED",
+                "2026-08-22T12:01:00+00:00", None, json.dumps({"new": "evidence"}), "active", "active",
+            ),
+        )
+    result = loop._capture_hard_evidence(cfg, ["fingerprint-incident"])
+    assert result["built"] == ["fingerprint-incident"]
+    assert calls == ["fingerprint-incident", "fingerprint-incident"]
+
+
+def test_real_large_snapshot_hits_tiny_capacity_once_then_next_incident_advances(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=15000, evidence_max_bytes=1024 * 1024)
+    _position(cfg, position_id="real-large-a")
+    _position(cfg, position_id="real-large-b")
+    _event(
+        cfg,
+        "large-monitor",
+        "real-large-a",
+        1,
+        "MONITOR_REFRESHED",
+        "2026-08-22T09:00:03+00:00",
+        phase_before="active",
+        phase_after="active",
+        payload={"blob": "x" * (59 * 1024 * 1024)},
+    )
+    with loop.memory(cfg) as mem:
+        for index, position_id in enumerate(("real-large-a", "real-large-b")):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"real-large-{index}", "hard", position_id, f"real-evidence-{index}", "below_floor",
+                    "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 2 - index,
+                    "queued", "blind", "2026-08-22T12:00:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    calls: list[str] = []
+    original_build = loop.build_evidence
+
+    def tracked_build(local_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        return original_build(local_cfg, incident_id)
+
+    monkeypatch.setattr(loop, "build_evidence", tracked_build)
+    trigger_batches = [["real-large-0"], []]
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+
+    assert loop.detect(cfg) == ["real-large-0"]
+    assert calls == ["real-large-0"]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT reason,attempts FROM controller_debt WHERE debt_id='evidence_snapshot:real-large-0'"
+        ).fetchone()
+    assert str(debt[0]).startswith("evidence_snapshot_capacity_failure:evidence_snapshot_oversized:")
+    assert debt[1] == 1
+    assert not (Path(cfg["paths"]["runtime"]) / "incidents" / "real-large-0" / "CURRENT").exists()
+
+    assert loop.detect(cfg) == []
+    assert calls == ["real-large-0", "real-large-1"]
+    assert loop._evidence_pair_valid(cfg, "real-large-1")
+
+
+def test_daemon_publishes_fresh_status_before_slow_evidence_maintenance(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    observed: list[dict] = []
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def slow_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        assert payload["alive"] is True
+        assert payload["evidence_maintenance"] == "starting"
+        (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", slow_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert observed and observed[0]["pid"] == os.getpid()
+
+
+def test_daemon_startup_status_precedes_bounded_large_run_reconcile(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    cfg["loop"].update(startup_run_batch_size=64, startup_maintenance_budget_ms=1000)
+    with loop.memory(cfg):
+        pass
+    for index in range(3000):
+        loop.atomic_json(
+            runs / f"startup-run-{index:04d}.json",
+            {"run_id": f"run-{index}", "incident_id": f"incident-{index}", "pid": 999999, "status": "completed"},
+        )
+    read_count = {"value": 0}
+    observed: list[dict] = []
+    spawned: list[object] = []
+    original_metadata = loop._startup_run_metadata
+
+    def traced_metadata(path: Path) -> dict:
+        read_count["value"] += 1
+        return original_metadata(path)
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        assert payload["alive"] is True
+        assert payload["pid"] == os.getpid()
+        if len(observed) == 2:
+            (runtime / "HALT").touch()
+        return []
+
+    codex_home = tmp_path / "startup-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(loop, "_startup_run_metadata", traced_metadata)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert len(observed) == 2
+    assert observed[0]["phase"] in {"startup_maintenance", "cycle"}
+    assert read_count["value"] <= 3 * cfg["loop"]["startup_run_batch_size"]
+    assert spawned == []
+    assert loop._STARTUP_RUN_CURSOR[str(runtime.resolve())] >= 2 * cfg["loop"]["startup_run_batch_size"]
+    checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+    assert checkpoint["cursor"] >= 2 * cfg["loop"]["startup_run_batch_size"]
+
+
+def test_startup_budget_bounds_real_locked_memory_subprocess_and_settings_io(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg):
+        pass
+    lock = sqlite3.connect(cfg["paths"]["runtime"] + "/memory.db", timeout=0.01)
+    lock.execute("BEGIN EXCLUSIVE")
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 0.05, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="memory_sqlite"):
+            loop.bootstrap(cfg)
+    finally:
+        loop._STARTUP_BUDGET = None
+        lock.rollback()
+        lock.close()
+
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 0.03, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="subprocess_timeout"):
+            loop._run_capture(["/bin/sh", "-c", "sleep 1"], cwd=ROOT, timeout=2)
+    finally:
+        loop._STARTUP_BUDGET = None
+
+    Path(cfg["paths"]["settings"]).write_text(json.dumps({"execution": {"absolute_live_unit_price_min": 0.05}, "padding": "x" * (300 * 1024)}))
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 1, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="file_size"):
+            loop.floor_price(cfg)
+    finally:
+        loop._STARTUP_BUDGET = None
+
+
+def test_startup_debt_fail_closed_blocks_external_dispatch_paths(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop.atomic_json(
+        Path(cfg["paths"]["runtime"]) / "startup-debt.json",
+        {"kind": "startup_maintenance", "status": "retry_pending", "reason": "locked", "updated_at": loop.iso()},
+    )
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: pytest.fail("startup debt must gate before reconcile"))
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("startup debt must prevent spawn"))
+    assert loop.dispatch(cfg) == []
+    assert loop.dispatch_once(cfg) == []
+    assert loop._dispatch_has_eligible_debt(cfg, []) is False
+
+
+def test_startup_locked_reconcile_keeps_same_batch_for_next_cycle(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    cfg["loop"].update(startup_run_batch_size=1, startup_maintenance_budget_ms=100)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES ('startup-orphan', 'hard', 'p1', 'q1', 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'running', 'blind', ?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    loop.atomic_json(
+        runs / "startup-orphan-run.json",
+        {"run_id": "startup-orphan-run", "incident_id": "startup-orphan", "pid": 999999, "status": "running"},
+    )
+    lock = sqlite3.connect(runtime / "memory.db", timeout=0.01)
+    original_bootstrap_memory = loop._bootstrap_memory_version
+    armed = {"value": False}
+
+    def arm_reconcile_lock(local_cfg: dict) -> None:
+        original_bootstrap_memory(local_cfg)
+        if not armed["value"]:
+            lock.execute("BEGIN EXCLUSIVE")
+            armed["value"] = True
+
+    monkeypatch.setattr(loop, "_bootstrap_memory_version", arm_reconcile_lock)
+    observed: list[dict] = []
+    spawned: list[object] = []
+    codex_home = tmp_path / "startup-lock-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        if len(observed) == 1:
+            debt = json.loads((runtime / "startup-debt.json").read_text())
+            assert payload["alive"] is True
+            assert debt["status"] == "retry_pending"
+            lock.rollback()
+            lock.close()
+        else:
+            with loop.memory(cfg) as mem:
+                status = mem.execute(
+                    "SELECT status FROM incidents WHERE incident_id='startup-orphan'"
+                ).fetchone()[0]
+            assert status == "retry_pending"
+            checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+            assert checkpoint["cursor"] == 1
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: False)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    try:
+        assert loop.daemon(cfg) == 0
+    finally:
+        if lock:
+            try:
+                lock.rollback()
+            except sqlite3.Error:
+                pass
+            lock.close()
+    assert len(observed) == 2
+    assert spawned == []
+
+
+def test_startup_checkpoint_commit_boundary_survives_deadline_race(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    loop.atomic_json(
+        runs / "checkpoint-race.json",
+        {"run_id": "checkpoint-race", "incident_id": "not-running", "pid": 999999, "status": "completed"},
+    )
+    with loop.memory(cfg):
+        pass
+    key = str(runtime.resolve())
+    loop._STARTUP_RUN_QUEUE.pop(key, None)
+    loop._STARTUP_RUN_CURSOR.pop(key, None)
+    loop._STARTUP_RUN_REMAINING.pop(key, None)
+    loop._STARTUP_BUDGET = {
+        "deadline": loop.time.monotonic() + 1.0,
+        "max_run_json_bytes": 256 * 1024,
+        "run_batch_size": 1,
+    }
+    original_atomic = loop.atomic_json
+
+    def advance_after_pointer_replace(path: Path, payload: dict) -> None:
+        original_atomic(path, payload)
+        if path.name == "startup-cursor.json":
+            loop._STARTUP_BUDGET["deadline"] = loop.time.monotonic() - 1.0
+
+    monkeypatch.setattr(loop, "atomic_json", advance_after_pointer_replace)
+    try:
+        assert loop.reconcile_orphan_incidents(cfg) == []
+    finally:
+        loop._STARTUP_BUDGET = None
+    checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+    assert checkpoint["cursor"] == 1
+    assert loop._STARTUP_RUN_CURSOR[key] == checkpoint["cursor"]
+
+
+def test_evidence_failure_debt_recovers_same_incident_without_spawn(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "capture-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    original = loop.build_evidence
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: (_ for _ in ()).throw(OSError("snapshot disk")))
+    incident_id = loop.detect(cfg)[0]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT kind,status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()
+    assert tuple(debt) == ("evidence_snapshot", "retry_pending")
+    monkeypatch.setattr(loop, "build_evidence", original)
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE incident_id=?", (incident_id,)
+        ).fetchone()[0] == 1
+        assert mem.execute(
+            "SELECT status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()[0] == "resolved"
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pointer_replace_failure_keeps_previous_pair_valid(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pointer-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    original_replace = loop.os.replace
+    def fail_pointer(src, dst):
+        if Path(dst).name == "CURRENT":
+            raise OSError("pointer replace")
+        original_replace(src, dst)
+    monkeypatch.setattr(loop.os, "replace", fail_pointer)
+    with pytest.raises(OSError, match="pointer replace"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert loop._evidence_pair_valid(cfg, incident_id)
 
 
 def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -600,16 +1127,79 @@ def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkey
             json.dumps({"kind": "provider_quota_limit", "reason": "quota", "next_retry_at": "2000-01-01T00:00:00+00:00"}),
         )
         mem.commit()
+    _position(cfg)
     _queue_blind_dispatch_debt(cfg, incident_id="cooldown-expired")
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: [])
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
     monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
     monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
     monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
-    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    claimed = {"value": False}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claimed["value"]:
+            return None
+        claimed["value"] = True
+        return {"incident_id": incident_id, "kind": "hard"}
+    monkeypatch.setattr(loop, "_claim", claim_once)
+    claim_count = {"hard": 0}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claim_count["hard"]:
+            return None
+        claim_count["hard"] = 1
+        return {"incident_id": "cooldown-expired", "kind": "hard"}
+    monkeypatch.setattr(loop, "_claim", claim_once)
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda cfg, incident_id: Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda cfg, incident_id: (
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "resumed"})
     assert loop.dispatch(cfg) == ["cooldown-expired"]
+
+
+def test_dispatch_uses_real_current_generation_pair_and_loaded_sha(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "dispatch-generation-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    generation = (incident_dir / "CURRENT").read_text().strip()
+    generation_evidence = incident_dir / "generations" / generation / "evidence.db"
+    generation_manifest = incident_dir / "generations" / generation / "manifest.json"
+    assert generation_evidence.is_file() and generation_manifest.is_file()
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        loop,
+        "_spawn_run",
+        lambda _cfg, **kwargs: launched.append(kwargs["incident_id"]) or {"run_id": "generation-run"},
+    )
+    original_read_json = loop.read_json
+    def loaded_generation(path, default=None):
+        if Path(path).name == "manifest.json" and "generations" in Path(path).parts:
+            payload = original_read_json(path, default)
+            payload["loaded_sha"] = "sha"
+            return payload
+        return original_read_json(path, default)
+    monkeypatch.setattr(loop, "read_json", loaded_generation)
+    assert loop.dispatch(cfg) == [incident_id]
+    assert launched == [incident_id]
 
 
 def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
@@ -625,6 +1215,39 @@ def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
         assert loop._parse_terminal_failure(path) is None
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_dispatch_path_mismatch_records_debt_without_spawn(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="path-mismatch")
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: [])
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    claim_count = {"hard": 0}
+    def claim_once(_cfg, kind):
+        if kind != "hard" or claim_count["hard"]:
+            return None
+        claim_count["hard"] = 1
+        return {"incident_id": "path-mismatch", "kind": "hard"}
+    monkeypatch.setattr(
+        loop,
+        "_claim",
+        claim_once,
+    )
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/not-current-generation.db"))
+    monkeypatch.setattr(loop, "_evidence_pair_paths", lambda *_args: (Path("/tmp/current-generation.db"), Path("/tmp/current-generation.json")))
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("path mismatch must not spawn"))
+    assert loop.dispatch(cfg) == []
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT kind,status,reason FROM controller_debt WHERE debt_id=?",
+            ("evidence_snapshot:path-mismatch",),
+        ).fetchone()
+    assert tuple(row) == ("evidence_snapshot", "retry_pending", "evidence_snapshot_path_mismatch")
 
 
 def test_terminal_failure_is_turn_scoped_and_structured_codes_win(
@@ -947,7 +1570,20 @@ def test_dispatch_claims_hard_blind_before_repair_waiting(cfg: dict, monkeypatch
     monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
     monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
     monkeypatch.setattr(loop, "_claim", lambda _cfg, kind: order.append(f"claim:{kind}") or (None if kind == "precursor" else {"incident_id": "hard", "kind": "hard"}))
-    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda cfg, incident_id: Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda cfg, incident_id: (
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+            Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "hard-run"})
     monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: order.append("repair") or None)
@@ -2024,7 +2660,16 @@ def test_controller_retry_consumes_its_kind_slot_without_blocking_precursor(
             else None
         ),
     )
-    monkeypatch.setattr(loop, "build_evidence", lambda _cfg, incident_id: runtime / f"{incident_id}.db")
+    monkeypatch.setattr(loop, "build_evidence", lambda _cfg, incident_id: runtime / "incidents" / incident_id / "evidence.db")
+    monkeypatch.setattr(
+        loop,
+        "_evidence_pair_paths",
+        lambda _cfg, incident_id: (
+            runtime / "incidents" / incident_id / "evidence.db",
+            runtime / "incidents" / incident_id / "manifest.json",
+            ),
+        )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda *_args: True)
     original_read_json = loop.read_json
     monkeypatch.setattr(
         loop,
@@ -2185,7 +2830,157 @@ def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: d
             "daemon_health", "code_versions", "config_snapshot",
         } <= tables
         assert conn.execute("SELECT COUNT(*) FROM price_ticks").fetchone()[0] >= 1
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    manifest = json.loads((incident_dir / "generations" / (incident_dir / "CURRENT").read_text().strip() / "manifest.json").read_text())
+    assert manifest["size_bytes"] == evidence.stat().st_size
+    assert manifest["capacity"]["window_days"] <= 7
     assert evidence.stat().st_size < Path(cfg["paths"]["trades_db"]).stat().st_size * 20
+
+
+def test_incomplete_generation_is_reaped_without_disturbing_current_pair(cfg: dict) -> None:
+    cfg["loop"]["evidence_generation_reap_age_seconds"] = 0
+    _position(cfg)
+    _quote(cfg, "reap-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    incomplete = incident_dir / "generations" / "interrupted-generation"
+    incomplete.mkdir(parents=True)
+    (incomplete / ".evidence.db.tmp").write_bytes(b"partial")
+    assert loop._evidence_pair_valid(cfg, incident_id)
+    loop._capture_hard_evidence(cfg, [incident_id])
+    assert not incomplete.exists()
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pair_validation_uses_manifest_stat_gate_without_full_read_each_cycle(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pair-stat", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("pair validation must not read full DB"))
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pair_hash_mismatch_uses_shared_deadline_and_records_typed_defer(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pair-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    pair = loop._evidence_pair_paths(cfg, incident_id)
+    assert pair is not None
+    evidence = pair[0]
+    stat = evidence.stat()
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_hash_deferred"):
+        loop._evidence_pair_valid(cfg, incident_id, budget={"deadline": loop.time.monotonic() - 1})
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_coverage_timeout_is_typed_and_never_publishes_new_current_pair(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "coverage-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    monkeypatch.setattr(
+        loop,
+        "_evidence_coverage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.EvidenceCapacityExceeded("evidence_coverage_deferred:time_budget")
+        ),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_coverage_deferred"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_hash_exception_cleans_orphan_generation_immediately(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "hash-orphan", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    monkeypatch.setattr(
+        loop,
+        "_stream_evidence_hash",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.EvidenceCapacityExceeded("evidence_pair_hash_deferred:time_budget")
+        ),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_hash_deferred"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+@pytest.mark.parametrize("boundary", ("hash", "manifest"))
+def test_publish_boundaries_guard_same_budget_and_keep_old_current(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    _position(cfg)
+    _quote(cfg, f"publish-{boundary}", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    real_monotonic = loop.time.monotonic
+    expired = False
+
+    def monotonic() -> float:
+        return real_monotonic() + (1000.0 if expired else 0.0)
+
+    monkeypatch.setattr(loop.time, "monotonic", monotonic)
+    if boundary == "hash":
+        original_hash = loop._stream_evidence_hash
+
+        def expire_after_hash(path: Path, budget: dict) -> str:
+            nonlocal expired
+            result = original_hash(path, budget)
+            expired = True
+            return result
+
+        monkeypatch.setattr(loop, "_stream_evidence_hash", expire_after_hash)
+    else:
+        original_write_text = Path.write_text
+
+        def expire_after_manifest(path: Path, data: str, *args, **kwargs):
+            nonlocal expired
+            result = original_write_text(path, data, *args, **kwargs)
+            if path.name == ".manifest.json.tmp":
+                expired = True
+            return result
+
+        monkeypatch.setattr(Path, "write_text", expire_after_manifest)
+
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="time_budget"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert loop._evidence_pair_valid(cfg, incident_id)
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+
+
+def test_pair_identity_sqlite_interrupt_is_typed_defer(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "identity-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    monkeypatch.setattr(
+        loop,
+        "_apply_evidence_sql_budget",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("interrupted")),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_identity_deferred"):
+        loop._evidence_pair_valid(cfg, incident_id, budget={"deadline": loop.time.monotonic() + 1})
 
 
 def test_evidence_wallet_fills_follow_command_trade_ids_without_token_scan(

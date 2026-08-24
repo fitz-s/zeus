@@ -1499,6 +1499,7 @@ def evaluate_edli_stage_readiness(
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
 
     reasons: list[str] = []
+    now = datetime.now(timezone.utc)
     if loaded_sha_file:
         identity_observations = _edli_stage_loaded_sha_observations(loaded_sha_file)
         if identity_observations:
@@ -1528,6 +1529,7 @@ def evaluate_edli_stage_readiness(
                     name="SOURCE_HEALTH",
                     path=source_health_json,
                     max_age_seconds=max_age_seconds,
+                    now=now,
                 )
             )
         if status_json:
@@ -1536,6 +1538,7 @@ def evaluate_edli_stage_readiness(
                     name="STATUS_SUMMARY",
                     path=status_json,
                     max_age_seconds=max_age_seconds,
+                    now=now,
                 )
             )
     finally:
@@ -1689,6 +1692,8 @@ def _edli_live_entry_readiness_block(
         max_age_seconds = int(
             edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
         )
+        now = datetime.now(timezone.utc)
+
         global_reasons: list[str] = []
         family_reasons: dict[str, str] = {}
         conn = _edli_stage_world_connection(world_db_path)
@@ -1725,6 +1730,7 @@ def _edli_live_entry_readiness_block(
                         name="SOURCE_HEALTH",
                         path=source_health_json,
                         max_age_seconds=max_age_seconds,
+                        now=now,
                     )
                 )
             if status_json:
@@ -1733,6 +1739,7 @@ def _edli_live_entry_readiness_block(
                         name="STATUS_SUMMARY",
                         path=status_json,
                         max_age_seconds=max_age_seconds,
+                        now=now,
                     )
                 )
         finally:
@@ -1972,13 +1979,7 @@ def _edli_stage_open_cap_reservation_families(conn) -> tuple[dict[str, str], int
     return family_reasons, unresolved
 
 
-def _edli_stage_fresh_file_reasons(
-    *,
-    name: str,
-    path: str,
-    max_age_seconds: int,
-    now: datetime | None = None,
-) -> list[str]:
+def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int, now: datetime) -> list[str]:
     file_path = Path(path)
     if not file_path.exists():
         return [f"EDLI_STAGE_{name}_MISSING:{path}"]
@@ -1995,12 +1996,7 @@ def _edli_stage_fresh_file_reasons(
         return [f"EDLI_STAGE_{name}_STALE:invalid_timestamp"]
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    # Bind the clock after the atomic payload read. The readiness caller may
-    # spend seconds in DB admission checks while the single status writer
-    # advances this file; a clock sampled before those checks makes a newer,
-    # valid payload look impossibly future-dated and blocks every BUY family.
-    observed_now = now or datetime.now(timezone.utc)
-    age = (observed_now - parsed.astimezone(timezone.utc)).total_seconds()
+    age = (now - parsed.astimezone(timezone.utc)).total_seconds()
     if age < -EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     age = max(0.0, age)
@@ -7573,27 +7569,93 @@ def _edli_command_recovery_cycle() -> None:
         reconcile_unresolved_commands,
         scheduled_recovery_budget_seconds,
     )
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.venue_cancel_journal import find_screen_redecision_cancel_obligations
     from src.state.db import get_trade_connection_read_only
+
+    screen_cancel_due = False
 
     invocation_deadline = (
         _time.monotonic() + scheduled_recovery_budget_seconds()
     )
     capital_blockers = 0
     capital_scope = None
+    selector_read_completed = False
     try:
-        trade_conn = get_trade_connection_read_only()
+        trade_conn = get_trade_connection_read_only(
+            deadline_monotonic=invocation_deadline,
+        )
         try:
+            set_progress_handler = getattr(trade_conn, "set_progress_handler", None)
+            if callable(set_progress_handler):
+                set_progress_handler(
+                    lambda: int(_time.monotonic() >= invocation_deadline),
+                    1_000,
+                )
             capital_blockers = capital_blocking_command_count(trade_conn)
             if capital_blockers > 0:
                 capital_scope = capital_blocking_command_scope(trade_conn)
+            screen_cancel_due = bool(find_screen_redecision_cancel_obligations(trade_conn))
+            selector_read_completed = True
         finally:
+            if callable(set_progress_handler):
+                set_progress_handler(None, 0)
             trade_conn.close()
+        if selector_read_completed and _time.monotonic() >= invocation_deadline:
+            logger.info(
+                "edli_command_recovery: screen selector deadline deferred; "
+                "no authenticated prewarm or venue dispatch"
+            )
+            return
+    except (TimeoutError, sqlite3.OperationalError) as exc:
+        message = str(exc).upper()
+        if (
+            _time.monotonic() >= invocation_deadline
+            or "DEADLINE" in message
+            or "LOCKED" in message
+            or "BUSY" in message
+        ):
+            logger.info(
+                "edli_command_recovery: bounded screen selector deferred; "
+                "no authenticated prewarm or venue dispatch: %s",
+                exc,
+            )
+            return
+        logger.warning(
+            "edli_command_recovery: capital blocker read unavailable; "
+            "continuing without reactor handoff: %r",
+            exc,
+        )
     except Exception as exc:  # noqa: BLE001 - recovery still runs fail-closed.
         logger.warning(
             "edli_command_recovery: capital blocker read unavailable; "
             "continuing without reactor handoff: %r",
             exc,
         )
+    recovery_client = None
+    if screen_cancel_due:
+        # Reuse only the client prepared by the live heartbeat/runtime owner.
+        # A lazy adapter may derive credentials or perform SDK I/O; that work is
+        # forbidden inside this bounded recovery lane.
+        try:
+            recovery_client = PolymarketClient()
+            recovery_adapter = _venue_heartbeat_adapter
+            if recovery_adapter is None:
+                raise RuntimeError(
+                    "authenticated venue adapter was not prewarmed by the live runtime"
+                )
+            if getattr(recovery_adapter, "_client", None) is None:
+                raise RuntimeError(
+                    "authenticated venue client was not prewarmed by the live runtime"
+                )
+            recovery_client._v2_adapter = recovery_adapter
+        except Exception as exc:  # noqa: BLE001 - auth loss keeps debt for retry
+            logger.warning(
+                "edli_command_recovery: authenticated adapter preparation failed; "
+                "leaving screen cancel debt for the next cadence: %r",
+                exc,
+            )
+            return
     global_capital_handoff = capital_blockers > 0
     if capital_scope is not None:
         try:
@@ -7672,10 +7734,13 @@ def _edli_command_recovery_cycle() -> None:
                 )
                 return
             reactor_fence_acquired = True
-        summary = reconcile_unresolved_commands(
-            scope="live_tick",
-            deadline_monotonic=invocation_deadline,
-        )
+        recovery_kwargs = {
+            "scope": "live_tick",
+            "deadline_monotonic": invocation_deadline,
+        }
+        if recovery_client is not None:
+            recovery_kwargs["client"] = recovery_client
+        summary = reconcile_unresolved_commands(**recovery_kwargs)
     finally:
         if reactor_fence_acquired:
             _edli_reactor_active_lock.release()
@@ -7688,16 +7753,23 @@ def _edli_command_recovery_cycle() -> None:
     global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
     if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
         return
-    if _time.monotonic() >= invocation_deadline:
+    try:
+        invocation_deadline_exhausted = _time.monotonic() >= invocation_deadline
+    except Exception:  # pragma: no cover - defensive clock failure is fail-closed
+        invocation_deadline_exhausted = True
+    if invocation_deadline_exhausted:
         logger.info(
             "edli_command_recovery: shared invocation deadline exhausted after "
             "live_tick; full sweep will retry next cadence"
         )
         return
-    full_summary = reconcile_unresolved_commands(
-        scope="full",
-        deadline_monotonic=invocation_deadline,
-    )
+    recovery_kwargs = {
+        "scope": "full",
+        "deadline_monotonic": invocation_deadline,
+    }
+    if recovery_client is not None:
+        recovery_kwargs["client"] = recovery_client
+    full_summary = reconcile_unresolved_commands(**recovery_kwargs)
     follow_through_ok = _consume_edli_command_recovery_summary(
         full_summary,
         log_context="edli_command_recovery.full",

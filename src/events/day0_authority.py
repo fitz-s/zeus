@@ -39,7 +39,7 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # authorized a fill.  Increment this when the Day0 probability construction
 # changes; the value is stamped into every live Day0 q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_provider_run_bound_total_variance_minus_path_spread_wu_revision_clock_v10"
+    "day0_shared_remaining_carrier_noaa_preliminary_v11"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
@@ -112,6 +112,20 @@ def day0_probability_semantics_revision(q_version: object) -> str | None:
     if not separator or not revision or not base_identity:
         return None
     return revision
+
+
+def day0_is_noaa_preliminary_source(source: object) -> bool:
+    """Return whether a current METAR print belongs to the NOAA provisional family."""
+
+    normalized = str(source or "").strip().lower()
+    return normalized.startswith(
+        (
+            "aviationweather_metar",
+            "ogimet_metar_",
+            "observation_prints:aviationweather_metar",
+            "observation_prints:ogimet_metar_",
+        )
+    )
 
 
 def day0_evidence_finality(payload: Mapping[str, object]) -> str:

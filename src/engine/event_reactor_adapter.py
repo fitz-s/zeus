@@ -33569,6 +33569,18 @@ def _conditioning_names_physical_frontier(
 
     conditioned = str(conditioning_source or "").strip().lower()
     physical = str(physical_source or "").strip().lower()
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+    if day0_is_noaa_preliminary_source(conditioned) and day0_is_noaa_preliminary_source(physical):
+        return True
+    if (
+        day0_is_noaa_preliminary_source(conditioned)
+        and physical.startswith("aviationweather_metar")
+    ) or (
+        day0_is_noaa_preliminary_source(physical)
+        and conditioned.startswith("aviationweather_metar")
+    ):
+        return True
     if conditioned == physical:
         return conditioned in {
             "aviationweather_metar",
@@ -34001,8 +34013,38 @@ def _provisional_day0_revision_likelihood(
             # ENTRY still requires empirical city history.
             allow_prior_only=not entry_authority,
         )
-    if provisional_source.startswith("aviationweather_metar"):
-        raise ValueError("METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE")
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+    if day0_is_noaa_preliminary_source(provisional_source):
+        from src.config import runtime_cities_by_name
+        from src.data.day0_observation_reader import (
+            same_station_preliminary_report_survival_likelihood,
+        )
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
+        if (
+            city_obj is None
+            or not station
+            or str(getattr(city_obj, "settlement_source_type", "") or "")
+            .strip()
+            .lower()
+            != "noaa"
+        ):
+            raise ValueError("METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE")
+        return same_station_preliminary_report_survival_likelihood(
+            conn,
+            city=city,
+            station_id=station,
+            timezone_name=city_timezone,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_time=decision_time,
+            # ENTRY must prove empirical same-station transitions; held
+            # reduce-only redecision may use the typed Jeffreys prior-only
+            # carrier so exit belief does not go blind.
+            allow_prior_only=not entry_authority,
+        )
     raise ValueError("PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE")
 
 
@@ -34091,6 +34133,23 @@ def _day0_replacement_conditioning(
                 raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
     return {
         **conditioning,
+        **{
+            key: provenance[key]
+            for key in (
+                "day0_remaining_carrier_content_identity",
+                "day0_remaining_carrier_operator",
+                "day0_remaining_carrier_q",
+                "day0_remaining_carrier_probability_samples",
+                "day0_remaining_carrier_sample_count",
+                "day0_remaining_carrier_future_extremes_c",
+                "day0_remaining_carrier_path_error_sigma_c",
+                "day0_remaining_carrier_probability_cutoff_utc",
+            )
+            if key in provenance
+        },
+        "day0_remaining_carrier_likelihood": provenance.get(
+            "day0_preliminary_report_survival_likelihood"
+        ),
         "metric": conditioned_metric,
         "unit": conditioned_unit,
     }
@@ -35333,6 +35392,21 @@ def _global_day0_execution_payload(
         payload["_edli_day0_remaining_model_names"] = list(
             remaining_witness.get("actual_models") or ()
         )
+    if isinstance(conditioning, Mapping):
+        carrier_fields = {
+            "day0_remaining_carrier_content_identity": "_edli_day0_remaining_content_identity",
+            "day0_remaining_carrier_operator": "_edli_day0_probability_operator",
+            "day0_remaining_carrier_q": "_edli_day0_remaining_carrier_q",
+            "day0_remaining_carrier_probability_samples": "_edli_day0_remaining_probability_samples",
+            "day0_remaining_carrier_sample_count": "_edli_day0_remaining_probability_sample_count",
+            "day0_remaining_carrier_future_extremes_c": "_edli_day0_remaining_carrier_future_extremes_c",
+            "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
+            "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
+            "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
+        }
+        for source_key, payload_key in carrier_fields.items():
+            if source_key in conditioning:
+                payload[payload_key] = conditioning[source_key]
     if physical_clock is not None:
         payload.update(
             {
@@ -35460,6 +35534,42 @@ def _global_day0_probability_authority_payload(
             (
                 "remaining_vector_witness",
                 "_edli_day0_remaining_vector_witness",
+            ),
+            (
+                "remaining_carrier_content_identity",
+                "_edli_day0_remaining_content_identity",
+            ),
+            (
+                "remaining_carrier_operator",
+                "_edli_day0_probability_operator",
+            ),
+            (
+                "remaining_carrier_q",
+                "_edli_day0_remaining_carrier_q",
+            ),
+            (
+                "remaining_carrier_probability_samples",
+                "_edli_day0_remaining_probability_samples",
+            ),
+            (
+                "remaining_carrier_sample_count",
+                "_edli_day0_remaining_probability_sample_count",
+            ),
+            (
+                "remaining_carrier_future_extremes_c",
+                "_edli_day0_remaining_carrier_future_extremes_c",
+            ),
+            (
+                "remaining_carrier_path_error_sigma_c",
+                "_edli_day0_remaining_carrier_path_error_sigma_c",
+            ),
+            (
+                "remaining_carrier_probability_cutoff_utc",
+                "_edli_day0_remaining_carrier_probability_cutoff_utc",
+            ),
+            (
+                "remaining_carrier_likelihood",
+                "_edli_day0_provisional_revision_likelihood",
             ),
             (
                 "current_temperature_native",
@@ -41542,11 +41652,7 @@ def _day0_remaining_p_raw_vector(
     metric = str(
         payload.get("metric") or payload.get("temperature_metric") or ""
     ).strip().lower()
-    boundary_scenarios = _day0_probability_boundary_scenarios_native(
-        payload,
-        metric=metric,
-        unit=str(getattr(city, "settlement_unit", "") or ""),
-    )
+    boundary_scenarios = None
     fast_residual_mixture = (
         "_edli_day0_fast_residual_probability_update" in payload
     )
@@ -41587,6 +41693,151 @@ def _day0_remaining_p_raw_vector(
             extra_member_sigma,
         )
     )
+    # A NOAA preliminary peak is not an exact peak-set atom.  It must retain
+    # its report-survival scenarios in the shared remaining-path carrier.
+    # Only the separately typed fast-residual mixture keeps its own operator.
+    from src.events.day0_authority import (
+        DAY0_MONOTONE_SETTLEMENT_BOUND,
+        day0_is_noaa_preliminary_source,
+    )
+    noaa_preliminary = (
+        finality in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
+        and day0_is_noaa_preliminary_source(
+            payload.get("settlement_source")
+            or payload.get("observation_source")
+            or ""
+        )
+    )
+    if noaa_preliminary:
+        from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+
+        required_fields = (
+            ("_edli_day0_remaining_content_identity", "IDENTITY"),
+            ("_edli_day0_remaining_carrier_q", "Q"),
+            ("_edli_day0_remaining_probability_samples", "SAMPLES"),
+            ("_edli_day0_remaining_probability_sample_count", "SAMPLE_COUNT"),
+            ("_edli_day0_remaining_carrier_probability_cutoff_utc", "CUTOFF"),
+            ("_edli_day0_remaining_carrier_future_extremes_c", "VECTOR"),
+            ("_edli_day0_remaining_carrier_path_error_sigma_c", "PATH_SIGMA"),
+            ("_edli_day0_provisional_revision_likelihood", "LIKELIHOOD"),
+            ("_edli_day0_probability_operator", "OPERATOR"),
+        )
+        for field, label in required_fields:
+            value = payload.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                raise ValueError(f"DAY0_NOAA_PRELIMINARY_CARRIER_{label}_MISSING")
+        likelihood = payload["_edli_day0_provisional_revision_likelihood"]
+        if not isinstance(likelihood, Mapping):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID")
+        try:
+            likelihood_identity = str(likelihood["identity_hash"]).strip()
+            survival = float(likelihood["boundary_survival_probability"])
+            sample_count = int(payload["_edli_day0_remaining_probability_sample_count"])
+            path_sigma_c = float(payload["_edli_day0_remaining_carrier_path_error_sigma_c"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PERSISTED_FIELDS_INVALID") from exc
+        if not likelihood_identity or not 0.0 < survival < 1.0:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID")
+        try:
+            payload_survival = float(
+                payload["_edli_day0_provisional_boundary_survival_probability"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISSING") from exc
+        if not math.isclose(payload_survival, survival, rel_tol=0.0, abs_tol=0.0):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISMATCH")
+        if sample_count != 500:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_INVALID")
+        if not math.isfinite(path_sigma_c) or path_sigma_c < 0.0:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PATH_SIGMA_INVALID")
+        future_raw = payload["_edli_day0_remaining_carrier_future_extremes_c"]
+        if not isinstance(future_raw, (list, tuple)) or not future_raw:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID")
+        try:
+            future_c = tuple(float(value) for value in future_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID") from exc
+        if not np.isfinite(np.asarray(future_c, dtype=float)).all():
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID")
+        try:
+            persisted_q = tuple(float(value) for value in payload["_edli_day0_remaining_carrier_q"])
+            persisted_samples = tuple(
+                tuple(float(value) for value in row)
+                for row in payload["_edli_day0_remaining_probability_samples"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PERSISTED_FIELDS_INVALID") from exc
+        if len(persisted_samples) != 500 or not persisted_q:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_INVALID")
+        if any(len(row) != len(persisted_q) for row in persisted_samples):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_INVALID")
+        witness_cutoff = str(payload["_edli_day0_remaining_carrier_probability_cutoff_utc"]).strip()
+        if not witness_cutoff:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_INVALID")
+        try:
+            cutoff_time = datetime.fromisoformat(witness_cutoff.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_INVALID") from exc
+        if cutoff_time.tzinfo is None or cutoff_time.utcoffset() is None:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_INVALID")
+        boundary_scenarios = _day0_probability_boundary_scenarios_native(
+            payload,
+            metric=metric,
+            unit=str(getattr(city, "settlement_unit", "") or ""),
+        )
+        carrier_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+        if carrier_unit not in {"C", "F"}:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
+        native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
+        native_offset = 0.0 if carrier_unit == "C" else 32.0
+        future_native = tuple(value * native_scale + native_offset for value in future_c)
+        native_bounds = tuple(
+            (
+                None if bin_.low is None else float(bin_.low),
+                None if bin_.high is None else float(bin_.high),
+            )
+            for bin_ in bins
+        )
+        instrument_sigma_native = float(
+            sigma_instrument_for_city(city).to(carrier_unit).value
+        )
+        carrier = build_day0_remaining_probability_carrier(
+            future_extremes_c=future_native,
+            boundary_scenarios=boundary_scenarios,
+            metric=metric,
+            path_error_sigma_c=path_sigma_c * native_scale,
+            instrument_sigma_c=instrument_sigma_native,
+            bin_bounds_c=native_bounds,
+            n_point=n_mc,
+            n_samples=500,
+            identity_inputs={
+                "city": str(getattr(city, "name", "")),
+                "unit": carrier_unit,
+                "probability_cutoff_utc": witness_cutoff,
+                "preliminary_survival_identity": likelihood_identity,
+            },
+        )
+        expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
+        if expected_identity != str(carrier["content_identity"]):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH")
+        if persisted_q != tuple(float(value) for value in carrier["q"]):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_Q_MISMATCH")
+        if persisted_samples != tuple(tuple(float(value) for value in row) for row in carrier["samples"]):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_MISMATCH")
+        if str(payload["_edli_day0_probability_operator"]) != str(carrier["operator"]):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_OPERATOR_MISMATCH")
+        if int(carrier["sample_count"]) != sample_count:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_MISMATCH")
+        return np.asarray(carrier["q"], dtype=float)
+    boundary_scenarios = _day0_probability_boundary_scenarios_native(
+        payload,
+        metric=metric,
+        unit=str(getattr(city, "settlement_unit", "") or ""),
+    )
+    peak_set_probability = _day0_peak_set_probability_for_distribution(
+        payload=payload,
+        metric=metric,
+    )
     seed_payload: dict[str, object] = {
         "operator": "day0_extreme_observed_then_noisy_future_v1",
         "city": str(getattr(city, "name", "") or ""),
@@ -41603,10 +41854,6 @@ def _day0_remaining_p_raw_vector(
             boundary_survival_probability
         )
     seed = int(stable_hash(seed_payload)[:16], 16)
-    peak_set_probability = _day0_peak_set_probability_for_distribution(
-        payload=payload,
-        metric=metric,
-    )
     probability_rows: list[np.ndarray] = []
     for scenario_boundary, scenario_weight in boundary_scenarios:
         scenario_rng = np.random.default_rng(seed)
@@ -41998,6 +42245,42 @@ def _day0_probability_boundary_scenarios_native(
     )
     validated = _validated_fast_residual_day0_conditioning(conditioning)
     if validated is None:
+        likelihood = payload.get("_edli_day0_provisional_revision_likelihood")
+        if not isinstance(likelihood, Mapping) and isinstance(binding, Mapping):
+            likelihood = binding.get("provisional_revision_likelihood")
+        source = str(
+            payload.get("settlement_source")
+            or payload.get("observation_source")
+            or ""
+        ).strip().lower()
+        from src.events.day0_authority import (
+            DAY0_MONOTONE_SETTLEMENT_BOUND,
+            day0_evidence_finality,
+            day0_is_noaa_preliminary_source,
+        )
+
+        provisional_source = day0_evidence_finality(payload)
+        if (
+            day0_is_noaa_preliminary_source(source)
+            and provisional_source
+            in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
+            and isinstance(likelihood, Mapping)
+        ):
+            try:
+                survival = float(likelihood["boundary_survival_probability"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("NOAA_PRELIMINARY_SURVIVAL_LIKELIHOOD_INVALID") from exc
+            if not 0.0 < survival < 1.0:
+                raise ValueError("NOAA_PRELIMINARY_SURVIVAL_LIKELIHOOD_INVALID")
+            # The report-survival prior is statistical: when the preliminary
+            # report does not survive, no absorbing boundary is applied.
+            return ((float(default_boundary), survival), (None, 1.0 - survival))
+        if (
+            day0_is_noaa_preliminary_source(source)
+            and provisional_source
+            in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
+        ):
+            raise ValueError("NOAA_PRELIMINARY_SURVIVAL_LIKELIHOOD_MISSING")
         return ((float(default_boundary), 1.0),)
     likelihood = validated["fast_residual_likelihood"]
     if not isinstance(likelihood, Mapping):

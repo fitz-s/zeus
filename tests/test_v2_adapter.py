@@ -674,6 +674,29 @@ def test_default_client_factory_does_not_override_explicit_api_creds(monkeypatch
     assert client.calls == []
 
 
+def test_default_client_factory_preserves_shared_sdk_transport(monkeypatch):
+    _install_fake_py_clob_client_v2(monkeypatch)
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    original_transport = helpers._http_client
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+    )
+
+    adapter._sdk_client()
+
+    assert helpers._http_client is original_transport
+
+
 def test_adapter_threads_configured_signature_type_to_client_factory(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
@@ -3964,7 +3987,7 @@ def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(m
     from src.data.polymarket_client import PolymarketClient
 
     class FakeAdapter:
-        def cancel(self, _order_id):  # pragma: no cover - tripwire
+        def cancel(self, _order_id, *, deadline_monotonic=None):  # pragma: no cover - tripwire
             raise AssertionError("adapter.cancel must not run when CutoverGuard blocks")
 
     monkeypatch.setattr(
@@ -3989,6 +4012,389 @@ def test_v2_cancel_order_method_uses_order_payload(tmp_path):
     assert fake.calls[0][0] == "cancel_order"
     assert fake.calls[0][1].orderID == "ord-cancel"
     assert '"canceled":["ord-cancel"]' in (result.raw_response_json or "")
+
+
+def test_v2_cancel_enforces_remaining_deadline(tmp_path, monkeypatch):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    observed = {}
+
+    def bounded_cancel(_client, order_id, deadline_monotonic):
+        observed.update(order_id=order_id, deadline=deadline_monotonic)
+        return {"canceled": [order_id]}
+
+    monkeypatch.setattr(adapter_module, "_bounded_cancel_request", bounded_cancel)
+    adapter, _ = _adapter(tmp_path, FakeCancelOrderClient())
+    deadline = time.monotonic() + 0.2
+    result = adapter.cancel("ord-cancel", deadline_monotonic=deadline)
+    assert result.status == "CANCELED"
+    assert observed["order_id"] == "ord-cancel"
+    assert observed["deadline"] == deadline
+
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError
+
+    with pytest.raises(IncompleteOrderTruthError, match="deadline elapsed"):
+        adapter.cancel("ord-cancel", deadline_monotonic=time.monotonic() - 0.001)
+
+
+def test_bounded_cancel_uses_private_native_transport_without_global_sdk_mutation(monkeypatch):
+    import httpx
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import _bounded_cancel_request
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingClient:
+        instances = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **kwargs):
+            self.calls.append(kwargs)
+            return httpx.Response(200, json={"canceled": ["ord-cancel"]})
+
+    monkeypatch.setattr(httpx, "Client", RecordingClient)
+    original = helpers._http_client
+    client = SimpleNamespace(
+        host="https://clob.example",
+        use_server_time=False,
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    deadline = time.monotonic() + 0.2
+    result = _bounded_cancel_request(client, "ord-cancel", deadline)
+    assert result == {"canceled": ["ord-cancel"]}
+    assert helpers._http_client is original
+    assert RecordingClient.instances[0].calls[0]["method"] == "DELETE"
+    assert RecordingClient.instances[0].calls[0]["timeout"].read <= 0.2
+
+
+def test_bounded_cancel_native_timeout_has_no_late_second_call(monkeypatch):
+    import httpx
+    from src.venue.polymarket_v2_adapter import _bounded_cancel_request
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    calls = []
+
+    class TimeoutClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **_kwargs):
+            calls.append(1)
+            raise httpx.ReadTimeout("native timeout")
+
+    monkeypatch.setattr(httpx, "Client", TimeoutClient)
+    with pytest.raises(httpx.ReadTimeout):
+        _bounded_cancel_request(
+            SimpleNamespace(
+                host="https://clob.example",
+                use_server_time=False,
+                signer=Signer(),
+                creds=Creds(),
+                assert_level_2_auth=lambda: None,
+            ),
+            "ord-cancel",
+            time.monotonic() + 0.2,
+        )
+    assert calls == [1]
+
+
+def test_internal_heartbeat_uses_private_bounded_transport_without_global_sdk_mutation(monkeypatch):
+    import httpx
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingTransport:
+        instances = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **kwargs):
+            self.calls.append(kwargs)
+            return httpx.Response(200, json={"heartbeat_id": "next-heartbeat"})
+
+    monkeypatch.setattr(httpx, "Client", RecordingTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=Creds(),
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+        network_timeout_seconds=0.25,
+    )
+    original_transport = helpers._http_client
+
+    result = adapter.post_heartbeat("current-heartbeat")
+
+    assert result.raw == {"heartbeat_id": "next-heartbeat"}
+    assert helpers._http_client is original_transport
+    assert RecordingTransport.instances[0].calls[0]["method"] == "POST"
+    assert RecordingTransport.instances[0].calls[0]["timeout"].read <= 0.25
+
+
+def test_main_internal_heartbeat_owner_uses_adapter_bounded_transport(monkeypatch):
+    import httpx
+
+    import src.main as main_module
+    import src.data.polymarket_client as client_module
+    import src.control.heartbeat_supervisor as heartbeat_module
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingTransport:
+        calls = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, **kwargs):
+            self.__class__.calls.append(kwargs)
+            return httpx.Response(200, json={"heartbeat_id": "next-heartbeat"})
+
+    monkeypatch.setattr(httpx, "Client", RecordingTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=Creds(),
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+        network_timeout_seconds=0.25,
+    )
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.setattr(client_module, "PolymarketClient", Client)
+    monkeypatch.setattr(main_module, "_external_venue_heartbeat_enabled", lambda: False)
+    monkeypatch.setattr(heartbeat_module, "heartbeat_cadence_seconds_from_env", lambda: 10)
+    monkeypatch.setattr(heartbeat_module, "fresh_heartbeat_id_from_status", lambda: "")
+    monkeypatch.setattr(heartbeat_module, "configure_global_supervisor", lambda _supervisor: None)
+    monkeypatch.setattr(heartbeat_module, "write_heartbeat_keeper_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "_start_venue_background_maintenance_async", lambda _adapter: None)
+    monkeypatch.setattr(main_module, "_venue_heartbeat_supervisor", None)
+    monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", None)
+
+    main_module._write_venue_heartbeat()
+
+    assert RecordingTransport.calls[0]["method"] == "POST"
+    assert RecordingTransport.calls[0]["url"].endswith("/v1/heartbeats")
+
+
+def test_production_server_time_heartbeat_signs_post_with_bounded_server_timestamp(monkeypatch):
+    import httpx
+
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class RecordingTransport:
+        instances = []
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, **kwargs):
+            self.calls.append(("GET", url, kwargs))
+            return httpx.Response(200, json={"timestamp": "1700000000"})
+
+        def request(self, **kwargs):
+            self.calls.append((kwargs["method"], kwargs["url"], kwargs))
+            return httpx.Response(200, json={"heartbeat_id": "next-heartbeat"})
+
+    monkeypatch.setattr(httpx, "Client", RecordingTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        use_server_time=True,
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=Creds(),
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+        network_timeout_seconds=0.25,
+    )
+
+    result = adapter.post_heartbeat("current-heartbeat")
+    calls = RecordingTransport.instances[0].calls
+
+    assert result.raw == {"heartbeat_id": "next-heartbeat"}
+    assert [call[0] for call in calls] == ["GET", "POST"]
+    assert calls[0][1].endswith("/time")
+    assert calls[1][2]["headers"]["POLY_TIMESTAMP"] == "1700000000"
+    assert json.loads(calls[1][2]["content"].decode("utf-8")) == {
+        "heartbeat_id": "current-heartbeat"
+    }
+
+
+def test_server_time_heartbeat_timeout_never_posts(monkeypatch):
+    import httpx
+
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class Signer:
+        def address(self):
+            return "0xabc"
+
+    class Creds:
+        api_secret = "c2VjcmV0"
+        api_key = "key"
+        api_passphrase = "pass"
+
+    class TimeoutTransport:
+        post_calls = 0
+
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url, **_kwargs):
+            raise httpx.ReadTimeout("server time timeout")
+
+        def request(self, **_kwargs):
+            self.__class__.post_calls += 1
+            raise AssertionError("heartbeat POST must not follow /time timeout")
+
+    monkeypatch.setattr(httpx, "Client", TimeoutTransport)
+    sdk_client = SimpleNamespace(
+        host="https://clob.example",
+        use_server_time=True,
+        signer=Signer(),
+        creds=Creds(),
+        assert_level_2_auth=lambda: None,
+    )
+    adapter = PolymarketV2Adapter(
+        host="https://clob.example",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=Creds(),
+        q1_egress_evidence_path=None,
+        client_factory=lambda **_kwargs: sdk_client,
+        network_timeout_seconds=0.25,
+    )
+
+    with pytest.raises(httpx.ReadTimeout):
+        adapter.post_heartbeat("current-heartbeat")
+    assert TimeoutTransport.post_calls == 0
+
+
+def test_bounded_cancel_requires_typed_l2_auth_before_signed_request():
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError, _bounded_cancel_request
+
+    with pytest.raises(IncompleteOrderTruthError, match="L2 cancel authentication unavailable"):
+        _bounded_cancel_request(
+            SimpleNamespace(
+                host="https://clob.example",
+                use_server_time=False,
+                signer=object(),
+                creds=object(),
+            ),
+            "ord-cancel",
+            time.monotonic() + 0.2,
+        )
 
 
 class TestCancelSingleResponseContract:
@@ -4125,7 +4531,7 @@ def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
     from src.venue.polymarket_v2_adapter import CancelResult
 
     class FakeAdapter:
-        def cancel(self, order_id):
+        def cancel(self, order_id, *, deadline_monotonic=None):
             return CancelResult(
                 status="CANCELED",
                 order_id=order_id,
@@ -4144,6 +4550,35 @@ def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
     assert payload["orderID"] == "ord-cancel"
     assert payload["status"] == "CANCELED"
     assert parse_cancel_response(payload).status == "CANCELED"
+
+
+def test_polymarket_client_cancel_legacy_adapter_call_omits_deadline_keyword(monkeypatch):
+    from src.control.cutover_guard import CutoverDecision, CutoverState
+    from src.data.polymarket_client import PolymarketClient
+    from src.venue.polymarket_v2_adapter import CancelResult
+
+    class LegacyAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def cancel(self, order_id):
+            self.calls.append(order_id)
+            return CancelResult(
+                status="CANCELED",
+                order_id=order_id,
+                raw_response_json='{"canceled":["ord-cancel"]}',
+            )
+
+    monkeypatch.setattr(
+        "src.control.cutover_guard.gate_for_intent",
+        lambda _intent_kind: CutoverDecision(False, True, False, None, CutoverState.LIVE_ENABLED),
+    )
+    client = PolymarketClient()
+    adapter = LegacyAdapter()
+    client._v2_adapter = adapter
+
+    assert client.cancel_order("ord-cancel")["status"] == "CANCELED"
+    assert adapter.calls == ["ord-cancel"]
 
 
 def test_polymarket_client_maps_typed_point_order_absence_to_none():

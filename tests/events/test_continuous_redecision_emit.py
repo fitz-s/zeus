@@ -13,6 +13,7 @@ import importlib
 import inspect
 import json
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -34,6 +35,215 @@ from src.data.replacement_cycle_advance_trigger import _held_position_families
 from src.state.db import init_schema, init_schema_forecasts
 
 ENTITY_KEY = "Chicago|2026-05-24|high|run-1"
+
+
+def _deadline_screen_world(tmp_path) -> str:
+    path = str(tmp_path / "screen-world.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE probability_trace_fact (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            trace_status TEXT NOT NULL,
+            missing_reason_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_labels_json TEXT,
+            p_posterior_json TEXT,
+            condition_ids_json TEXT,
+            q_lcb_yes_json TEXT,
+            q_lcb_no_json TEXT
+        )
+        """
+    )
+    rows = [
+        (
+            f"trace-{index}",
+            f"edli_belief:Chicago:2026-05-24:high:{index}",
+            "complete",
+            "[]",
+            f"2026-05-24T04:{index % 60:02d}:00+00:00",
+            "Chicago",
+            "2026-05-24",
+            "high",
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+        )
+        for index in range(50_000)
+    ]
+    conn.executemany(
+        "INSERT INTO probability_trace_fact VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    conn.execute("CREATE TABLE write_probe (value INTEGER NOT NULL)")
+    conn.execute("INSERT INTO write_probe VALUES (0)")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _patch_screen_connections(monkeypatch: pytest.MonkeyPatch, world_path: str) -> None:
+    import src.state.db as db
+
+    def _world_connection() -> sqlite3.Connection:
+        conn = sqlite3.connect(world_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda _name, _default: {"continuous_redecision_screen_budget_seconds": 0.001},
+    )
+    monkeypatch.setattr(db, "get_world_connection_read_only", _world_connection)
+    monkeypatch.setattr(db, "get_world_connection", _world_connection)
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_with_world_required",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
+
+
+def test_belief_postprocessing_honors_screen_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fence is checked after SQL too, while Python parses/dedupes a large result."""
+
+    from src.events import continuous_redecision as screen
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE probability_trace_fact (
+            trace_id TEXT PRIMARY KEY, decision_id TEXT, recorded_at TEXT,
+            city TEXT, target_date TEXT, bin_labels_json TEXT, p_posterior_json TEXT
+        )"""
+    )
+    conn.executemany(
+        "INSERT INTO probability_trace_fact VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(str(i), f"edli_belief:{i}", "2026-05-24T00:00:00+00:00", "Chicago",
+          "2026-05-24", "[]", "[]") for i in range(40)],
+    )
+    conn.commit()
+    fence = screen.SqliteDeadlineFence(time.monotonic() + 10.0, generation=991)
+    def _expire_then_parse(row):
+        fence.deadline_monotonic = time.monotonic() - 0.001
+        return None
+
+    monkeypatch.setattr(screen, "_row_to_belief", _expire_then_parse)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        screen._all_latest_beliefs(conn, deadline_fence=fence, scan_limit=40)
+    conn.close()
+
+
+def test_sqlite_deadline_rejects_expired_short_select() -> None:
+    """An already-expired fence must reject even a one-op SQLite statement."""
+
+    from src.events.continuous_redecision import SqliteDeadlineFence, sqlite_deadline_bound
+
+    conn = sqlite3.connect(":memory:")
+    fence = SqliteDeadlineFence(time.monotonic() - 0.001, generation=993)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        with sqlite_deadline_bound(conn, fence):
+            conn.execute("SELECT 1").fetchone()
+    conn.close()
+
+
+def test_expired_screen_fence_suppresses_helper_open_marker_and_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No helper connection, sidecar marker, or venue cancel may start after the fence."""
+
+    from src.events.continuous_redecision import SqliteDeadlineFence
+    import src.state.db as db
+
+    fence = SqliteDeadlineFence(time.monotonic() - 0.001, generation=992)
+    monkeypatch.setattr(
+        db, "get_trade_connection_read_only", lambda: pytest.fail("helper opened after deadline")
+    )
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        reactor._edli_families_with_fresh_scoped_executable_substrate(
+            {("Chicago", "2026-05-24", "high"): {"condition-1"}},
+            now_utc=datetime.now(timezone.utc),
+            deadline_fence=fence,
+        )
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        reactor._edli_refresh_continuous_money_path_families(
+            {("Chicago", "2026-05-24", "high")}, deadline_fence=fence
+        )
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        reactor._edli_cancel_rest_pulls([(object(), object())], deadline_fence=fence)
+
+
+def test_redecision_screen_sqlite_deadline_defers_under_competing_lock_without_write_or_lock_leak(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real large belief ORDER BY is interrupted before any emit/cancel side effect."""
+
+    world_path = _deadline_screen_world(tmp_path)
+    _patch_screen_connections(monkeypatch, world_path)
+    receipts: list[dict[str, object]] = []
+    original_receipt = reactor._edli_redecision_stage_receipt
+    monkeypatch.setattr(
+        reactor,
+        "_edli_redecision_stage_receipt",
+        lambda **kwargs: receipts.append(original_receipt(**kwargs)) or receipts[-1],
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_cancel_rest_pulls",
+        lambda *_args: pytest.fail("deadline tick must not call venue cancellation"),
+    )
+    lock = threading.Lock()
+
+    holder = sqlite3.connect(world_path)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=lock)
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert lock.locked() is False
+    assert receipts[-1]["stage"] == "belief_scan"
+    assert receipts[-1]["status"] == "deferred"
+    with sqlite3.connect(world_path) as conn:
+        assert conn.execute("SELECT value FROM write_probe").fetchone()[0] == 0
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=lock)
+    assert lock.locked() is False
+
+
+def test_redecision_screen_nondeadline_sqlite_error_is_not_swallowed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the fence's own interrupted error is fail-soft."""
+
+    world_path = _deadline_screen_world(tmp_path)
+    _patch_screen_connections(monkeypatch, world_path)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda _name, _default: {"continuous_redecision_screen_budget_seconds": 10.0},
+    )
+    from src.events import continuous_redecision
+
+    monkeypatch.setattr(
+        continuous_redecision,
+        "_all_latest_beliefs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("synthetic nondeadline sqlite failure")
+        ),
+    )
+    lock = threading.Lock()
+    with pytest.raises(sqlite3.OperationalError, match="synthetic nondeadline"):
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=lock)
+    assert lock.locked() is False
 
 
 @pytest.fixture(autouse=True)
