@@ -7202,6 +7202,10 @@ def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
         bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
         probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
         completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        selection_epoch_identity="epoch-production-construction",
+        sell_book_witness_identity="book-production-construction",
+        debt_event_id="atomic-signal-position:exit_retry_released:7",
+        monitor_event_id="atomic-signal-position:monitor_refreshed:8",
         wake_path=tmp_path / "atomic-signal-wake.json",
     )
 
@@ -7217,6 +7221,16 @@ def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
         )
         assert accepted is True
         assert request is not None
+        assert request.position_id == common["position_id"]
+        assert request.held_token_id == common["held_token_id"]
+        assert request.selection_epoch_identity == common[
+            "selection_epoch_identity"
+        ]
+        assert request.sell_book_witness_identity == common[
+            "sell_book_witness_identity"
+        ]
+        assert request.debt_event_id == common["debt_event_id"]
+        assert request.monitor_event_id == common["monitor_event_id"]
         assert reactor_wake.v4_held_sell_reauction_request_is_queued(
             request,
             path=common["wake_path"],
@@ -7332,9 +7346,13 @@ def test_held_sell_completion_request_persists_position_q_and_bid_witness(tmp_pa
             family=("Paris", "2026-07-28", "LOW"),
             probability_content_identity="q-content-1",
             held_token_id="token-no-1",
-            held_best_bid=0.12,
-            bid_observed_at="2026-07-28T08:00:00+00:00",
-            wake_path=path,
+                held_best_bid=0.12,
+                bid_observed_at="2026-07-28T08:00:00+00:00",
+                selection_epoch_identity="epoch-position-1",
+                sell_book_witness_identity="book-position-1",
+                debt_event_id="position-1:exit_retry_released:7",
+                monitor_event_id="position-1:monitor_refreshed:6",
+                wake_path=path,
         ) is True
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
@@ -7999,9 +8017,13 @@ def test_v4_fresh_q_attempts_reuse_one_debt_and_complete_latest_action(tmp_path)
             "family": ("Istanbul", "2026-08-02", "high"),
             "held_token_id": "istanbul-held-no",
             "schema_version": 4,
-            "held_best_bid": 0.22,
-            "book_state": "EXECUTABLE",
-        }
+                "held_best_bid": 0.22,
+                "book_state": "EXECUTABLE",
+                "selection_epoch_identity": "epoch-istanbul",
+                "sell_book_witness_identity": "book-istanbul",
+                "debt_event_id": "7ba16223-79c:exit_retry_released:9",
+                "monitor_event_id": "7ba16223-79c:monitor_refreshed:8",
+            }
         for index in range(42):
             observed_at = f"2026-08-02T12:{index:02d}:00+00:00"
             accepted, request = reactor.request_global_auction_completion(
@@ -8812,6 +8834,10 @@ def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
         completion_deadline_at=(decision_at - timedelta(seconds=1)).isoformat(),
         schema_version=4,
         book_state="EXECUTABLE",
+        selection_epoch_identity="epoch-deadline",
+        sell_book_witness_identity="book-deadline",
+        debt_event_id="deadline-position:exit_retry_released:7",
+        monitor_event_id="deadline-position:monitor_refreshed:8",
     )
     venue_calls = 0
 
@@ -8848,6 +8874,17 @@ def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
     assert len(receipts) == 1
     assert receipts[0].status == reactor_wake.DEADLINE_EXPIRED
     assert receipts[0].completion_deadline_at == request.completion_deadline_at
+    assert receipts[0].position_id == request.position_id
+    assert receipts[0].held_token_id == request.held_token_id
+    assert receipts[0].debt_event_id == request.debt_event_id
+    assert receipts[0].monitor_event_id == request.monitor_event_id
+    assert (
+        receipts[0].selection_epoch_identity == request.selection_epoch_identity
+    )
+    assert (
+        receipts[0].sell_book_witness_identity
+        == request.sell_book_witness_identity
+    )
 
     path = tmp_path / "deadline-wake.json"
     reactor_wake.publish_reactor_wake(
@@ -8879,6 +8916,10 @@ def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):
         scope_identity="deadline-fence-scope",
         book_state="EXECUTABLE",
         completion_deadline_at=deadline,
+        selection_epoch_identity="epoch-deadline-fence",
+        sell_book_witness_identity="book-deadline-fence",
+        debt_event_id="deadline-fence-position:exit_retry_released:7",
+        monitor_event_id="deadline-fence-position:monitor_refreshed:8",
     )
     old = reactor_wake.make_held_sell_reauction_request(
         **common,
@@ -8912,12 +8953,31 @@ def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):
         book_state="EXECUTABLE",
         status=reactor_wake.DEADLINE_EXPIRED,
         reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+        position_id=old.position_id,
+        held_token_id=old.held_token_id,
+        selection_epoch_identity=old.selection_epoch_identity,
+        sell_book_witness_identity=old.sell_book_witness_identity,
+        debt_event_id=old.debt_event_id,
+        monitor_event_id=old.monitor_event_id,
     )
 
-    assert reactor_wake.persist_held_sell_reauction_receipts(
+    assert not reactor_wake.persist_held_sell_reauction_receipts(
         (stale_receipt,), path=path
     )
     assert not reactor_wake.held_sell_reauction_requests_completed(
+        (fresh,), path=path
+    )
+    valid_receipt = replace(
+        stale_receipt,
+        request_id=fresh.request_id,
+        material_identity=fresh.material_identity,
+        attempt_identity=fresh.attempt_identity,
+        completion_deadline_at=fresh.completion_deadline_at,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (valid_receipt,), path=path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
         (fresh,), path=path
     )
 
@@ -9002,7 +9062,7 @@ def test_v4_legacy_deadline_collision_accepts_absorbing_close_proof(tmp_path):
         path=path,
         held_sell_reauction_requests=(old,),
     )
-    assert reactor_wake.persist_held_sell_reauction_receipts(
+    assert not reactor_wake.persist_held_sell_reauction_receipts(
         (
             reactor_wake.HeldSellReauctionReceipt(
                 request_id=old.request_id,
@@ -9051,6 +9111,69 @@ def test_v4_legacy_deadline_collision_accepts_absorbing_close_proof(tmp_path):
     )
 
 
+def test_v4_durable_wake_survives_stale_cycle_until_exact_deadline_receipt(
+    tmp_path,
+):
+    """A later stale-q monitor cannot clear a committed fresh-q wake debt."""
+
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="cross-cycle-position",
+        family=("Paris", "2026-08-13", "high"),
+        probability_content_identity="q-fresh-negative-edge",
+        held_token_id="cross-cycle-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-13T12:00:00+00:00",
+        probability_observed_at="2026-08-13T12:00:00+00:00",
+        completion_deadline_at="2026-08-13T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+        selection_epoch_identity="epoch-cross-cycle",
+        sell_book_witness_identity="book-cross-cycle",
+        debt_event_id="cross-cycle-position:exit_retry_released:7",
+        monitor_event_id="cross-cycle-position:monitor_refreshed:8",
+    )
+    result = tmp_path / "cross-cycle-wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=result,
+        held_sell_reauction_requests=(request,),
+    )
+
+    # The next cycle has stale q and therefore no terminal receipt; the
+    # already-committed fresh-q debt remains pending.
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=result
+    )
+
+    exact = reactor_wake.HeldSellReauctionReceipt(
+        request_id=request.request_id,
+        material_identity=request.material_identity,
+        generation=request.generation,
+        attempt_identity=request.attempt_identity,
+        completion_deadline_at=request.completion_deadline_at,
+        schema_version=4,
+        scope_identity=request.scope_identity,
+        book_state="EXECUTABLE",
+        status=reactor_wake.DEADLINE_EXPIRED,
+        reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+        position_id=request.position_id,
+        held_token_id=request.held_token_id,
+        debt_event_id=request.debt_event_id,
+        monitor_event_id=request.monitor_event_id,
+        selection_epoch_identity=request.selection_epoch_identity,
+        sell_book_witness_identity=request.sell_book_witness_identity,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (exact,), path=result
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=result
+    )
+
+
 def test_v4_earliest_deadline_does_not_terminalize_later_attempt():
     from src.engine import global_batch_runtime
     from src.events import reactor
@@ -9072,6 +9195,10 @@ def test_v4_earliest_deadline_does_not_terminalize_later_attempt():
             completion_deadline_at=deadline.isoformat(),
             schema_version=4,
             book_state="EXECUTABLE",
+            selection_epoch_identity=f"epoch-{position_id}",
+            sell_book_witness_identity=f"book-{position_id}",
+            debt_event_id=f"{position_id}:exit_retry_released:7",
+            monitor_event_id=f"{position_id}:monitor_refreshed:8",
         )
 
     expired = request("expired", decision_at)
@@ -16109,3 +16236,202 @@ def test_multiwinner_winner_frontier_survives_spent_budget_and_advances_causal_c
         _processing_status(conn, event.event_id) == "processed"
         for event in events
     )
+
+
+def test_v4_registered_owner_monitor_cut_produces_exact_request_and_pending_gate(
+    tmp_path,
+):
+    """The production retry-release writer binds the latest monitor cut."""
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+    from src.state.ledger import (
+        CANONICAL_POSITION_EVENT_COLUMNS,
+        append_many_and_project,
+    )
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    position = Position(
+        trade_id="production-v4-owner",
+        market_id="condition-production-v4",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-24",
+        bin_label="33C",
+        direction="buy_no",
+        temperature_metric="high",
+        env="test",
+        token_id="held-token-production-v4",
+        no_token_id="held-token-production-v4",
+        condition_id="condition-production-v4",
+        state="holding",
+        shares=3.0,
+        last_monitor_at="2026-08-24T12:00:00+00:00",
+        strategy_key="test_global_sell",
+    )
+    position._day0_monitor_probability_receipt = {
+        "probability_content_identity": "q-production-v4"
+    }
+    position._zeus_held_monitor_full_depth_action_authority = True
+    projection = build_position_current_projection(position)
+    upsert_position_current(conn, projection)
+    lineage = {
+        "selection_epoch_identity": "epoch-production-v4",
+        "sell_book_witness_identity": "book-production-v4",
+    }
+    monitor_payload = {
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_market_price_is_fresh": True,
+        "last_monitor_best_bid": 0.21,
+        "held_sell_full_depth_action_authority": True,
+        "day0_monitor_probability_receipt": {
+            "probability_content_identity": "q-production-v4"
+        },
+        "held_sell_reauction_monitor_lineage": {
+            "monitor_event_id": "ignored-builder-value",
+            **lineage,
+        },
+    }
+    monitor_event = {
+        column: None for column in CANONICAL_POSITION_EVENT_COLUMNS
+    }
+    monitor_event.update(
+        {
+            "event_id": "production-v4-owner:monitor_refreshed:1",
+            "position_id": position.trade_id,
+            "event_version": 1,
+            "sequence_no": 1,
+            "event_type": "MONITOR_REFRESHED",
+            "occurred_at": "2026-08-24T12:00:00+00:00",
+            "phase_before": "active",
+            "phase_after": "active",
+            "caused_by": "monitor_cycle",
+            "idempotency_key": "production-v4-owner:monitor_refreshed:1",
+            "venue_status": "ready",
+            "source_module": "tests.events.test_reactor",
+            "env": "test",
+            "strategy_key": "test_global_sell",
+            "payload_json": json.dumps(monitor_payload, sort_keys=True),
+        }
+    )
+    append_many_and_project(conn, [monitor_event], projection)
+
+    assert exit_lifecycle._dual_write_exit_retry_released_if_available(
+        conn,
+        position,
+        previous_next_retry_at="",
+        previous_retry_count=1,
+        previous_error="venue timeout",
+        release_reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+    )
+    released = conn.execute(
+        """
+        SELECT payload_json FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    obligation = json.loads(released[0])["held_sell_reauction_obligation"]
+    assert obligation["debt_event_id"] == (
+        "production-v4-owner:exit_retry_released:2"
+    )
+    assert obligation["monitor_event_id"] == "production-v4-owner:monitor_refreshed:1"
+    assert obligation["selection_epoch_identity"] == lineage[
+        "selection_epoch_identity"
+    ]
+    assert obligation["sell_book_witness_identity"] == lineage[
+        "sell_book_witness_identity"
+    ]
+
+    path = tmp_path / "wake.json"
+    accepted, request = __import__("src.events.reactor", fromlist=["reactor"]).request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=position.trade_id,
+        family=("Paris", "2026-08-24", "high"),
+        probability_content_identity="q-production-v4",
+        held_token_id=position.token_id,
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-24T12:00:00+00:00",
+        probability_observed_at="2026-08-24T12:00:00+00:00",
+        selection_epoch_identity=obligation["selection_epoch_identity"],
+        sell_book_witness_identity=obligation["sell_book_witness_identity"],
+        debt_event_id=obligation["debt_event_id"],
+        monitor_event_id=obligation["monitor_event_id"],
+        completion_deadline_at="2026-08-24T12:00:30+00:00",
+        schema_version=4,
+        wake_path=path,
+        return_request=True,
+    )
+    assert accepted is True
+    assert request is not None
+    assert request.lineage_status == "COMPLETE"
+    queued = reactor_wake.latest_v4_held_sell_reauction_request(
+        request.scope_identity, path=path
+    )
+    assert queued is not None
+    assert queued.monitor_event_id == obligation["monitor_event_id"]
+    refreshed_accepted, refreshed = __import__(
+        "src.events.reactor", fromlist=["reactor"]
+    ).request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=position.trade_id,
+        family=("Paris", "2026-08-24", "high"),
+        probability_content_identity="q-production-v4-next",
+        held_token_id=position.token_id,
+        held_best_bid=0.22,
+        bid_observed_at="2026-08-24T12:01:00+00:00",
+        probability_observed_at="2026-08-24T12:01:00+00:00",
+        selection_epoch_identity="epoch-production-v4-next",
+        sell_book_witness_identity="book-production-v4-next",
+        debt_event_id=obligation["debt_event_id"],
+        monitor_event_id="production-v4-owner:monitor_refreshed:2",
+        completion_deadline_at="2026-08-24T12:01:30+00:00",
+        generation="generation-production-v4-next",
+        scope_identity=request.scope_identity,
+        schema_version=4,
+        wake_path=path,
+        force_new_generation=True,
+        return_request=True,
+    )
+    assert refreshed_accepted is True
+    assert refreshed is not None
+    assert refreshed.monitor_event_id == "production-v4-owner:monitor_refreshed:2"
+    assert refreshed.selection_epoch_identity == "epoch-production-v4-next"
+
+    pending, pending_request = __import__(
+        "src.events.reactor", fromlist=["reactor"]
+    ).request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id="production-v4-pending",
+        family=("Paris", "2026-08-24", "high"),
+        probability_content_identity="q-pending",
+        held_token_id="held-token-pending",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-24T12:00:00+00:00",
+        selection_epoch_identity="epoch-pending",
+        sell_book_witness_identity="book-pending",
+        debt_event_id="debt-pending",
+        monitor_event_id="",
+        schema_version=4,
+        wake_path=tmp_path / "pending.json",
+        return_request=True,
+    )
+    assert pending is False
+    assert pending_request is not None
+    assert pending_request.lineage_status == "PENDING_CANONICAL_LINEAGE"
+    assert not (tmp_path / "pending.json").exists()
+
+    from src.execution.exit_lifecycle import _held_sell_reauction_recovery_due
+
+    assert _held_sell_reauction_recovery_due(
+        {
+            "schema_version": 4,
+            "scope_identity": request.scope_identity,
+        },
+        durable_reserved=True,
+    ) is False

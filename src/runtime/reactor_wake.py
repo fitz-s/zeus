@@ -170,6 +170,11 @@ class HeldSellReauctionRequest:
     probability_observed_at: str = ""
     attempt_identity: str = ""
     completion_deadline_at: str = ""
+    selection_epoch_identity: str = ""
+    sell_book_witness_identity: str = ""
+    debt_event_id: str = ""
+    monitor_event_id: str = ""
+    lineage_status: str = "COMPLETE"
 
 
 @dataclass(frozen=True)
@@ -605,6 +610,10 @@ def make_held_sell_reauction_request(
     book_state: str = "EXECUTABLE",
     probability_observed_at: str = "",
     completion_deadline_at: str = "",
+    selection_epoch_identity: str = "",
+    sell_book_witness_identity: str = "",
+    debt_event_id: str = "",
+    monitor_event_id: str = "",
 ) -> HeldSellReauctionRequest:
     """Bind one monitor witness to one non-reusable request generation."""
 
@@ -682,12 +691,28 @@ def make_held_sell_reauction_request(
         attempt_identity,
         schema_version=int(material.get("schema_version", 1)),
     )
+    clean_lineage = {
+        "selection_epoch_identity": str(selection_epoch_identity or "").strip(),
+        "sell_book_witness_identity": str(
+            sell_book_witness_identity or ""
+        ).strip(),
+        "debt_event_id": str(debt_event_id or "").strip(),
+        "monitor_event_id": str(monitor_event_id or "").strip(),
+    }
+    lineage_status = (
+        "COMPLETE"
+        if int(schema_version) != HELD_SELL_REAUCTION_V4
+        or all(clean_lineage.values())
+        else "PENDING_CANONICAL_LINEAGE"
+    )
     return HeldSellReauctionRequest(
         request_id=request_id,
         material_identity=material_identity,
         generation=clean_generation,
         attempt_identity=attempt_identity,
         completion_deadline_at=clean_completion_deadline,
+        **clean_lineage,
+        lineage_status=lineage_status,
         **material,
     )
 
@@ -757,6 +782,14 @@ def _clean_held_sell_reauction_requests(
                 completion_deadline_at=str(
                     get("completion_deadline_at") or ""
                 ),
+                selection_epoch_identity=str(
+                    get("selection_epoch_identity") or ""
+                ),
+                sell_book_witness_identity=str(
+                    get("sell_book_witness_identity") or ""
+                ),
+                debt_event_id=str(get("debt_event_id") or ""),
+                monitor_event_id=str(get("monitor_event_id") or ""),
             )
         except (TypeError, ValueError):
             continue
@@ -1628,6 +1661,44 @@ def _held_sell_reauction_lineage_lock(
         yield
 
 
+_V4_DEADLINE_LINEAGE_FIELDS = (
+    "position_id",
+    "held_token_id",
+    "debt_event_id",
+    "monitor_event_id",
+    "selection_epoch_identity",
+    "sell_book_witness_identity",
+)
+
+
+def _v4_deadline_lineage_complete(value: object) -> bool:
+    """Require the exact held-SELL debt lineage before terminalizing a deadline."""
+
+    return all(
+        str(getattr(value, field, "") or "").strip()
+        for field in _V4_DEADLINE_LINEAGE_FIELDS
+    )
+
+
+def _v4_deadline_receipt_matches(
+    request: HeldSellReauctionRequest,
+    receipt: HeldSellReauctionReceipt,
+) -> bool:
+    """Validate a deadline receipt against the immutable request lineage."""
+
+    return (
+        request.schema_version == HELD_SELL_REAUCTION_V4
+        and receipt.schema_version == HELD_SELL_REAUCTION_V4
+        and receipt.status == DEADLINE_EXPIRED
+        and _v4_deadline_lineage_complete(request)
+        and all(
+            str(getattr(receipt, field, "") or "").strip()
+            == str(getattr(request, field, "") or "").strip()
+            for field in _V4_DEADLINE_LINEAGE_FIELDS
+        )
+    )
+
+
 def _held_sell_reauction_receipt_from_payload(
     payload: object,
     *,
@@ -1791,6 +1862,7 @@ def _held_sell_reauction_receipt_from_payload(
     if receipt.status == DEADLINE_EXPIRED and (
         receipt.schema_version != HELD_SELL_REAUCTION_V4
         or not receipt.completion_deadline_at
+        or not _v4_deadline_lineage_complete(receipt)
     ):
         return None
     return receipt
@@ -2223,6 +2295,7 @@ def persist_held_sell_reauction_receipts(
                     and (
                         receipt.schema_version != HELD_SELL_REAUCTION_V4
                         or not receipt.completion_deadline_at
+                        or not _v4_deadline_lineage_complete(receipt)
                     )
                 )
             ):
@@ -2247,6 +2320,20 @@ def persist_held_sell_reauction_receipts(
                     ):
                         raise ValueError("HELD_SELL_REAUCTION_RECEIPT_LINEAGE_INVALID")
                     latest = _v4_held_sell_reauction_lineage_request(lineage)
+                    if receipt.status == DEADLINE_EXPIRED and (
+                        receipt.attempt_identity != latest.attempt_identity
+                        or receipt.completion_deadline_at
+                        != latest.completion_deadline_at
+                        or not _v4_deadline_receipt_matches(latest, receipt)
+                    ):
+                        # SCOPE: this exact V4 deadline attempt. DRAIN: only
+                        # the latest request's complete six-field lineage may
+                        # occupy its receipt slot. RESET: reject this payload
+                        # before any slot read/write so a later valid receipt
+                        # is never blocked by an older or mismatched answer.
+                        raise ValueError(
+                            "HELD_SELL_REAUCTION_DEADLINE_LINEAGE_MISMATCH"
+                        )
                     if (
                         receipt.status
                         == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
@@ -2402,6 +2489,16 @@ def held_sell_reauction_requests_completed(
                 request.request_id,
                 path=path,
             )
+        if (
+            receipt is not None
+            and receipt.status == DEADLINE_EXPIRED
+            and not _v4_deadline_receipt_matches(request, receipt)
+        ):
+            # SCOPE: this exact V4 position/token attempt. DRAIN: only a
+            # receipt carrying every immutable debt/monitor/book identity can
+            # clear it. RESET: an exact ACTUATED or other validated terminal
+            # receipt; stale/anonymous receipts remain pending forever.
+            return False
         if (
             receipt is None
             or receipt.material_identity != request.material_identity
