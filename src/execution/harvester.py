@@ -1042,7 +1042,7 @@ def run_harvester() -> dict:
     Returns: harvester counts plus stage2_status / stage2 preflight details.
 
     """
-    # INV-37 (ChatGPT PR#408 review B1, 2026-06-14): use a SINGLE connection with
+    # INV-37 (PR #408 review B1, 2026-06-14): use a SINGLE connection with
     # forecasts.db as MAIN and zeus_trades.db ATTACHed as 'trades'. A single
     # SAVEPOINT wraps all writes so the entire settlement cycle is all-or-nothing.
     # Previously two independent connections (get_trade_connection +
@@ -1735,7 +1735,7 @@ def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) ->
     Shoulder cases use English text form (not unicode ≥/≤) because
     ``src/data/market_scanner.py::_parse_temp_range`` uses ``re.search``
     and would silently misparse ``'≥21°C'`` as the POINT bin ``(21.0, 21.0)``.
-    Critic-opus C1 (P-E pre-review 2026-04-23) proved this empirically.
+    review C1 (P-E pre-review 2026-04-23) proved this empirically.
     """
     if lo is None and hi is None:
         return None
@@ -2580,7 +2580,7 @@ def harvest_settlement(
                 "full" if _phase2_cycle in ("00", "12") else "short"
             )
     except (ImportError, AttributeError, TypeError, ValueError) as _exc:
-        # Phase 2.6 hardening (2026-05-04, critic-opus MINOR 10): explicit
+        # Phase 2.6 hardening (2026-05-04, review MINOR 10): explicit
         # exception list rather than bare Exception so a real bug doesn't get
         # swallowed silently. For p_raw writes, unknown stratification authority
         # degrades to no learning row rather than schema-default TIGGE identity.

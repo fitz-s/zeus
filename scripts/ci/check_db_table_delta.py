@@ -82,6 +82,10 @@ _SQL_RESERVED = frozenset({
     "for", "as", "from", "where", "select", "if", "not", "exists",
     "when", "and", "or", "join", "on", "into", "values",
     "ddl", "sql",
+    # Prose words that follow "CREATE TABLE" when a comment discusses the
+    # statement rather than issuing one: "...a single CREATE TABLE statement
+    # instead". No real table is ever named these.
+    "statement", "statements", "call", "calls", "syntax",
 })
 
 # Known non-canonical sidecar/scratch tables created in a SEPARATE sidecar FILE
@@ -89,7 +93,20 @@ _SQL_RESERVED = frozenset({
 # _migrations_applied = the per-DB migration ledger. NARROWED (consult re-review
 # 2026-07-22) from a blanket leading-underscore skip so a future _-named table
 # created against a CANONICAL connection is NOT silently exempted.
-_KNOWN_SIDECAR_TABLES = frozenset({"_capsule_meta", "_migrations_applied"})
+# family_book_telemetry_outbox / family_book_telemetry_meta (book_snapshot_
+# persistence): live ONLY in the family-book telemetry writer's PRIVATE spool
+# file (family_book_telemetry_spool.db, src/events/family_book_telemetry_writer.py),
+# never any canonical DB -- the whole point of the round-5 bounded-outbox
+# redesign was to keep this transport buffer OFF the canonical tables it
+# feeds (family_book_states/family_book_observations, which DO have real
+# registry entries on family_book_evidence). A registry entry for these two
+# would be a category error: they are not a DB-ownership surface.
+_KNOWN_SIDECAR_TABLES = frozenset({
+    "_capsule_meta",
+    "_migrations_applied",
+    "family_book_telemetry_outbox",
+    "family_book_telemetry_meta",
+})
 
 
 def _changed_files_from_git(base: str, head: str) -> list[str]:
@@ -119,7 +136,7 @@ def _known_tables(ownership_doc: dict) -> set[str]:
     Only collects names that appear in a DB-owner scope. The previous
     implementation walked the whole document and treated any `name:` or
     `id:` string as a table — that incorrectly captured `name: applied_at`
-    inside `required_columns` entries (Copilot finding on PR #345),
+    inside `required_columns` entries (finding on PR #345),
     which let real new tables sneak past as already-known.
 
     Recognized shapes:

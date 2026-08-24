@@ -20,7 +20,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 | [`percity_representativeness_debias.md`](percity_representativeness_debias.md) | OPEN | Per-city representativeness de-bias |
 | [`coarse_feed_retirement_2026-07-20.md`](coarse_feed_retirement_2026-07-20.md) | INVESTIGATION-COMPLETE | Retire coarse 0.25° ecmwf_open_data feed → fusion; ground-truth from forecasts.db; plan pending operator scope. Flags current_source_validity.md / current_data_state.md as 43d stale (still cite retired AIFS) |
 | [`auction_multiwinner_plan_2026-07-19.md`](auction_multiwinner_plan_2026-07-19.md) | PROPOSED | Multi-winner auction design (design only; no code changed) |
-| [`live_unit_price_band_incident/PLAN.md`](live_unit_price_band_incident/PLAN.md) | IMPLEMENTING | Reopened live-money incident: restore absolute submit band and make regressions restart-blocking |
+| [`live_unit_price_band_incident/PLAN.md`](live_unit_price_band_incident/PLAN.md) | VERIFIED-LOCAL | Reopened live-money incident: restore absolute submit band and make regressions restart-blocking |
 | [`ci_topology_refactor_refined.md`](ci_topology_refactor_refined.md) | DORMANT | CI topology refactor (proposed 2026-05-26, untouched since) |
 | [`zeus_home_repo_migration.md`](zeus_home_repo_migration.md) | DONE-EXCEPT | Migration complete (daemons run from ~/zeus); one residue: heartbeat-sensor plist still points at old workspace-venus/bin |
 | [`gate_scope_drain_reset_2026-07-26.md`](gate_scope_drain_reset_2026-07-26.md) | DONE | INV-47 registered in invariants.yaml + NC-24; site-anchored SCOPE/DRAIN/RESET test over 4 named gates |

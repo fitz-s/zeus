@@ -1,7 +1,7 @@
 # Created: 2026-07-11
 # Last reused or audited: 2026-08-10
-# Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md "Consult adjudication"
-#   (GPT-5.6 Pro deep review, adopted target shape) BLOCKER-1/BLOCKER-3, critic I-1.
+# Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md adjudication
+#   (adopted target shape) BLOCKER-1/BLOCKER-3, review finding I-1.
 #   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 
 """ReviewWorkItem — the owner-local review/retry/operator-resolution protocol.

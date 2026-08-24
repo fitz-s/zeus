@@ -177,7 +177,8 @@ edge → execution → monitoring → settlement → learning
 The probability chain (strategy of record, 2026-06-09 — authority `docs/authority/replacement_final_form_2026_06_09.md`):
 
 ```
-per-model walk-forward de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+per-model RAW center, NO de-bias shift (bayes_precision_fusion_capture._raw_instrument;
+residual history feeds width/provenance only — 2026-06-18 RAW law) → T2 Bayesian precision
 fusion, Ledoit-Wolf Σ (fuse_bayes_precision_posterior) → σ_pred (floor 1.0°C) → settlement-preimage
 bin q (emos.bin_probability_settlement, q_shape fused_normal_direct) → q_lcb floor →
 Edge → Fractional Kelly → Position Size

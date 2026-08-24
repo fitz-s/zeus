@@ -271,6 +271,7 @@ from src.events.candidate_binding import MarketTopologyCandidate, weather_family
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
+from src.events.family_book_telemetry_writer import enqueue_family_book_observation
 from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
@@ -18118,6 +18119,22 @@ def _build_event_bound_no_submit_receipt_core(
                 _spine_fact_decision = _spine_result.decision
                 _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                     _spine_result.decision
+                )
+                # book_snapshot_persistence (2026-07-29, redesigned post deep-review
+                # NO-GO): capture at the decision-PRODUCTION seam, not after this
+                # retry loop exits -- a later actionability veto in THIS SAME cycle
+                # (near-day0 / rest-then-cross / fill-up exclusion, below) resets
+                # _spine_fact_decision to None, which would silently drop a decision
+                # that existed here from the evidence population. Nonblocking: this
+                # only enqueues an envelope (queue.put_nowait); all serialization and
+                # SQLite I/O happen off this thread (family_book_telemetry_writer).
+                enqueue_family_book_observation(
+                    decision=_spine_result.decision,
+                    family=family,
+                    active_proofs=_active_spine_entry_proofs,
+                    candidate_bin_id=_candidate_bin_id,
+                    decision_time=decision_time,
+                    causal_snapshot_id=event.causal_snapshot_id,
                 )
                 if (
                     global_actuation is not None
@@ -38631,20 +38648,19 @@ def _forecast_snapshot_probability_and_fdr_proof(
     dict[str, str],
 ]:
     """
-    FAIL-CLOSED STUB — codex never authored the EDLI probability + FDR inference kernel.
+    FAIL-CLOSED STUB — the EDLI probability + FDR inference kernel is unimplemented.
 
-    The full implementation requires authoring EDLI's live-money probability
-    semantics (Platt p_cal lookup, hypothesis bootstrap, FDR proof construction)
-    which is out-of-scope for rebase-resolution. Until codex provides the
-    canonical implementation, this stub returns empty mappings so:
+    Implementing it means authoring EDLI's live-money probability semantics
+    (Platt p_cal lookup, hypothesis bootstrap, FDR proof construction). Until
+    that exists, this returns empty mappings so:
 
       1. Module imports succeed (event reactor tests pass)
       2. Any production path reaching this function admits NO candidates
          (q_by_condition empty → no executable proofs → no_submit decision)
-      3. Evidence dict explicitly documents the gap for downstream audit
+      3. The evidence dict names the gap for downstream audit
 
-    Returns an empty inference result. Do not "fill in" the empty dicts with
-    placeholder probabilities — that would silently mis-trade.
+    Do not "fill in" the empty dicts with placeholder probabilities — an empty
+    result is a refusal to trade, whereas a placeholder silently mis-trades.
     """
     q_by_condition: dict[str, float] = {}
     q_lcb_by_direction: dict[tuple[str, str], float] = {}
@@ -38653,7 +38669,7 @@ def _forecast_snapshot_probability_and_fdr_proof(
     probability_evidence: dict[str, str] = {
         "status": "no_submit_fail_closed",
         "reason": "edli_probability_kernel_unauthored",
-        "TODO": "codex must implement _forecast_snapshot_probability_and_fdr_proof per EDLI v1 spec",
+        "unimplemented": "_forecast_snapshot_probability_and_fdr_proof (EDLI v1 spec)",
         "event_type": event.event_type,
         "allow_latest_snapshot": str(allow_latest_snapshot),
         "decision_time": decision_time.isoformat(),

@@ -178,7 +178,7 @@ def run_migration(db_path: Path = DEFAULT_DB, dry_run: bool = False) -> dict:
         conn = sqlite3.connect(db_path)
         # Gate WAL mode behind not-dry-run: PRAGMA journal_mode=WAL persists on disk
         # and creates -wal/-shm sidecar files even in read-only inspection runs
-        # (PR #89 Copilot fix).
+        # (PR #89 review fix).
         if not dry_run:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=OFF")  # required for rename+recreate

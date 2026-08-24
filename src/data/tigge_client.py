@@ -263,7 +263,7 @@ def _latest_payload_time(key: str, *payloads: object) -> tuple[str, datetime | N
 def _fetch_db_payload(city: object, fetch_time: datetime) -> ForecastBundle | None:
     """Combine high+low TIGGE rows into a 51 x (24*N) hourly grid.
 
-    Sonnet's per-metric ``tigge_db_fetcher.fetch_from_db`` broadcasts the
+    The per-metric ``tigge_db_fetcher.fetch_from_db`` broadcasts the
     daily aggregate across 24 hours of a single metric, which makes the
     resulting array's ``min()`` equal to the max (or vice-versa) — wrong
     for the half of markets keyed on the OTHER metric. To preserve the

@@ -9,7 +9,7 @@
 #   DROP old + RENAME). Also bumps PRAGMA user_version to 4 on ALL canonical
 #   DBs (zeus_trades + zeus-live + zeus-world + zeus-forecasts) to satisfy
 #   src.main._startup_world_db_schema_ready_check() — PR #126 review-fix from
-#   Codex P1 #2 (without world+forecasts bump, daemon retries 5 min then fatal).
+#   review P1 #2 (without world+forecasts bump, daemon retries 5 min then fatal).
 # Reuse: Run as operator BEFORE deploying SCHEMA_VERSION=4 code. Daemon-stop
 #   prerequisite (fcntl.flock check on zeus-live.db). --dry-run flag for
 #   operator verification. Authority basis: SCAFFOLD_F14_F16.md §K.8 v5.
@@ -109,7 +109,7 @@ def _bump_user_version(conn: sqlite3.Connection, target: int) -> str:
     because src.main._startup_world_db_schema_ready_check() compares
     PRAGMA user_version on every canonical DB against SCHEMA_VERSION.
 
-    PR #126 review-fix (Codex P1 #2): bumping SCHEMA_VERSION on a
+    PR #126 review-fix (review P1 #2): bumping SCHEMA_VERSION on a
     trade-ledger-only CHECK change would otherwise brick boot on world.db
     + forecasts.db (still at v3) until operator manually bumped them.
     """
@@ -157,7 +157,7 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
 
     conn = sqlite3.connect(str(db_path))
     try:
-        # PR #126 review-fix (Codex P1 #2): DBs without settlement_commands
+        # PR #126 review-fix (review P1 #2): DBs without settlement_commands
         # (world.db, forecasts.db) still need PRAGMA user_version bumped
         # because src.main._startup_world_db_schema_ready_check() compares
         # user_version against the shared SCHEMA_VERSION sentinel.
@@ -205,7 +205,7 @@ def _migrate_one_db(db_path: Path, *, dry_run: bool = False) -> dict:
 
         conn.execute("BEGIN IMMEDIATE TRANSACTION")
         try:
-            # PR #126 review-fix (Copilot 3254021453): conn.executescript()
+            # PR #126 review-fix (review comment 3254021453): conn.executescript()
             # in Python sqlite3 issues an implicit COMMIT before each script,
             # breaking our outer BEGIN IMMEDIATE. Use conn.execute() for the
             # single CREATE TABLE statement instead — no transaction collision.
@@ -279,7 +279,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.db:
         targets = [Path(p).resolve() for p in args.db]
     else:
-        # PR #126 review-fix (Codex P1 #2): include world.db in default targets
+        # PR #126 review-fix (review P1 #2): include world.db in default targets
         # so SCHEMA_VERSION sentinel stays in sync across DBs that share it.
         #
         # PR #126 G5c FA3 ship-blocker fix (R2): zeus-forecasts.db is NOT in

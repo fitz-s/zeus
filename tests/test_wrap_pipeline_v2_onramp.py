@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 
-SAFE_ADDR = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+SAFE_ADDR = "0x5AFE0000000000000000000000000000000000F1"
 AMOUNT_MICRO = 1_587_297
 
 

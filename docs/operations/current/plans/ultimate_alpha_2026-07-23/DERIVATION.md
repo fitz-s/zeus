@@ -6,8 +6,8 @@ Authority basis: operator axiom 2026-07-23(逐字):
 > 对于opening来说使用低价格购买到对应期望的价格就是划算
 
 Inputs: strategy-map file:line 地图(session 2026-07-23)、chain-truth 经济学(read-only
-live 实测)、consult REQ-20260723-033638(两概念裁定,被本公理覆盖处以公理为准)、
-consult REQ-20260723-145335(终局形式化,进行中)。
+live 实测)、consult external consult, 2026-07-23(两概念裁定,被本公理覆盖处以公理为准)、
+consult external consult, 2026-07-23(终局形式化,进行中)。
 
 ---
 

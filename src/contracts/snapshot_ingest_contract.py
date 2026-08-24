@@ -35,7 +35,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # 2026-05-07: mx2t3/mn2t3 rename. New versions are the active write path.
 # Legacy mx2t6/mn2t6 kept in allow-list so historical rows remain readable.
 #
-# 2026-05-07 Codex P2 fix: dedicate MetricIdentity instances for the 3h
+# 2026-05-07 review P2 fix: dedicate MetricIdentity instances for the 3h
 # native derived quantity ("mx2t3_local_calendar_day_max" /
 # "mn2t3_local_calendar_day_min"). The cloud extract patch (see
 # docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md) writes these strings

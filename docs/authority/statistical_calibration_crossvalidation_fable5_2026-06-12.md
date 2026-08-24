@@ -1,4 +1,4 @@
-# Independent cross-validation: Fable 5, same clean-room prompt (REQ-20260612-174119)
+# Independent cross-validation: Fable 5, same clean-room prompt (external consult, 2026-06-12)
 
 Status: ARCHIVED_REFERENCE — cross-validation evidence behind the calibration authority; not standalone live law.
 
@@ -24,7 +24,7 @@ Monte-Carlo verification of the k* formula.
 Full Fable response follows verbatim.
 
 ---
-[Full Fable 5 response archived from operator paste 2026-06-12 — see conversation transcript REQ-20260612-174119. Key formulas restated for grep-ability:]
+[Full Fable 5 response archived from operator paste 2026-06-12 — see conversation transcript external consult, 2026-06-12. Key formulas restated for grep-ability:]
 
 k* = sqrt(1 + (delta/sigma)^2)   — scale-only MLE bias absorption (KL minimizer)
 ell(b,k) = sum_i log[Phi((u_j - mu_i - b_loc)/(sigma_i k)) - Phi((l_j - mu_i - b_loc)/(sigma_i k))]

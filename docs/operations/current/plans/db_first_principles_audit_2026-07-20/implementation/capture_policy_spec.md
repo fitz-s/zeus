@@ -70,7 +70,7 @@ A row goes to `executable_market_snapshots` (current schema, unchanged) when **a
 
 Everything else (EDLI-warm outcomes not priority, not near-threshold, not keyframe) → compact table (§3).
 
-> **SHIPPED INCREMENT (2026-07-22, after GPT-5.6 PR review REQ-20260722-005247).**
+> **SHIPPED INCREMENT (2026-07-22, after GPT-5.6 PR review external consult, 2026-07-22).**
 > The first landed increment is deliberately narrower than §3–§4 below, which
 > remain the design of record for later operator-fenced increments:
 > - **Only** the nullable `capture_trigger TEXT` column on the existing

@@ -16,16 +16,39 @@ analysis is evidence, never a runtime probability lane.
 
 The canonical live probability pipeline, also called the *replacement forecast*
 or *replacement chain*. It constructs the single authoritative per-bin probability
-`q` by: (1) empirical-Bayes de-biasing each ensemble model against its settled
-history, (2) Ledoit–Wolf shrinkage of the model covariance, (3) Bayesian
-precision-weighted fusion of all de-biased models into a single `(μ*, V*)`, (4)
+`q` by: (1) taking each model's RAW center with no de-bias shift — settled residual
+history is consumed for width and provenance only (2026-06-18 RAW law, see
+*RAW no-de-bias law* below), (2) Ledoit–Wolf shrinkage of the model covariance,
+(3) Bayesian precision-weighted fusion into a single `(μ*, V*)`, (4)
 settlement-exact preimage integration via EMOS to produce per-bin probabilities.
 The output is a single `q` per (city, date, metric, bin). There is no multi-regime
 fallback and no parallel complement on the live path.
 
-**Authoritative source:** [`docs/authority/replacement_final_form_2026_06_09.md`](../authority/replacement_final_form_2026_06_09.md)  
-**Implementation:** `src/forecast/bayes_precision_fusion.py` → `src/forecast/emos.py`  
+**Authoritative source:** [`docs/authority/replacement_final_form_2026_06_09.md`](../authority/replacement_final_form_2026_06_09.md), amended by the RAW law below  
+**Implementation:** `src/forecast/bayes_precision_fusion.py` → `src/calibration/emos.py`  
 **Related invariant:** INV (see `architecture/invariants.yaml` for probability-chain entries)
+
+---
+
+### RAW no-de-bias law
+
+Since 2026-06-18 the consumed instrument center is the RAW model value `z = x`, not
+the empirical-Bayes-corrected `z = x − b̂`. Settled residual history is still read —
+it sets anchor `τ0`, the cross-source disagreement variance, and predictive `σ_resid`,
+and `n_train` still drives low-`n` width inflation — but it never shifts the center.
+
+The reason is a two-center split, not a preference for raw numbers. Entry belief
+(`FamilyBook`) was already RAW while exit and monitor belief read the materialized
+`forecast_posteriors`, which was de-biased: one belief priced entries and a different
+one priced exits on the same position. Making the materialized center RAW collapses
+them into a single belief instead of adding a parallel product.
+
+`eb_bias` survives in the codebase as offline baseline math with no live caller, and
+`tests/test_raw_unify_forecast_posteriors.py` asserts it is never imported into the
+capture path.
+
+**Implementation:** `src/data/bayes_precision_fusion_capture.py::_raw_instrument`; weights in `src/forecast/center.py`  
+**Related:** `docs/reference/zeus_math_spec.md` §0.1a
 
 ---
 
@@ -178,14 +201,21 @@ emits `q_safe = 0` (no trade) — never a fallback to the raw center-bootstrap
 
 ### fractional Kelly
 
-The Kelly criterion multiplied down by an independent cascade of factors —
-confidence-interval width, lead time, win rate, portfolio heat, drawdown, and
-data-density — that compound geometrically and fail closed: any NaN or malformed
-input yields no trade. "Full Kelly" is the theoretical optimal, but it maximizes
-expected log-growth only in the limit and is reckless under parameter uncertainty;
-the multiplier cascade produces a practical fraction (typically 20–50% of full
-Kelly). Per-city asymmetric loss preferences enter as additional Kelly multipliers,
-not as DDD floor overrides (see `zeus_kelly_asymmetric_loss_reference.md`).
+The Kelly criterion multiplied down to a small fraction of full Kelly. The base is
+the config value `sizing.kelly_multiplier` (currently `0.03125`), and three haircuts
+compound on it: confidence-interval width, lead time, and portfolio heat. It fails
+closed — NaN or a collapse to zero raises rather than substituting a floor value,
+because a fabricated floor would size a position off a computation that had already
+lost meaning.
+
+Per-strategy, per-city, win-rate, drawdown, and data-density stages were DELETED by
+the one-law form (2026-07-23): the robust `q_lcb` bound already carries that
+uncertainty into the edge, so haircutting again double-counts it. `GLOBAL_KELLY_FRACTION`
+in `kelly.py` is `1.0` but is **not** an economic fraction — it is an identity gate
+returning `0.0` for an unknown or non-live strategy key.
+
+"Full Kelly" maximizes expected log-growth only in the limit and is reckless under
+parameter uncertainty, which is what the config fraction is for.
 
 **Authoritative source:** [`docs/reference/zeus_kelly_asymmetric_loss_reference.md`](zeus_kelly_asymmetric_loss_reference.md); [`docs/authority/exit_portfolio_execution_authority_2026-06-13.md`](../authority/exit_portfolio_execution_authority_2026-06-13.md)  
 **Implementation:** `src/strategy/kelly.py`  

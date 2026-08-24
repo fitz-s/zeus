@@ -429,7 +429,16 @@ def test_cycle_summary_exposes_cutover_state_and_blocks_discovery(monkeypatch, t
     assert summary["entries_blocked_reason"] == "cutover_guard=PRE_CUTOVER_FREEZE"
 
 
-@pytest.mark.skip(reason="M5 exchange reconciliation findings table owns cutover-wipe classification.")
+@pytest.mark.skip(
+    reason=(
+        "UNCOVERED, not relocated: the handoff named exchange_reconcile_findings as the "
+        "owner of cutover-wipe classification, but VENUE_WIPED_REVIEW appears nowhere in "
+        "src/ or tests/ except this name. The findings table itself is live "
+        "(src/execution/exchange_reconcile.py), so the mechanism exists and the "
+        "classification does not. Writing this requires deciding cutover-wipe semantics "
+        "against live-money reconciliation — a design step, not a test-authoring step."
+    )
+)
 def test_post_cutover_reconcile_marks_v1_orphans_as_VENUE_WIPED_REVIEW():
     pass
 

@@ -1,8 +1,12 @@
 # DB 第一性原理全面体检 — 调查 spec(只查不改)
 
-Created: 2026-07-20 · Status: INVESTIGATING · Owner: main thread(integrator)
+Created: 2026-07-20 · Status: **调查完成,修复已分批落地** · Owner: main thread(integrator)
 Scope: `state/*.db` 全部文件 + `src/state/**` 数据层 + 所有写入/解码/连接路径。
-铁律:本 packet **只调查、只产出 findings,不实现任何修复**。实现按 §5 worktree/packet 流程另开。
+
+本 packet 起始铁律是「只调查、只产出 findings,不实现任何修复」——该阶段已结束。
+findings 的修复通过 PR #436 / #438 / #442 落地(均已 merge),分批状态见同目录
+`IMPLEMENTATION_STATUS.md`;`REDESIGN.md` 已被 `REDESIGN_v2.md` 取代。
+读本目录时以各文件自身的状态行为准,不要以本行的原始「只查不改」约束反推当前代码。
 
 ## 0. 为什么(第一性原理)
 

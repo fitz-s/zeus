@@ -15,9 +15,12 @@
 #   names + the live signal: selected candidate has edge_lcb / point_ev / delta_u /
 #   optimal_stake / payoff_vector_hash; scalar q-price LOGGED but not selected on).
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
-#   (GREENFIELD — no live edits; the reactor scalar-Kelly seam
-#   event_reactor_adapter.py:8632 and the trade_score demotion happen at Stage 11, NOT
-#   here. This module is pure objects + pure functions, wired into the reactor later).
+#   (Written greenfield — pure objects + pure functions, no live edits in this file.
+#   Since wired: family_decision_engine.py imports build_candidate_route /
+#   compute_candidate_economics, and the resulting optimal_stake_usd reaches the live
+#   submit path through the qkernel-spine certificate. The reactor's scalar-Kelly seam
+#   still exists but no longer selects: it is overwritten by the q_lcb-grounded stake
+#   before any receipt reads it.)
 #   Live dependencies (ALL already built; imported, never re-implemented):
 #     - src/probability/instruments.py::Instrument
 #                       (Instrument.payoff_vector(omega) — the (n_bins,) Arrow-Debreu

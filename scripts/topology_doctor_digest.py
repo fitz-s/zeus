@@ -1461,7 +1461,7 @@ def _apply_companion_loop_break(
     if normalized_intent not in _COMPANION_LOOP_INTENTS:
         return admission
 
-    # F2 fix (PR #72 critic-opus round-3): batch-cap is now a hard gate, not just advisory.
+    # F2 fix (PR #72 review round-3): batch-cap is now a hard gate, not just advisory.
     # When len(requested) > batch_cap for create_new: emit advisory FIRST, then auto-admit
     # only the first batch_cap valid pairs; remaining files → out_of_scope_files with
     # blocked_by_batch_cap reason. Status advisory_only when any file is blocked.
@@ -1590,7 +1590,7 @@ def _apply_typed_intent_shortcut(
     NOT digest profile ids. As a result, _reconcile_admission returns advisory_only or
     ambiguous.
 
-    F1 round-3 (PR #72 critic-opus): for plan_only and audit (whitelist-driven intents),
+    F1 round-3 (PR #72 review): for plan_only and audit (whitelist-driven intents),
     ONLY paths matching admits_path_globs from admission_severity.yaml are admitted.
     Everything else → out_of_scope_files + blocked_by_intent. Status advisory_only
     whenever any path is blocked. Canonical scopes (admission_severity.yaml):

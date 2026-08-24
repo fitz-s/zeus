@@ -1725,7 +1725,7 @@ def _start_user_channel_ingestor() -> None:
         # Invalidate the adapter's memoized SDK client so this attempt forces a
         # fresh signer-bound L2 credential derivation rather than reusing a cached
         # client whose creds were None from a prior failed boot
-        # (codereview-may19 / Codex P1: src/venue/polymarket_v2_adapter.py:286
+        # (codereview-may19 P1: src/venue/polymarket_v2_adapter.py:286
         # memoizes self._client; without reset, every retry sees the same bad
         # creds and the loop never recovers).
         try:

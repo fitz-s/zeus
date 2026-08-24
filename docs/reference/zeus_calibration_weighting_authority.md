@@ -357,13 +357,13 @@ None of (1)-(5) are required to deploy LAW 1+2+3+4+5+6. They are upside, sequenc
 
 | Item | Path |
 |---|---|
-| PoC v4 source | `/Users/leofitz/.openclaw/workspace-venus/_poc_weighted_platt_2026-04-28/poc_weighted_platt.py` |
-| PoC v4 metrics | `/Users/leofitz/.openclaw/workspace-venus/_poc_weighted_platt_2026-04-28/metrics.json` |
+| PoC v4 source | `<local>/workspace-venus/_poc_weighted_platt_2026-04-28/poc_weighted_platt.py` |
+| PoC v4 metrics | `<local>/workspace-venus/_poc_weighted_platt_2026-04-28/metrics.json` |
 | PoC v4 evidence summary | `docs/operations/task_2026-04-28_weighted_platt_precision_weight_rfc/evidence/poc_summary.md` |
-| PoC v5 source | `/Users/leofitz/.openclaw/workspace-venus/_poc_weighted_platt_2026-04-28/poc_v5_temp_delta_weighted.py` |
-| PoC v5 ΔT index | `/Users/leofitz/.openclaw/workspace-venus/_poc_weighted_platt_2026-04-28/delta_index_v5.parquet` |
+| PoC v5 source | `<local>/workspace-venus/_poc_weighted_platt_2026-04-28/poc_v5_temp_delta_weighted.py` |
+| PoC v5 ΔT index | `<local>/workspace-venus/_poc_weighted_platt_2026-04-28/delta_index_v5.parquet` |
 | RFC | `docs/operations/task_2026-04-28_weighted_platt_precision_weight_rfc/rfc.md` |
-| Original LOW extractor | `/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/tigge_local_calendar_day_extract.py:_finalize_low_record` |
+| Original LOW extractor | `<local>/workspace-venus/51 source data/scripts/tigge_local_calendar_day_extract.py:_finalize_low_record` |
 | Snapshot ingest contract | `src/contracts/snapshot_ingest_contract.py::validate_snapshot_contract` (Laws 1, 2 — boundary_ambiguous and causality gating) |
 | Weight authority | THIS FILE |
 
