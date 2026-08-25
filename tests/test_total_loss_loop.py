@@ -1795,6 +1795,40 @@ def test_reaper_capacity_interrupt_defers_current_and_remaining_ids(cfg: dict, m
         ).fetchall()
     assert {str(row[0]) for row in rows} == {f"evidence_snapshot:{value}" for value in ids}
     assert all(str(row[1]) == "retry_pending" for row in rows)
+
+
+def test_forecast_fingerprint_interrupted_query_is_capacity_debt(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    _position(cfg, position_id="forecast-interrupted-position")
+    incident_id = "forecast-interrupted-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "forecast-interrupted-position", "forecast-interrupted-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    real_open_ro = loop.open_ro
+    forecasts_path = Path(cfg["paths"]["forecasts_db"]).resolve()
+    class ForecastConnection:
+        def __init__(self, connection):
+            self.connection = connection
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, traceback):
+            return self.connection.__exit__(exc_type, exc, traceback)
+        def set_progress_handler(self, *args):
+            return self.connection.set_progress_handler(*args)
+        def execute(self, query, *args):
+            if "forecast_posteriors" in query:
+                raise sqlite3.OperationalError("InTeRrUpTeD")
+            return self.connection.execute(query, *args)
+    def fake_open_ro(path, **kwargs):
+        connection = real_open_ro(path, **kwargs)
+        return ForecastConnection(connection) if Path(path).resolve() == forecasts_path else connection
+    monkeypatch.setattr(loop, "open_ro", fake_open_ro)
+    result = loop._capture_hard_evidence(cfg, [incident_id])
+    assert result["deferred"] == [incident_id]
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM controller_debt WHERE debt_id=?", (f"evidence_snapshot:{incident_id}",)).fetchone()[0] == "retry_pending"
 def test_pointer_replace_failure_keeps_previous_pair_valid(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

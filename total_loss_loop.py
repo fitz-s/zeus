@@ -2980,18 +2980,23 @@ def _evidence_fingerprints(
             _apply_evidence_sql_budget(forecasts, budget)
             source_start = iso(floor_at - timedelta(days=window_days / 2))
             source_end = iso(floor_at + timedelta(days=window_days / 2))
-            source_rows["posteriors"] = [dict(row) for row in forecasts.execute(
-                "SELECT * FROM forecast_posteriors WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
-                "AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL) "
-                "ORDER BY computed_at DESC LIMIT ?",
-                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
-            ).fetchall()]
-            source_rows["ensembles"] = [dict(row) for row in forecasts.execute(
-                "SELECT * FROM ensemble_snapshots WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
-                "AND (available_at BETWEEN ? AND ? OR available_at IS NULL) "
-                "ORDER BY available_at DESC LIMIT ?",
-                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
-            ).fetchall()]
+            try:
+                source_rows["posteriors"] = [dict(row) for row in forecasts.execute(
+                    "SELECT * FROM forecast_posteriors WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
+                    "AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL) "
+                    "ORDER BY computed_at DESC LIMIT ?",
+                    (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
+                ).fetchall()]
+                source_rows["ensembles"] = [dict(row) for row in forecasts.execute(
+                    "SELECT * FROM ensemble_snapshots WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
+                    "AND (available_at BETWEEN ? AND ? OR available_at IS NULL) "
+                    "ORDER BY available_at DESC LIMIT ?",
+                    (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
+                ).fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "interrupted" not in str(exc).lower():
+                    raise
+                raise EvidenceCapacityExceeded("evidence_fingerprint_forecast_query_deferred:interrupted") from exc
     def bounded_records(rows: Mapping[str, list[dict[str, Any]]]) -> dict[str, str]:
         return {
             name: digest(
