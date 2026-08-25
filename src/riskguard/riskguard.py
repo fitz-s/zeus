@@ -39,8 +39,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import uuid
 
 from src.config import settings, get_mode
 from src.contracts.global_auction_receipt import (
@@ -6994,6 +6995,62 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     finally:
         zeus_conn.close()
         risk_conn.close()
+
+
+@dataclass(frozen=True)
+class RiskAttestation:
+    """Typed single read of the five-level RiskGuard authority."""
+
+    level: RiskLevel
+    attestation_id: str
+    read_at: str
+    monotonic_ns: int
+    outcome: str = "READ_OK"
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.level, RiskLevel):
+            object.__setattr__(self, "level", RiskLevel(str(self.level)))
+        if not self.attestation_id or not self.read_at or self.monotonic_ns < 0:
+            raise ValueError("risk attestation identity invalid")
+        if self.outcome not in {"READ_OK", "READ_ERROR_FAIL_CLOSED"}:
+            raise ValueError("risk attestation outcome invalid")
+        if self.outcome == "READ_ERROR_FAIL_CLOSED" and self.level is not RiskLevel.RED:
+            raise ValueError("risk read errors must remain RED")
+
+    @property
+    def observed_red(self) -> bool:
+        return self.level is RiskLevel.RED
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "attestation_id": self.attestation_id,
+            "level": self.level.value,
+            "read_at": self.read_at,
+            "monotonic_ns": self.monotonic_ns,
+            "outcome": self.outcome,
+            "error": self.error,
+        }
+
+
+def read_risk_attestation(*, now: datetime | None = None) -> RiskAttestation:
+    """Read RiskGuard exactly once; DB/error surfaces fail closed as RED."""
+    try:
+        level = get_current_level()
+        outcome = "READ_OK"
+        error = ""
+    except Exception as exc:  # noqa: BLE001 - authority edge is fail closed.
+        level = RiskLevel.RED
+        outcome = "READ_ERROR_FAIL_CLOSED"
+        error = f"{type(exc).__name__}:{str(exc)[:400]}"
+    return RiskAttestation(
+        level=level,
+        attestation_id=uuid.uuid4().hex,
+        read_at=(now or datetime.now(timezone.utc)).isoformat(),
+        monotonic_ns=time.monotonic_ns(),
+        outcome=outcome,
+        error=error,
+    )
 
 
 def get_current_level() -> RiskLevel:

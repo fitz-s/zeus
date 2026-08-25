@@ -16,6 +16,7 @@ import logging
 import base64
 import copy
 import inspect
+import hashlib
 import json
 import math
 import multiprocessing
@@ -24313,3 +24314,790 @@ def test_market_velocity_without_executable_quote_time_is_non_authoritative(tmp_
         current_price=float("nan"),
         observed_at=None,
     ) == 0.0
+
+
+def _red_real_schema_fixture(trade_id="red-real-schema"):
+    from src.state.db import init_schema_trade_only
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    position = _make_position(
+        trade_id=trade_id, state="holding", token_id="red-yes", no_token_id="red-no",
+        shares=2.0, chain_shares=2.0, env="live", strategy_key="Center Bin Buy",
+        entered_at="2026-08-24T00:00:00+00:00", condition_id="red-condition",
+        market_id="red-market",
+    )
+    projection = build_position_current_projection(position)
+    projection["phase"] = "active"
+    upsert_position_current(conn, projection)
+    conn.commit()
+    return conn, position
+
+
+def test_red_handoff_real_schema_atomic_retry_release_and_hashes():
+    from src.execution.exit_lifecycle import (
+        _red_payload_hash, build_exit_intent, persist_red_exit_handoff,
+        release_red_handoff_after_b2,
+    )
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture()
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    a = RiskAttestation(RiskLevel.RED, "a-clock", "2026-08-24T00:00:00+00:00", 1)
+    handoff = persist_red_exit_handoff(conn, position, exit_intent=intent,
+                                       attestation=a, attempt_id="attempt-1")
+    assert handoff is not None
+    rows = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json "
+        "FROM position_events WHERE position_id=? ORDER BY sequence_no", (position.trade_id,)
+    ).fetchall()
+    assert [(row[0], row[1]) for row in rows] == [("MONITOR_REFRESHED", 1), ("EXIT_INTENT", 2)]
+    assert rows[-1][3] == "pending_exit"
+    assert handoff.monitor_payload_sha256 == _red_payload_hash(json.loads(rows[0][4]))
+    assert persist_red_exit_handoff(conn, position, exit_intent=intent,
+                                    attestation=a, attempt_id="attempt-1") == handoff
+    b2 = RiskAttestation(RiskLevel.GREEN, "b2-clock", "2026-08-24T00:00:00.1+00:00", 2)
+    assert release_red_handoff_after_b2(conn, position, handoff, b2)
+    assert release_red_handoff_after_b2(conn, position, handoff, b2)
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='EXIT_RETRY_RELEASED'").fetchone()[0] == 1
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id=?", (position.trade_id,)).fetchone()[0] == "active"
+
+
+def test_red_handoff_live_conn_none_fails_closed():
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    position = _make_position(trade_id="red-no-conn", state="holding", env="live")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    assert persist_red_exit_handoff(
+        None, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "a", "t", 1), attempt_id="attempt",
+    ) is None
+
+
+def test_red_handoff_atomic_failure_leaves_no_events(monkeypatch):
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-rollback")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    monkeypatch.setattr(
+        "src.state.db.append_many_and_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rollback")),
+    )
+    assert persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "a", "t", 1), attempt_id="attempt",
+    ) is None
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+
+
+def test_red_handoff_has_no_pending_b2_identity():
+    from src.execution.exit_lifecycle import PersistedRedExitHandoff
+
+    handoff = PersistedRedExitHandoff(
+        position_id="p", token_id="t", shares="1", decision_id="d", attempt_id="a",
+        monitor_event_id="m", monitor_payload_sha256="0" * 64,
+        exit_intent_event_id="i", exit_intent_payload_sha256="1" * 64,
+        attestation_id="A", phase_before="active", causal_hash="2" * 64,
+    )
+    assert "submit_attestation_id" not in handoff.as_payload()
+
+
+def test_red_handoff_binds_one_current_monitor_snapshot_on_both_events():
+    from src.execution.exit_lifecycle import MonitorSnapshot, build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-snapshot-binding")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.31, best_ask=0.32,
+        fresh_prob=0.33, fresh_prob_is_fresh=True,
+    ))
+    snapshot = MonitorSnapshot(
+        position_id=position.trade_id,
+        decision_id=intent.decision_id,
+        q=0.33,
+        book_bid=0.31,
+        book_ask=0.32,
+        observed_at="2026-08-24T00:00:00.200000+00:00",
+    )
+    handoff = persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "snapshot-A", snapshot.observed_at, 20),
+        attempt_id="snapshot-attempt", monitor_snapshot=snapshot,
+    )
+    assert handoff is not None
+    rows = conn.execute(
+        "SELECT event_type,payload_json FROM position_events WHERE position_id=? ORDER BY sequence_no",
+        (position.trade_id,),
+    ).fetchall()
+    payloads = [json.loads(row[1]) for row in rows]
+    assert payloads[0]["red_monitor_snapshot"] == snapshot.as_payload()
+    assert payloads[1]["red_monitor_snapshot"] == snapshot.as_payload()
+    assert payloads[0]["monitor_risk_attestation"] == payloads[1]["monitor_risk_attestation"]
+
+
+def test_red_recovery_rejects_later_superseding_event_without_latest_selection():
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff, recover_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-superseded")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    handoff = persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "supersede-A", "2026-08-24T00:00:00+00:00", 21),
+        attempt_id="supersede-attempt",
+    )
+    assert handoff is not None
+    conn.execute(
+        "INSERT INTO position_events (event_id,position_id,event_version,sequence_no,event_type,occurred_at,"
+        "phase_before,phase_after,strategy_key,decision_id,snapshot_id,order_id,command_id,caused_by,"
+        "idempotency_key,venue_status,source_module,env,payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("superseding-event", position.trade_id, 1, 3, "MONITOR_REFRESHED",
+         "2026-08-24T00:00:01+00:00", "pending_exit", "pending_exit", "Center Bin Buy",
+         intent.decision_id, None, None, None, handoff.exit_intent_event_id,
+         "superseding-event", "monitor_refreshed", "tests", "live", "{}"),
+    )
+    conn.commit()
+    assert recover_red_exit_handoff(conn, position) is None
+
+
+def test_red_handoff_writer_lease_failure_is_fail_closed_and_empty(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-lease-failure")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_red_trade_writer_lease",
+        lambda _conn: (_ for _ in ()).throw(RuntimeError("lease unavailable")),
+    )
+    assert persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "lease-A", "2026-08-24T00:00:00+00:00", 22),
+        attempt_id="lease-attempt",
+    ) is None
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+
+
+def test_red_executor_order_has_b2_before_command_and_sdk_and_only_one_read():
+    source = Path(ROOT / "src/execution/executor.py").read_text()
+    b2 = source.index("b2 = read_risk_attestation()")
+    command = source.index("insert_command(", b2)
+    sdk = source.index("client.place_limit_order(", b2)
+    assert b2 < command < sdk
+    assert source.count("b2 = read_risk_attestation()") == 1
+
+
+def test_red_cycle_persists_handoff_before_ordinary_monitor_writer_and_executor():
+    source = Path(ROOT / "src/engine/cycle_runtime.py").read_text()
+    red_block = source.index("if red_force_exit:")
+    handoff = source.index("persist_red_exit_handoff(", red_block)
+    ordinary = source.index("_emit_monitor_refreshed_canonical_if_available(", handoff)
+    execute = source.index("outcome = execute_exit(", handoff)
+    assert handoff < ordinary < execute
+
+
+def test_live_red_execute_requires_cycle_handoff_without_reading_a_or_minting_attempt(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="red-no-synthetic-fallback", state="holding", env="live",
+        token_id="red-yes", no_token_id="red-no", shares=2.0, chain_shares=2.0,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle, "persist_red_exit_handoff",
+        lambda *args, **kwargs: pytest.fail("execute_exit must not write RED handoff"),
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.read_risk_attestation",
+        lambda **kwargs: pytest.fail("execute_exit must not reread A"),
+    )
+    result = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+            fresh_prob_is_fresh=True, current_market_price=0.4,
+            current_market_price_is_fresh=True, best_bid=0.4,
+            best_ask=0.41, hours_to_settlement=10.0,
+            position_state="active",
+        ), conn=None,
+    )
+    assert result == "exit_deferred: red_handoff_required"
+
+
+def test_red_handoff_does_not_commit_callers_unrelated_transaction():
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-borrowed-transaction")
+    conn.execute("CREATE TABLE caller_unrelated (value TEXT)")
+    conn.execute("INSERT INTO caller_unrelated VALUES ('uncommitted')")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    assert persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "borrowed-A", "2026-08-24T00:00:00+00:00", 23),
+        attempt_id="borrowed-attempt",
+    ) is None
+    assert conn.in_transaction is True
+    assert conn.execute("SELECT value FROM caller_unrelated").fetchone()[0] == "uncommitted"
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.rollback()
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+
+
+def test_red_handoff_canonicalizes_decimal_shares_8_and_8_0():
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-decimal-shares")
+    conn.execute("UPDATE position_current SET shares=8.0,chain_shares=8.0 WHERE position_id=?", (position.trade_id,))
+    conn.commit()
+    position.shares = 8.0
+    position.shares_filled = 8.0
+    position.chain_shares = 8.0
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    handoff = persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "decimal-A", "2026-08-24T00:00:00+00:00", 24),
+        attempt_id="decimal-attempt",
+    )
+    assert handoff is not None
+    assert handoff.shares == "8"
+
+
+def test_red_release_writer_lease_failure_is_typed_and_does_not_append(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_lifecycle import build_exit_intent, persist_red_exit_handoff, release_red_handoff_after_b2
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-release-lease-failure")
+    intent = build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    handoff = persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "release-A", "2026-08-24T00:00:00+00:00", 25),
+        attempt_id="release-attempt",
+    )
+    assert handoff is not None
+    b2 = RiskAttestation(RiskLevel.GREEN, "release-B2", "2026-08-24T00:00:01+00:00", 26)
+    monkeypatch.setattr(
+        exit_lifecycle, "_red_trade_writer_lease",
+        lambda _conn: (_ for _ in ()).throw(RuntimeError("release lease unavailable")),
+    )
+    assert release_red_handoff_after_b2(conn, position, handoff, b2) is False
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='EXIT_RETRY_RELEASED'").fetchone()[0] == 0
+
+
+def _configure_real_red_executor_call_chain(monkeypatch, conn, *, b2, reader=None, sdk_exception=None, observed_envelopes=None):
+    """Keep lifecycle and executor real while isolating only external/pure gates."""
+    from src.execution import executor, exit_lifecycle
+    from src.riskguard import riskguard
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    sdk_calls = []
+
+    class FakeClient:
+        def __init__(self):
+            pass
+
+        def bind_submission_envelope(self, _envelope):
+            if observed_envelopes is not None:
+                observed_envelopes.append(_envelope)
+            return None
+
+        def bind_signed_submission_identity_persister(self, _persister):
+            return None
+
+        def place_limit_order(self, **kwargs):
+            row = dict(kwargs)
+            row["submit_requested_rows"] = conn.execute(
+                "SELECT COUNT(*) FROM venue_command_events WHERE event_type='SUBMIT_REQUESTED'"
+            ).fetchone()[0]
+            sdk_calls.append(row)
+            if sdk_exception is not None:
+                raise sdk_exception
+            return {"orderID": "integration-sdk-order", "status": "LIVE"}
+
+    class FakeExitMutex:
+        def __init__(self, _conn):
+            pass
+
+        def acquire(self, *_args):
+            return True
+
+    monkeypatch.setattr(executor, "_exit_snapshot_identity_component", lambda *_args, **_kwargs: {"allowed": True, "reason": "test"})
+    monkeypatch.setattr(executor, "_refresh_exit_collateral_snapshot_for_submit", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(executor, "_persist_exit_collateral_snapshot_for_submit", lambda *_args, **_kwargs: {"component": "collateral", "allowed": True})
+    monkeypatch.setattr(executor, "_assert_collateral_allows_sell", lambda *_args, **_kwargs: {"component": "collateral", "allowed": True})
+    monkeypatch.setattr(executor, "_reserve_collateral_for_sell", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: False)
+    monkeypatch.setattr(executor, "_select_risk_allocator_order_type", lambda *_args, **_kwargs: "FAK")
+    monkeypatch.setattr(executor, "_assert_cutover_allows_submit", lambda *_args, **_kwargs: {"component": "cutover", "allowed": True})
+    monkeypatch.setattr(executor, "_assert_risk_allocator_allows_exit_submit", lambda *_args, **_kwargs: {"component": "allocator", "allowed": True})
+    monkeypatch.setattr(executor, "_assert_heartbeat_allows_submit", lambda *_args, **_kwargs: {"component": "heartbeat", "allowed": True})
+    monkeypatch.setattr(executor, "_assert_ws_gap_allows_submit", lambda *_args, **_kwargs: {"component": "ws_gap", "allowed": True})
+    monkeypatch.setattr(executor, "_marketable_sell_certificate_error", lambda *_args, **_kwargs: None, raising=False)
+    def build_test_envelope(_conn, **kwargs):
+        submit_attestation_id = str(
+            (kwargs.get("red_handoff") or {}).get("submit_attestation_id") or ""
+        )
+        envelope_hash = hashlib.sha256(
+            submit_attestation_id.encode("utf-8")
+        ).hexdigest() if submit_attestation_id else "b" * 64
+        return VenueSubmissionEnvelope(
+            sdk_package="py-clob-client-v2", sdk_version="test", host="https://test.invalid",
+            chain_id=137, funder_address="0x" + "1" * 40,
+            condition_id="red-condition", question_id="red-question",
+            yes_token_id="red-yes", no_token_id="red-no",
+            selected_outcome_token_id=str(kwargs["token_id"]),
+            outcome_label="YES", side=str(kwargs["side"]),
+            price=Decimal(str(kwargs["price"])), size=Decimal(str(kwargs["size"])),
+            order_type=str(kwargs["order_type"]), post_only=bool(kwargs["post_only"]),
+            tick_size=Decimal("0.01"), min_order_size=Decimal("1"), neg_risk=False,
+            fee_details={}, canonical_pre_sign_payload_hash=envelope_hash,
+            signed_order=None, signed_order_hash=None, raw_request_hash=envelope_hash,
+            raw_response_json=None, order_id=None, trade_ids=(), transaction_hashes=(),
+            error_code=None, error_message=None, captured_at=str(kwargs["captured_at"]),
+        )
+    monkeypatch.setattr(executor, "_build_pre_submit_envelope", build_test_envelope)
+    monkeypatch.setattr(
+        executor, "_persist_prebuilt_submit_envelope",
+        lambda db_conn, envelope, *, command_id: insert_submission_envelope(
+            db_conn, envelope, envelope_id=f"pre-submit:{command_id}"
+        ),
+    )
+    monkeypatch.setattr(executor, "ExitMutex", FakeExitMutex, raising=False)
+    monkeypatch.setattr(executor, "_exit_execution_authority_deadline_error", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exit_lifecycle, "_exit_execution_authority_deadline_error", lambda *_args, **_kwargs: None)
+    # This integration test isolates the external risk reader while preserving
+    # the real execute_exit/_execute_live_exit/executor path.  Provenance
+    # validation is covered by the canonical handoff tests above.
+    monkeypatch.setattr(exit_lifecycle, "_red_force_exit_authorized", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(exit_lifecycle, "_canonical_non_executable_dust_hold", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exit_lifecycle, "_active_exit_sell_for_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *_args, **_kwargs: {
+        "executable_snapshot_id": "integration-snapshot",
+        "executable_snapshot_hash": "a" * 64,
+        "executable_snapshot_min_tick_size": "0.01",
+        "executable_snapshot_min_order_size": "1",
+        "executable_snapshot_neg_risk": False,
+        "executable_snapshot_orderbook_top_bid": 0.39,
+        "executable_snapshot_orderbook_top_ask": 0.40,
+        "execution_authority_deadline_utc": "",
+    })
+    monkeypatch.setattr(exit_lifecycle, "_build_protective_sell_execution_authority", lambda **_kwargs: object())
+    monkeypatch.setattr("src.state.venue_command_repo._assert_snapshot_gate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    if reader is None:
+        monkeypatch.setattr(riskguard, "read_risk_attestation", lambda **_kwargs: b2)
+    real_executor = executor.execute_exit_order
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda intent, **kwargs: real_executor(intent, conn=conn, **kwargs),
+    )
+    return sdk_calls
+
+
+def test_real_execute_exit_red_path_commits_command_before_one_sdk_call(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-real-call-chain")
+    intent = exit_lifecycle.build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+        fresh_prob_is_fresh=True, current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+        hours_to_settlement=10.0, position_state="active",
+    ))
+    a = RiskAttestation(RiskLevel.RED, "chain-A", "2026-08-24T00:00:00+00:00", 31)
+    handoff = exit_lifecycle.persist_red_exit_handoff(conn, position, exit_intent=intent, attestation=a, attempt_id="chain-attempt")
+    assert handoff is not None
+    position._red_exit_handoff = handoff
+    b2 = RiskAttestation(RiskLevel.RED, "chain-B2", "2026-08-24T00:00:00+00:00", __import__("time").monotonic_ns())
+    sdk_calls = _configure_real_red_executor_call_chain(monkeypatch, conn, b2=b2)
+    result = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+            fresh_prob_is_fresh=True, current_market_price=0.4,
+            current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+            hours_to_settlement=10.0, position_state="active",
+        ), conn=conn, exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert sdk_calls and len(sdk_calls) == 1, result
+    assert sdk_calls[0]["submit_requested_rows"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT payload_json FROM venue_command_events WHERE event_type='SUBMIT_REQUESTED'"
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row[0])["red_handoff"]["submit_attestation_id"] == "chain-B2"
+    assert result
+    # A replay after the command crossed the side-effect boundary reuses the
+    # persisted command/recovery identity and never blind-resubmits the SDK.
+    replay = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+            fresh_prob_is_fresh=True, current_market_price=0.4,
+            current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+            hours_to_settlement=10.0, position_state="active",
+        ), conn=conn, exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert replay
+    assert len(sdk_calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+
+
+def test_real_cycle_monitor_red_handoff_reaches_real_executor(tmp_path, monkeypatch):
+    """The monitoring cycle's RED branch owns M/I, then calls the real executor."""
+    from src.engine import cycle_runtime
+    from src.engine import monitor_refresh
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.db import init_schema_trade_only
+    from src.state.projection import upsert_position_current
+
+    conn = sqlite3.connect(tmp_path / "red-real-cycle-call-chain.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    position = _make_position(
+        trade_id="red-real-cycle-call-chain", token_id="red-yes", no_token_id="red-no",
+        condition_id="red-condition", market_id="red-market", state="holding",
+        chain_state="synced", shares=2.0, chain_shares=2.0,
+        env="live", strategy_key="Center Bin Buy", entered_at="2026-08-24T00:00:00+00:00",
+    )
+    projection = build_position_current_projection(position)
+    projection["phase"] = "active"
+    upsert_position_current(conn, projection)
+    conn.commit()
+    position._zeus_held_monitor_full_depth_action_authority = True
+    position._held_monitor_min_order_size = 1
+    a = RiskAttestation(RiskLevel.RED, "cycle-A", "2026-07-02T18:00:00+00:00", 41)
+    b2 = RiskAttestation(RiskLevel.RED, "cycle-B2", "2026-07-02T18:00:00+00:00", time.monotonic_ns())
+    reads = iter((a, b2))
+    def reader(**_kwargs):
+        return next(reads)
+    monkeypatch.setattr(riskguard, "read_risk_attestation", reader)
+    observed_envelopes = []
+    sdk_calls = _configure_real_red_executor_call_chain(
+        monkeypatch, conn, b2=b2, reader=reader, observed_envelopes=observed_envelopes,
+    )
+    monkeypatch.setattr(cycle_runtime, "_monitoring_phase_positions", lambda *_args, **_kwargs: [position])
+    monkeypatch.setattr(cycle_runtime, "_prefetch_held_replacement_artifact_hwm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cycle_runtime, "_day0_hard_fact_position_eligible", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cycle_runtime, "_entry_selection_guard_exit_decision", lambda **_kwargs: None)
+    monkeypatch.setattr(cycle_runtime, "_apply_family_monitor_overlay", lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]))
+    monkeypatch.setattr(cycle_runtime, "_exit_evidence_gate_allows_statistical_exit", lambda **_kwargs: (True, None))
+    monkeypatch.setattr(cycle_runtime, "_release_monitor_write_lock_boundary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cycle_runtime, "_emit_portfolio_rotation_evaluation_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cycle_runtime, "_fresh_local_held_monitor_orderbooks", lambda *_args, **_kwargs: {
+        position.token_id: {"asset_id": position.token_id, "bids": [{"price": "0.39", "size": "2"}], "asks": [{"price": "0.40", "size": "2"}]}
+    })
+    monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda *_args, **_kwargs: None)
+    def refresh_cycle_position(*_args, **_kwargs):
+        context = _monitor_test_edge_context(position)
+        context.divergence_score = 0.0
+        context.market_velocity_1h = 0.0
+        return context
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh_cycle_position)
+    monkeypatch.setattr(Position, "evaluate_exit", lambda *_args, **_kwargs: ExitDecision(
+        True, "RED_FORCE_EXIT", urgency="immediate", trigger="RED_FORCE_EXIT",
+        applied_validations=["red_force_exit", "dt2_red_force_exit_sweep_actuated"],
+    ))
+    monkeypatch.setattr(cycle_runtime, "_emit_monitor_refreshed_canonical_if_available", lambda *_args, **_kwargs: pytest.fail("ordinary monitor writer ran before RED handoff"))
+    real_execute = exit_lifecycle.execute_exit
+    execute_calls = []
+    crashed = [False]
+    def execute_with_crash(*args, **kwargs):
+        execute_calls.append(kwargs.get("exit_intent"))
+        if not crashed[0]:
+            crashed[0] = True
+            raise RuntimeError("crash-after-red-handoff-commit")
+        return real_execute(*args, **kwargs)
+    monkeypatch.setattr(exit_lifecycle, "execute_exit", execute_with_crash)
+    summary = {"monitors": 0, "exits": 0}
+    clob = SimpleNamespace(get_order_status=lambda _order_id: {"status": "LIVE"}, cancel_order=lambda _order_id: None)
+    crash_deps = _monitor_test_deps("red-real-cycle-crash")
+    def raise_crash(*_args, **_kwargs):
+        raise RuntimeError("crash-after-red-handoff-commit")
+    monkeypatch.setattr(crash_deps.logger, "error", raise_crash)
+    with pytest.raises(RuntimeError, match="crash-after-red-handoff-commit"):
+        cycle_runtime.execute_monitoring_phase(
+            conn, clob, _make_portfolio(position), _monitor_test_artifact(),
+            _monitor_test_tracker(), summary, deps=crash_deps,
+            run_exit_preflight=False, held_position_monitor_budget_seconds=20.0,
+            current_riskguard_red=True,
+        )
+    rows = conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id=? ORDER BY sequence_no",
+        (position.trade_id,),
+    ).fetchall()
+    assert [row[0] for row in rows[:2]] == ["MONITOR_REFRESHED", "EXIT_INTENT"]
+    assert len(execute_calls) == 1
+    assert sdk_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 0
+    assert len(observed_envelopes) == 0
+    recovered_before = exit_lifecycle.recover_red_exit_handoff(conn, position)
+    assert recovered_before is not None
+    attempt_before = recovered_before.attempt_id
+    event_ids_before = (recovered_before.monitor_event_id, recovered_before.exit_intent_event_id)
+
+    # Rerunning after the crash recovers the exact committed handoff/attempt;
+    # only then does B2 authorize one command and one SDK call.
+    cycle_runtime.execute_monitoring_phase(
+        conn, clob, _make_portfolio(position), _monitor_test_artifact(),
+        _monitor_test_tracker(), {"monitors": 0, "exits": 0},
+        deps=_monitor_test_deps("red-real-cycle-recovery"), run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0, current_riskguard_red=True,
+    )
+    rows_after_recovery = conn.execute(
+        "SELECT event_type, payload_json FROM position_events WHERE position_id=? ORDER BY sequence_no",
+        (position.trade_id,),
+    ).fetchall()
+    assert [row[0] for row in rows_after_recovery[:2]] == ["MONITOR_REFRESHED", "EXIT_INTENT"]
+    assert len(rows_after_recovery) >= 2
+    assert len(execute_calls) == 2
+    recovered_after = getattr(position, "_red_exit_handoff", None)
+    assert recovered_after is not None
+    assert recovered_after.attempt_id == attempt_before
+    assert (recovered_after.monitor_event_id, recovered_after.exit_intent_event_id) == event_ids_before
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? AND event_type IN ('MONITOR_REFRESHED','EXIT_INTENT')",
+        (position.trade_id,),
+    ).fetchone()[0] == 2
+    assert len(observed_envelopes) == 1
+    assert sdk_calls and len(sdk_calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+    assert json.loads(rows_after_recovery[0][1])["monitor_risk_attestation"]["attestation_id"] == "cycle-A"
+    assert json.loads(rows_after_recovery[1][1])["monitor_risk_attestation"]["attestation_id"] == "cycle-A"
+    assert json.loads(conn.execute(
+        "SELECT payload_json FROM venue_command_events WHERE event_type='SUBMIT_REQUESTED'"
+    ).fetchone()[0])["red_handoff"]["submit_attestation_id"] == "cycle-B2"
+    envelope = observed_envelopes[0]
+    assert envelope.raw_request_hash == hashlib.sha256(b"cycle-B2").hexdigest()
+
+
+def test_real_execute_exit_b2_nonred_releases_once_with_zero_command_sdk_cancel(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-real-nonred-call-chain")
+    intent = exit_lifecycle.build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+        fresh_prob_is_fresh=True, current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+        hours_to_settlement=10.0, position_state="active",
+    ))
+    handoff = exit_lifecycle.persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "nonred-A", "2026-08-24T00:00:00+00:00", 32),
+        attempt_id="nonred-attempt",
+    )
+    assert handoff is not None
+    position._red_exit_handoff = handoff
+    b2 = RiskAttestation(RiskLevel.GREEN, "nonred-B2", "2026-08-24T00:00:00+00:00", 33)
+    b2_reads = []
+    def read_same_nonred(**_kwargs):
+        b2_reads.append(b2.attestation_id)
+        return b2
+    monkeypatch.setattr(riskguard, "read_risk_attestation", read_same_nonred)
+    sdk_calls = _configure_real_red_executor_call_chain(monkeypatch, conn, b2=b2, reader=read_same_nonred)
+    cancel_calls = []
+    monkeypatch.setattr(position, "last_exit_order_id", "")
+    result = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+            fresh_prob_is_fresh=True, current_market_price=0.4,
+            current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+            hours_to_settlement=10.0, position_state="active",
+        ), conn=conn, clob=SimpleNamespace(cancel_order=lambda order_id: cancel_calls.append(order_id)),
+        exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert result == "exit_redecision_required: red_force_exit_cleared"
+    assert sdk_calls == []
+    assert cancel_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='EXIT_RETRY_RELEASED'").fetchone()[0] == 1
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id=?", (position.trade_id,)).fetchone()[0] == "active"
+    second = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+            fresh_prob_is_fresh=True, current_market_price=0.4,
+            current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+            hours_to_settlement=10.0, position_state="active",
+        ), conn=conn,
+        clob=SimpleNamespace(cancel_order=lambda order_id: cancel_calls.append(order_id)),
+        exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert second == "exit_redecision_required: red_force_exit_cleared"
+    assert b2_reads == ["nonred-B2", "nonred-B2"]
+    assert sdk_calls == []
+    assert cancel_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='EXIT_RETRY_RELEASED'").fetchone()[0] == 1
+
+
+def test_real_execute_unknown_side_effect_recovery_never_blind_resubmits(monkeypatch):
+    """A post-SDK timeout leaves a durable fence that the next caller reuses."""
+    from src.execution import exit_lifecycle
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-real-unknown-side-effect")
+    intent = exit_lifecycle.build_exit_intent(position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+        fresh_prob_is_fresh=True, current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+        hours_to_settlement=10.0, position_state="active",
+    ))
+    handoff = exit_lifecycle.persist_red_exit_handoff(
+        conn, position, exit_intent=intent,
+        attestation=RiskAttestation(RiskLevel.RED, "unknown-A", "2026-08-24T00:00:00+00:00", 51),
+        attempt_id="unknown-attempt",
+    )
+    assert handoff is not None
+    position._red_exit_handoff = handoff
+    b2 = RiskAttestation(RiskLevel.RED, "unknown-B2", "2026-08-24T00:00:00+00:00", time.monotonic_ns())
+    sdk_calls = _configure_real_red_executor_call_chain(
+        monkeypatch, conn, b2=b2, sdk_exception=RuntimeError("SDK timeout after POST"),
+    )
+    context = ExitContext(
+        exit_reason="RED_FORCE_EXIT", fresh_prob=0.2,
+        fresh_prob_is_fresh=True, current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.39, best_ask=0.40,
+        hours_to_settlement=10.0, position_state="active",
+    )
+    clob = SimpleNamespace(get_order_status=lambda _order_id: {"status": "UNKNOWN"}, cancel_order=lambda _order_id: None)
+    first = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position, context, conn=conn, clob=clob,
+        exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert sdk_calls and len(sdk_calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_command_events WHERE event_type='SUBMIT_REQUESTED'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_command_events WHERE event_type='SUBMIT_TIMEOUT_UNKNOWN'").fetchone()[0] == 1
+    assert first.startswith("sell_placed:")
+    second = exit_lifecycle.execute_exit(
+        _make_portfolio(position), position, context, conn=conn, clob=clob,
+        exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+    assert "exit_snapshot_identity" in second.lower()
+    assert len(sdk_calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM venue_command_events WHERE event_type='SUBMIT_REQUESTED'").fetchone()[0] == 1
+
+
+def test_red_file_backed_real_coordinator_contention_leaves_zero_partial_writes(tmp_path, monkeypatch):
+    """A real coordinator lease rejects a second canonical writer atomically."""
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+    from src.state import db as db_module
+    from src.state.db import init_schema_trade_only
+    from src.state.projection import upsert_position_current
+    from src.state.write_coordinator import DBIdentity, WriteClass, WriteCoordinator, WritePriority
+
+    db_path = tmp_path / "red-coordinator-contention.db"
+    conn1 = sqlite3.connect(db_path)
+    conn2 = sqlite3.connect(db_path)
+    conn1.row_factory = sqlite3.Row
+    conn2.row_factory = sqlite3.Row
+    init_schema_trade_only(conn1)
+
+    def add_position(trade_id):
+        pos = _make_position(
+            trade_id=trade_id, token_id=f"{trade_id}-yes", no_token_id=f"{trade_id}-no",
+            condition_id=f"{trade_id}-condition", market_id=f"{trade_id}-market",
+            state="holding", chain_state="synced", shares=2.0, chain_shares=2.0,
+            strategy_key="Center Bin Buy",
+            entered_at="2026-08-24T00:00:00+00:00",
+        )
+        projection = build_position_current_projection(pos)
+        projection["phase"] = "active"
+        upsert_position_current(conn1, projection)
+        return pos
+
+    first_position = add_position("red-lease-first")
+    second_position = add_position("red-lease-second")
+    conn1.commit()
+    first_intent = exit_lifecycle.build_exit_intent(first_position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    second_intent = exit_lifecycle.build_exit_intent(second_position, ExitContext(
+        exit_reason="RED_FORCE_EXIT", current_market_price=0.4,
+        current_market_price_is_fresh=True, best_bid=0.4,
+    ))
+    first_handoff = exit_lifecycle.persist_red_exit_handoff(
+        conn1, first_position, exit_intent=first_intent,
+        attestation=RiskAttestation(RiskLevel.RED, "lease-first-A", "2026-08-24T00:00:00+00:00", 61),
+        attempt_id="lease-first-attempt",
+    )
+    assert first_handoff is not None
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        "src.state.write_coordinator.default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    with coordinator.lease(
+        (DBIdentity.TRADE,), owner="test-hold-canonical-red-lease",
+        write_class=WriteClass.LIVE, priority=WritePriority.MONITOR,
+        deadline_ms=1000, max_hold_ms=2000,
+    ):
+        assert exit_lifecycle.persist_red_exit_handoff(
+            conn2, second_position, exit_intent=second_intent,
+            attestation=RiskAttestation(RiskLevel.RED, "lease-second-A", "2026-08-24T00:00:00+00:00", 62),
+            attempt_id="lease-second-attempt",
+        ) is None
+        assert exit_lifecycle.release_red_handoff_after_b2(
+            conn2, first_position, first_handoff,
+            RiskAttestation(RiskLevel.GREEN, "lease-first-B2", "2026-08-24T00:00:01+00:00", 63),
+        ) is False
+    assert conn2.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (second_position.trade_id,),
+    ).fetchone()[0] == 0
+    assert conn2.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? AND event_type='EXIT_RETRY_RELEASED'",
+        (first_position.trade_id,),
+    ).fetchone()[0] == 0
+    conn1.close()
+    conn2.close()

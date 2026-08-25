@@ -4471,6 +4471,7 @@ def _build_pre_submit_envelope(
     post_only: bool,
     captured_at: str,
     intent_kind: str = "ENTRY",
+    red_handoff: Mapping[str, object] | None = None,
 ):
     """Build the U2 venue-submission envelope before SDK contact.
 
@@ -4515,6 +4516,8 @@ def _build_pre_submit_envelope(
         "condition_id": snapshot.condition_id,
         "question_id": snapshot.question_id,
     }
+    if red_handoff is not None:
+        canonical_payload["red_handoff"] = dict(red_handoff)
     canonical_json = json.dumps(
         canonical_payload,
         sort_keys=True,
@@ -5162,6 +5165,7 @@ class OrderResult:
     venue_call_started: bool = False
     venue_ack_received: bool = False
     submitted_order_type: Optional[str] = None
+    red_b2_payload: Mapping[str, object] | None = None
 
 
 def _with_venue_boundary(
@@ -5201,6 +5205,7 @@ class ExitOrderIntent:
     marketable_sell_certificate_identity: str = ""
     execution_authority_deadline_utc: str = ""
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None
+    red_handoff: Mapping[str, object] | None = None
 
 
 def marketable_sell_certificate_identity(
@@ -6411,6 +6416,7 @@ def create_exit_order_intent(
     protective_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
+    red_handoff: Mapping[str, object] | None = None,
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
 
@@ -6440,6 +6446,7 @@ def create_exit_order_intent(
         protective_sell_execution_authority=protective_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
         global_sell_receipt_closure=global_sell_receipt_closure,
+        red_handoff=(dict(red_handoff) if red_handoff is not None else None),
     )
 
 
@@ -6487,6 +6494,8 @@ def place_sell_order(
     shares: float,
     current_price: float,
     best_bid: Optional[float] = None,
+    *,
+    red_handoff: Mapping[str, object] | None = None,
 ) -> dict:
     """Legacy compatibility wrapper for the executor-level exit-order path."""
 
@@ -6497,6 +6506,7 @@ def place_sell_order(
             shares=shares,
             current_price=current_price,
             best_bid=best_bid,
+            red_handoff=red_handoff,
         )
     )
     if result.status == "rejected":
@@ -7013,6 +7023,35 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
         from src.state.write_coordinator import WriteLeaseTimeout
+        prepared_client = None
+        if intent.red_handoff is not None:
+            try:
+                prepared_client = PolymarketClient()
+            except Exception as exc:  # noqa: BLE001 - no B2 without client.
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason=f"RED_CLIENT_INIT_FAILED:{type(exc).__name__}",
+                    order_role="exit",
+                )
+
+        # Deadline is a pure/read gate and must complete before B2.
+        authority_deadline_error = _exit_execution_authority_deadline_error(
+            intent,
+            conn=conn,
+        )
+        if authority_deadline_error is not None:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=authority_deadline_error,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
 
         try:
             with _canonical_trade_write_lease(
@@ -7052,6 +7091,35 @@ def execute_exit_order(
                     shares,
                     conn=conn,
                 )
+                b2_payload = None
+                # B2 is the final authority read.  Everything above is pure
+                # validation, client/collateral preparation, or lease setup;
+                # everything below is only durable command persistence and the
+                # SDK boundary.  A non-RED B2 rolls back before any command or
+                # cancellation exists.
+                if intent.red_handoff is not None:
+                    from src.riskguard.riskguard import read_risk_attestation
+
+                    b2 = read_risk_attestation()
+                    b2_payload = b2.as_payload()
+                    if not b2.observed_red:
+                        conn.rollback()
+                        return OrderResult(
+                            trade_id=intent.trade_id,
+                            status="rejected",
+                            reason="RED_B2_NON_RED",
+                            order_role="exit",
+                            red_b2_payload=b2_payload,
+                        )
+                    red_handoff = dict(intent.red_handoff)
+                    red_handoff.update({
+                        "submit_attestation_id": b2.attestation_id,
+                        "submit_level": b2.level.value,
+                        "submit_read_at": b2.read_at,
+                        "submit_monotonic_ns": b2.monotonic_ns,
+                        "submit_outcome": b2.outcome,
+                    })
+                    intent = replace(intent, red_handoff=red_handoff)
                 pre_submit_envelope = _build_pre_submit_envelope(
                     conn,
                     command_id=command_id,
@@ -7064,6 +7132,7 @@ def execute_exit_order(
                     post_only=order_type in {"GTC", "GTD"},
                     captured_at=now_str,
                     intent_kind=IntentKind.EXIT.value,
+                    red_handoff=intent.red_handoff,
                 )
                 if intent.global_sell_receipt_closure is not None:
                     # The closure must be validated in insert_command's own
@@ -7129,6 +7198,7 @@ def execute_exit_order(
                     occurred_at=now_str,
                     payload={
                         "order_type": order_type,
+                        "red_handoff": intent.red_handoff,
                         "execution_capability": _build_execution_capability(
                             action="EXIT",
                             command_id=command_id,
@@ -7349,7 +7419,7 @@ def execute_exit_order(
         # submit phase — SDK call (INV-30: row already SUBMITTING)
         # -----------------------------------------------------------------------
         try:
-            client = PolymarketClient()
+            client = prepared_client or PolymarketClient()
         except Exception as exc:
             # Constructor / credential / adapter setup failures happen before
             # any venue submit side effect. They are safe terminal rejections,
@@ -7394,39 +7464,38 @@ def execute_exit_order(
                 conn,
                 command_id=command_id,
             )
-        authority_deadline_error = _exit_execution_authority_deadline_error(
-            intent,
-            conn=conn,
-        )
-        if authority_deadline_error is not None:
-            rej_time = datetime.now(timezone.utc).isoformat()
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type="SUBMIT_REJECTED",
-                occurred_at=rej_time,
-                payload={
-                    "reason": authority_deadline_error,
-                    "side_effect_boundary_crossed": False,
-                    "sdk_submit_attempted": False,
-                    "execution_authority_deadline_utc": (
-                        intent.execution_authority_deadline_utc
-                    ),
-                },
-            )
-            conn.commit()
-            return OrderResult(
-                trade_id=intent.trade_id,
-                status="rejected",
-                reason=authority_deadline_error,
-                submitted_price=limit_price,
-                shares=shares,
-                order_role="exit",
-                intent_id=intent.intent_id,
-                idempotency_key=idem.value,
-                command_id=command_id,
-                command_state="REJECTED",
-            )
+        if isinstance(intent.red_handoff, Mapping):
+            try:
+                b2_clock = int(intent.red_handoff.get("submit_monotonic_ns") or 0)
+                b2_age_ms = (time.monotonic_ns() - b2_clock) / 1_000_000
+            except (TypeError, ValueError):
+                b2_age_ms = float("inf")
+            if b2_clock <= 0 or b2_age_ms < 0 or b2_age_ms > 1000:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                    payload={
+                        "reason": "RED_B2_EXPIRED",
+                        "b2_age_ms": b2_age_ms,
+                        "sdk_submit_attempted": False,
+                        "red_handoff": dict(intent.red_handoff),
+                    },
+                )
+                conn.commit()
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason="RED_B2_EXPIRED",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
         # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
         _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:

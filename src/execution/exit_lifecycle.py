@@ -2316,6 +2316,130 @@ class ExitIntent:
     hours_to_settlement: float | None = None
     position_state: str = ""
     day0_active: bool | None = None
+    red_handoff: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class MonitorSnapshot:
+    """The one monitor frame from which RED M and I are derived."""
+
+    position_id: str
+    decision_id: str
+    q: object
+    book_bid: object
+    book_ask: object
+    observed_at: str
+
+    def __post_init__(self) -> None:
+        if not all(str(value or "").strip() for value in (
+            self.position_id, self.decision_id, self.observed_at,
+        )):
+            raise ValueError("monitor snapshot identity incomplete")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "position_id": self.position_id,
+            "decision_id": self.decision_id,
+            "q": self.q,
+            "book_bid": self.book_bid,
+            "book_ask": self.book_ask,
+            "observed_at": self.observed_at,
+        }
+
+
+@dataclass(frozen=True)
+class PersistedRedExitHandoff:
+    """Exact causal identity for one atomic MONITOR_REFRESHED + EXIT_INTENT."""
+
+    position_id: str
+    token_id: str
+    shares: str
+    decision_id: str
+    attempt_id: str
+    monitor_event_id: str
+    monitor_payload_sha256: str
+    exit_intent_event_id: str
+    exit_intent_payload_sha256: str
+    attestation_id: str
+    phase_before: str
+    causal_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shares", _red_canonical_shares(self.shares))
+        if not all(
+            str(v or "").strip()
+            for v in (
+                self.position_id,
+                self.token_id,
+                self.shares,
+                self.decision_id,
+                self.attempt_id,
+                self.monitor_event_id,
+                self.exit_intent_event_id,
+                self.attestation_id,
+                self.phase_before,
+                self.causal_hash,
+            )
+        ):
+            raise ValueError("RED handoff identity incomplete")
+        if self.phase_before not in {"active", "day0_window"}:
+            raise ValueError("RED handoff phase invalid")
+        if any(not re.fullmatch(r"[0-9a-f]{64}", h) for h in (
+            self.monitor_payload_sha256,
+            self.exit_intent_payload_sha256,
+            self.causal_hash,
+        )):
+            raise ValueError("RED handoff hash invalid")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "position_id": self.position_id,
+            "token_id": self.token_id,
+            "shares": self.shares,
+            "decision_id": self.decision_id,
+            "attempt_id": self.attempt_id,
+            "monitor_event_id": self.monitor_event_id,
+            "monitor_payload_sha256": self.monitor_payload_sha256,
+            "exit_intent_event_id": self.exit_intent_event_id,
+            "exit_intent_payload_sha256": self.exit_intent_payload_sha256,
+            "attestation_id": self.attestation_id,
+            "phase_before": self.phase_before,
+            "causal_hash": self.causal_hash,
+        }
+
+
+@dataclass(frozen=True)
+class MonitorRiskAuthority:
+    """A plus the later B2 identity carried through the execution boundary."""
+
+    position_id: str
+    attempt_id: str
+    attestation_id: str
+    level: str
+    read_at: str
+    submit_attestation_id: str = ""
+    submit_level: str = ""
+    submit_read_at: str = ""
+    submit_monotonic_ns: int = 0
+    submit_outcome: str = ""
+
+    @property
+    def observed_red(self) -> bool:
+        return self.level.upper() == "RED"
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "position_id": self.position_id,
+            "attempt_id": self.attempt_id,
+            "attestation_id": self.attestation_id,
+            "level": self.level.upper(),
+            "read_at": self.read_at,
+            "submit_attestation_id": self.submit_attestation_id,
+            "submit_level": self.submit_level.upper(),
+            "submit_read_at": self.submit_read_at,
+            "submit_monotonic_ns": self.submit_monotonic_ns,
+            "submit_outcome": self.submit_outcome,
+        }
 
 
 @dataclass(frozen=True)
@@ -3069,6 +3193,7 @@ def place_sell_order(
     protective_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
+    red_handoff: Mapping[str, object] | None = None,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -3099,6 +3224,7 @@ def place_sell_order(
         protective_sell_execution_authority=protective_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
         global_sell_receipt_closure=global_sell_receipt_closure,
+        red_handoff=red_handoff,
     )
     deadline_error = _exit_execution_authority_deadline_error(intent)
     if deadline_error is not None:
@@ -4397,7 +4523,12 @@ def _dual_write_canonical_economic_close_if_available(
     return True
 
 
-def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitIntent:
+def build_exit_intent(
+    position: Position,
+    exit_context: ExitContext,
+    *,
+    red_handoff: Mapping[str, object] | None = None,
+) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
     probability_receipt = (
@@ -4440,6 +4571,7 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         hours_to_settlement=exit_context.hours_to_settlement,
         position_state=exit_context.position_state,
         day0_active=exit_context.day0_active,
+        red_handoff=(dict(red_handoff) if red_handoff is not None else None),
     )
 
 
@@ -5119,6 +5251,7 @@ def _red_force_exit_authorized(
     exit_context: ExitContext,
     *,
     conn: sqlite3.Connection | None = None,
+    red_handoff: Mapping[str, object] | None = None,
 ) -> bool:
     """Authorize the emergency exemption only from current RED plus provenance.
 
@@ -5136,6 +5269,22 @@ def _red_force_exit_authorized(
         return False
     if not _red_runtime_position_open(conn, position, require_canonical=False):
         return False
+    if red_handoff is not None:
+        if conn is None:
+            return False
+        recovered = recover_red_exit_handoff(conn, position)
+        return bool(
+            recovered is not None
+            and recovered.causal_hash == str(red_handoff.get("causal_hash") or "")
+            and (
+            str(red_handoff.get("position_id") or "") == str(getattr(position, "trade_id", "") or "")
+            and str(red_handoff.get("token_id") or "") == str(_asset_id_for_position(position) or "")
+            and str(red_handoff.get("phase_before") or "") in {"active", "day0_window"}
+            and str(red_handoff.get("attestation_id") or "")
+            and str(red_handoff.get("monitor_event_id") or "")
+            and str(red_handoff.get("exit_intent_event_id") or "")
+            )
+        )
     try:
         from src.riskguard.risk_level import RiskLevel
         from src.riskguard.riskguard import get_current_level
@@ -6174,6 +6323,564 @@ def _record_exit_intent_before_execution_gates(
     return True
 
 
+def _red_payload_hash(payload: Mapping[str, object]) -> str:
+    """Hash the canonical payload basis, excluding its non-recursive handoff."""
+    basis = dict(payload)
+    basis.pop("red_exit_handoff", None)
+    return hashlib.sha256(
+        json.dumps(basis, default=str, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+_RED_HANDOFF_LEASE_DEADLINE_MS = 250
+_RED_HANDOFF_LEASE_MAX_HOLD_MS = 500
+
+
+def _red_trade_writer_lease(conn: sqlite3.Connection):
+    """Acquire the canonical TRADE lease for the one RED append transaction."""
+    if conn is None:
+        raise RuntimeError("RED_HANDOFF_CANONICAL_CONNECTION_REQUIRED")
+    try:
+        from pathlib import Path
+        from src.state.db import _zeus_trade_db_path
+        rows = [row for row in conn.execute("PRAGMA database_list").fetchall() if str(row[1]) == "main"]
+        if len(rows) != 1:
+            raise RuntimeError("RED_HANDOFF_TRADE_DB_IDENTITY_AMBIGUOUS")
+        raw_path = str(rows[0][2] or "").strip()
+        if not raw_path:
+            return nullcontext()
+        if Path(raw_path).resolve(strict=False) != _zeus_trade_db_path().resolve(strict=False):
+            return nullcontext()
+        from src.state.db_writer_lock import WriteClass
+        from src.state.write_coordinator import DBIdentity, WritePriority, default_runtime_write_coordinator
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner="red_exit_handoff_atomic",
+            write_class=WriteClass.LIVE,
+            priority=WritePriority.MONITOR,
+            deadline_ms=_RED_HANDOFF_LEASE_DEADLINE_MS,
+            max_hold_ms=_RED_HANDOFF_LEASE_MAX_HOLD_MS,
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("RED_HANDOFF_TRADE_DB_IDENTITY_UNAVAILABLE") from exc
+
+
+def _red_monitor_snapshot_from_position(
+    position: Position, exit_intent: ExitIntent, snapshot: MonitorSnapshot | None,
+) -> MonitorSnapshot:
+    if snapshot is not None:
+        return snapshot
+    return MonitorSnapshot(
+        position_id=str(getattr(position, "trade_id", "") or ""),
+        decision_id=str(exit_intent.decision_id or ""),
+        q=getattr(position, "last_monitor_prob", None),
+        book_bid=getattr(position, "last_monitor_best_bid", None),
+        book_ask=getattr(position, "last_monitor_best_ask", None),
+        observed_at=str(getattr(position, "last_monitor_at", "") or _utcnow().isoformat()),
+    )
+
+
+def _red_causal_hash(material: Mapping[str, object]) -> str:
+    basis = {key: material[key] for key in (
+        "position_id", "token_id", "shares", "decision_id", "attempt_id",
+        "monitor_event_id", "monitor_payload_sha256", "exit_intent_event_id",
+        "exit_intent_payload_sha256", "attestation_id", "phase_before",
+    )}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _red_canonical_shares(value: object) -> str:
+    try:
+        decimal = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("RED handoff shares invalid") from None
+    if not decimal.is_finite() or decimal <= 0:
+        raise ValueError("RED handoff shares invalid")
+    return format(decimal.normalize(), "f")
+
+
+def _red_shares_equal(left: object, right: object) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def persist_red_exit_handoff(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    exit_intent: ExitIntent,
+    attestation: object,
+    attempt_id: str,
+    monitor_snapshot: MonitorSnapshot | None = None,
+    _lease_held: bool = False,
+) -> PersistedRedExitHandoff | None:
+    """Atomically append adjacent M + I and project pending_exit.
+
+    The only phase query is ``position_current.phase``.  Existing rows are
+    reconciled by exact event IDs; no latest-event query can select a stale
+    lineage.  The helper is live-only: ``conn=None`` is a hard failure.
+    """
+    if conn is None or not getattr(attestation, "observed_red", False):
+        return None
+    if not _lease_held:
+        try:
+            # Do not retain a caller's unrelated transaction while waiting for
+            # the canonical TRADE lease.  M, I, and the projection are then the
+            # only writes in the transaction below.
+            if conn.in_transaction:
+                return None
+            with _red_trade_writer_lease(conn):
+                return persist_red_exit_handoff(
+                    conn,
+                    position,
+                    exit_intent=exit_intent,
+                    attestation=attestation,
+                    attempt_id=attempt_id,
+                    monitor_snapshot=monitor_snapshot,
+                    _lease_held=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - typed fail-closed boundary.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("RED M/I writer lease failed: %s", exc)
+            return None
+    snapshot = _red_monitor_snapshot_from_position(position, exit_intent, monitor_snapshot)
+    if snapshot.position_id != str(getattr(position, "trade_id", "") or ""):
+        return None
+    if snapshot.decision_id != str(exit_intent.decision_id or ""):
+        return None
+    position_id = str(getattr(position, "trade_id", "") or "")
+    token_id = str(exit_intent.token_id or "")
+    decision_id = str(exit_intent.decision_id or "")
+    if not position_id or not token_id or not decision_id or not attempt_id:
+        return None
+    try:
+        current = conn.execute(
+            "SELECT phase,token_id,no_token_id,shares,chain_shares,direction FROM position_current WHERE position_id=? LIMIT 1",
+            (position_id,),
+        ).fetchone()
+        phase_before = str(current[0] if current else "")
+        if current is None:
+            return None
+        expected_token = _asset_id_for_position(position)
+        canonical_token = str(current[1] if str(current[5] or "").lower() == "buy_yes" else current[2] or "")
+        canonical_shares = current[4] if current[4] not in (None, "") else current[3]
+        canonical_share_text = _red_canonical_shares(canonical_shares)
+        intent_share_text = _red_canonical_shares(exit_intent.shares)
+        if canonical_token != token_id or expected_token != token_id or _positive_decimal(canonical_shares) is None:
+            return None
+        if not _red_shares_equal(intent_share_text, canonical_share_text):
+            return None
+        monitor_event_id = f"{position_id}:red:{attempt_id}:M"
+        intent_event_id = f"{position_id}:red:{attempt_id}:I"
+        exact = conn.execute(
+            "SELECT event_id,event_type,sequence_no,payload_json FROM position_events "
+            "WHERE event_id IN (?,?) ORDER BY event_id",
+            (monitor_event_id, intent_event_id),
+        ).fetchall()
+        if exact:
+            if len(exact) != 2:
+                return None
+            exact_types = {str(row[1]): row for row in exact}
+            if set(exact_types) != {"MONITOR_REFRESHED", "EXIT_INTENT"}:
+                return None
+            if (
+                str(exact_types["MONITOR_REFRESHED"][0]) != monitor_event_id
+                or str(exact_types["EXIT_INTENT"][0]) != intent_event_id
+                or int(exact_types["EXIT_INTENT"][2])
+                != int(exact_types["MONITOR_REFRESHED"][2]) + 1
+            ):
+                return None
+            later = conn.execute(
+                "SELECT 1 FROM position_events WHERE position_id=? AND sequence_no>? "
+                "AND event_type IN ('EXIT_RETRY_RELEASED','EXIT_ORDER_FILLED','SETTLED','VOIDED','ADMIN_CLOSED','EXIT_INTENT') LIMIT 1",
+                (position_id, int(exact_types["EXIT_INTENT"][2])),
+            ).fetchone()
+            if later is not None:
+                return None
+            stored_payload = json.loads(str(exact_types["MONITOR_REFRESHED"][3] or "{}"))
+            stored_handoff = stored_payload.get("red_exit_handoff")
+            if not isinstance(stored_handoff, Mapping):
+                return None
+            return _red_handoff_from_rows(
+                position_id=position_id,
+                token_id=token_id,
+                shares=_red_canonical_shares(exit_intent.shares),
+                decision_id=decision_id,
+                attempt_id=attempt_id,
+                phase_before=str(stored_handoff.get("phase_before") or phase_before),
+                attestation_id=str(attestation.attestation_id),
+                rows=exact,
+            )
+        if phase_before not in {"active", "day0_window"}:
+            return None
+        seq = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no),0) FROM position_events WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        next_seq = int(seq[0] or 0) + 1
+        occurred_at = _utcnow().isoformat()
+        monitor_payload = {
+            "red_attempt_id": attempt_id,
+            "monitor_risk_attestation": attestation.as_payload(),
+            "decision_id": decision_id,
+            "decision_snapshot_id": getattr(position, "decision_snapshot_id", ""),
+            "q": snapshot.q,
+            "book_bid": snapshot.book_bid,
+            "book_ask": snapshot.book_ask,
+            "monitor_observed_at": snapshot.observed_at,
+            "red_monitor_snapshot": snapshot.as_payload(),
+            "exit_decision_should_exit": True,
+            "exit_decision_reason": _RED_FORCE_EXIT,
+            "exit_decision_trigger": _RED_FORCE_EXIT,
+            "applied_validations": ["red_force_exit", "dt2_red_force_exit_sweep_actuated"],
+        }
+        intent_payload = _exit_intent_audit_payload(exit_intent)
+        intent_payload.update({
+            "red_attempt_id": attempt_id,
+            "exit_intent_reason": _RED_FORCE_EXIT,
+            "monitor_risk_attestation": attestation.as_payload(),
+            "red_monitor_snapshot": snapshot.as_payload(),
+        })
+        monitor_hash = _red_payload_hash(monitor_payload)
+        intent_hash = _red_payload_hash(intent_payload)
+        material = {
+            "position_id": position_id,
+            "token_id": token_id,
+            "shares": _red_canonical_shares(exit_intent.shares),
+            "decision_id": decision_id,
+            "attempt_id": attempt_id,
+            "monitor_event_id": monitor_event_id,
+            "monitor_payload_sha256": monitor_hash,
+            "exit_intent_event_id": intent_event_id,
+            "exit_intent_payload_sha256": intent_hash,
+            "attestation_id": str(attestation.attestation_id),
+            "phase_before": phase_before,
+        }
+        material["causal_hash"] = _red_causal_hash(material)
+        handoff = PersistedRedExitHandoff(**material)
+        monitor_payload["red_exit_handoff"] = handoff.as_payload()
+        intent_payload["red_exit_handoff"] = handoff.as_payload()
+        monitor_event = {
+            "event_id": monitor_event_id,
+            "position_id": position_id,
+            "event_version": 1,
+            "sequence_no": next_seq,
+            "event_type": "MONITOR_REFRESHED",
+            "occurred_at": occurred_at,
+            "phase_before": phase_before,
+            "phase_after": phase_before,
+            "strategy_key": str(getattr(position, "strategy_key", "") or getattr(position, "strategy", "") or ""),
+            "decision_id": decision_id,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": None,
+            "idempotency_key": monitor_event_id,
+            "venue_status": "monitor_refreshed",
+            "source_module": "src.engine.cycle_runtime",
+            "env": "live",
+            "payload_json": json.dumps(monitor_payload, default=str, sort_keys=True, separators=(",", ":")),
+        }
+        intent_event = {
+            **monitor_event,
+            "event_id": intent_event_id,
+            "sequence_no": next_seq + 1,
+            "event_type": "EXIT_INTENT",
+            "phase_after": "pending_exit",
+            "caused_by": monitor_event_id,
+            "idempotency_key": intent_event_id,
+            "venue_status": "exit_intent",
+            "payload_json": json.dumps(intent_payload, default=str, sort_keys=True, separators=(",", ":")),
+        }
+        projected = copy.copy(position)
+        projected.state = "pending_exit"
+        projected.exit_state = "exit_intent"
+        projected.order_status = "exit_intent"
+        projected.exit_reason = _RED_FORCE_EXIT
+        from src.engine.lifecycle_events import build_position_current_projection
+        projection = build_position_current_projection(projected)
+        projection["phase"] = "pending_exit"
+        from src.state.db import append_many_and_project
+        append_many_and_project(conn, [monitor_event, intent_event], projection)
+        conn.commit()
+        return handoff
+    except Exception as exc:  # noqa: BLE001 - SAVEPOINT rolls back both rows.
+        logger.warning("RED M/I atomic persistence failed: %s", exc)
+        return None
+
+
+def _red_handoff_from_rows(**kwargs) -> PersistedRedExitHandoff:
+    rows = kwargs.pop("rows")
+    decoded = [json.loads(str(row[3] or "{}")) for row in rows]
+    by_type = {str(row[1]): (row, payload) for row, payload in zip(rows, decoded)}
+    if set(by_type) != {"MONITOR_REFRESHED", "EXIT_INTENT"}:
+        raise ValueError("RED retry event types incomplete")
+    m_row, m_payload = by_type["MONITOR_REFRESHED"]
+    i_row, i_payload = by_type["EXIT_INTENT"]
+    if int(i_row[2]) != int(m_row[2]) + 1:
+        raise ValueError("RED retry events are not adjacent")
+    if str(i_row[0]) != str(kwargs["exit_intent_event_id"] if kwargs.get("exit_intent_event_id") else i_row[0]):
+        raise ValueError("RED retry intent event identity mismatch")
+    if str(m_row[0]) != str(kwargs["monitor_event_id"] if kwargs.get("monitor_event_id") else m_row[0]):
+        raise ValueError("RED retry monitor event identity mismatch")
+    if str(i_payload.get("red_attempt_id") or "") != str(kwargs["attempt_id"]):
+        raise ValueError("RED retry attempt mismatch")
+    monitor_snapshot = m_payload.get("red_monitor_snapshot")
+    intent_snapshot = i_payload.get("red_monitor_snapshot")
+    if not isinstance(monitor_snapshot, Mapping) or monitor_snapshot != intent_snapshot:
+        raise ValueError("RED retry monitor snapshot mismatch")
+    monitor_attestation = m_payload.get("monitor_risk_attestation")
+    intent_attestation = i_payload.get("monitor_risk_attestation")
+    if not isinstance(monitor_attestation, Mapping) or monitor_attestation != intent_attestation:
+        raise ValueError("RED retry attestation mismatch")
+    if str(monitor_attestation.get("attestation_id") or "") != str(kwargs["attestation_id"]):
+        raise ValueError("RED retry attestation identity mismatch")
+    if str(m_payload.get("decision_id") or "") != str(i_payload.get("exit_intent_decision_id") or ""):
+        raise ValueError("RED retry decision identity mismatch")
+    m_hash = _red_payload_hash(m_payload)
+    i_hash = _red_payload_hash(i_payload)
+    stored = m_payload.get("red_exit_handoff")
+    if not isinstance(stored, Mapping) or stored.get("monitor_payload_sha256") != m_hash:
+        raise ValueError("RED retry monitor payload hash mismatch")
+    if stored.get("exit_intent_payload_sha256") != i_hash:
+        raise ValueError("RED retry intent payload hash mismatch")
+    if i_payload.get("red_exit_handoff") != stored:
+        raise ValueError("RED retry handoff differs between M and I")
+    for field in ("position_id", "token_id", "decision_id", "attempt_id", "phase_before"):
+        if str(stored.get(field) or "") != str(kwargs.get(field) or ""):
+            raise ValueError(f"RED retry handoff binding mismatch: {field}")
+    if not _red_shares_equal(stored.get("shares"), kwargs.get("shares")):
+        raise ValueError("RED retry handoff binding mismatch: shares")
+    causal_basis = {key: stored.get(key) for key in (
+        "position_id", "token_id", "shares", "decision_id", "attempt_id",
+        "monitor_event_id", "monitor_payload_sha256", "exit_intent_event_id",
+        "exit_intent_payload_sha256", "attestation_id", "phase_before",
+    )}
+    if str(stored.get("causal_hash") or "") != _red_causal_hash(causal_basis):
+        raise ValueError("RED retry causal hash mismatch")
+    material = dict(kwargs)
+    material.update({
+        "monitor_event_id": str(m_row[0]),
+        "monitor_payload_sha256": m_hash,
+        "exit_intent_event_id": str(i_row[0]),
+        "exit_intent_payload_sha256": i_hash,
+        "causal_hash": str(stored.get("causal_hash") or ""),
+    })
+    return PersistedRedExitHandoff(**material)
+
+
+def recover_red_exit_handoff(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> PersistedRedExitHandoff | None:
+    """Recover one canonical pending RED handoff without minting an attempt."""
+    if conn is None:
+        return None
+    position_id = str(getattr(position, "trade_id", "") or "")
+    try:
+        phase = conn.execute(
+            "SELECT phase,token_id,no_token_id,shares,chain_shares,direction FROM position_current WHERE position_id=?", (position_id,)
+        ).fetchone()
+        if phase is None or str(phase[0]) != "pending_exit":
+            return None
+        selected_token = str(phase[1] if str(phase[5] or "").lower() == "buy_yes" else phase[2] or "")
+        canonical_shares = phase[4] if phase[4] not in (None, "") else phase[3]
+        if not selected_token or _positive_decimal(canonical_shares) is None:
+            return None
+        rows = conn.execute(
+            "SELECT event_id,event_type,sequence_no,payload_json FROM position_events "
+            "WHERE position_id=? AND event_type IN ('MONITOR_REFRESHED','EXIT_INTENT')",
+            (position_id,),
+        ).fetchall()
+        candidates: dict[str, dict[str, object]] = {}
+        for row in rows:
+            payload = json.loads(str(row[3] or "{}"))
+            handoff = payload.get("red_exit_handoff") if isinstance(payload, dict) else None
+            if isinstance(handoff, Mapping) and str(handoff.get("position_id") or "") == position_id:
+                candidates.setdefault(str(handoff.get("attempt_id") or ""), {})[str(row[1])] = row
+        valid = []
+        for attempt_id, pair in candidates.items():
+            if attempt_id and set(pair) == {"MONITOR_REFRESHED", "EXIT_INTENT"}:
+                m, i = pair["MONITOR_REFRESHED"], pair["EXIT_INTENT"]
+                if int(i[2]) == int(m[2]) + 1:
+                    try:
+                        m_payload = json.loads(str(m[3] or "{}"))
+                        stored = m_payload.get("red_exit_handoff", {})
+                        if str(stored.get("token_id") or "") != selected_token or not _red_shares_equal(stored.get("shares"), canonical_shares):
+                            continue
+                        later = conn.execute(
+                            "SELECT 1 FROM position_events WHERE position_id=? AND sequence_no>? LIMIT 1",
+                            (position_id, int(i[2])),
+                        ).fetchone()
+                        if later is not None:
+                            continue
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    valid.append((m, i))
+        if len(valid) != 1:
+            return None
+        m, i = valid[0]
+        payload = json.loads(str(m[3] or "{}"))["red_exit_handoff"]
+        return _red_handoff_from_rows(
+            position_id=position_id,
+            token_id=str(payload.get("token_id") or ""),
+            shares=str(payload.get("shares") or ""),
+            decision_id=str(payload.get("decision_id") or ""),
+            attempt_id=str(payload.get("attempt_id") or ""),
+            phase_before=str(payload.get("phase_before") or ""),
+            attestation_id=str(payload.get("attestation_id") or ""),
+            rows=[m, i],
+        )
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def release_red_handoff_after_b2(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    handoff: PersistedRedExitHandoff,
+    b2: object,
+    _lease_held: bool = False,
+) -> bool:
+    """Idempotently release only an exact persisted M/I when B2 is non-RED."""
+    if conn is None or getattr(b2, "observed_red", True):
+        return False
+    if not _lease_held:
+        if conn.in_transaction:
+            return False
+        try:
+            with _red_trade_writer_lease(conn):
+                return release_red_handoff_after_b2(
+                    conn, position, handoff, b2, _lease_held=True
+                )
+        except Exception as exc:  # noqa: BLE001 - typed release failure.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("RED handoff release writer lease failed: %s", exc)
+            return False
+    try:
+        rows = conn.execute(
+            "SELECT event_id,event_type,sequence_no,payload_json FROM position_events "
+            "WHERE event_id IN (?,?)",
+            (handoff.monitor_event_id, handoff.exit_intent_event_id),
+        ).fetchall()
+        if len(rows) != 2:
+            return False
+        types = {str(row[1]) for row in rows}
+        if types != {"MONITOR_REFRESHED", "EXIT_INTENT"}:
+            return False
+        by_type = {str(row[1]): row for row in rows}
+        if int(by_type["EXIT_INTENT"][2]) != int(by_type["MONITOR_REFRESHED"][2]) + 1:
+            return False
+        verified = _red_handoff_from_rows(
+            position_id=handoff.position_id,
+            token_id=handoff.token_id,
+            shares=handoff.shares,
+            decision_id=handoff.decision_id,
+            attempt_id=handoff.attempt_id,
+            phase_before=handoff.phase_before,
+            attestation_id=handoff.attestation_id,
+            rows=rows,
+        )
+        if verified.causal_hash != handoff.causal_hash:
+            return False
+        release_id = f"{handoff.position_id}:red:{handoff.attempt_id}:RELEASE"
+        existing = conn.execute(
+            "SELECT event_id,event_type,sequence_no,payload_json FROM position_events WHERE event_id=?",
+            (release_id,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[1]) != "EXIT_RETRY_RELEASED":
+                return False
+            try:
+                existing_payload = json.loads(str(existing[3] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+            expected_b2 = b2.as_payload() if hasattr(b2, "as_payload") else {}
+            return (
+                existing_payload.get("red_exit_handoff") == handoff.as_payload()
+                and existing_payload.get("b2_attestation") == expected_b2
+            )
+        current = conn.execute(
+            "SELECT phase,token_id,no_token_id,shares,chain_shares,direction FROM position_current WHERE position_id=?",
+            (handoff.position_id,),
+        ).fetchone()
+        if current is None or str(current[0]) != "pending_exit":
+            return False
+        selected_token = str(current[1] if str(current[5] or "").lower() == "buy_yes" else current[2] or "")
+        current_shares = current[4] if current[4] not in (None, "") else current[3]
+        if selected_token != handoff.token_id or not _red_shares_equal(current_shares, handoff.shares):
+            return False
+        later = conn.execute(
+            "SELECT event_type FROM position_events WHERE position_id=? AND sequence_no>? "
+            "AND event_type IN ('EXIT_RETRY_RELEASED','EXIT_ORDER_FILLED','SETTLED','VOIDED','ADMIN_CLOSED','EXIT_INTENT')",
+            (handoff.position_id, int(by_type["EXIT_INTENT"][2])),
+        ).fetchone()
+        if later is not None:
+            return False
+        from src.engine.lifecycle_events import build_position_current_projection
+        released = copy.copy(position)
+        released.state = handoff.phase_before
+        released.exit_state = ""
+        released.order_status = "filled"
+        released.exit_reason = ""
+        projection = build_position_current_projection(released)
+        projection["phase"] = handoff.phase_before
+        seq = max(int(row[2]) for row in rows) + 1
+        b2_payload = b2.as_payload() if hasattr(b2, "as_payload") else {
+            "attestation_id": str(getattr(b2, "attestation_id", "") or ""),
+            "level": str(getattr(getattr(b2, "level", ""), "value", getattr(b2, "level", "")) or ""),
+            "read_at": str(getattr(b2, "read_at", "") or ""),
+            "monotonic_ns": int(getattr(b2, "monotonic_ns", 0) or 0),
+            "outcome": str(getattr(b2, "outcome", "READ_OK") or "READ_OK"),
+            "error": str(getattr(b2, "error", "") or ""),
+        }
+        payload = {
+            "release_reason": "RED_FORCE_EXIT_CLEARED_AT_B2",
+            "red_exit_handoff": handoff.as_payload(),
+            "b2_attestation": b2_payload,
+            "b2_attestation_id": str(b2_payload.get("attestation_id") or ""),
+            "b2_outcome": str(b2_payload.get("outcome") or "READ_OK"),
+        }
+        event = {
+            "event_id": release_id,
+            "position_id": handoff.position_id,
+            "event_version": 1,
+            "sequence_no": seq,
+            "event_type": "EXIT_RETRY_RELEASED",
+            "occurred_at": _utcnow().isoformat(),
+            "phase_before": "pending_exit",
+            "phase_after": handoff.phase_before,
+            "strategy_key": str(getattr(position, "strategy_key", "") or getattr(position, "strategy", "") or ""),
+            "decision_id": handoff.decision_id,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": handoff.exit_intent_event_id,
+            "idempotency_key": release_id,
+            "venue_status": "ready",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": "live",
+            "payload_json": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        }
+        from src.state.db import append_many_and_project
+        append_many_and_project(conn, [event], projection)
+        conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - release is fail closed.
+        logger.warning("RED handoff release failed: %s", exc)
+        return False
+
+
 def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
     """Canonical EXIT_INTENT evidence captured before execution gates mutate state."""
 
@@ -6344,10 +7051,21 @@ def execute_exit(
     """
     exit_intent = exit_intent or build_exit_intent(position, exit_context)
     _validate_exit_intent(position, exit_context, exit_intent)
+    red_handoff = exit_intent.red_handoff
+    red_attestation = None
+    if str(exit_context.exit_reason or "").upper() == _RED_FORCE_EXIT and red_handoff is None:
+        live_env = str(getattr(position, "env", "live") or "live").lower() not in {
+            "test", "replay", "backtest"
+        }
+        if live_env:
+            # CycleRuntime is the sole RED handoff writer.  The execution
+            # boundary must never read A, mint an attempt, or synthesize M/I.
+            return "exit_deferred: red_handoff_required"
     is_red_force_exit = _red_force_exit_authorized(
         position,
         exit_context,
         conn=conn,
+        red_handoff=red_handoff,
     )
     is_hard_fact_force_exit = bool(
         not is_red_force_exit
@@ -6373,7 +7091,7 @@ def execute_exit(
                 conn=conn,
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
-        if not _record_exit_intent_before_execution_gates(
+        if red_handoff is None and not _record_exit_intent_before_execution_gates(
             conn,
             position,
             exit_intent,
@@ -7126,6 +7844,7 @@ def _execute_live_exit(
                 global_sell_authority if global_authorized else None
             ),
             protective_sell_execution_authority=protective_sell_authority,
+            red_handoff=exit_intent.red_handoff,
             global_sell_receipt_closure=(
                 exit_intent.global_sell_receipt_closure
                 if global_authorized
@@ -7174,6 +7893,26 @@ def _execute_live_exit(
                 **executor_kwargs,
             )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
+        if sell_result.reason == "RED_B2_NON_RED":
+            handoff = getattr(position, "_red_exit_handoff", None)
+            payload = sell_result.red_b2_payload or {}
+            try:
+                from src.riskguard.riskguard import RiskAttestation, RiskLevel
+                b2 = RiskAttestation(
+                    level=RiskLevel(str(payload.get("level") or "GREEN")),
+                    attestation_id=str(payload.get("attestation_id") or ""),
+                    read_at=str(payload.get("read_at") or ""),
+                    monotonic_ns=int(payload.get("monotonic_ns") or 0),
+                    outcome=str(payload.get("outcome") or "READ_OK"),
+                    error=str(payload.get("error") or ""),
+                )
+            except (TypeError, ValueError):
+                return "exit_deferred: red_b2_attestation_invalid"
+            if handoff is not None and release_red_handoff_after_b2(
+                conn, position, handoff, b2
+            ):
+                return "exit_redecision_required: red_force_exit_cleared"
+            return "exit_deferred: red_handoff_release_failed"
         if execution_evidence is not None:
             execution_evidence.observe(sell_result)
 

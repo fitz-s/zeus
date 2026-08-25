@@ -10136,6 +10136,71 @@ def execute_monitoring_phase(
                 )
 
             exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            red_force_exit = (
+                should_exit
+                and exit_trigger == "RED_FORCE_EXIT"
+                and exit_reason == "RED_FORCE_EXIT"
+            )
+            red_handoff = None
+            red_exit_intent = None
+            red_handoff_failed = False
+            if red_force_exit:
+                # The cycle already owns the real monitor q/book/decision
+                # frame.  Persist its M + adjacent I + pending_exit projection
+                # exactly once before any ordinary monitor writer or executor
+                # gate can run.
+                from src.execution.exit_lifecycle import (
+                    build_exit_intent,
+                    MonitorSnapshot,
+                    persist_red_exit_handoff,
+                    recover_red_exit_handoff,
+                )
+                from src.riskguard.riskguard import read_risk_attestation
+
+                red_exit_intent = build_exit_intent(
+                    pos, replace(exit_context, exit_reason=exit_reason)
+                )
+                red_monitor_snapshot = MonitorSnapshot(
+                    position_id=str(pos.trade_id),
+                    decision_id=str(red_exit_intent.decision_id or ""),
+                    q=exit_context.fresh_prob,
+                    book_bid=exit_context.best_bid,
+                    book_ask=exit_context.best_ask,
+                    observed_at=monitor_now_utc.isoformat(),
+                )
+                red_handoff = recover_red_exit_handoff(conn, pos)
+                if red_handoff is None:
+                    red_attestation = read_risk_attestation(now=monitor_now_utc)
+                if red_handoff is not None:
+                    setattr(pos, "_red_exit_handoff", red_handoff)
+                    monitor_canonical_written = True
+                elif red_attestation.observed_red:
+                    red_handoff = persist_red_exit_handoff(
+                        conn,
+                        pos,
+                        exit_intent=red_exit_intent,
+                        attestation=red_attestation,
+                        attempt_id=f"monitor:{pos.trade_id}:{red_attestation.attestation_id}",
+                        monitor_snapshot=red_monitor_snapshot,
+                    )
+                    if red_handoff is None:
+                        monitor_canonical_written = False
+                        red_handoff_failed = True
+                        should_exit = False
+                        exit_reason = "RED_HANDOFF_PERSISTENCE_FAILED"
+                        pos.applied_validations = list(dict.fromkeys([
+                            *(pos.applied_validations or []),
+                            "red_handoff_persistence_failed_exact_attempt_debt",
+                        ]))
+                        summary["red_handoff_persistence_failed"] = summary.get(
+                            "red_handoff_persistence_failed", 0
+                        ) + 1
+                    else:
+                        setattr(pos, "_red_exit_handoff", red_handoff)
+                        monitor_canonical_written = True
+                elif red_attestation is not None:
+                    should_exit = False
+                    exit_reason = "RED_FORCE_EXIT_CLEARED_AT_A"
             if should_exit:
                 gate_allowed, gate_reason = _exit_evidence_gate_allows_statistical_exit(
                     conn=conn,
@@ -10150,7 +10215,10 @@ def execute_monitoring_phase(
             _incomplete_reason = _incomplete_exit_observability_reason(
                 exit_decision, exit_context
             )
-            if _incomplete_reason is not None and not should_exit:
+            if red_handoff is not None:
+                # Atomic writer above already persisted the real M/I pair.
+                pass
+            elif _incomplete_reason is not None and not should_exit:
                 _record_incomplete_exit_context_summary(
                     summary,
                     pos=pos,
@@ -10163,7 +10231,7 @@ def execute_monitoring_phase(
                     _incomplete_reason,
                 )
 
-            if _incomplete_reason is not None and not should_exit:
+            if _incomplete_reason is not None and not should_exit and not red_handoff_failed:
                 _revoke_monitor_action_authority(
                     pos,
                     missing_fields=_missing_fields_from_incomplete_exit_reason(
@@ -10179,7 +10247,7 @@ def execute_monitoring_phase(
                         decision_unavailable_trigger="INCOMPLETE_EXIT_CONTEXT",
                     )
                 )
-            else:
+            elif red_handoff is None and not red_handoff_failed:
                 monitor_canonical_written = (
                     _emit_monitor_refreshed_canonical_if_available(
                         conn,
@@ -10339,6 +10407,9 @@ def execute_monitoring_phase(
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
+                    red_handoff=(
+                        red_handoff.as_payload() if red_handoff is not None else None
+                    ),
                 )
                 from src.engine.global_batch_runtime import (
                     _invalidate_global_holding_coverage,
