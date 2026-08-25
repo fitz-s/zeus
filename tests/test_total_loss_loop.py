@@ -103,6 +103,18 @@ def _forecast_db(path: Path) -> None:
             );
             """
         )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (1,'London','2026-08-22','high','cycle','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO ensemble_snapshots VALUES (1,'London','2026-08-22','high','cycle','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (2,'Tel Aviv','2026-08-22','high','cycle','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO ensemble_snapshots VALUES (2,'Tel Aviv','2026-08-22','high','cycle','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00','2026-08-22T09:00:00+00:00')"
+        )
 
 
 def test_sqlite_factories_close_on_context_exit(cfg: dict) -> None:
@@ -3754,6 +3766,57 @@ def test_single_critical_depth_blob_becomes_typed_capacity_debt(cfg: dict) -> No
                 row_limit=1, cfg=cfg, budget=loop._new_evidence_budget(cfg),
             )
     assert incident_id
+
+
+def test_source_clock_selector_uses_exact_city_metadata_and_truthful_payload_cap(cfg: dict) -> None:
+    with sqlite3.connect(cfg["paths"]["forecasts_db"]) as conn:
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN payload_json TEXT")
+        conn.execute(
+            "CREATE INDEX source_city_target_metric_time ON forecast_posteriors(city,target_date,temperature_metric,source_available_at)"
+        )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (10,'London','2026-08-22','28C','2026-08-22T00:00:00+00:00','2026-08-22T10:00:00+00:00','2026-08-22T12:00:00+00:00','2026-08-22T12:00:00+00:00',?)",
+            ("small",),
+        )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (11,'London','2026-08-22','28C','2026-08-22T00:00:00+00:00',NULL,'2026-08-22T11:00:00+00:00','2026-08-22T11:00:00+00:00',?)",
+            ("x" * (35 * 1024 * 1024),),
+        )
+        conn.executemany(
+            "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?)",
+            [(index + 12, "Paris", "2026-08-22", "28C", "", "2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00", "", "decoy") for index in range(20_000)],
+        )
+        conn.execute(
+            "INSERT INTO ensemble_snapshots VALUES (3,'London','2026-08-22','28C','cycle',NULL,NULL,'2026-08-22T10:00:00+00:00','2026-08-22T10:00:00+00:00','2026-08-22T10:00:00+00:00')"
+        )
+    position = {"city": "London", "target_date": "2026-08-22", "temperature_metric": "28C"}
+    with loop.open_ro(Path(cfg["paths"]["forecasts_db"])) as forecasts:
+        plan = forecasts.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM forecast_posteriors WHERE city=? AND target_date=? AND temperature_metric=? AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL)",
+            ("London", "2026-08-22", "28C", "2026-08-21T00:00:00+00:00", "2026-08-23T00:00:00+00:00"),
+        ).fetchall()
+        rows, coverage = loop._source_clock_rows(
+            forecasts, position, "2026-08-21T00:00:00+00:00", "2026-08-23T00:00:00+00:00",
+            row_limit=10, byte_limit=1024 * 1024, budget={"deadline": loop.time.monotonic() + 5},
+        )
+    assert "SEARCH" in " ".join(str(value) for row in plan for value in row).upper()
+    assert [row["posterior_id"] for row in rows["forecast_posteriors"]] == [10]
+    assert rows["ensemble_snapshots"][0]["snapshot_id"] == 3
+    assert coverage["truncated"] is True and coverage["reason"] == "source_byte_limit"
+
+
+@pytest.mark.parametrize("table", ("forecast_posteriors", "ensemble_snapshots"))
+def test_source_clock_selector_rejects_missing_required_table(cfg: dict, table: str) -> None:
+    with sqlite3.connect(cfg["paths"]["forecasts_db"]) as conn:
+        conn.execute(f"DROP TABLE {table}")
+    with loop.open_ro(Path(cfg["paths"]["forecasts_db"])) as forecasts:
+        with pytest.raises(loop.EvidenceCapacityExceeded, match=f"required_missing:{table}:schema"):
+            loop._source_clock_rows(
+                forecasts,
+                {"city": "London", "target_date": "2026-08-22", "temperature_metric": "high"},
+                "2026-08-21T00:00:00+00:00", "2026-08-23T00:00:00+00:00",
+                row_limit=1, byte_limit=1024, budget={"deadline": loop.time.monotonic() + 1},
+            )
 
 
 def test_no_bid_crossing_is_retained_outside_trajectory_window(cfg: dict) -> None:

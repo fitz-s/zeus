@@ -3273,24 +3273,20 @@ def _evidence_fingerprints(
                 ).fetchall()]
     source_rows: dict[str, list[dict[str, Any]]] = {}
     forecasts_path = Path(str(cfg["paths"]["forecasts_db"]))
+    if not forecasts_path.exists():
+        raise EvidenceCapacityExceeded("evidence_source_required_missing:forecasts_db")
     if forecasts_path.exists():
         with open_ro(forecasts_path) as forecasts:
             _apply_evidence_sql_budget(forecasts, budget)
             source_start = iso(floor_at - timedelta(days=window_days / 2))
             source_end = iso(floor_at + timedelta(days=window_days / 2))
             try:
-                source_rows["posteriors"] = [dict(row) for row in forecasts.execute(
-                    "SELECT * FROM forecast_posteriors WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
-                    "AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL) "
-                    "ORDER BY computed_at DESC LIMIT ?",
-                    (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
-                ).fetchall()]
-                source_rows["ensembles"] = [dict(row) for row in forecasts.execute(
-                    "SELECT * FROM ensemble_snapshots WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
-                    "AND (available_at BETWEEN ? AND ? OR available_at IS NULL) "
-                    "ORDER BY available_at DESC LIMIT ?",
-                    (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
-                ).fetchall()]
+                selected_sources, source_coverage = _source_clock_rows(
+                    forecasts, position, source_start, source_end, row_limit=fingerprint_rows,
+                    byte_limit=max(1024 * 1024, int(budget.get("max_bytes", 32 * 1024 * 1024)) // 4), budget=budget,
+                )
+                source_rows = {"posteriors": selected_sources.get("forecast_posteriors", []), "ensembles": selected_sources.get("ensemble_snapshots", [])}
+                source_rows["selection"] = [source_coverage]
             except sqlite3.OperationalError as exc:
                 if "interrupted" not in str(exc).lower():
                     raise
@@ -3435,12 +3431,18 @@ def _evidence_retry_identity_for_debt(
             settings.get("history_days"),
             settings.get("evidence_window_days", 7),
             settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000)),
+            settings.get("evidence_source_rows", 1000),
+            settings.get("evidence_source_max_bytes"),
+            "source_clock_selector_v2",
             length=32,
         )
         capacity_fp = digest(
             settings.get("evidence_builds_per_cycle", 1),
             settings.get("evidence_build_budget_ms", 1000),
             settings.get("evidence_max_bytes", 32 * 1024 * 1024),
+            settings.get("evidence_source_rows", 1000),
+            settings.get("evidence_source_max_bytes"),
+            "source_clock_selector_v2",
             length=32,
         )
         return digest("evidence-retry-identity", incident_id, config_fp, capacity_fp, length=32)
@@ -3453,7 +3455,7 @@ def _evidence_retry_state(
     fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
     with memory(cfg) as mem:
         debt = mem.execute(
-            "SELECT status,retry_identity,next_retry_at,attempts FROM controller_debt "
+            "SELECT status,retry_identity,next_retry_at,attempts,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint FROM controller_debt "
             "WHERE debt_id=? AND kind='evidence_snapshot'",
             (_evidence_debt_id(incident_id),),
         ).fetchone()
@@ -3512,7 +3514,7 @@ def _record_evidence_debt(
     try:
         with memory(cfg) as mem:
             prior = mem.execute(
-                "SELECT retry_identity,next_retry_at,attempts FROM controller_debt "
+                "SELECT retry_identity,next_retry_at,attempts,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint FROM controller_debt "
                 "WHERE debt_id=? AND kind='evidence_snapshot'",
                 (_evidence_debt_id(incident_id),),
             ).fetchone()
@@ -3523,6 +3525,12 @@ def _record_evidence_debt(
                 and (retry_at := parse_time(str(prior[1] or ""))) is not None
                 and now() < retry_at
             ):
+                if not all(str(value or "") for value in prior[3:]):
+                    mem.execute(
+                        "UPDATE controller_debt SET fingerprint=?,config_fingerprint=?,capacity_fingerprint=?,data_fingerprint=?,updated_at=? WHERE debt_id=?",
+                        (fingerprint, config_fp, capacity_fp, data_fp, stamp, _evidence_debt_id(incident_id)),
+                    )
+                    mem.commit()
                 return
             attempts = int(prior[2] or 0) + (1 if backoff else 0) if prior is not None else int(backoff)
             next_retry_at = (
@@ -3929,6 +3937,19 @@ def _capture_hard_evidence_inner(
             )
             summary["deferred"].append(incident_id)
             continue
+        if debt is not None and str(debt["status"]) == "retry_pending":
+            retry_at = parse_time(str(debt["next_retry_at"] or ""))
+            if retry_at is not None and now() < retry_at and (
+                not str(debt["retry_identity"] or "")
+                or any(not str(debt[key] or "") for key in ("fingerprint", "config_fingerprint", "capacity_fingerprint", "data_fingerprint") if key in debt.keys())
+            ):
+                _record_evidence_debt(
+                    cfg, incident_id, "evidence_snapshot_capacity_failure:legacy_debt_upgrade",
+                    preserve_incident_state=incident_id not in created_rank,
+                    fingerprints=retry_fingerprints, retry_identity=retry_fingerprints[0],
+                )
+                summary["deferred"].append(incident_id)
+                continue
         if _evidence_retry_deferred(retry_fingerprints, debt):
             # Read the cheap durable identity before hashing the evidence pair:
             # not-due debt must not touch the snapshot or forecast DBs.
@@ -3992,6 +4013,7 @@ def _capture_hard_evidence_inner(
                 incident_id,
                 f"evidence_snapshot_capacity_failure:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
+                fingerprints=retry_fingerprints,
                 retry_identity=retry_identity,
                 backoff=True,
             )
@@ -4243,6 +4265,86 @@ def _float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _source_clock_rows(
+    forecasts: sqlite3.Connection,
+    position: Mapping[str, Any],
+    source_start: str,
+    source_end: str,
+    *,
+    row_limit: int,
+    byte_limit: int,
+    budget: Mapping[str, Any] | None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Read one canonical city source slice without materializing payload blobs.
+
+    The first current row per source is decision-critical.  Historical rows are
+    useful context only and stop at the source byte/row budget with an explicit
+    sampled marker rather than becoming an unbounded SQLite fetchall.
+    """
+    city, target, metric = (str(position.get(key) or "").strip() for key in ("city", "target_date", "temperature_metric"))
+    if not city or not target or not metric:
+        raise EvidenceCapacityExceeded("evidence_source_identity_unknown")
+    specs = (
+        ("forecast_posteriors", "posterior_id", "source_available_at", "computed_at DESC", "source_available_at"),
+        ("ensemble_snapshots", "snapshot_id", "available_at", "available_at DESC", "source_available_at"),
+    )
+    selected: dict[str, list[dict[str, Any]]] = {}
+    coverage: dict[str, Any] = {"city": city, "truncated": False, "reason": None, "bytes": 0, "tables": {}}
+    batch_size = 32
+    for table, id_column, availability, ordering, source_available in specs:
+        if budget is not None and time.monotonic() >= float(budget["deadline"]):
+            raise EvidenceCapacityExceeded(f"evidence_source_required_deadline:{table}")
+        columns = [str(row[1]) for row in forecasts.execute(f"PRAGMA table_info({table})").fetchall()]
+        if not columns:
+            raise EvidenceCapacityExceeded(f"evidence_source_required_missing:{table}:schema")
+        def quoted(value: str) -> str:
+            return '"' + value.replace('"', '""') + '"'
+        metadata = ["rowid AS _rowid", quoted(id_column), quoted("city"), quoted("target_date"), quoted("temperature_metric")]
+        metadata.extend(f"LENGTH(CAST({quoted(column)} AS BLOB)) AS _len_{column}" for column in columns if column not in {id_column, "city", "target_date", "temperature_metric"})
+        cursor = forecasts.execute(
+            f"SELECT {','.join(metadata)} FROM {quoted(table)} WHERE city=? AND target_date=? AND temperature_metric=? "
+            f"AND ({quoted(availability)} BETWEEN ? AND ? OR {quoted(availability)} IS NULL) ORDER BY {ordering},rowid DESC",
+            (city, target, metric, source_start, source_end),
+        )
+        rows: list[dict[str, Any]] = []
+        truncated = False
+        while len(rows) < row_limit:
+            if budget is not None and time.monotonic() >= float(budget["deadline"]):
+                raise EvidenceCapacityExceeded(f"evidence_source_required_deadline:{table}")
+            batch = cursor.fetchmany(min(batch_size, row_limit - len(rows)))
+            if not batch:
+                break
+            for meta in batch:
+                estimate = 256 + sum(int(meta[key] or 0) for key in meta.keys() if str(key).startswith("_len_"))
+                critical = not rows
+                if int(coverage["bytes"]) + estimate > byte_limit:
+                    if critical:
+                        raise EvidenceCapacityExceeded(f"evidence_source_critical_capacity:{table}:bytes={int(coverage['bytes']) + estimate}")
+                    truncated = True
+                    coverage.update(truncated=True, reason="source_byte_limit")
+                    break
+                raw = forecasts.execute(f"SELECT * FROM {quoted(table)} WHERE rowid=?", (int(meta["_rowid"]),)).fetchone()
+                if raw is None or str(raw["city"] or "") != city:
+                    raise EvidenceCapacityExceeded(f"evidence_source_identity_inconsistent:{table}")
+                packed = dict(raw)
+                actual = len(json.dumps(packed, default=str, separators=(",", ":")).encode())
+                if int(coverage["bytes"]) + actual > byte_limit:
+                    if critical:
+                        raise EvidenceCapacityExceeded(f"evidence_source_critical_capacity:{table}:bytes={int(coverage['bytes']) + actual}")
+                    truncated = True
+                    coverage.update(truncated=True, reason="source_byte_limit")
+                    break
+                rows.append(packed)
+                coverage["bytes"] = int(coverage["bytes"]) + actual
+            if truncated:
+                break
+        selected[table] = rows
+        coverage["tables"][table] = {"rows": len(rows), "truncated": truncated}
+        if not rows:
+            raise EvidenceCapacityExceeded(f"evidence_source_required_missing:{table}:city={city}")
+    return selected, coverage
+
+
 def _copy_source_clocks(
     cfg: Mapping[str, Any],
     out: sqlite3.Connection,
@@ -4252,7 +4354,7 @@ def _copy_source_clocks(
 ) -> None:
     path = Path(str(cfg["paths"]["forecasts_db"]))
     if not path.exists():
-        return
+        raise EvidenceCapacityExceeded("evidence_source_required_missing:forecasts_db")
     with open_ro(path) as forecasts:
         target = parse_time(f"{position.get('target_date')}T00:00:00+00:00") or now()
         source_start = iso(target - timedelta(days=3))
@@ -4260,18 +4362,12 @@ def _copy_source_clocks(
         budget = _EVIDENCE_BUILD_CONTEXT
         _apply_evidence_sql_budget(forecasts, budget)
         try:
-            rows = forecasts.execute(
-                """
-                SELECT * FROM forecast_posteriors
-                 WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
-                   AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL)
-                 ORDER BY computed_at DESC LIMIT ?
-                """,
-                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, row_limit),
-            ).fetchall()
-            for raw in rows:
+            rows_by_table, coverage = _source_clock_rows(
+                forecasts, position, source_start, source_end, row_limit=row_limit,
+                byte_limit=max(1, int((budget or {}).get("max_bytes", 32 * 1024 * 1024)) // 4), budget=budget,
+            )
+            for row in rows_by_table.get("forecast_posteriors", []):
                 _budget_check(conn=out)
-                row = dict(raw)
                 key = f"posterior:{row['posterior_id']}"
                 raw_json = json.dumps(row, default=str)
                 _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
@@ -4279,18 +4375,8 @@ def _copy_source_clocks(
                     "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
                     (key, row.get("source_cycle_time"), row.get("source_available_at"), row.get("computed_at"), row.get("recorded_at"), raw_json),
                 )
-            ens = forecasts.execute(
-                """
-                SELECT * FROM ensemble_snapshots
-                 WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
-                   AND (available_at BETWEEN ? AND ? OR available_at IS NULL)
-                 ORDER BY available_at DESC LIMIT ?
-                """,
-                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, row_limit),
-            ).fetchall()
-            for raw in ens:
+            for row in rows_by_table.get("ensemble_snapshots", []):
                 _budget_check(conn=out)
-                row = dict(raw)
                 key = f"ensemble:{row['snapshot_id']}"
                 raw_json = json.dumps(row, default=str)
                 _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
@@ -4298,6 +4384,7 @@ def _copy_source_clocks(
                     "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
                     (key, row.get("source_cycle_time") or row.get("issue_time"), row.get("source_available_at") or row.get("available_at"), row.get("fetch_time"), row.get("recorded_at"), raw_json),
                 )
+            out.execute("INSERT OR REPLACE INTO config_snapshot VALUES (?,?,?)", ("source_clock_selection", json.dumps(coverage, sort_keys=True), digest(json.dumps(coverage, sort_keys=True))))
         except sqlite3.OperationalError as exc:
             if "interrupted" in str(exc).lower() and budget is not None:
                 raise EvidenceCapacityExceeded("evidence_snapshot_deferred:forecast_query_budget") from exc
