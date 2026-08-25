@@ -356,6 +356,71 @@ def test_latest_belief_reader_filters_forecast_only_inadmissible_families():
     assert {belief.target_date for belief in beliefs} == {"2026-06-02"}
 
 
+def test_filter_beliefs_forecast_only_admissible_matches_dual_query_path():
+    """2026-08-24 belief_scan fix: run_edli_continuous_redecision_screen_cycle used
+    to call _all_latest_beliefs TWICE per cycle -- once with forecast_only_admissible=True
+    (entry beliefs), once without (management/rest-order beliefs) -- two independent full
+    scans of the same probability_trace_fact decision_id-prefix range. The fix fetches the
+    superset once (forecast_only_admissible unset) and derives the entry-admissible subset
+    in Python via filter_beliefs_forecast_only_admissible. This pins that the derived subset
+    is IDENTICAL to what the old dual-query path returned, using a fixture with both an
+    admissible (open) and an inadmissible (closed) family -- same fixture shape as
+    test_latest_belief_reader_filters_forecast_only_inadmissible_families above."""
+    conn = _mem_world()
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.99,
+        recorded_at="2026-06-01T11:30:00+00:00",
+        snapshot_id="closed-snap",
+    )
+    cr.cache_belief(
+        conn,
+        family_id="Wuhan|2026-06-02|high",
+        city="Wuhan",
+        target_date="2026-06-02",
+        temperature_metric="high",
+        snapshot_id="open-snap",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, 0.99],
+        recorded_at="2026-06-01T11:35:00+00:00",
+    )
+    decision_time = "2026-06-01T13:00:00+00:00"
+
+    # OLD path: two independent full scans.
+    old_entry_beliefs = cr._all_latest_beliefs(
+        conn,
+        decision_time=decision_time,
+        forecast_only_admissible=True,
+    )
+    old_management_beliefs = cr._all_latest_beliefs(
+        conn,
+        decision_time=decision_time,
+    )
+
+    # NEW path: one scan (the superset, same query as old_management_beliefs)
+    # plus a Python-side filter for the entry-admissible subset.
+    new_management_beliefs = cr._all_latest_beliefs(
+        conn,
+        decision_time=decision_time,
+    )
+    new_entry_beliefs = cr.filter_beliefs_forecast_only_admissible(
+        new_management_beliefs,
+        decision_time=decision_time,
+    )
+
+    assert new_management_beliefs == old_management_beliefs
+    assert new_entry_beliefs == old_entry_beliefs
+    # Sanity: the fixture actually exercises a non-trivial filter (subset, not
+    # equal to the superset) -- otherwise this test could pass vacuously.
+    assert len(new_entry_beliefs) < len(new_management_beliefs)
+    assert {belief.target_date for belief in new_entry_beliefs} == {"2026-06-02"}
+    assert {belief.target_date for belief in new_management_beliefs} == {
+        "2026-06-01",
+        "2026-06-02",
+    }
+
+
 def test_latest_belief_reader_targets_requested_families_in_sql():
     conn = _mem_world()
     for city in ("Wuhan", "Shanghai"):

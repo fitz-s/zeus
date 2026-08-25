@@ -84,10 +84,23 @@ DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
 DEFAULT_EDLI_REDECISION_SCREEN_BUDGET_SECONDS = 60.0
 MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS = 85.0
+# 2026-08-24 incident: a post-restart cold-cache window against the 96GB world +
+# 79GB forecasts DB pair produced 10 straight belief_scan deadline_interrupted
+# defers before the OS page cache re-warmed and cycles recovered on their own.
+# Three straight defers is enough to distinguish a persistent slow-I/O episode
+# from one unlucky tick without riding out a long outage at the tight default.
+DEFAULT_EDLI_BELIEF_SCAN_GRACE_DEFER_THRESHOLD = 3
 MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
 MARKET_CHANNEL_SINK_READINESS_FILENAME = "market-channel-action-sink-readiness.json"
 PRICE_CHANNEL_HEARTBEAT_FILENAME = "daemon-heartbeat-price-channel-ingest.json"
 _edli_redecision_screen_generation = 0
+# Consecutive belief_scan deadline_interrupted defers, oldest-cycle-first. Reset
+# to 0 the moment a belief_scan stage completes; read by
+# _edli_redecision_screen_budget_seconds to decide whether the current cycle
+# gets the widened (grace) budget. Process-local and intentionally volatile —
+# a restart starts the count fresh, which is correct: the grace window exists
+# to absorb a restart's own cold-cache cost.
+_edli_belief_scan_consecutive_defers = 0
 
 
 def _edli_screen_deadline_check(deadline_fence: Any | None) -> None:
@@ -119,8 +132,39 @@ def _edli_screen_bound_connection(factory: Callable[[], sqlite3.Connection], dea
             pass
 
 
+def _edli_belief_scan_grace_defer_threshold() -> int:
+    """Consecutive belief_scan defers before the screen budget widens toward MAX.
+
+    Env-overridable via ``ZEUS_EDLI_BELIEF_SCAN_GRACE_DEFER_THRESHOLD``.
+    """
+
+    raw = os.environ.get("ZEUS_EDLI_BELIEF_SCAN_GRACE_DEFER_THRESHOLD")
+    if raw is None:
+        return DEFAULT_EDLI_BELIEF_SCAN_GRACE_DEFER_THRESHOLD
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_EDLI_BELIEF_SCAN_GRACE_DEFER_THRESHOLD
+    return max(1, value)
+
+
 def _edli_redecision_screen_budget_seconds(edli_cfg: Mapping[str, Any]) -> float:
-    """Keep a screen tick safely below its 90-second scheduler cadence."""
+    """Screen-tick budget: the 60s default equals the scheduler's own 60s cadence
+    (``edli.reactor_scan_interval_seconds``, default 60 — src/main.py's
+    ``_register_edli_live_jobs``), not "safely below" it as an earlier version of
+    this docstring claimed. That leaves zero slack once a cycle overruns.
+
+    After ``_edli_belief_scan_grace_defer_threshold()`` (default 3) consecutive
+    belief_scan deadline_interrupted defers, this widens to
+    MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS (85s) until the next belief_scan
+    completes, then reverts. Exceeding the 60s cadence during grace is safe only
+    because the scheduler job is registered with ``max_instances=1,
+    coalesce=True`` (src/main.py's ``edli_event_reactor`` job) — cycles can never
+    run concurrently with themselves; an overlapping trigger during a
+    grace-widened cycle is simply skipped, not queued, so a longer budget only
+    lengthens the effective interval during grace, it never causes a second
+    instance to start while the first is still running.
+    """
 
     try:
         configured = float(
@@ -131,7 +175,10 @@ def _edli_redecision_screen_budget_seconds(edli_cfg: Mapping[str, Any]) -> float
         )
     except (TypeError, ValueError):
         configured = DEFAULT_EDLI_REDECISION_SCREEN_BUDGET_SECONDS
-    return max(0.001, min(MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS, configured))
+    budget = max(0.001, min(MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS, configured))
+    if _edli_belief_scan_consecutive_defers >= _edli_belief_scan_grace_defer_threshold():
+        budget = max(budget, MAX_EDLI_REDECISION_SCREEN_BUDGET_SECONDS)
+    return budget
 
 
 def _next_edli_redecision_screen_generation() -> int:
@@ -13905,6 +13952,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     out-of-scope command-recovery cluster still mutates it directly in main.py, so the
     reach-back import just binds the same live object reference -- no duplication.
     """
+
+    global _edli_belief_scan_consecutive_defers
     import logging as _logging
     from src.config import get_mode
     from src.main import (
@@ -13935,6 +13984,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
             entry_substrate_refresh_scope,
+            filter_beliefs_forecast_only_admissible,
             filter_redecisions_with_spine_members,
             RepriceDecision,
             screen_entry_redecisions,
@@ -14008,22 +14058,25 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         trade_ro.execute("PRAGMA query_only=ON")
         policy_rest_pulls = []
         try:
-            all_beliefs = _all_latest_beliefs(
-                world_ro,
-                decision_time=received_at,
-                forecast_only_admissible=True,
-                deadline_fence=screen_fence,
-            )
             # Entry admission is forecast-phase scoped; management of an order
             # Zeus already submitted is not.  Day0 maker rests must remain
             # enumerable after the family leaves forecast-only admission, or a
             # live order silently disappears from cancel/reprice re-decision.
+            # One scan of the belief-prefix range covers both: management_beliefs
+            # is the superset query, all_beliefs is its forecast-only-admissible
+            # subset derived in Python (filter_beliefs_forecast_only_admissible)
+            # instead of a second identical DB scan.
             management_beliefs = _all_latest_beliefs(
                 world_ro,
                 decision_time=received_at,
                 deadline_fence=screen_fence,
             )
+            all_beliefs = filter_beliefs_forecast_only_admissible(
+                management_beliefs,
+                decision_time=received_at,
+            )
             _screen_check_deadline()
+            _edli_belief_scan_consecutive_defers = 0
             _log.info(
                 "edli_redecision_screen receipt=%s",
                 _edli_redecision_stage_receipt(
@@ -14750,6 +14803,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 or _edli_is_sqlite_lock_error(exc)
             )
         ):
+            if screen_fence.stage == "belief_scan":
+                _edli_belief_scan_consecutive_defers += 1
             _log.info(
                 "edli_redecision_screen receipt=%s",
                 _edli_redecision_stage_receipt(

@@ -849,6 +849,32 @@ def _belief_forecast_only_admissible(
         return False
 
 
+def filter_beliefs_forecast_only_admissible(
+    beliefs: list[CachedBelief],
+    *,
+    decision_time: str | datetime | None,
+) -> list[CachedBelief]:
+    """Apply the same forecast-only admissibility filter that
+    ``_all_latest_beliefs(forecast_only_admissible=True)`` applies inline (see the loop
+    at the end of that function), to an already-fetched belief list.
+
+    Entry admission is a strict subset of management admission: the two
+    ``_all_latest_beliefs`` calls in ``run_edli_continuous_redecision_screen_cycle``
+    (src/events/reactor.py) were previously two independent full scans of the same
+    ``probability_trace_fact`` decision_id-prefix range that differed only in this
+    filter. A caller can fetch the superset (management) scan once and derive the
+    entry-admissible subset from it with this function, halving per-cycle DB I/O
+    with byte-identical results (same underlying predicate, ``_belief_forecast_only_admissible``).
+    """
+
+    decision_time_utc = _decision_time_utc(decision_time)
+    return [
+        belief
+        for belief in beliefs
+        if _belief_forecast_only_admissible(belief, decision_time_utc=decision_time_utc)
+    ]
+
+
 def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
     if decision_time_utc is None:
         return False
