@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ARTIFACT ONLY. NOT auto-installed. Daily retention sweep for decision_log
+  (zeus_trades.db), independent of the main Python scheduler so it still runs
+  when that scheduler is wedged -- same rationale as com.zeus.log-rotation.
+  scripts/migrations/202608_decision_log_retention.py is dry-run by default;
+  this job explicitly passes --apply with the script's own default
+  --keep-days (30, floor 7, refuses below the floor) and default chunk size.
+  The script deletes in db_writer_lock(BULK)-guarded chunks, releasing the
+  lock between chunks so LIVE writers are never blocked longer than one
+  chunk's commit.
+
+  DELETE alone does not shrink the on-disk file (auto_vacuum=0 on the live
+  trade DB as of 2026-08-25) -- this job keeps the row count from growing back
+  toward the incident state; it does NOT itself relieve the storage_capacity
+  gate. Reclaiming disk space needs a separate, operator-run VACUUM INTO on a
+  volume with sufficient free space (see the migration script's module
+  docstring VACUUM note).
+
+  GATING (operator law: default OFF, operator enables only after a manual
+  dry-run + --apply run has been verified against the live DB): this plist is
+  never auto-installed by any code path. It ships inert under deploy/launchd/
+  until an operator explicitly runs the two commands below.
+
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time via scripts/install_launchd_plist.py (plistlib-based -- parses
+  the plist, substitutes string values, refuses unresolved placeholders, and
+  lints before writing). No secrets are present.
+
+  INSTALL (operator, run from the repo root, ONLY after verifying a manual
+  --apply run):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.decision-log-retention.plist
+    launchctl bootout gui/$(id -u)/com.zeus.decision-log-retention 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.decision-log-retention.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.decision-log-retention</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python3</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/migrations/202608_decision_log_retention.py</string>
+		<string>--apply</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/decision_log_retention.log</string>
+	<key>StandardOutPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/decision_log_retention.log</string>
+	<key>StartInterval</key>
+	<integer>86400</integer>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+</dict>
+</plist>

@@ -1021,6 +1021,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/selection_lift_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri (scoreboard_panels.open_ro); SELECT-only over the (not-yet-landed, Item 3) candidate-set provenance table — prints "provenance table absent — 0 observations" cleanly when absent; runs src/analysis/selection_lift.py (DB-agnostic pure computation, no live wiring); writes stdout only
         # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
         "scripts/promotion_gates_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri (scoreboard_panels.open_ro); SELECT-only over settlement_attribution; runs the two-gate evaluator (src/analysis/promotion_gates.py, not wired into the entry path); its only write is an atomic append to state/promotion_gates_ledger.json recording a formal Gate-B alpha-spending evaluation (never a DB write); prints stdout
+        # --- storage-retention slice (2026-08-25): decision_log retention migration ---
+        "scripts/migrations/202608_decision_log_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk; daemon never imports
     }
 )
 

@@ -2478,6 +2478,45 @@ scripts:
       - tests/events/test_continuous_redecision_emit.py
       - tests/test_ops_scripts_smoke.py
 
+  202608_decision_log_retention.py:
+    class: migration
+    status: active
+    lifecycle: long_lived
+    authority_scope: retention_delete
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python3 scripts/migrations/202608_decision_log_retention.py [--db PATH] [--keep-days N] [--chunk-size N] [--apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Recurring maintenance: deletes decision_log rows older than --keep-days
+      (default 30, floor 7) to relieve the 2026-08-24 storage_capacity
+      DATA_DEGRADED incident (decision_log was 73GB/565,879 rows with no prior
+      retention). Rows with mode='global_single_order_auction' anchored to a
+      tier0_candidate_set_provenance row (selection_epoch_identity join) are
+      protected indefinitely for the preregistered selection-lift study.
+      Idempotent; safe to re-run at any cadence.
+    do_not_use_when: >
+      Do not lower --keep-days below the documented consumer-window floor (7
+      days) without re-auditing scripts/migrations/202608_decision_log_retention.py's
+      module docstring consumer table -- settlement_skill_attribution's
+      only_new=True backfill has no age bound and is currently safe only because
+      no unattributed settled position older than the window resolves a live
+      global-auction certificate (verify this invariant live before widening
+      deletion aggressiveness). DELETE alone does not shrink the on-disk file
+      (auto_vacuum=0); do not expect this script alone to relieve the storage
+      gate without a follow-up VACUUM INTO / incremental-vacuum conversion.
+    promotion_barrier: "Requires explicit --apply flag; dry-run default reports total/protected/deletable counts only."
+    unguarded_write_rationale: "--apply writes are chunked (default 2000 rows/txn) under db_writer_lock(BULK), lock acquired and released per chunk so LIVE writers are never blocked longer than one chunk's commit; refuses to run at all if --keep-days is below the documented floor."
+    required_helpers:
+      - src.state.db_writer_lock.db_writer_lock
+    required_tests:
+      - tests/test_decision_log_retention_migration.py
+
   measure_wu_obs_latency.py:
     class: telemetry_read
     status: active
