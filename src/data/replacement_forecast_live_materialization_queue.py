@@ -2477,6 +2477,11 @@ def _build_request_claim_read_plan(
     lane: str,
 ) -> _RequestClaimReadPlan:
     """Create a no-mutation request claim plan before taking the queue flock."""
+    request_files = (
+        tuple(path for path in request_path.glob("*.json") if path.is_file())
+        if request_path.exists()
+        else ()
+    )
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     active_keys: set[tuple[str, ...]] = set()
     active_batches_by_identity: dict[tuple[str, tuple[str, ...]], set[str]] = {}
@@ -2513,11 +2518,28 @@ def _build_request_claim_read_plan(
                         active_keys.add(coalescing)
                 else:
                     unknown_inflight_batches.add(batch_path.name)
-    request_files = (
-        tuple(path for path in request_path.glob("*.json") if path.is_file())
-        if request_path.exists()
-        else ()
-    )
+    if not request_files:
+        return _RequestClaimReadPlan(
+            claim=_MaterializationQueueClaim(
+                request_path=request_path,
+                batch_path=None,
+                processed_path=processed_path,
+                failed_path=failed_path,
+                claimed_count=0,
+                skipped_count=0,
+                inflight_deferred_count=0,
+                timeout_retry_deferred_count=0,
+                processed_files=(),
+                failed_files=(),
+                seed_processed_files=(),
+                seed_failed_files=(),
+                seed_reasons=(),
+                discovery_report=None,
+                forecast_db_path=forecast_db,
+            ),
+            superseded=(),
+            unknown_inflight_batches=tuple(sorted(unknown_inflight_batches)),
+        )
     priority, priority_names = _priority_map_with_names(forecast_db, request_files)
     requests = tuple(
         sorted(
@@ -3821,7 +3843,15 @@ def process_replacement_forecast_live_materialization_queue(
                     limit=limit,
                     lane=lane,
                 )
-        except _ClaimReadDeadlineExceeded:
+        except (_ClaimReadDeadlineExceeded, sqlite3.OperationalError) as exc:
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and exc.args != ("DB_CONNECTION_DEADLINE_EXPIRED",)
+            ):
+                raise
+            # SCOPE: this scheduler tick's pre-claim read tranche only. DRAIN:
+            # the next tick rebuilds the plan after the DB deadline clears. RESET:
+            # an exact queue/DB snapshot can be claimed; no request moves here.
             return ReplacementForecastLiveMaterializationQueueReport(
                 status="DEFERRED",
                 request_dir=str(request_path),
