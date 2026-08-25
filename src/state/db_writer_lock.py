@@ -1023,6 +1023,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/promotion_gates_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri (scoreboard_panels.open_ro); SELECT-only over settlement_attribution; runs the two-gate evaluator (src/analysis/promotion_gates.py, not wired into the entry path); its only write is an atomic append to state/promotion_gates_ledger.json recording a formal Gate-B alpha-spending evaluation (never a DB write); prints stdout
         # --- storage-retention slice (2026-08-25): decision_log retention migration ---
         "scripts/migrations/202608_decision_log_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk; daemon never imports
+        "scripts/migrations/202608_execution_feasibility_evidence_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk (plus one prerequisite CREATE INDEX IF NOT EXISTS); daemon never imports
+        "scripts/migrations/202608_executable_market_snapshots_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK) PLUS a per-chunk BEGIN IMMEDIATE that drops/verifies/re-creates the no_delete_executable_market_snapshots append-only trigger from its own sqlite_master.sql (precedent: scripts/repair_executable_snapshot_corruption.py); daemon never imports
     }
 )
 
