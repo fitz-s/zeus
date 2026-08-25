@@ -9,6 +9,8 @@ import pytest
 
 from src.strategy.tier0_policy import (
     TIER0_MAX_ENTRY_PRICE,
+    tier0_decision_price,
+    tier0_price_rejection_reason,
     TIER0_REJECT_AGGREGATE_CEILING,
     TIER0_REJECT_CLUSTER_OCCUPIED,
     TIER0_REJECT_LIMIT_CROSSES_CAP,
@@ -397,3 +399,50 @@ def test_tier0_realized_pnl_usd_excludes_unsettled_position():
 
 def test_tier0_realized_pnl_usd_empty_is_zero():
     assert tier0_realized_pnl_usd(closed_positions=()) == 0.0
+
+
+class _Level:
+    def __init__(self, price):
+        self.price = price
+
+
+class _Curve:
+    def __init__(self, prices):
+        self.levels = tuple(_Level(p) for p in prices)
+
+
+class _Candidate:
+    """GlobalSingleOrderCandidate surface as seen by tier0_decision_price:
+    economic_cost_curve only -- deliberately NO limit_price attribute, the
+    exact shape the live wiring bug read against."""
+
+    def __init__(self, curve):
+        self.economic_cost_curve = curve
+
+
+def test_decision_price_is_cheapest_ask_and_admits_cheap_taker():
+    price = tier0_decision_price(_Candidate(_Curve((0.12, 0.14))))
+    assert price == 0.12
+    assert (
+        tier0_price_rejection_reason(execution_price=price, limit_price=price)
+        is None
+    )
+
+
+def test_decision_price_none_without_curve_rejects_inputs_missing():
+    for cand in (_Candidate(None), _Candidate(_Curve(()))):
+        price = tier0_decision_price(cand)
+        assert price is None
+        reason = tier0_price_rejection_reason(
+            execution_price=price, limit_price=price
+        )
+        assert reason == f"{TIER0_REJECT_PRICE_TOO_HIGH}:inputs=missing"
+
+
+def test_decision_price_never_reads_limit_price_attribute():
+    class _Trap(_Candidate):
+        @property
+        def limit_price(self):
+            raise AssertionError("gate must not read candidate.limit_price")
+
+    assert tier0_decision_price(_Trap(_Curve((0.2,)))) == 0.2
