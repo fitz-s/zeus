@@ -94,13 +94,20 @@ def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
 
 
 def _candidate(*, execution_mode="TAKER_LIMIT", limit_price=0.15):
+    # Mirrors GlobalSingleOrderCandidate's real surface: the decision price
+    # lives on economic_cost_curve.levels[0].price and there is NO limit_price
+    # attribute (the 2026-08-25 wiring bug read a nonexistent field and
+    # rejected every BUY with inputs=missing; this fixture carried the
+    # phantom field, which is why it never caught that).
     return SimpleNamespace(
         action="BUY",
         execution_mode=execution_mode,
         family_key=FAMILY_DALLAS_HIGH,
         bin_id="bin-a",
         side="YES",
-        limit_price=limit_price,
+        economic_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=limit_price),)
+        ),
     )
 
 

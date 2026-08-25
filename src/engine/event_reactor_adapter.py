@@ -10945,6 +10945,7 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 from src.strategy.tier0_policy import (
                     tier0_cluster_occupied_rejection_reason,
+                    tier0_decision_price,
                     tier0_execution_mode_rejection_reason,
                     tier0_price_rejection_reason,
                 )
@@ -10952,7 +10953,7 @@ def event_bound_live_adapter_from_trade_conn(
                 _tier0_cluster_key = _global_entry_cluster_by_family.get(
                     family_key, ("", "")
                 )
-                _tier0_price = getattr(candidate, "limit_price", None)
+                _tier0_price = tier0_decision_price(candidate)
                 tier0_reason = tier0_price_rejection_reason(
                     execution_price=_tier0_price,
                     limit_price=_tier0_price,

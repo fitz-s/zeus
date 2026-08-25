@@ -60,6 +60,25 @@ class Tier0CandidateFacts:
     cluster_key: tuple[str, str]
 
 
+def tier0_decision_price(candidate) -> float | None:
+    """The decision-time BUY price of a global-auction candidate, or None.
+
+    Duck-typed off the candidate's own cost curve: economic_cost_curve
+    collapses to executable_cost_curve for TAKER_LIMIT (tier0's only legal
+    mode), and its cheapest ask level is the price a marketable order fills
+    at. Returns None when the curve or its levels are absent -- the caller's
+    price gate then rejects with inputs=missing, matching an unexecutable
+    side. GlobalSingleOrderCandidate carries no limit_price field; a taker's
+    limit equals its execution price, so one value binds both gate inputs.
+    """
+
+    curve = getattr(candidate, "economic_cost_curve", None)
+    levels = getattr(curve, "levels", None) or ()
+    if not levels:
+        return None
+    return float(levels[0].price)
+
+
 def tier0_price_rejection_reason(
     *,
     execution_price: float | int | None,
