@@ -2849,6 +2849,34 @@ def test_velocity_uses_token_time_index_for_latest_three_quotes(cfg: dict) -> No
     assert acceleration == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("invalid_bid", ["not-a-price", "NaN", "+Infinity", "-Infinity"])
+def test_velocity_drops_invalid_sqlite_quote_values(cfg: dict, invalid_bid: str) -> None:
+    _quote(cfg, "velocity-finite-left", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
+    _quote(cfg, "velocity-invalid", "2026-08-22T09:00:02+00:00", invalid_bid, latest=False)
+    _quote(cfg, "velocity-finite-right", "2026-08-22T09:00:03+00:00", 0.60, latest=False)
+
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
+
+    assert velocity == pytest.approx(-0.10)
+    assert acceleration == pytest.approx(0.0)
+
+
+def test_velocity_returns_zero_with_fewer_than_two_finite_recent_quotes(cfg: dict) -> None:
+    _quote(cfg, "velocity-finite-old", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
+    for evidence_id, at, bid in (
+        ("velocity-nan", "2026-08-22T09:00:02+00:00", "NaN"),
+        ("velocity-positive-infinity", "2026-08-22T09:00:03+00:00", "+Infinity"),
+        ("velocity-negative-infinity", "2026-08-22T09:00:04+00:00", "-Infinity"),
+    ):
+        _quote(cfg, evidence_id, at, bid, latest=False)
+
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
+
+    assert (velocity, acceleration) == (0.0, 0.0)
+
+
 def test_depth_top_bid_overrides_conflicting_zero_scalar(cfg: dict) -> None:
     _position(cfg)
     _quote(

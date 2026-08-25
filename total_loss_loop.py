@@ -1811,9 +1811,13 @@ def _velocity(
         """,
         (token_id, carrier_direction),
     ).fetchall()
-    if len(rows) < 2:
+    points: list[tuple[datetime | None, float]] = []
+    for row in reversed(rows):
+        bid = _float(row[1])
+        if bid is not None:
+            points.append((parse_time(row[0]), bid))
+    if len(points) < 2:
         return 0.0, 0.0
-    points = [(parse_time(row[0]), float(row[1])) for row in reversed(rows)]
     velocities: list[float] = []
     for left, right in zip(points, points[1:]):
         if left[0] is None or right[0] is None:
