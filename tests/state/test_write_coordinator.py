@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from src.state import write_coordinator as write_coordinator_module
 from src.state.db_writer_lock import WriteClass
 from src.state.write_coordinator import (
     CrossDatabaseTransactionUnsupported,
@@ -291,6 +292,114 @@ def test_multi_db_recovery_yields_when_monitor_arrives_after_first_gate(
     assert not recovery.is_alive()
     assert errors == []
     assert order == ["monitor", "recovery"]
+
+
+def test_standard_writer_bypasses_transient_false_positive_monitor_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-08-25 incident antibody: the global auction's STANDARD-priority
+    commit lease starved for 12+ hours behind _acquire_nonmonitor_reservations'
+    advisory _monitor_intent_locked() pre-checks, which had no bound on how
+    many times a writer may be told to back off. Those checks are a "back off
+    before even trying" heuristic, not the correctness gate -- the real per-db
+    reservation flock, process/file locks, and the publication barrier's own
+    flock() still serialize truthfully regardless of whether the heuristic
+    fires. When a recurring MONITOR writer (settlement harvest, held-position
+    exit handoff) re-registers its intent often enough that the advisory
+    probe unluckily reads "locked" on every poll, a STANDARD writer used to
+    spin for its entire deadline without ever reaching the real gates even
+    once.
+
+    This test makes _monitor_intent_locked deterministically report "locked"
+    for the first few probes -- simulating that unlucky-but-transient
+    reading -- while every real lock (turnstile, process, file, waiter
+    reservation, publication barrier) stays genuinely free throughout. Pins:
+    grace lets the writer through well inside its deadline; without grace
+    (max attempts=0) the same false-positive pattern starves it.
+    """
+
+    paths = _db_paths(tmp_path)
+
+    def _make_flaky_probe(false_positive_count: int):
+        calls = {"n": 0}
+        real = write_coordinator_module.WriteCoordinator._monitor_intent_locked
+
+        def _flaky(db_path: Path) -> bool:
+            calls["n"] += 1
+            if calls["n"] <= false_positive_count:
+                return True
+            return real(db_path)
+
+        return _flaky, calls
+
+    # With grace (default 3): a writer that yields to the first 3 false
+    # positives stops trusting the advisory probe and reaches the real gates,
+    # which are all genuinely free -- succeeds promptly.
+    flaky, calls = _make_flaky_probe(false_positive_count=6)
+    monkeypatch.setattr(
+        write_coordinator_module.WriteCoordinator,
+        "_monitor_intent_locked",
+        staticmethod(flaky),
+    )
+    coordinator = WriteCoordinator(paths)
+    started = time.monotonic()
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="global_single_order_auction",
+        priority=WritePriority.STANDARD,
+        deadline_ms=5_000,
+    ):
+        elapsed = time.monotonic() - started
+    assert elapsed < 1.0, (
+        f"STANDARD lease took {elapsed:.3f}s against a transient false-positive "
+        "advisory probe -- grace bypass did not kick in"
+    )
+    # Grace exhausts after MONITOR_YIELD_GRACE_MAX_ATTEMPTS (3) calls that
+    # each see the fake "locked" reading; the writer then stops probing
+    # altogether for the rest of this attempt and goes straight for the real
+    # (genuinely free) locks -- it must never need all 6 rigged positives.
+    assert calls["n"] < 6, (
+        f"probe was called {calls['n']} times -- grace bypass did not stop "
+        "consulting the advisory heuristic before exhausting the rigged run"
+    )
+
+
+def test_standard_writer_starves_without_yield_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the pre-fix failure mode: with grace disabled (max attempts=0),
+    the identical transient false-positive pattern starves a STANDARD writer
+    for its entire deadline even though every real lock is free throughout --
+    reproducing the 2026-08-25 auction write-lease incident's shape.
+    """
+
+    # A grace budget this large never exhausts within the test's deadline --
+    # equivalent to the pre-fix code, which always respected the advisory
+    # probe with no bound.
+    monkeypatch.setattr(
+        write_coordinator_module, "MONITOR_YIELD_GRACE_MAX_ATTEMPTS", 1_000_000_000
+    )
+    paths = _db_paths(tmp_path)
+
+    def _always_locked(db_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        write_coordinator_module.WriteCoordinator,
+        "_monitor_intent_locked",
+        staticmethod(_always_locked),
+    )
+    coordinator = WriteCoordinator(paths)
+    with pytest.raises(WriteLeaseTimeout):
+        with coordinator.lease(
+            (DBIdentity.TRADE,),
+            owner="global_single_order_auction",
+            priority=WritePriority.STANDARD,
+            deadline_ms=150,
+        ):
+            pass
 
 
 def test_monitor_cannot_enter_final_check_to_lease_publication_handoff(
