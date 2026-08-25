@@ -1024,6 +1024,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- storage-retention slice (2026-08-25): decision_log retention migration ---
         "scripts/migrations/202608_decision_log_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk; daemon never imports
         "scripts/ops/vacuum_reset_trades_db.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock: --check/--vacuum-into open the live trade DB mode=ro only (VACUUM INTO writes a NEW file elsewhere, never the live DB); --swap requires --operator-confirms-fenced (writer-plane fence, T5 pattern) and operates only after every zeus daemon is stopped, so no concurrent writer exists to serialize against; item 13 Slice C, documented but NEVER executed against a live or live-like DB
+        "scripts/migrations/202608_execution_feasibility_evidence_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk (plus one prerequisite CREATE INDEX IF NOT EXISTS); daemon never imports
+        "scripts/migrations/202608_executable_market_snapshots_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK) PLUS a per-chunk BEGIN IMMEDIATE that drops/verifies/re-creates the no_delete_executable_market_snapshots append-only trigger from its own sqlite_master.sql (precedent: scripts/repair_executable_snapshot_corruption.py); daemon never imports
     }
 )
 

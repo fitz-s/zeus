@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ARTIFACT ONLY. NOT auto-installed. Daily retention sweep for
+  executable_market_snapshots (zeus_trades.db) -- companion to
+  com.zeus.decision-log-retention.plist and
+  com.zeus.execution-feasibility-evidence-retention.plist. Same rationale and
+  same gating law (default OFF; installing this plist IS the operator's
+  explicit enable step, only after a manual dry-run + --apply run has been
+  verified).
+
+  scripts/migrations/202608_executable_market_snapshots_retention.py is
+  dry-run by default; this job explicitly passes --apply with the script's
+  own default --keep-days (30, floor 17) and default chunk size. This table
+  is APPEND-ONLY by DB trigger (NC-NEW-B) -- the script drops, verifies, and
+  re-creates that trigger inside one BEGIN IMMEDIATE transaction per delete
+  chunk (see the migration's module docstring "SAFETY OF THE TRIGGER WINDOW"
+  section); only rows NOT referenced by venue_commands.snapshot_id or
+  position_events.snapshot_id are ever deleted.
+
+  DELETE alone does not shrink the on-disk file (auto_vacuum=0 on the live
+  trade DB as of 2026-08-25) -- see the decision-log-retention plist's
+  comment and the migration script's VACUUM note for the full path.
+
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time via scripts/install_launchd_plist.py.
+
+  INSTALL (operator, run from the repo root, ONLY after verifying a manual
+  --apply run):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.executable-market-snapshots-retention.plist
+    launchctl bootout gui/$(id -u)/com.zeus.executable-market-snapshots-retention 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.executable-market-snapshots-retention.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.executable-market-snapshots-retention</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python3</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/migrations/202608_executable_market_snapshots_retention.py</string>
+		<string>--apply</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/executable_market_snapshots_retention.log</string>
+	<key>StandardOutPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/executable_market_snapshots_retention.log</string>
+	<key>StartInterval</key>
+	<integer>86400</integer>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+</dict>
+</plist>
