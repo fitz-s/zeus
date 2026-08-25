@@ -216,8 +216,11 @@ class AnchorAvailabilityProbe:
         return self._meta
 
     def __call__(self, cycle: datetime) -> bool:
-        if probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen):
-            return True
+        # Free signals first: the cached model meta and the public S3 bucket
+        # manifest confirm publication without spending API quota. The metered
+        # single-runs probe is the last rung, paid only when neither free
+        # signal confirms -- before this reorder it ran FIRST on every call
+        # and burned one quota unit per pre-publication 400.
         meta = self._model_meta()
         if meta is not None:
             try:
@@ -229,7 +232,9 @@ class AnchorAvailabilityProbe:
                     return True
             except (KeyError, TypeError, ValueError) as exc:
                 logger.debug("anchor meta probe malformed (treated unavailable): %s", exc)
-        return probe_bucket_run_declared(cycle)
+        if probe_bucket_run_declared(cycle):
+            return True
+        return probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen)
 
 
 def probe_anchor_available_any(

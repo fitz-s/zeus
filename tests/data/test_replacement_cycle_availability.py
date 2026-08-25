@@ -181,19 +181,49 @@ class TestProbeResolvedSelection:
 
         assert probe(published) is True
 
-    def test_single_runs_success_avoids_meta_fetch(self):
-        meta_calls: list[None] = []
+    def test_free_meta_confirmation_avoids_metered_single_runs_probe(self):
+        # Cost-order law (2026-08-25): the cached meta and S3 bucket manifest
+        # are free; the single-runs API probe costs one quota unit (and 400s
+        # before publication). When a free signal confirms, the metered probe
+        # must never fire.
+        cycle = _dt("2026-06-11T18:00:00")
+        single_runs_calls: list[None] = []
+
+        def counting_urlopen(*args, **kwargs):
+            single_runs_calls.append(None)
+            return type("Response", (), {
+                "status": 200,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *exc: None,
+            })()
+
+        probe = AnchorAvailabilityProbe(
+            urlopen=counting_urlopen,
+            meta_fetch=lambda: {
+                "run_initialisation_utc": cycle,
+                "run_availability_utc": cycle,
+                "run_modification_utc": cycle,
+            },
+        )
+
+        assert probe(cycle) is True
+        assert single_runs_calls == []
+
+    def test_metered_single_runs_probe_is_last_rung(self, monkeypatch):
+        # When neither free signal confirms, the metered probe still decides.
+        import src.data.replacement_cycle_availability as rca
+
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
         probe = AnchorAvailabilityProbe(
             urlopen=lambda *args, **kwargs: type("Response", (), {
                 "status": 200,
                 "__enter__": lambda self: self,
                 "__exit__": lambda self, *exc: None,
             })(),
-            meta_fetch=lambda: meta_calls.append(None) or {},
+            meta_fetch=lambda: {},
         )
 
         assert probe(_dt("2026-06-11T18:00:00")) is True
-        assert meta_calls == []
 
     def test_production_single_run_probe_uses_shared_priority_quota(self, monkeypatch):
         import src.data.replacement_cycle_availability as rca

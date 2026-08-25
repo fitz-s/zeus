@@ -833,6 +833,7 @@ def _resolve_anchor_payload(
     bucket_read_workers: int = 1,
     client: httpx.Client | None = None,
     meta_wave_failure: Exception | None = None,
+    single_runs_run_refusals: set | None = None,
 ) -> tuple[dict, dict]:
     """Resolve one city's anchor payload through the full transport ladder.
 
@@ -864,6 +865,16 @@ def _resolve_anchor_payload(
             "single-runs rung skipped: source-clock metadata says requested run is not public yet"
         )
         rung2_reason: Exception = meta_wave_failure
+    elif (
+        single_runs_run_refusals is not None
+        and request.run.isoformat() in single_runs_run_refusals
+    ):
+        # A sibling city already got HTTP 400 for this exact run this pass:
+        # the API refusal is run-scoped, not city-scoped, so re-asking per
+        # city only converts one refusal into a metered 400 per city.
+        single_runs_exc = RuntimeError(
+            "single-runs rung skipped: run refused 400 for a sibling city this pass"
+        )
     elif _single_runs_public_for_request(request):
         try:
             kwargs: dict[str, object] = {"fast_fail_429": True}
@@ -892,6 +903,8 @@ def _resolve_anchor_payload(
             status_code = exc.response.status_code
             if status_code != 400 and status_code != 429 and status_code < 500:
                 raise
+            if status_code == 400 and single_runs_run_refusals is not None:
+                single_runs_run_refusals.add(request.run.isoformat())
             # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
             single_runs_exc = exc
         except RuntimeError as exc:
@@ -1402,6 +1415,10 @@ def download_current_target_raw_inputs(
     bucket_pool = (
         bucket_reader_pool if bucket_reader_pool is not None else BucketPointReaderPool()
     )
+    # Runs the single-runs API refused with 400 during THIS pass. The refusal
+    # is run-scoped: once one city sees it, every sibling city skips rung 1
+    # instead of paying one metered 400 each (~146x per cycle transition).
+    single_runs_run_refusals: set = set()
     try:
         for target in targets:
             target_key = (target.city, target.target_date)
@@ -1463,6 +1480,7 @@ def download_current_target_raw_inputs(
                             bucket_read_workers=min(max(1, int(fetch_workers)), 8),
                             client=openmeteo_client,
                             meta_wave_failure=meta_wave_failures.get(target_key),
+                            single_runs_run_refusals=single_runs_run_refusals,
                         )
                         payload_captured_at = datetime.now(tz=UTC)
                         resolved_payloads[target_key] = (

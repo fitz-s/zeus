@@ -1986,20 +1986,25 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     )
                     for _, (ref, target_dates) in chunk
                 ]
-                results = _default_live_fetch_locations_batched(
-                    models=[model],
-                    locations=locations,
-                    run=run,
-                    forecast_hours=forecast_hours,
-                    source_available_at=_single_runs_request_for_model(
-                        model
-                    ).source_available_at,
-                    deadline_monotonic=(
-                        wall_clock_deadline - 0.25
-                        if wall_clock_deadline is not None
-                        else None
-                    ),
-                )
+                # Live-probability capture of a newly published run: the
+                # source-clock tranche (cap 9000) exists exactly for this, so
+                # the fetch must not die at the 8500 maintenance ceiling
+                # alongside backfill jobs.
+                with bayes_precision_fusion_source_clock_quota_priority():
+                    results = _default_live_fetch_locations_batched(
+                        models=[model],
+                        locations=locations,
+                        run=run,
+                        forecast_hours=forecast_hours,
+                        source_available_at=_single_runs_request_for_model(
+                            model
+                        ).source_available_at,
+                        deadline_monotonic=(
+                            wall_clock_deadline - 0.25
+                            if wall_clock_deadline is not None
+                            else None
+                        ),
+                    )
                 location_batch_count += 1
                 location_count += len(chunk)
                 location_target_date_count += sum(
@@ -2169,26 +2174,30 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     (city, target_date, single_run.isoformat()),
                     None,
                 )
-                sv_map = (
-                    dict(location_result)
-                    if location_result is not None
-                    else _default_live_fetch_batched(
-                        models=single_models,
-                        latitude=ref.latitude,
-                        longitude=ref.longitude,
-                        timezone_name=ref.timezone_name,
-                        run=single_run,
-                        target_local_date=target_local_date,
-                        forecast_hours=forecast_hours,
-                        source_available_at=(
-                            single_request_by_model[single_models[0]].source_available_at
-                            if len(single_models) == 1
-                            else None
-                        ),
-                        allow_per_model_fallback=allow_single_runs_fallback,
-                        deadline_monotonic=wall_clock_deadline,
-                    )
-                )
+                if location_result is not None:
+                    sv_map = dict(location_result)
+                else:
+                    # Same newly-published-run capture as the wave fetch above;
+                    # same source-clock tranche.
+                    with bayes_precision_fusion_source_clock_quota_priority():
+                        sv_map = _default_live_fetch_batched(
+                            models=single_models,
+                            latitude=ref.latitude,
+                            longitude=ref.longitude,
+                            timezone_name=ref.timezone_name,
+                            run=single_run,
+                            target_local_date=target_local_date,
+                            forecast_hours=forecast_hours,
+                            source_available_at=(
+                                single_request_by_model[
+                                    single_models[0]
+                                ].source_available_at
+                                if len(single_models) == 1
+                                else None
+                            ),
+                            allow_per_model_fallback=allow_single_runs_fallback,
+                            deadline_monotonic=wall_clock_deadline,
+                        )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 single_transport_provenance = sv_map.pop(
                     _BATCH_TRANSPORT_PROVENANCE_KEY,

@@ -110,6 +110,46 @@ def test_one_fetch_per_model_cycle_and_under_budget(tmp_path, monkeypatch):
     )
 
 
+def test_live_single_runs_fetches_run_on_priority_lane(tmp_path, monkeypatch):
+    """Lane law (2026-08-25): live-probability capture of a newly published
+    run must consume the source-clock tranche (cap 9000), not the maintenance
+    lane (cap 8500) shared with backfill -- otherwise fusion starves first
+    when the day's quota fills."""
+    lane_states: list[bool] = []
+
+    def fake_single(*, models, **k):
+        lane_states.append(dl._BPF_OPENMETEO_QUOTA_TRACKER._is_priority())
+        return {m: (20.0, 10.0) for m in models}
+
+    def fake_prev(*, models, **k):
+        return {m: (19.0, 9.0) for m in models}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", fake_single)
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", fake_prev)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+    import sqlite3
+
+    db = tmp_path / "f.db"
+    conn = sqlite3.connect(str(db))
+    ensure_replacement_forecast_live_schema(conn)
+    conn.commit()
+    conn.close()
+
+    download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 13, 12, tzinfo=timezone.utc),
+        targets=_all_targets(),
+    )
+
+    assert lane_states, "no single-runs fetches executed"
+    assert all(lane_states), (
+        f"{lane_states.count(False)}/{len(lane_states)} live single-runs "
+        "fetches ran on the maintenance lane"
+    )
+
+
 def test_jma_not_fetched_at_non_publishing_cycle():
     """R3: jma_seamless must be excluded from the model set at 06Z/18Z (2x/day only)."""
     from src.data.bayes_precision_fusion_download import _model_publishes_cycle

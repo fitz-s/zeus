@@ -453,6 +453,60 @@ def test_bucket_tolerance_still_flags_real_downscaling_bias() -> None:
 # ---------------------------------------------------------------------------
 # Manifest parsing — live JSON shape round-trips.
 # ---------------------------------------------------------------------------
+def test_rung1_400_short_circuits_sibling_cities_same_run(monkeypatch) -> None:
+    """Quota law (2026-08-25): a single-runs HTTP 400 is run-scoped, not
+    city-scoped. Once one city pays the metered 400, every sibling city in the
+    same pass must skip rung 1 for that run instead of paying its own 400."""
+    import httpx
+
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    class _Req:
+        latitude = 39.9
+        longitude = 116.4
+        run = datetime(2026, 6, 11, 0, tzinfo=UTC)
+        forecast_hours = 120
+
+    req = _Req()
+    rung1_calls: list[str] = []
+
+    def _rung1(r, **kwargs):
+        rung1_calls.append(r.run.isoformat())
+        request = httpx.Request("GET", "https://x")
+        response = httpx.Response(400, request=request)
+        raise httpx.HTTPStatusError("err", request=request, response=response)
+
+    monkeypatch.setattr(dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", _rung1)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "_try_bucket_rung_three",
+        lambda **kwargs: (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"run_authority": "bucket_partial_run_unverified"},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        lambda r, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("down")),
+    )
+
+    refusals: set = set()
+    for city in ("Beijing", "Shanghai", "Tokyo"):
+        dl._resolve_anchor_payload(
+            request=req,
+            city=city,
+            target_date="2026-06-13",
+            timezone_name="Asia/Shanghai",
+            single_runs_run_refusals=refusals,
+        )
+
+    assert len(rung1_calls) == 1, (
+        f"sibling cities paid {len(rung1_calls)} metered 400s for one run"
+    )
+    assert req.run.isoformat() in refusals
+
+
 def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(monkeypatch) -> None:
     """Ladder ordering + scoping: rung-1 HTTP 400 → rung-2 (refusal/transport/5xx) → rung-3.
 
