@@ -18,6 +18,104 @@ logger = logging.getLogger(__name__)
 
 
 LEGACY_SETTLEMENT_CONTRACT_VERSION = "decision_log.settlement.v1"
+
+# --------------------------------------------------------------------------
+# Bounded-by-construction inline retention (2026-08-25, operator redirect:
+# storage must be bounded by construction, not periodic cleanup -- see
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 13).
+#
+# Piggybacked in the SAME transaction as every decision_log INSERT (both
+# store_artifact and store_settlement_records below): after inserting a row
+# of a given mode, opportunistically deletes up to _INLINE_EXPIRE_LIMIT rows
+# of that SAME mode older than that mode's retention window. No commit here
+# -- matches the existing "caller owns the commit" contract, so this is part
+# of whatever transaction the caller is already managing. Bounded by
+# construction: fires once per insert, so as long as writes continue the
+# backlog cannot grow unbounded; if writes ever stopped, no expiry would be
+# needed either. scripts/migrations/202608_decision_log_retention.py (PR
+# #510) remains available as the one-time backlog-drain tool for rows
+# written before this inline mechanism existed; its companion launchd plist
+# is optional in steady state.
+#
+# Per-mode windows carried forward from the PR #510 consumer-window audit:
+# 7 days is safe for every consumer except the tier0 preregistered-study
+# anchor (protected below, indefinitely) and full auction receipts, which
+# settlement_skill_attribution's unbounded-in-principle backfill (verified
+# 2026-08-25: currently zero at-risk rows, but a live invariant, not a
+# structural guarantee) argues for the wider 30-day margin.
+_MODE_RETENTION_DAYS: dict[str, int] = {
+    "global_single_order_auction": 30,
+    "global_single_order_auction_delta": 7,
+    "global_single_order_auction_duplicate": 7,
+    "global_single_order_auction_preflight": 7,
+    "exit_monitor": 7,
+}
+_DEFAULT_MODE_RETENTION_DAYS = 30
+_INLINE_EXPIRE_LIMIT = 50
+
+# Tier0 preregistered selection-lift study anchor (PR #510): a
+# global_single_order_auction row whose artifact_json.summary.
+# selection_epoch_identity matches a tier0_candidate_set_provenance row is
+# retained indefinitely. Exported so scripts/migrations/
+# 202608_decision_log_retention.py imports this single definition rather
+# than duplicating the SQL text.
+TIER0_EXCEPT_CLAUSE = """
+      AND NOT (
+        mode = 'global_single_order_auction'
+        AND EXISTS (
+          SELECT 1 FROM tier0_candidate_set_provenance t
+          WHERE t.selection_epoch_identity = json_extract(
+            decision_log.artifact_json, '$.summary.selection_epoch_identity'
+          )
+        )
+      )
+"""
+
+
+def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = None) -> None:
+    """Opportunistically delete up to _INLINE_EXPIRE_LIMIT expired decision_log
+    rows of the given mode. ``exclude_id`` is the row just inserted by the
+    caller in this same call -- excluded so a legitimately old-timestamped
+    write (a backfill/catch-up insert, or a row whose own timestamp happens
+    to already be outside the window) is never deleted by the very insert
+    that created it. Never raises -- a bug here must not block a legitimate
+    decision_log write; failures are logged and swallowed so the caller's
+    insert/commit proceeds unaffected.
+    """
+    try:
+        keep_days = _MODE_RETENTION_DAYS.get(mode, _DEFAULT_MODE_RETENTION_DAYS)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=keep_days)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        except_clause = ""
+        if mode == "global_single_order_auction":
+            has_tier0 = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='tier0_candidate_set_provenance'"
+            ).fetchone() is not None
+            if has_tier0:
+                except_clause = TIER0_EXCEPT_CLAUSE
+        exclude_clause = "AND id != ?" if exclude_id is not None else ""
+        params: tuple = (mode, cutoff)
+        if exclude_id is not None:
+            params += (exclude_id,)
+        params += (_INLINE_EXPIRE_LIMIT,)
+        conn.execute(
+            f"""
+            DELETE FROM decision_log WHERE id IN (
+                SELECT id FROM decision_log
+                WHERE mode = ? AND timestamp < ?
+                {exclude_clause}
+                {except_clause}
+                ORDER BY id LIMIT ?
+            )
+            """,
+            params,
+        )
+    except Exception:  # noqa: BLE001 - inline expiry must never block a real write
+        logger.exception("_inline_expire_decision_log failed for mode=%s (write unaffected)", mode)
+
+
 @dataclass
 class NoTradeCase:
     """Records why a trade was NOT made. Blueprint v2 §3."""
@@ -156,6 +254,7 @@ def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None"
         artifact.mode, artifact.started_at, artifact.completed_at,
         json.dumps(asdict(artifact), default=str), now, env,
     ))
+    _inline_expire_decision_log(conn, artifact.mode, exclude_id=cursor.lastrowid)
     return cursor.lastrowid
 
 
@@ -189,13 +288,14 @@ def store_settlement_records(
         },
         "settlements": serialized_records,
     }
-    conn.execute(
+    settlement_cursor = conn.execute(
         """
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         ("settlement", now, now, json.dumps(artifact, default=str), now, env),
     )
+    _inline_expire_decision_log(conn, "settlement", exclude_id=settlement_cursor.lastrowid)
     # NOTE (DT#1): No internal commit. Caller owns the commit.
     # Standalone callers (harvester, tests) must conn.commit() after this returns.
 

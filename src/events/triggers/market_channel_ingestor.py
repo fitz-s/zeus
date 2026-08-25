@@ -3783,6 +3783,95 @@ def insert_execution_feasibility_evidence_batch(
     except sqlite3.OperationalError as exc:
         if "execution_feasibility_latest" not in str(exc):
             raise
+    if append_evidence:
+        _inline_expire_execution_feasibility_evidence(
+            conn, table,
+            exclude_evidence_ids=[str(v.get("evidence_id")) for v in values_rows],
+        )
+
+
+# --------------------------------------------------------------------------
+# Bounded-by-construction inline retention (2026-08-25, operator redirect:
+# storage must be bounded by construction, not periodic cleanup -- see
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 13).
+#
+# execution_feasibility_evidence has no append-only trigger and no external
+# FK-style reference into it (verified during the periodic-tool law-check:
+# no other table stores an evidence_id column) -- a plain time-window DELETE,
+# piggybacked on every insert_execution_feasibility_evidence_batch call (this
+# table's single INSERT funnel; each call is already a batch via
+# executemany, so this fires once per batch, not once per row). No commit
+# here -- part of whatever transaction the caller is already managing.
+#
+# scripts/migrations/202608_execution_feasibility_evidence_retention.py
+# remains available as the one-time backlog-drain tool plus the bootstrap
+# that creates idx_execution_feasibility_evidence_quote_seen_at_only (this
+# inline helper creates it too, idempotently, so a fresh deploy that never
+# runs the periodic script still gets the index); its companion launchd
+# plist is optional in steady state.
+_FEASIBILITY_KEEP_DAYS = 30
+_FEASIBILITY_INLINE_EXPIRE_LIMIT = 50
+_FEASIBILITY_CUTOFF_INDEX_NAME = "idx_execution_feasibility_evidence_quote_seen_at_only"
+
+
+def _inline_expire_execution_feasibility_evidence(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    exclude_evidence_ids: "list[str] | None" = None,
+) -> None:
+    """Opportunistically delete up to _FEASIBILITY_INLINE_EXPIRE_LIMIT expired
+    execution_feasibility_evidence rows. ``exclude_evidence_ids`` are the rows
+    just inserted by the caller in this same batch -- excluded so a
+    legitimately old-timestamped write (a backfill/catch-up insert, or a row
+    whose own quote_seen_at happens to already be outside the window) is
+    never deleted by the very insert that created it. Never raises -- a bug
+    here must not block a legitimate quote-evidence write; failures are
+    logged and swallowed so the caller's insert/commit proceeds unaffected.
+
+    ``table`` is the already owner-routed table name (e.g. "execution_feasibility_evidence"
+    or "trades.execution_feasibility_evidence") resolved by the caller -- never
+    re-derived here, so this never picks a different DB than the row that was
+    just written.
+    """
+    try:
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {_FEASIBILITY_CUTOFF_INDEX_NAME} "
+            f"ON {table}(quote_seen_at)"
+        )
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=_FEASIBILITY_KEEP_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        ids = [eid for eid in (exclude_evidence_ids or []) if eid]
+        exclude_clause = ""
+        params: list = [cutoff]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            exclude_clause = f"AND evidence_id NOT IN ({placeholders})"
+            params.extend(ids)
+        params.append(_FEASIBILITY_INLINE_EXPIRE_LIMIT)
+        conn.execute(
+            f"""
+            DELETE FROM {table} WHERE evidence_id IN (
+                SELECT evidence_id FROM {table}
+                WHERE quote_seen_at < ?
+                {exclude_clause}
+                ORDER BY evidence_id
+                LIMIT ?
+            )
+            """,
+            params,
+        )
+        # No-op today (auto_vacuum=0 live); activates automatically once the
+        # one-time VACUUM reset (scripts/ops/vacuum_reset_trades_db.py,
+        # documented but not yet run) converts the DB to auto_vacuum=
+        # INCREMENTAL.
+        conn.execute("PRAGMA incremental_vacuum(1000)")
+    except Exception:  # noqa: BLE001 - inline expiry must never block a real write
+        _logger.exception(
+            "_inline_expire_execution_feasibility_evidence failed for table=%s (write unaffected)",
+            table,
+        )
 
 
 # W0.2 blind-window metric (architecture/invariants.yaml
