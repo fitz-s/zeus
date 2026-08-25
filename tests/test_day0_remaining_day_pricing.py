@@ -970,6 +970,178 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
         )
 
 
+def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch):
+    """The canonical ENTRY chain reaches current-vector carrier rebinding."""
+    import src.engine.event_reactor_adapter as era
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    bounds = [(None, 29)] + [(value, value) for value in range(30, 39)] + [(39, None)]
+    family = SimpleNamespace(
+        city="Tel Aviv",
+        target_date="2026-08-24",
+        metric="high",
+        candidates=[
+            SimpleNamespace(bin=Bin(low, high, "C", f"bin-{index}"))
+            for index, (low, high) in enumerate(bounds)
+        ],
+    )
+    decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
+    witness = {
+        "vector_id": "same-vector",
+        "expected_models": ["ecmwf_ifs"],
+        "actual_models": ["ecmwf_ifs"],
+        "capture_times_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+        "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+        "provider_source_available_at_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+        "source_run_id_by_model": {"ecmwf_ifs": "source-run"},
+        "provider_run_id_by_model": {"ecmwf_ifs": "provider-run"},
+        "request_hash_by_model": {"ecmwf_ifs": "request-hash"},
+    }
+    payload = {
+        "metric": "high",
+        "rounded_value": 33.0,
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_probability_boundary_native": 33.0,
+        "_edli_day0_source_clock_predictive_sigma_native": 1.2,
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+        "_edli_day0_provisional_revision_likelihood": {
+            "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+            "identity_hash": "entry-empirical-likelihood",
+            "boundary_survival_probability": 0.95,
+            "station_id": "LLBG",
+            "source_channel_pair": {
+                "awc": "aviationweather_metar",
+                "ogimet": "ogimet_metar_llbg",
+            },
+        },
+        "_edli_day0_remaining_content_identity": "source-clock-identity",
+        "_edli_day0_probability_operator": "source-clock-operator",
+        "_edli_day0_remaining_carrier_q": [1.0],
+        "_edli_day0_remaining_probability_samples": [[1.0]],
+        "_edli_day0_remaining_probability_sample_count": 1,
+        "_edli_day0_remaining_carrier_future_extremes_c": [27.0, 27.5, 28.0],
+        "_edli_day0_remaining_carrier_path_error_sigma_c": 0.25,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": decision_time.isoformat(),
+        "_edli_day0_remaining_vector_witness": witness,
+        "_edli_global_day0_binding": {
+            "posterior_id": 77,
+            "probability_base_identity": "posterior-77",
+        },
+    }
+    vector = Day0HourlyVector(
+        model="ecmwf_ifs",
+        city="Tel Aviv",
+        target_date="2026-08-24",
+        timezone_name="Asia/Jerusalem",
+        captured_at=decision_time.isoformat(),
+        times=tuple(f"2026-08-24T{hour:02d}:00" for hour in range(24)),
+        temps_c=tuple(29.0 + hour * 0.05 for hour in range(24)),
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs"],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: [vector],
+    )
+    monkeypatch.setattr(
+        era,
+        "_latest_day0_current_temperature_native",
+        lambda **_kwargs: (
+            33.0,
+            datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+            "aviationweather_metar",
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_current_vector_witness",
+        lambda **_kwargs: witness,
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: {"settlement_unit": "C"},
+    )
+
+    class _EntrySeamReached(Exception):
+        pass
+
+    def market_analysis_spy(**kwargs):
+        assert kwargs["entry_authority"] is True
+        members = era._day0_remaining_day_members(
+            payload=kwargs["payload"],
+            family=kwargs["family"],
+            unit="C",
+            decision_time=decision_time,
+            world_conn=object(),
+            forecast_conn=object(),
+            entry_authority=kwargs["entry_authority"],
+        )
+        assert members is not None
+        city = runtime_cities_by_name()["Tel Aviv"]
+        era._day0_remaining_p_raw_vector(
+            np.asarray(kwargs["payload"]["_edli_day0_unclamped_remaining_extrema_native"]),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[candidate.bin for candidate in kwargs["family"].candidates],
+            payload=kwargs["payload"],
+            extra_member_sigma=0.0,
+            decision_time=decision_time,
+        )
+        raise _EntrySeamReached
+
+    monkeypatch.setattr(era, "_market_analysis_from_event_snapshot", market_analysis_spy)
+    with pytest.raises(_EntrySeamReached):
+        era._canonical_probability_and_fdr_proof(
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            payload=payload,
+            family=family,
+            conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+            native_costs={},
+            decision_time=decision_time,
+            entry_authority=True,
+        )
+    assert payload["_edli_day0_remaining_carrier_future_extremes_c"] != [27.0, 27.5, 28.0]
+    provenance = payload["_edli_day0_source_clock_carrier_provenance"]
+    assert provenance["posterior_id"] == 77
+    assert provenance["probability_base_identity"] == "posterior-77"
+
+
+def test_live_day0_entry_explicitly_marks_canonical_authority(monkeypatch):
+    """The live ENTRY dispatcher cannot silently use canonical's held default."""
+    import src.engine.event_reactor_adapter as era
+
+    class _CanonicalEntryReached(Exception):
+        pass
+
+    def canonical_spy(**kwargs):
+        assert kwargs["entry_authority"] is True
+        raise _CanonicalEntryReached
+
+    monkeypatch.setattr(
+        "src.data.day0_oracle_anomaly.is_day0_family_paused",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(era, "_canonical_probability_and_fdr_proof", canonical_spy)
+    with pytest.raises(_CanonicalEntryReached):
+        era._live_yes_probabilities(
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            payload={"metric": "high", "evidence_finality": "FINAL_DAILY"},
+            family=SimpleNamespace(
+                city="Tel Aviv", target_date="2026-08-24", metric="high"
+            ),
+            conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+            native_costs={},
+            decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
+        )
+
+
 def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name

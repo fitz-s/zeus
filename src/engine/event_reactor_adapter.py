@@ -33144,6 +33144,7 @@ def _live_yes_probabilities(
             calibration_conn=calibration_conn,
             native_costs=native_costs,
             decision_time=decision_time,
+            entry_authority=True,
         )
     if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         # A family-scoped source-truth pause outranks every probability carrier,
@@ -33270,6 +33271,7 @@ def _live_yes_probabilities(
             native_costs=native_costs,
             allow_latest_snapshot=True,
             decision_time=decision_time,
+            entry_authority=True,
         )
         q_by_condition, lcb_by_condition, _p_values, _prefilter, evidence = generated
         masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
@@ -39037,6 +39039,7 @@ def _canonical_probability_and_fdr_proof(
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
     allow_latest_snapshot: bool = False,
+    entry_authority: bool = False,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -39077,6 +39080,7 @@ def _canonical_probability_and_fdr_proof(
         payload=payload,
         decision_time=decision_time,
         day0_seed_members=_day0_seed_members,
+        entry_authority=entry_authority,
     )
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
     from src.config import edge_n_bootstrap
@@ -43097,11 +43101,19 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
         "_edli_day0_remaining_vector_witness",
     )
-    payload["_edli_day0_source_clock_carrier_provenance"] = {
+    provenance = {
         field.removeprefix("_edli_day0_"): deepcopy(payload[field])
         for field in carrier_fields
         if field in payload
     }
+    binding = payload.get("_edli_global_day0_binding")
+    for field in ("posterior_id", "probability_base_identity"):
+        value = payload.get(field)
+        if value in (None, "") and isinstance(binding, Mapping):
+            value = binding.get(field)
+        if value not in (None, ""):
+            provenance[field] = deepcopy(value)
+    payload["_edli_day0_source_clock_carrier_provenance"] = provenance
 
 
 def _rebuild_decision_time_day0_carrier(
