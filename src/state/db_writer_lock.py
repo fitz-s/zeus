@@ -1023,6 +1023,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/promotion_gates_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro&immutable=0 uri (scoreboard_panels.open_ro); SELECT-only over settlement_attribution; runs the two-gate evaluator (src/analysis/promotion_gates.py, not wired into the entry path); its only write is an atomic append to state/promotion_gates_ledger.json recording a formal Gate-B alpha-spending evaluation (never a DB write); prints stdout
         # --- storage-retention slice (2026-08-25): decision_log retention migration ---
         "scripts/migrations/202608_decision_log_retention.py",  # operator_invoked + already_guarded: report()/dry-run opens the trade DB mode=ro, SELECT-only; --apply writes under db_writer_lock(BULK), lock acquired/released per delete chunk; daemon never imports
+        "scripts/ops/vacuum_reset_trades_db.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock: --check/--vacuum-into open the live trade DB mode=ro only (VACUUM INTO writes a NEW file elsewhere, never the live DB); --swap requires --operator-confirms-fenced (writer-plane fence, T5 pattern) and operates only after every zeus daemon is stopped, so no concurrent writer exists to serialize against; item 13 Slice C, documented but NEVER executed against a live or live-like DB
     }
 )
 
