@@ -237,6 +237,109 @@ class TestRequestStatusApplyCommandBehavior:
         )
 
 
+class TestLiveHealthCompositeCyclePulsesOnEmptyBook:
+    """Antibody: 2026-08-25 incident -- status_summary.json froze indefinitely
+    once the book emptied.
+
+    Root cause: the only two live write_cycle_pulse callers are (1)
+    src/engine/cycle_runner.py's run_cycle(), never invoked in EDLI
+    event-driven modes, and (2) src/execution/exit_lifecycle.py's
+    _schedule_exit_monitor_status_pulse(), reachable only via
+    run_exit_monitor_cycle() -- but src/main.py's periodic exit_monitor job
+    returns before calling run_exit_monitor_cycle() whenever canonical
+    monitored exposure is zero ("periodic exit_monitor completed without
+    reactor handoff: canonical monitored exposure is empty"). Commit
+    a0811394e ("keep composite child read-only") then removed the one other
+    unconditional refresher, which used to run every 60s inside the
+    live_health_composite subprocess child regardless of held-position count.
+    With zero held positions, generated_at never advanced again, and the
+    EDLI_STAGE_STATUS_SUMMARY_STALE entry-readiness check read that as
+    unbounded staleness (mitigated separately, but the freshness pipeline
+    itself remained broken).
+
+    Fix: _live_health_composite_cycle -- the surviving 60s job that runs
+    regardless of held-position count -- now calls write_cycle_pulse directly
+    from the daemon process itself (no impersonation needed, unlike the
+    removed child call) after refreshing composite live health.
+    """
+
+    def test_pulses_status_summary_with_zero_held_positions(self, monkeypatch):
+        import src.main as main_mod
+
+        monkeypatch.setattr(main_mod, "_status_summary_refresh_can_defer", lambda: False)
+        monkeypatch.setattr(
+            main_mod,
+            "_defer_for_held_position_monitor",
+            lambda job_name: False,
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "_defer_for_active_entry_reactor",
+            lambda job_name: False,
+        )
+
+        composite_calls = []
+        monkeypatch.setattr(
+            "src.control.live_health.refresh_composite_live_health_bounded",
+            lambda **kwargs: composite_calls.append(kwargs) or {"status": "OK"},
+        )
+
+        pulse_calls = []
+        monkeypatch.setattr(
+            "src.observability.status_summary.write_cycle_pulse",
+            lambda cycle_summary=None, **kwargs: pulse_calls.append(
+                (cycle_summary, kwargs)
+            ),
+        )
+
+        # Simulate the empty-book condition: run_exit_monitor_cycle's own
+        # pulse path is unreachable this cycle, yet freshness must still
+        # advance via this independent 60s job.
+        main_mod._live_health_composite_cycle()
+
+        assert composite_calls, "composite live-health refresh must still run"
+        assert pulse_calls, (
+            "an empty-portfolio process must still refresh status_summary.json's "
+            "generated_at via write_cycle_pulse -- this is the only remaining "
+            "unconditional freshness path when held positions are zero"
+        )
+        cycle_summary, kwargs = pulse_calls[0]
+        assert cycle_summary == {"mode": "heartbeat_pulse", "heartbeat": True}
+        assert "process_identity" not in kwargs, (
+            "the pulse now runs in the real daemon process; no impersonated "
+            "process_identity should be threaded through"
+        )
+
+    def test_pulse_failure_does_not_raise(self, monkeypatch):
+        """A pulse failure must stay non-fatal to the composite health job."""
+        import src.main as main_mod
+
+        monkeypatch.setattr(main_mod, "_status_summary_refresh_can_defer", lambda: False)
+        monkeypatch.setattr(
+            main_mod,
+            "_defer_for_held_position_monitor",
+            lambda job_name: False,
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "_defer_for_active_entry_reactor",
+            lambda job_name: False,
+        )
+        monkeypatch.setattr(
+            "src.control.live_health.refresh_composite_live_health_bounded",
+            lambda **kwargs: {"status": "OK"},
+        )
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated pulse failure")
+
+        monkeypatch.setattr(
+            "src.observability.status_summary.write_cycle_pulse", _boom
+        )
+
+        main_mod._live_health_composite_cycle()  # must not raise
+
+
 class TestDaemonWriteCadenceCoversFreshnessBudget:
     """Relationship: write_cycle_pulse output is within STATUS_FRESH_BUDGET_SECONDS.
 

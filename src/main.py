@@ -2302,6 +2302,25 @@ def _live_health_composite_cycle() -> None:
         parent_mode=get_mode(),
     )
 
+    # Unconditional freshness pulse (2026-08-25 incident fix): this job is the
+    # only DB-derived refresh that runs every cycle regardless of held-position
+    # count -- the exit_monitor pulse (src/execution/exit_lifecycle.py
+    # _schedule_exit_monitor_status_pulse) only fires once run_exit_monitor_cycle
+    # is reached, and src/main.py's periodic exit_monitor short-circuits before
+    # that call whenever canonical monitored exposure is empty (obligation_count
+    # == 0). An empty book therefore froze status_summary.json's generated_at
+    # indefinitely, which the EDLI_STAGE_STATUS_SUMMARY_STALE entry-readiness
+    # check then read as unbounded staleness. Called in-process here (the real
+    # daemon, not the read-only composite child a0811394e correctly stopped from
+    # impersonating the parent) so no process_identity plumbing is needed --
+    # os.getpid()/get_mode() are already the daemon's own identity.
+    from src.observability.status_summary import write_cycle_pulse
+
+    try:
+        write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+    except Exception:
+        logger.exception("live_health_composite: status pulse refresh failed")
+
 
 def _status_summary_refresh_can_defer() -> bool:
     """Yield only while both observability cuts have ample freshness budget."""
