@@ -262,3 +262,90 @@ def test_empty_request_priority_preserves_unknown_inflight_deferred(tmp_path):
     assert queue._CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON in report.reason_codes
     assert claimed.exists()
     assert batch.exists()
+
+
+
+def test_priority_non_priority_request_keeps_locked_path(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request_path = request_dir / "London.2026-08-25.high.json"
+    request_path.write_text(json.dumps(_materialization_request()), encoding="utf-8")
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    locked_calls: list[dict[str, object]] = []
+    sentinel = queue._MaterializationQueueClaim(
+        request_path=request_dir,
+        batch_path=None,
+        processed_path=processed_dir,
+        failed_path=failed_dir,
+        claimed_count=0,
+        skipped_count=0,
+        inflight_deferred_count=0,
+        timeout_retry_deferred_count=0,
+        processed_files=(),
+        failed_files=(),
+        seed_processed_files=(),
+        seed_failed_files=(),
+        seed_reasons=(),
+        discovery_report=None,
+    )
+
+    def locked_claim(**kwargs):
+        locked_calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        queue,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        locked_claim,
+    )
+    report = queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=None,
+        seed_limit=0,
+        limit=1,
+        runner=lambda _argv: pytest.fail("locked sentinel must not run a child"),
+        lane=queue.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert locked_calls
+    assert report.status == "NO_REQUESTS"
+    assert request_path.exists()
+
+
+
+def test_priority_empty_request_returns_before_lock_or_discovery(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("empty priority queue must not lock, discover, or read DB")
+
+    monkeypatch.setattr(queue, "_queue_lock", forbidden)
+    monkeypatch.setattr(
+        queue,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        forbidden,
+    )
+    monkeypatch.setattr(queue, "_priority_map_with_names", forbidden)
+    monkeypatch.setattr(queue, "_claim_db_fingerprint", forbidden)
+
+    report = queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=0,
+        limit=1,
+        runner=lambda _argv: pytest.fail("empty priority queue must not run a child"),
+        lane=queue.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert report.status == "NO_REQUESTS"
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes

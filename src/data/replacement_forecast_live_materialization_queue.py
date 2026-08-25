@@ -3937,6 +3937,19 @@ def process_replacement_forecast_live_materialization_queue(
             ),
         )
 
+    if (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        and read_plan is not None
+        and not read_plan.stale_conflict_batches
+        and not read_plan.claim.selected_files
+        and not read_plan.claim.request_snapshot
+    ):
+        # SCOPE: a genuinely empty priority queue snapshot. DRAIN: the next
+        # priority tick rebuilds the plan as queued work arrives. RESET: any
+        # request snapshot, selected work, or ownership conflict re-enters its
+        # existing gated path.
+        return _claim_only_report(read_plan.claim)
+
     claim: _MaterializationQueueClaim | None = None
     if (
         lane == MATERIALIZATION_LANE_PRIORITY
