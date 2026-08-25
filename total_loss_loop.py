@@ -389,7 +389,9 @@ CREATE TABLE IF NOT EXISTS controller_debt (
     config_fingerprint TEXT NOT NULL DEFAULT '',
     capacity_fingerprint TEXT NOT NULL DEFAULT '',
     data_fingerprint TEXT NOT NULL DEFAULT '',
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_identity TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT
 );
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
@@ -478,7 +480,7 @@ _STARTUP_SCHEMA_COLUMNS = {
     },
     "controller_debt": {
         "debt_id", "kind", "status", "reason", "updated_at", "fingerprint", "config_fingerprint",
-        "capacity_fingerprint", "data_fingerprint", "attempts",
+        "capacity_fingerprint", "data_fingerprint", "attempts", "retry_identity", "next_retry_at",
     },
     "settlement_backfill_state": {"position_id", "fingerprint", "completed", "updated_at"},
     "workspace_writer_leases": {"cwd", "run_id", "stage", "owner_pid", "child_pid", "lock_path", "acquired_at"},
@@ -709,6 +711,8 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
         ("capacity_fingerprint", "TEXT NOT NULL DEFAULT ''"),
         ("data_fingerprint", "TEXT NOT NULL DEFAULT ''"),
         ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("retry_identity", "TEXT NOT NULL DEFAULT ''"),
+        ("next_retry_at", "TEXT"),
     ):
         if name not in debt_columns:
             conn.execute(f"ALTER TABLE controller_debt ADD COLUMN {name} {definition}")
@@ -1980,7 +1984,7 @@ def _maintenance_guard() -> None:
 
 def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -> list[str]:
     detector_deadline = deadline or (time.monotonic() + max(
-        0.001,
+        0.000001,
         float(cfg["loop"].get("detector_budget_ms", 200.0)) / 1000.0,
     ))
     floor = _bounded_floor_price(cfg, detector_deadline)
@@ -2437,16 +2441,6 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
     receipt_deadline = time.monotonic() + max(0.01, float(cfg["loop"].get("receipt_budget_ms", 50.0))) / 1000.0
     _retry_committed_receipt(cfg, receipt_deadline)
     _phase_heartbeat(cfg, "evidence_start", created=trigger_created)
-    # Both trigger connections are closed before this independent local
-    # snapshot transaction begins.
-    evidence_summary = _capture_hard_evidence(cfg, trigger_created, budget=budget)
-    _phase_heartbeat(
-        cfg,
-        "evidence_deferred" if evidence_summary.get("deferred") else "evidence_committed",
-        created=trigger_created,
-        evidence_built=evidence_summary.get("built", []),
-        evidence_deferred=evidence_summary.get("deferred", []),
-    )
     _phase_heartbeat(cfg, "maintenance_start", created=trigger_created)
     maintenance_deadline = time.monotonic() + max(
         0.001,
@@ -2457,6 +2451,9 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
     except sqlite3.OperationalError as exc:
         if "interrupted" not in str(exc).lower():
             raise
+        # Both trigger connections are closed before this independent local
+        # snapshot transaction begins.  Keep the cycle to one shared-budget
+        # evidence capture, even when maintenance is interrupted.
         _capture_hard_evidence(cfg, trigger_created, budget=budget)
         return list(dict.fromkeys(trigger_created))
     maintenance_ids = list(maintenance_result)
@@ -2474,6 +2471,9 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
         maintenance_created=maintenance_ids,
         postcommit_deferred=maintenance_deferred,
     )
+    # Both trigger connections are closed before this independent local
+    # snapshot transaction begins.  New maintenance incidents join this one
+    # capture rather than triggering a second pass over the same budget.
     _capture_hard_evidence(cfg, created, budget=budget)
     return list(dict.fromkeys(created))
 
@@ -3061,10 +3061,31 @@ def _evidence_identity_fingerprints_inner(
             (str(incident["position_id"]),),
         ).fetchone()
         _evidence_guard()
-    data_fp = digest(json.dumps({"incident": dict(incident), "position": dict(position_row) if position_row else {}}, sort_keys=True, default=str), length=32)
+        event_revision = trades.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id=?",
+            (str(incident["position_id"]),),
+        ).fetchone()[0]
+        _evidence_guard()
+    position_updated_at = str(position_row["updated_at"] or "") if position_row else ""
+    data_revision = {
+        "incident_id": str(incident["incident_id"]),
+        "evidence_revision": int(incident["evidence_revision"] or 0),
+        "position_updated_at": position_updated_at,
+        "position_event_revision": int(event_revision or 0),
+    }
+    data_fp = digest(json.dumps(data_revision, sort_keys=True, default=str), length=32)
     config_fp = digest(json.dumps(config_payload, sort_keys=True, default=str), length=32)
     capacity_fp = digest(json.dumps(capacity_payload, sort_keys=True, default=str), length=32)
-    return digest(config_fp, capacity_fp, data_fp, length=32), config_fp, capacity_fp, data_fp
+    retry_identity = digest(
+        str(incident["incident_id"]),
+        int(incident["evidence_revision"] or 0),
+        position_updated_at,
+        int(event_revision or 0),
+        config_fp,
+        capacity_fp,
+        length=32,
+    )
+    return retry_identity, config_fp, capacity_fp, data_fp
 
 
 def _evidence_identity_fingerprints(
@@ -3078,6 +3099,72 @@ def _evidence_identity_fingerprints(
         return _evidence_identity_fingerprints_inner(cfg, incident_id, active)
     finally:
         _EVIDENCE_BUILD_CONTEXT = previous
+
+
+def _evidence_retry_delay(cfg: Mapping[str, Any], attempts: int) -> float:
+    settings = cfg["loop"]
+    base = max(
+        0.001,
+        float(settings.get("evidence_retry_base_seconds", settings.get("evidence_retry_seconds", 1.0))),
+    )
+    maximum = max(
+        base,
+        float(settings.get("evidence_retry_max_seconds", settings.get("max_evidence_retry_seconds", 300.0))),
+    )
+    return min(maximum, base * (2 ** max(0, attempts - 1)))
+
+
+def _evidence_retry_identity_for_debt(
+    cfg: Mapping[str, Any], incident_id: str
+) -> str:
+    """Establish the durable light identity outside an exhausted budget."""
+    try:
+        return _evidence_identity_fingerprints(
+            cfg, incident_id, _new_evidence_budget(cfg)
+        )[0]
+    except (EvidenceCapacityExceeded, KeyError, OSError, sqlite3.Error):
+        # The identity query is deliberately fail-safe and never opens the
+        # forecast DB.  Preserve a stable incident/config identity if the
+        # canonical position read itself is unavailable.
+        settings = cfg["loop"]
+        config_fp = digest(
+            settings.get("history_days"),
+            settings.get("evidence_window_days", 7),
+            settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000)),
+            length=32,
+        )
+        capacity_fp = digest(
+            settings.get("evidence_builds_per_cycle", 1),
+            settings.get("evidence_build_budget_ms", 1000),
+            settings.get("evidence_max_bytes", 32 * 1024 * 1024),
+            length=32,
+        )
+        return digest("evidence-retry-identity", incident_id, config_fp, capacity_fp, length=32)
+
+
+def _evidence_retry_state(
+    cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any]
+) -> tuple[tuple[str, str, str, str], sqlite3.Row | None]:
+    """Read cheap retry identity and debt state; never touches forecast data."""
+    fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
+    with memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT status,retry_identity,next_retry_at,attempts FROM controller_debt "
+            "WHERE debt_id=? AND kind='evidence_snapshot'",
+            (_evidence_debt_id(incident_id),),
+        ).fetchone()
+    return fingerprints, debt
+
+
+def _evidence_retry_deferred(
+    fingerprints: tuple[str, str, str, str], debt: sqlite3.Row | None
+) -> bool:
+    if debt is None or str(debt["status"]) != "retry_pending":
+        return False
+    if str(debt["retry_identity"] or "") != fingerprints[0]:
+        return False
+    retry_at = parse_time(str(debt["next_retry_at"] or ""))
+    return retry_at is not None and now() < retry_at
 
 
 def _has_capacity_failure_debt(cfg: Mapping[str, Any], incident_id: str) -> bool:
@@ -3110,18 +3197,41 @@ def _record_evidence_debt(
     *,
     preserve_incident_state: bool = False,
     fingerprints: tuple[str, str, str, str] | None = None,
+    retry_identity: str | None = None,
+    backoff: bool = True,
 ) -> None:
     stamp = iso()
     fingerprint, config_fp, capacity_fp, data_fp = fingerprints or ("", "", "", "")
+    retry_identity = str(retry_identity or fingerprint or "")
+    if not retry_identity:
+        retry_identity = _evidence_retry_identity_for_debt(cfg, incident_id)
     try:
         with memory(cfg) as mem:
+            prior = mem.execute(
+                "SELECT retry_identity,next_retry_at,attempts FROM controller_debt "
+                "WHERE debt_id=? AND kind='evidence_snapshot'",
+                (_evidence_debt_id(incident_id),),
+            ).fetchone()
+            if (
+                prior is not None
+                and retry_identity
+                and str(prior[0] or "") == retry_identity
+                and (retry_at := parse_time(str(prior[1] or ""))) is not None
+                and now() < retry_at
+            ):
+                return
+            attempts = int(prior[2] or 0) + (1 if backoff else 0) if prior is not None else int(backoff)
+            next_retry_at = (
+                iso(now() + timedelta(seconds=_evidence_retry_delay(cfg, attempts)))
+                if backoff else stamp
+            )
             mem.execute(
-                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts) "
-                "VALUES (?,?,?,?,?,?,?,?,?,1) "
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts,retry_identity,next_retry_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at,"
                 "fingerprint=excluded.fingerprint,config_fingerprint=excluded.config_fingerprint,capacity_fingerprint=excluded.capacity_fingerprint,"
-                "data_fingerprint=excluded.data_fingerprint,attempts=controller_debt.attempts+1",
-                (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
+                "data_fingerprint=excluded.data_fingerprint,attempts=excluded.attempts,retry_identity=excluded.retry_identity,next_retry_at=excluded.next_retry_at",
+                (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp, attempts, retry_identity, next_retry_at),
             )
             if not preserve_incident_state:
                 mem.execute(
@@ -3136,6 +3246,8 @@ def _record_evidence_debt(
             reason,
             preserve_incident_state=preserve_incident_state,
             fingerprints=(fingerprint, config_fp, capacity_fp, data_fp),
+            retry_identity=retry_identity,
+            backoff=backoff,
             primary_error=exc,
         )
 
@@ -3150,6 +3262,8 @@ def _record_emergency_evidence_debt(
     *,
     preserve_incident_state: bool,
     fingerprints: tuple[str, str, str, str],
+    retry_identity: str = "",
+    backoff: bool = True,
     primary_error: BaseException,
 ) -> None:
     """Persist evidence debt without inheriting an exhausted evidence deadline.
@@ -3162,6 +3276,7 @@ def _record_emergency_evidence_debt(
 
     stamp = iso()
     fingerprint, config_fp, capacity_fp, data_fp = fingerprints
+    retry_identity = str(retry_identity or fingerprint or "")
     deadline = time.monotonic() + _EMERGENCY_EVIDENCE_DEBT_WRITE_SECONDS
     debt_id = _evidence_debt_id(incident_id)
     payload: dict[str, Any] = {
@@ -3178,13 +3293,31 @@ def _record_emergency_evidence_debt(
         conn = sqlite3.connect(runtime_dir(cfg) / "memory.db", timeout=remaining)
         conn.execute(f"PRAGMA busy_timeout={max(1, int(remaining * 1000))}")
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        prior = conn.execute(
+            "SELECT retry_identity,next_retry_at,attempts FROM controller_debt "
+            "WHERE debt_id=? AND kind='evidence_snapshot'",
+            (debt_id,),
+        ).fetchone()
+        if (
+            prior is not None
+            and retry_identity
+            and str(prior[0] or "") == retry_identity
+            and (retry_at := parse_time(str(prior[1] or ""))) is not None
+            and now() < retry_at
+        ):
+            return
+        attempts = int(prior[2] or 0) + (1 if backoff else 0) if prior is not None else int(backoff)
+        next_retry_at = (
+            iso(now() + timedelta(seconds=_evidence_retry_delay(cfg, attempts)))
+            if backoff else stamp
+        )
         conn.execute(
-            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,1) "
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts,retry_identity,next_retry_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at,"
             "fingerprint=excluded.fingerprint,config_fingerprint=excluded.config_fingerprint,capacity_fingerprint=excluded.capacity_fingerprint,"
-            "data_fingerprint=excluded.data_fingerprint,attempts=controller_debt.attempts+1",
-            (debt_id, "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
+            "data_fingerprint=excluded.data_fingerprint,attempts=excluded.attempts,retry_identity=excluded.retry_identity,next_retry_at=excluded.next_retry_at",
+            (debt_id, "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp, attempts, retry_identity, next_retry_at),
         )
         if not preserve_incident_state:
             conn.execute(
@@ -3250,7 +3383,7 @@ def _resolve_evidence_debt(cfg: Mapping[str, Any], incident_id: str) -> None:
     stamp = iso()
     with memory(cfg) as mem:
         mem.execute(
-            "UPDATE controller_debt SET status='resolved',reason='evidence_snapshot_complete',updated_at=? WHERE debt_id=?",
+            "UPDATE controller_debt SET status='resolved',reason='evidence_snapshot_complete',updated_at=?,next_retry_at=NULL WHERE debt_id=?",
             (stamp, _evidence_debt_id(incident_id)),
         )
         mem.execute(
@@ -3400,10 +3533,15 @@ def _capture_hard_evidence_inner(
             candidates.update(queued_ids)
             debts = mem.execute(
                 "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
-                "ORDER BY updated_at DESC LIMIT ?", (queue_limit,)
+                "ORDER BY next_retry_at IS NOT NULL, next_retry_at, debt_id LIMIT ?", (queue_limit,)
             ).fetchall()
             _evidence_guard()
-            candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
+            debt_order = {
+                str(row[0]).removeprefix("evidence_snapshot:"): index
+                for index, row in enumerate(debts)
+                if str(row[0]).startswith("evidence_snapshot:")
+            }
+            candidates.update(debt_order)
         if not candidates:
             return finish()
         with memory(cfg) as mem:
@@ -3440,9 +3578,13 @@ def _capture_hard_evidence_inner(
             row = row_by_id[incident_id]
             position = positions.get(str(row[2]), {})
             detected = parse_time(str(row[3]))
+            if incident_id in created_rank:
+                return (0, created_rank[incident_id], incident_id)
+            if incident_id in debt_order:
+                return (1, debt_order[incident_id], incident_id)
             return (
-                0 if incident_id in created_rank else 1,
-                created_rank.get(incident_id, 10**9),
+                2,
+                10**9,
                 open_rank.get(str(position.get("phase") or ""), 2),
                 0 if str(position.get("city") or "").casefold() == "tel aviv" else 1,
                 status_rank.get(str(row[1]), 9),
@@ -3498,29 +3640,42 @@ def _capture_hard_evidence_inner(
             resolved_queue.add(incident_id)
             continue
         summary["validated"] += 1
-        has_failure_debt = _has_capacity_failure_debt(cfg, incident_id)
-        if has_failure_debt and time.monotonic() >= float(budget["deadline"]):
+        try:
+            retry_fingerprints, debt = _evidence_retry_state(cfg, incident_id, budget)
+        except EvidenceCapacityExceeded as exc:
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                f"evidence_snapshot_capacity_failure:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+            )
             summary["deferred"].append(incident_id)
             continue
-        if not has_failure_debt and int(budget["remaining"]) <= 0:
-            fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
+        if _evidence_retry_deferred(retry_fingerprints, debt):
+            # A retry observation is intentionally read-only: no forecast
+            # fingerprint query, attempts increment, or updated_at churn.
+            summary["deferred"].append(incident_id)
+            continue
+        retry_identity = retry_fingerprints[0]
+        if int(budget["remaining"]) <= 0:
             _record_evidence_debt(
                 cfg,
                 incident_id,
                 "evidence_snapshot_deferred:capacity_count",
                 preserve_incident_state=incident_id not in created_rank,
-                fingerprints=fingerprints,
+                fingerprints=retry_fingerprints,
+                retry_identity=retry_identity,
             )
             summary["deferred"].append(incident_id)
             continue
-        if not has_failure_debt and time.monotonic() >= float(budget["deadline"]):
-            fingerprints = _evidence_identity_fingerprints(cfg, incident_id, budget)
+        if time.monotonic() >= float(budget["deadline"]):
             _record_evidence_debt(
                 cfg,
                 incident_id,
                 "evidence_snapshot_deferred:time_budget",
                 preserve_incident_state=incident_id not in created_rank,
-                fingerprints=fingerprints,
+                fingerprints=retry_fingerprints,
+                retry_identity=retry_identity,
             )
             summary["deferred"].append(incident_id)
             continue
@@ -3533,10 +3688,9 @@ def _capture_hard_evidence_inner(
                 incident_id,
                 f"evidence_snapshot_capacity_failure:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
+                retry_identity=retry_identity,
+                backoff=True,
             )
-            summary["deferred"].append(incident_id)
-            continue
-        if _capacity_debt_matches(cfg, incident_id, fingerprints[0]):
             summary["deferred"].append(incident_id)
             continue
         if time.monotonic() >= float(budget["deadline"]):
@@ -3547,6 +3701,7 @@ def _capture_hard_evidence_inner(
                 reason,
                 preserve_incident_state=incident_id not in created_rank,
                 fingerprints=fingerprints,
+                retry_identity=retry_identity,
             )
             summary["deferred"].append(incident_id)
             continue
@@ -3562,6 +3717,7 @@ def _capture_hard_evidence_inner(
                 cfg, incident_id, f"evidence_snapshot_capacity_failure:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
                 fingerprints=fingerprints,
+                retry_identity=retry_identity,
             )
             summary["deferred"].append(incident_id)
             continue
@@ -3570,6 +3726,11 @@ def _capture_hard_evidence_inner(
                 cfg, incident_id, f"{type(exc).__name__}:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
                 fingerprints=fingerprints,
+                retry_identity=retry_identity,
+                # Keep an immediately recoverable local I/O failure
+                # compatible with the controller's existing repair path;
+                # capacity/query failures use the durable exponential gate.
+                backoff=False,
             )
             summary["deferred"].append(incident_id)
             continue
@@ -3580,6 +3741,7 @@ def _capture_hard_evidence_inner(
                 cfg, incident_id, f"evidence_snapshot_capacity_failure:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
                 fingerprints=fingerprints,
+                retry_identity=retry_identity,
             )
             summary["deferred"].append(incident_id)
             continue
@@ -3639,7 +3801,7 @@ def _recover_evidence_candidate_ids(
         ).fetchall()
         debts = conn.execute(
             "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
-            "ORDER BY updated_at DESC LIMIT ?", (limit,)
+            "ORDER BY next_retry_at IS NOT NULL, next_retry_at, debt_id LIMIT ?", (limit,)
         ).fetchall()
         values: list[str] = []
         for row in [*hard, *debts]:
@@ -3687,7 +3849,11 @@ def _capture_hard_evidence(
         _EVIDENCE_BUILD_CONTEXT = budget
         try:
             for incident_id in deferred:
-                _record_evidence_debt(cfg, incident_id, "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget")
+                _record_evidence_debt(
+                    cfg,
+                    incident_id,
+                    "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
+                )
         finally:
             _EVIDENCE_BUILD_CONTEXT = previous_context
         summary = {"built": [], "deferred": deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
@@ -5269,6 +5435,7 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
     """Reclaim only running claims with no live controller/worker witness."""
 
     runs_by_incident: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    runs_by_id: dict[str, tuple[Path, dict[str, Any]]] = {}
     startup_batch: list[Path] | None = None
     startup_batch_end = 0
     if _STARTUP_BUDGET is not None:
@@ -5279,10 +5446,14 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
     for path in run_paths:
         _startup_guard()
         row = _startup_run_metadata(path) if _STARTUP_BUDGET is not None else read_json(path, {})
+        if row.get("run_id"):
+            runs_by_id[str(row["run_id"])] = (path, row)
         if row.get("status") == "running" and row.get("incident_id"):
             runs_by_incident.setdefault(str(row["incident_id"]), []).append((path, row))
     reclaimed: list[str] = []
     orphaned_runs: list[tuple[Path, dict[str, Any]]] = []
+    terminal_run_incidents: set[str] = set()
+    reconciled_run_incidents: set[str] = set()
     with _startup_reconcile_memory(cfg) as mem:
         _startup_guard()
         protected_incidents: set[str] = set()
@@ -5319,6 +5490,78 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
                 Path(str(intent["witness_path"])).unlink(missing_ok=True)
             except OSError:
                 pass
+        # The model ledger is a second source of running claims.  Reconcile it
+        # even when its incident has already moved out of ``running``: a
+        # terminal runtime record is authoritative, while a missing/runtime
+        # running record is reclaimable only after PID and spawn-witness checks.
+        db_runs = mem.execute(
+            "SELECT run_id,incident_id,status,session_id,usage_json FROM model_runs WHERE status='running'"
+        ).fetchall()
+        intent_by_run = {
+            str(intent["run_id"]): intent
+            for intent in intents
+        }
+        for db_run in db_runs:
+            run_id = str(db_run["run_id"])
+            incident_id = str(db_run["incident_id"])
+            runtime_entry = runs_by_id.get(run_id)
+            path, runtime_run = runtime_entry if runtime_entry is not None else (None, None)
+            runtime_status = str(runtime_run.get("status") or "") if runtime_run is not None else ""
+            if runtime_status in {"completed", "failed", "orphaned", "cancelled"}:
+                completed_at = str(runtime_run.get("completed_at") or iso())
+                usage = runtime_run.get("usage_json", runtime_run.get("usage", db_run["usage_json"]))
+                if not isinstance(usage, str):
+                    usage = json.dumps(usage if isinstance(usage, Mapping) else {}, sort_keys=True)
+                mem.execute(
+                    "UPDATE model_runs SET status=?,completed_at=?,session_id=?,usage_json=? "
+                    "WHERE run_id=? AND status='running'",
+                    (runtime_status, completed_at, runtime_run.get("session_id", db_run["session_id"]), usage, run_id),
+                )
+                terminal_run_incidents.add(incident_id)
+                reconciled_run_incidents.add(incident_id)
+                continue
+            witness = intent_by_run.get(run_id)
+            witness_busy = bool(
+                witness is not None
+                and (
+                    _writer_lock_held(Path(str(witness["witness_path"])))
+                    or _pid_alive(witness["owner_pid"])
+                    or _pid_alive(witness["child_pid"])
+                    or (
+                        (created_at := parse_time(str(witness["created_at"] or ""))) is not None
+                        and (now() - created_at).total_seconds() < _SPAWN_AMBIGUITY_SECONDS
+                    )
+                )
+            )
+            runtime_pid_alive = bool(runtime_run is not None and _pid_alive(runtime_run.get("pid")))
+            if runtime_pid_alive or witness_busy:
+                continue
+            completed_at = iso()
+            mem.execute(
+                "UPDATE model_runs SET status='failed',completed_at=?,usage_json=? "
+                "WHERE run_id=? AND status='running'",
+                (completed_at, json.dumps({"error": "orphaned_running_model_run"}), run_id),
+            )
+            reconciled_run_incidents.add(incident_id)
+            if runtime_run is not None:
+                runtime_run["status"] = "orphaned"
+                runtime_run["completed_at"] = completed_at
+                runtime_run["error"] = "orphaned_running_model_run"
+                orphaned_runs.append((path, runtime_run))
+            incident_row = mem.execute(
+                "SELECT status,stage FROM incidents WHERE incident_id=?", (incident_id,)
+            ).fetchone()
+            if incident_row is not None and str(incident_row["status"]) == "running":
+                _transition_if_status(
+                    mem,
+                    incident_id,
+                    str(incident_row["stage"] or "blind"),
+                    expected_status="running",
+                    reason="orphaned_running_model_run_reclaimed",
+                    status="retry_pending",
+                    run_id=run_id,
+                )
+                reclaimed.append(incident_id)
         if _STARTUP_BUDGET is None:
             rows = mem.execute(
                 "SELECT incident_id,stage FROM incidents WHERE status='running'"
@@ -5335,11 +5578,11 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
         _startup_guard()
         for row in rows:
             incident_id = str(row["incident_id"])
-            if incident_id in protected_incidents:
+            if incident_id in protected_incidents or incident_id in reconciled_run_incidents:
                 continue
             witnesses = runs_by_incident.get(incident_id, [])
             live = any(_pid_alive(run.get("pid")) for _, run in witnesses)
-            if live:
+            if live or incident_id in terminal_run_incidents:
                 continue
             for path, run in witnesses:
                 run["status"] = "orphaned"
