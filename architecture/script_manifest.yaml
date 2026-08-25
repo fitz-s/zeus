@@ -2517,6 +2517,82 @@ scripts:
     required_tests:
       - tests/test_decision_log_retention_migration.py
 
+  202608_execution_feasibility_evidence_retention.py:
+    class: migration
+    status: active
+    lifecycle: long_lived
+    authority_scope: retention_delete
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python3 scripts/migrations/202608_execution_feasibility_evidence_retention.py [--db PATH] [--keep-days N] [--chunk-size N] [--apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Recurring maintenance: deletes execution_feasibility_evidence rows older
+      than --keep-days (default 30, floor 7). Slice 2 of the 2026-08-24
+      storage_capacity DATA_DEGRADED incident retention pair (see
+      202608_decision_log_retention.py for slice 1). Table has no append-only
+      trigger and no external FK-style reference into it (verified: no other
+      table stores an evidence_id column) -- plain time-window DELETE, no
+      protection exception needed. Idempotent; safe to re-run at any cadence.
+    do_not_use_when: >
+      DELETE alone does not shrink the on-disk file (auto_vacuum=0); do not
+      expect this script alone to relieve the storage gate without a
+      follow-up VACUUM INTO / incremental-vacuum conversion (see
+      202608_decision_log_retention.py's VACUUM note, same DB).
+    promotion_barrier: "Requires explicit --apply flag; dry-run default reports deletable count only."
+    unguarded_write_rationale: "--apply writes are chunked (default 20000 rows/txn) under db_writer_lock(BULK), lock acquired and released per chunk; also creates one prerequisite plain index (idx_execution_feasibility_evidence_quote_seen_at_only) so the chunked scan does not degrade against 28M+ rows; refuses to run at all if --keep-days is below the documented floor."
+    required_helpers:
+      - src.state.db_writer_lock.db_writer_lock
+    required_tests:
+      - tests/test_execution_feasibility_evidence_retention_migration.py
+
+  202608_executable_market_snapshots_retention.py:
+    class: migration
+    status: active
+    lifecycle: long_lived
+    authority_scope: retention_delete
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python3 scripts/migrations/202608_executable_market_snapshots_retention.py [--db PATH] [--keep-days N] [--chunk-size N] [--apply]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Recurring maintenance: deletes executable_market_snapshots rows older
+      than --keep-days (default 30, floor 17) EXCEPT rows whose snapshot_id is
+      referenced by venue_commands.snapshot_id or position_events.snapshot_id
+      (INV-NEW-E anchor; live evidence 2026-08-25: <0.05% of 11.5M rows are
+      anchored). Slice 2 of the 2026-08-24 storage_capacity DATA_DEGRADED
+      incident retention pair. Table is APPEND-ONLY by DB trigger (NC-NEW-B)
+      -- each delete chunk drops, verifies, and re-creates
+      no_delete_executable_market_snapshots inside one BEGIN IMMEDIATE
+      transaction (precedent: scripts/repair_executable_snapshot_corruption.py).
+      Idempotent; safe to re-run at any cadence.
+    do_not_use_when: >
+      Do not lower --keep-days below the documented floor (17 days -- margin
+      over qkernel_arm_replay.py's confirmed "now - 16 days" rolling window)
+      without re-auditing the module docstring's consumer-window table. DELETE
+      alone does not shrink the on-disk file (auto_vacuum=0); see
+      202608_decision_log_retention.py's VACUUM note, same DB. The
+      trigger-drop/recreate window is safe under concurrent LIVE writers only
+      because it runs inside one BEGIN IMMEDIATE transaction per chunk -- do
+      not extract the DROP/DELETE/CREATE sequence out of that transaction
+      boundary.
+    promotion_barrier: "Requires explicit --apply flag; dry-run default reports total/protected/deletable counts only."
+    unguarded_write_rationale: "--apply writes are chunked (default 20000 rows/txn) under db_writer_lock(BULK) PLUS a per-chunk BEGIN IMMEDIATE that atomically drops/verifies-changes()/re-creates the append-only trigger from its own sqlite_master.sql text (never hand-retyped); also creates one prerequisite plain index (idx_executable_market_snapshots_captured_at_only) so the chunked scan does not degrade against 11.5M+ rows; refuses to run at all if --keep-days is below the documented floor."
+    required_helpers:
+      - src.state.db_writer_lock.db_writer_lock
+    required_tests:
+      - tests/test_executable_market_snapshots_retention_migration.py
+
   measure_wu_obs_latency.py:
     class: telemetry_read
     status: active
