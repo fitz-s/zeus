@@ -118,6 +118,7 @@ _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _TRADE_PRICE_WIRE_ABS_TOLERANCE = Decimal("0.00000001")
+_POINT_ORDER_SPLIT_PRICE_REL_TOLERANCE = Decimal("0.000001")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset(
     {"pending_entry", "active", "day0_window", "pending_exit"}
 )
@@ -4867,7 +4868,25 @@ def _append_linkable_trade_fact_if_missing(
             filled_size=filled_size,
             fill_price=fill_price,
         )
-        if same_fill_economics and str(latest_fact.get("state") or "") == state:
+        same_state_point_order_split_price = not same_fill_economics and (
+            _point_order_split_weighted_price_reproduces_local_authority(
+                latest_fact,
+                raw=raw,
+                venue_order_id=order_id,
+                state=state,
+                filled_size=filled_size,
+            )
+        )
+        if same_state_point_order_split_price:
+            # The incoming trade's top-level price is a single point-order leg;
+            # the local fact's price is the already-correct size-weighted
+            # aggregate across all legs. Use the local (correct) price for any
+            # downstream event/position accounting in this branch instead of
+            # propagating the single-leg artifact.
+            fill_price = str(latest_fact.get("fill_price"))
+        if (
+            same_fill_economics or same_state_point_order_split_price
+        ) and str(latest_fact.get("state") or "") == state:
             _resolve_open_trade_findings(
                 conn,
                 trade_id,
@@ -7327,6 +7346,80 @@ def _point_order_aggregate_exact_trade_split_has_authority(
     except (InvalidOperation, ValueError):
         return False
     return incoming_size > Decimal("0") and incoming_size <= prior_size
+
+
+def _point_order_split_weighted_price_reproduces_local_authority(
+    fact: Mapping[str, Any],
+    *,
+    raw: Mapping[str, Any],
+    venue_order_id: str | None,
+    state: str,
+    filled_size: str,
+) -> bool:
+    """A taker fill split across point-order legs on different outcome tokens
+    reports only one leg's price in the trade's top-level `price` field. When
+    the local fact's fill_price already equals the size-weighted average of
+    the trade's own `maker_orders` legs -- converting each leg's price through
+    its 1-price complement whenever the leg trades the opposite outcome token
+    from the taker -- the apparent price "drift" is an artifact of that
+    single-leg field, not a real revision, and the local aggregate keeps
+    authority.
+    """
+
+    if str(fact.get("state") or "") != state:
+        return False
+    if not _same_decimal_value(fact.get("filled_size"), filled_size):
+        return False
+    if not _taker_order_price_applies(raw, venue_order_id):
+        return False
+    taker_asset_id = _string_or_none(raw.get("asset_id"))
+    if not taker_asset_id:
+        return False
+    legs = raw.get("maker_orders")
+    if not isinstance(legs, list) or not legs:
+        return False
+    total_size = Decimal("0")
+    weighted_sum = Decimal("0")
+    for leg in legs:
+        if not isinstance(leg, Mapping):
+            return False
+        leg_asset_id = _string_or_none(
+            _first_present(leg, "asset_id", "assetId", default=None)
+        )
+        leg_size_raw = _first_present(
+            leg, "matched_amount", "matchedAmount", "filled_size", "size", "amount", default=None
+        )
+        leg_price_raw = _first_present(
+            leg, "price", "avgPrice", "avg_price", "fillPrice", "fill_price", default=None
+        )
+        if leg_asset_id is None or leg_size_raw is None or leg_price_raw is None:
+            return False
+        try:
+            leg_size = _decimal(leg_size_raw)
+            leg_price = _decimal(leg_price_raw)
+        except (InvalidOperation, ValueError):
+            return False
+        if leg_size <= Decimal("0") or leg_price < Decimal("0") or leg_price > Decimal("1"):
+            return False
+        effective_price = leg_price if leg_asset_id == taker_asset_id else Decimal("1") - leg_price
+        total_size += leg_size
+        weighted_sum += leg_size * effective_price
+    if total_size <= Decimal("0"):
+        return False
+    try:
+        incoming_size = _decimal(filled_size)
+        local_price = _decimal(fact.get("fill_price"))
+    except (InvalidOperation, ValueError):
+        return False
+    if total_size != incoming_size:
+        return False
+    weighted_price = weighted_sum / total_size
+    if local_price == Decimal("0"):
+        return weighted_price == Decimal("0")
+    return (
+        abs(weighted_price - local_price) / abs(local_price)
+        <= _POINT_ORDER_SPLIT_PRICE_REL_TOLERANCE
+    )
 
 
 def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:

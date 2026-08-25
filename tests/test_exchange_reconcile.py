@@ -7338,6 +7338,208 @@ def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn)
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
 
 
+def test_point_order_split_weighted_leg_price_reproduces_local_fact_is_same_economics(conn):
+    """Live shape (finding 6d822fe0-b06b-4d38-9970-a3491c1ab852): a taker fill
+    split across two point-order legs on opposite outcome tokens reports only
+    one leg's price ("0.39") in the trade's top-level price field, while the
+    already-recorded local fact holds the correct size-weighted aggregate
+    price across both legs (5.4 @ 0.39 direct-outcome + 4.135 @ (1-0.6)
+    complement-outcome / 9.535 total = 0.3943366544310435...). This must NOT
+    raise unrecorded_trade -- the local aggregate stays authoritative.
+    """
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=9.535, price=0.39)
+
+    first = trade(
+        trade_id="trade-point-order-split",
+        order_id="ord-m5",
+        size="9.535",
+        price="0.3943366544310435238594651285",
+        fill_price="0.3943366544310435238594651285",
+        status="CONFIRMED",
+    )
+    assert run_reconcile_sweep(
+        FakeM5Adapter(trades=[first], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    ) == []
+
+    second = trade(
+        trade_id="trade-point-order-split",
+        order_id="ord-m5",
+        size="9.535",
+        price="0.39",
+        fill_price="0.39",
+        status="CONFIRMED",
+        asset_id=YES_TOKEN,
+        taker_order_id="ord-m5",
+        maker_orders=[
+            {
+                "asset_id": YES_TOKEN,
+                "matched_amount": "5.4",
+                "price": "0.39",
+                "order_id": "maker-no-sell",
+                "outcome": "No",
+                "side": "SELL",
+            },
+            {
+                "asset_id": "opposite-outcome-token-m5",
+                "matched_amount": "4.135",
+                "price": "0.6",
+                "order_id": "maker-yes-buy",
+                "outcome": "Yes",
+                "side": "BUY",
+            },
+        ],
+    )
+    result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[second], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result == []
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(fill_price) AS fill_price"
+        " FROM venue_trade_facts WHERE trade_id = 'trade-point-order-split'"
+    ).fetchone()
+    assert row["n"] == 1
+    assert row["fill_price"] == "0.3943366544310435238594651285"
+
+
+def test_point_order_split_genuine_price_drift_still_becomes_finding(conn):
+    """Same two-leg split shape, but the legs' weighted average does NOT
+    reproduce the local fact's recorded price -- a real economic drift, not a
+    single-leg artifact. Must still record unrecorded_trade."""
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=9.535, price=0.39)
+
+    first = trade(
+        trade_id="trade-point-order-genuine-drift",
+        order_id="ord-m5",
+        size="9.535",
+        price="0.3943366544310435238594651285",
+        fill_price="0.3943366544310435238594651285",
+        status="CONFIRMED",
+    )
+    assert run_reconcile_sweep(
+        FakeM5Adapter(trades=[first], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    ) == []
+
+    second = trade(
+        trade_id="trade-point-order-genuine-drift",
+        order_id="ord-m5",
+        size="9.535",
+        price="0.39",
+        fill_price="0.39",
+        status="CONFIRMED",
+        asset_id=YES_TOKEN,
+        taker_order_id="ord-m5",
+        maker_orders=[
+            {
+                "asset_id": YES_TOKEN,
+                "matched_amount": "5.4",
+                "price": "0.39",
+                "order_id": "maker-no-sell",
+                "outcome": "No",
+                "side": "SELL",
+            },
+            {
+                "asset_id": "opposite-outcome-token-m5",
+                "matched_amount": "4.135",
+                "price": "0.8",
+                "order_id": "maker-yes-buy",
+                "outcome": "Yes",
+                "side": "BUY",
+            },
+        ],
+    )
+    result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[second], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_lifecycle_regression_or_economic_drift" in result[0].evidence_json
+    assert conn.execute(
+        "SELECT fill_price FROM venue_trade_facts WHERE trade_id = 'trade-point-order-genuine-drift'"
+    ).fetchone()["fill_price"] == "0.3943366544310435238594651285"
+
+
+def test_point_order_split_size_mismatch_still_becomes_finding(conn):
+    """The incoming trade's filled_size does not match the local fact's
+    filled_size -- fail closed even though the legs' weighted price would
+    otherwise reproduce the local fact's price."""
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=9.535, price=0.39)
+
+    first = trade(
+        trade_id="trade-point-order-size-mismatch",
+        order_id="ord-m5",
+        size="9.535",
+        price="0.3943366544310435238594651285",
+        fill_price="0.3943366544310435238594651285",
+        status="CONFIRMED",
+    )
+    assert run_reconcile_sweep(
+        FakeM5Adapter(trades=[first], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    ) == []
+
+    second = trade(
+        trade_id="trade-point-order-size-mismatch",
+        order_id="ord-m5",
+        size="8",
+        price="0.39",
+        fill_price="0.39",
+        status="CONFIRMED",
+        asset_id=YES_TOKEN,
+        taker_order_id="ord-m5",
+        maker_orders=[
+            {
+                "asset_id": YES_TOKEN,
+                "matched_amount": "5.4",
+                "price": "0.39",
+                "order_id": "maker-no-sell",
+                "outcome": "No",
+                "side": "SELL",
+            },
+            {
+                "asset_id": "opposite-outcome-token-m5",
+                "matched_amount": "2.6",
+                "price": "0.6",
+                "order_id": "maker-yes-buy",
+                "outcome": "Yes",
+                "side": "BUY",
+            },
+        ],
+    )
+    result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[second], positions=[position(size="9.535")]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert [finding.kind for finding in result] == ["unrecorded_trade"]
+    assert "exchange_trade_lifecycle_regression_or_economic_drift" in result[0].evidence_json
+    assert conn.execute(
+        "SELECT fill_price FROM venue_trade_facts WHERE trade_id = 'trade-point-order-size-mismatch'"
+    ).fetchone()["fill_price"] == "0.3943366544310435238594651285"
+
+
 def test_linked_confirmed_trade_missing_fill_price_becomes_finding_not_fact(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
