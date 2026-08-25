@@ -5237,6 +5237,56 @@ def test_memory_gate_upgrades_legacy_and_skips_not_due_without_canonical_open(
     assert all(loop.parse_time(str(row[2])) > fixed for row in rows)
 
 
+def test_memory_gate_saturates_huge_legacy_attempt_without_canonical_open(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(
+        evidence_queue_batch_size=8,
+        evidence_retry_base_seconds=1,
+        evidence_retry_max_seconds=300,
+    )
+    fixed = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    assert [loop._evidence_retry_delay(cfg, attempts) for attempts in range(5)] == [1, 1, 2, 4, 8]
+    assert loop._evidence_retry_delay(cfg, 2607) == 300
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("huge-legacy-debt", "hard", "p-huge", "e-huge", "below_floor", "yes-token", "sell_yes", .05,
+             fixed.isoformat(), 1.0, "blocked", "evidence", fixed.isoformat()),
+        )
+        mem.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,attempts,retry_identity,next_retry_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("evidence_snapshot:huge-legacy-debt", "evidence_snapshot", "retry_pending", "legacy", fixed.isoformat(),
+             2607, "", None),
+        )
+        mem.commit()
+    opens: list[Path] = []
+    real_open_ro = loop.open_ro
+
+    def counted_open_ro(path: Path, **kwargs):
+        opens.append(Path(path))
+        return real_open_ro(path, **kwargs)
+
+    monkeypatch.setattr(loop, "open_ro", counted_open_ro)
+    monkeypatch.setattr(loop, "_capture_pair_valid", lambda *_args, **_kwargs: pytest.fail("legacy upgrade must not validate pair"))
+    monkeypatch.setattr(loop, "_evidence_fingerprints", lambda *_args, **_kwargs: pytest.fail("legacy upgrade must not fingerprint"))
+    result = loop._capture_hard_evidence(cfg, [], scan_all=True)
+    assert result["deferred"] == ["huge-legacy-debt"]
+    assert opens == []
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT attempts,retry_identity,next_retry_at FROM controller_debt WHERE debt_id=?",
+            ("evidence_snapshot:huge-legacy-debt",),
+        ).fetchone()
+    assert int(debt["attempts"]) == 2607
+    assert str(debt["retry_identity"])
+    assert loop.parse_time(str(debt["next_retry_at"])) == fixed + timedelta(seconds=300)
+
+
 def test_memory_gate_runs_one_due_lane_and_still_constructs_new_incident(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

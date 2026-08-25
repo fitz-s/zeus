@@ -3411,7 +3411,15 @@ def _evidence_retry_delay(cfg: Mapping[str, Any], attempts: int) -> float:
         base,
         float(settings.get("evidence_retry_max_seconds", settings.get("max_evidence_retry_seconds", 300.0))),
     )
-    return min(maximum, base * (2 ** max(0, attempts - 1)))
+    # Do not construct 2**attempts: legacy debt may carry an arbitrarily
+    # large persisted counter.  The loop stops at saturation, so its work is
+    # bounded by the configured backoff range rather than that counter.
+    delay = base
+    remaining_doublings = max(0, attempts - 1)
+    while remaining_doublings and delay < maximum:
+        delay = min(maximum, delay * 2)
+        remaining_doublings -= 1
+    return delay
 
 
 def _evidence_retry_identity_for_debt(
