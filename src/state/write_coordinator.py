@@ -24,6 +24,25 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from src.state.db_writer_lock import WriteClass
 
+# TYPE-C-style bounded starvation grace (mirrors src/engine/event_reactor_adapter.py's
+# GLOBAL_AUCTION_PREEMPTION_GRACE_* idiom, docs/operations/current/plans/
+# auction_collapse_repair_design_2026-08-24.md Sec1.3). _acquire_nonmonitor_reservations
+# refuses to even ATTEMPT a real reservation whenever _monitor_intent_locked() is
+# true at poll time -- an advisory pre-check, not the correctness gate itself
+# (_acquire_nonmonitor_reservation's own post-acquire recheck and the publication
+# barrier's flock() still serialize truthfully regardless of this pre-check). A
+# non-MONITOR writer that has already deferred to that pre-check this many
+# consecutive times, within the SAME lease() call, stops re-checking it and
+# attempts its real (still mutex-safe) reservation directly -- bounding a class of
+# starvation where a MONITOR priority loop (settlement harvest, exit handoff,
+# held-position monitor) keeps the advisory flag up long enough to spend a
+# STANDARD writer's entire deadline on pre-checks it never gets to act past. 2026-08-25
+# incident: the global auction's final receipt commit (STANDARD priority, money-path
+# entry commit) never landed for 12+ hours behind this exact unbounded yield.
+MONITOR_YIELD_GRACE_MAX_ATTEMPTS = int(
+    os.environ.get("ZEUS_WRITE_COORDINATOR_MONITOR_YIELD_GRACE_MAX_ATTEMPTS", "3")
+)
+
 
 class DBIdentity(str, enum.Enum):
     """Canonical runtime DB identities managed by the coordinator."""
@@ -563,13 +582,16 @@ class WriteCoordinator:
     ) -> list[_AcquiredGate]:
         acquired: list[_AcquiredGate] = []
         nonmonitor_reservations: dict[DBIdentity, int] = {}
+        monitor_intent_advisory_exhausted = False
         try:
             if priority is not WritePriority.MONITOR:
-                nonmonitor_reservations = self._acquire_nonmonitor_reservations(
-                    ordered,
-                    deadline=deadline,
-                    owner=owner,
-                    priority=priority,
+                nonmonitor_reservations, monitor_intent_advisory_exhausted = (
+                    self._acquire_nonmonitor_reservations(
+                        ordered,
+                        deadline=deadline,
+                        owner=owner,
+                        priority=priority,
+                    )
                 )
             for db in ordered:
                 db_path = self._db_paths[db]
@@ -600,6 +622,7 @@ class WriteCoordinator:
                         )
                     if (
                         priority is not WritePriority.MONITOR
+                        and not monitor_intent_advisory_exhausted
                         and self._monitor_intent_locked(db_path)
                     ):
                         raise _MonitorIntentYield(
@@ -624,6 +647,7 @@ class WriteCoordinator:
                     )
                     if (
                         priority is not WritePriority.MONITOR
+                        and not monitor_intent_advisory_exhausted
                         and self._monitor_intent_locked(db_path)
                     ):
                         raise _MonitorIntentYield(
@@ -670,9 +694,13 @@ class WriteCoordinator:
                         process_lock=process_lock,
                     )
                 )
-            if priority is not WritePriority.MONITOR and any(
-                self._monitor_intent_locked(self._db_paths[db])
-                for db in ordered
+            if (
+                priority is not WritePriority.MONITOR
+                and not monitor_intent_advisory_exhausted
+                and any(
+                    self._monitor_intent_locked(self._db_paths[db])
+                    for db in ordered
+                )
             ):
                 raise _MonitorIntentYield(
                     "DB writer yielded before DB-set publication for "
@@ -779,7 +807,7 @@ class WriteCoordinator:
         deadline: float | None,
         owner: str,
         priority: WritePriority,
-    ) -> dict[DBIdentity, int]:
+    ) -> tuple[dict[DBIdentity, int], bool]:
         """Acquire a non-monitor DB set atomically with respect to MONITOR.
 
         A writer must not hold one DB gate while waiting for another DB's
@@ -787,13 +815,26 @@ class WriteCoordinator:
         any conflict, release the partial set before retrying.  A MONITOR that
         publishes intent during the sweep therefore cannot form a cross-DB
         lock-order cycle with this writer.
+
+        Returns ``(reservations, monitor_intent_advisory_exhausted)``. The
+        second element is True once this call has cooperatively yielded to a
+        visible MONITOR intent MONITOR_YIELD_GRACE_MAX_ATTEMPTS times (Type-C
+        idiom, see the module-level constant) -- the caller (``_acquire_gates``)
+        must then also skip its own remaining advisory intent pre-checks for
+        the rest of THIS attempt, or the grace earned here is immediately
+        undone by the next checkpoint. The real gates (this function's own
+        per-db reservation flock, the process lock, the file lock, and the
+        publication barrier's flock) still serialize correctly regardless --
+        only the "back off before even trying" heuristic is bypassed.
         """
 
         background = priority is WritePriority.BACKGROUND_RECOVERY
+        yield_count = 0
         while True:
             reservations: dict[DBIdentity, int] = {}
+            advisory_check = not background and yield_count < MONITOR_YIELD_GRACE_MAX_ATTEMPTS
             try:
-                if any(
+                if advisory_check and any(
                     self._monitor_intent_locked(self._db_paths[db])
                     for db in ordered
                 ):
@@ -808,8 +849,9 @@ class WriteCoordinator:
                         db=db,
                         owner=owner,
                         blocking=False,
+                        respect_monitor_intent=advisory_check,
                     )
-                if any(
+                if advisory_check and any(
                     self._monitor_intent_locked(self._db_paths[db])
                     for db in ordered
                 ):
@@ -817,7 +859,7 @@ class WriteCoordinator:
                         "DB writer monitor waiter reservation deferred "
                         f"for owner={owner}: monitor intent visible"
                     )
-                return reservations
+                return reservations, not advisory_check
             except BaseException as exc:
                 cleanup_error = self._release_turnstile_set(
                     reversed(tuple(reservations.values()))
@@ -828,6 +870,7 @@ class WriteCoordinator:
                     raise cleanup_error from exc
                 if background or (deadline is not None and self._clock() >= deadline):
                     raise
+                yield_count += 1
                 sleep_for = 0.01
                 if deadline is not None:
                     sleep_for = max(
@@ -967,6 +1010,7 @@ class WriteCoordinator:
         db: DBIdentity,
         owner: str,
         blocking: bool,
+        respect_monitor_intent: bool = True,
     ) -> int:
         path = writer_monitor_waiter_path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -994,8 +1038,15 @@ class WriteCoordinator:
                     # waiting on this reservation.  A non-monitor that won the
                     # reservation race must yield it when that intent is now
                     # visible, closing the check/acquire race for STANDARD and
-                    # RECOVERY_CRITICAL writers as well as BACKGROUND.
-                    if not self._monitor_intent_locked(db_path):
+                    # RECOVERY_CRITICAL writers as well as BACKGROUND -- UNLESS
+                    # respect_monitor_intent is False (MONITOR_YIELD_GRACE_MAX_ATTEMPTS
+                    # already exhausted upstream in _acquire_nonmonitor_reservations):
+                    # this writer has already deferred that many times this lease()
+                    # call, so a real, already-won flock is kept rather than handed
+                    # back to a MONITOR intent that may itself be stale.
+                    if not respect_monitor_intent or not self._monitor_intent_locked(
+                        db_path
+                    ):
                         transferred = True
                         return fd
                     try:
