@@ -2183,14 +2183,15 @@ def _detect_trigger(
     return list(dict.fromkeys(created))
 
 
-def _phase_heartbeat(cfg: Mapping[str, Any], phase: str, **extra: Any) -> None:
+def _phase_heartbeat(cfg: Mapping[str, Any], phase: str, **extra: Any) -> bool:
     try:
         atomic_json(
             runtime_dir(cfg) / "status.json",
             {"alive": True, "pid": os.getpid(), "at": iso(), "phase": phase, **extra},
         )
     except OSError:
-        pass
+        return False
+    return True
 
 
 def _bounded_floor_price(cfg: Mapping[str, Any], deadline: float) -> float:
@@ -3107,21 +3108,137 @@ def _record_evidence_debt(
 ) -> None:
     stamp = iso()
     fingerprint, config_fp, capacity_fp, data_fp = fingerprints or ("", "", "", "")
-    with memory(cfg) as mem:
-        mem.execute(
+    try:
+        with memory(cfg) as mem:
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts) "
+                "VALUES (?,?,?,?,?,?,?,?,?,1) "
+                "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at,"
+                "fingerprint=excluded.fingerprint,config_fingerprint=excluded.config_fingerprint,capacity_fingerprint=excluded.capacity_fingerprint,"
+                "data_fingerprint=excluded.data_fingerprint,attempts=controller_debt.attempts+1",
+                (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
+            )
+            if not preserve_incident_state:
+                mem.execute(
+                    "UPDATE incidents SET stage='evidence',status=CASE WHEN status IN ('queued','retry_pending','observing') THEN 'blocked' ELSE status END,updated_at=? WHERE incident_id=?",
+                    (stamp, incident_id),
+                )
+            mem.commit()
+    except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+        _record_emergency_evidence_debt(
+            cfg,
+            incident_id,
+            reason,
+            preserve_incident_state=preserve_incident_state,
+            fingerprints=(fingerprint, config_fp, capacity_fp, data_fp),
+            primary_error=exc,
+        )
+
+
+_EMERGENCY_EVIDENCE_DEBT_WRITE_SECONDS = 0.25
+
+
+def _record_emergency_evidence_debt(
+    cfg: Mapping[str, Any],
+    incident_id: str,
+    reason: str,
+    *,
+    preserve_incident_state: bool,
+    fingerprints: tuple[str, str, str, str],
+    primary_error: BaseException,
+) -> None:
+    """Persist evidence debt without inheriting an exhausted evidence deadline.
+
+    SCOPE: one committed incident's evidence debt. DRAIN: the next evidence
+    cycle consumes the same debt id. RESET: a valid evidence pair resolves it.
+    If the bounded independent write cannot obtain SQLite, a typed receipt and
+    heartbeat degrade this controller cycle without killing the daemon.
+    """
+
+    stamp = iso()
+    fingerprint, config_fp, capacity_fp, data_fp = fingerprints
+    deadline = time.monotonic() + _EMERGENCY_EVIDENCE_DEBT_WRITE_SECONDS
+    debt_id = _evidence_debt_id(incident_id)
+    payload: dict[str, Any] = {
+        "debt_id": debt_id,
+        "incident_id": incident_id,
+        "reason": reason[:1000],
+        "primary_error": f"{type(primary_error).__name__}:{primary_error}",
+        "updated_at": stamp,
+    }
+    db_error: str | None = None
+    conn: sqlite3.Connection | None = None
+    try:
+        remaining = max(0.001, deadline - time.monotonic())
+        conn = sqlite3.connect(runtime_dir(cfg) / "memory.db", timeout=remaining)
+        conn.execute(f"PRAGMA busy_timeout={max(1, int(remaining * 1000))}")
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        conn.execute(
             "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts) "
             "VALUES (?,?,?,?,?,?,?,?,?,1) "
             "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at,"
             "fingerprint=excluded.fingerprint,config_fingerprint=excluded.config_fingerprint,capacity_fingerprint=excluded.capacity_fingerprint,"
             "data_fingerprint=excluded.data_fingerprint,attempts=controller_debt.attempts+1",
-            (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
+            (debt_id, "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
         )
         if not preserve_incident_state:
-            mem.execute(
+            conn.execute(
                 "UPDATE incidents SET stage='evidence',status=CASE WHEN status IN ('queued','retry_pending','observing') THEN 'blocked' ELSE status END,updated_at=? WHERE incident_id=?",
                 (stamp, incident_id),
             )
-        mem.commit()
+        conn.commit()
+        payload["status"] = "retry_pending"
+        payload["write_path"] = "emergency_sqlite"
+    except (OSError, sqlite3.Error) as exc:
+        db_error = f"{type(exc).__name__}:{exc}"
+        payload["status"] = "controller_degraded"
+        payload["reason_code"] = "EVIDENCE_EMERGENCY_DEBT_DB_UNWRITABLE"
+        payload["db_error"] = db_error
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+    receipt_error: str | None = None
+    try:
+        atomic_json(
+            runtime_dir(cfg) / "incidents" / incident_id / "emergency-evidence-debt.json",
+            payload,
+        )
+    except OSError as exc:
+        receipt_error = f"{type(exc).__name__}:{exc}"
+        payload["status"] = "controller_degraded"
+        payload["reason_code"] = "EVIDENCE_EMERGENCY_DEBT_RECEIPT_UNWRITABLE"
+        payload["receipt_error"] = receipt_error
+    heartbeat_error: str | None = None
+    try:
+        heartbeat_ok = _phase_heartbeat(
+            cfg,
+            "evidence_emergency_debt" if db_error is None else "evidence_controller_degraded",
+            incident_id=incident_id,
+            evidence_reason=reason[:1000],
+            evidence_debt_status=payload["status"],
+        )
+        if heartbeat_ok is False:
+            heartbeat_error = "OSError:status.json unwritable"
+    except OSError as exc:
+        heartbeat_error = f"{type(exc).__name__}:{exc}"
+    if receipt_error or heartbeat_error:
+        degradation = {
+            "status": "controller_degraded",
+            "reason_code": "EVIDENCE_EMERGENCY_DEBT_PERSISTENCE_FAILED",
+            "incident_id": incident_id,
+            "receipt_error": receipt_error,
+            "heartbeat_error": heartbeat_error,
+        }
+        _LAST_EVIDENCE_CYCLE["controller_degraded"] = degradation
+        try:
+            print("EVIDENCE_CONTROLLER_DEGRADED " + json.dumps(degradation, sort_keys=True), file=sys.stderr, flush=True)
+        except OSError:
+            pass
 
 
 def _resolve_evidence_debt(cfg: Mapping[str, Any], incident_id: str) -> None:
@@ -3227,89 +3344,134 @@ def _capture_hard_evidence_inner(
 ) -> dict[str, Any]:
     global _EVIDENCE_BUILD_CONTEXT, _LAST_EVIDENCE_CYCLE
     budget = budget or _new_evidence_budget(cfg)
-    _evidence_guard()
-    created_order = [str(value) for value in incident_ids if str(value)]
-    candidates = set(created_order)
-    queue_limit = max(1, int(cfg["loop"].get("evidence_queue_batch_size", 32)))
-    queued_ids: list[str] = []
-    queue_cursor = 0
-    with memory(cfg) as mem:
-        _evidence_guard()
-        try:
-            queue_cursor = max(0, int(meta_get(mem, "evidence_queue_cursor", "0")))
-            queued_ids = [str(value) for value in json.loads(meta_get(mem, "evidence_queue", "[]"))][:queue_limit]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            queued_ids = []
-        if scan_all or not queued_ids:
-            query = (
-                "SELECT incident_id FROM incidents WHERE kind='hard' "
-                "ORDER BY CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END, "
-                "priority DESC, detected_at DESC, incident_id LIMIT ? OFFSET ?"
-            )
-            queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, queue_cursor)).fetchall()]
-            if not queued_ids and queue_cursor:
-                queue_cursor = 0
-                queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, 0)).fetchall()]
-            meta_set(mem, "evidence_queue", json.dumps(queued_ids, separators=(",", ":")))
-            mem.commit()
-        candidates.update(queued_ids)
-        debts = mem.execute(
-            "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
-            "ORDER BY updated_at DESC LIMIT ?", (queue_limit,)
-        ).fetchall()
-        _evidence_guard()
-        candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
-    if not candidates:
-        return {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
-    with memory(cfg) as mem:
-        _evidence_guard()
-        rows = []
-        candidate_list = list(candidates)
-        for offset in range(0, len(candidate_list), 900):
-            chunk = candidate_list[offset:offset + 900]
-            rows.extend(mem.execute(
-                "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
-                f"({','.join('?' for _ in chunk)})", tuple(chunk)
-            ).fetchall())
-    positions: dict[str, dict[str, Any]] = {}
-    try:
-        with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
-            _apply_evidence_sql_budget(trades, budget)
-            position_ids = list(dict.fromkeys(str(row[2]) for row in rows))
-            for offset in range(0, len(position_ids), 900):
-                chunk = position_ids[offset:offset + 900]
-                if not chunk:
-                    continue
-                for row in trades.execute(
-                    "SELECT position_id,phase,city,updated_at FROM position_current WHERE position_id IN "
-                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
-                ).fetchall():
-                    positions[str(row[0])] = dict(row)
-    except (OSError, sqlite3.Error):
-        positions = {}
-    status_rank = {"queued": 0, "retry_pending": 0, "blocked": 1, "observing": 2, "running": 3}
-    open_rank = {phase: 0 for phase in OPEN_PHASES}
-    row_by_id = {str(row[0]): row for row in rows}
-    created_rank = {incident_id: index for index, incident_id in enumerate(created_order)}
-    def priority(incident_id: str) -> tuple[Any, ...]:
-        row = row_by_id[incident_id]
-        position = positions.get(str(row[2]), {})
-        detected = parse_time(str(row[3]))
-        return (
-            0 if incident_id in created_rank else 1,
-            created_rank.get(incident_id, 10**9),
-            open_rank.get(str(position.get("phase") or ""), 2),
-            0 if str(position.get("city") or "").casefold() == "tel aviv" else 1,
-            status_rank.get(str(row[1]), 9),
-            -(detected.timestamp() if detected else 0.0),
-            incident_id,
-        )
-    ordered = sorted(row_by_id, key=priority)
+    created_order = list(dict.fromkeys(str(value) for value in incident_ids if str(value)))
     summary = {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
     resolved_queue: set[str] = set()
-    for incident_id in ordered:
-        _evidence_guard()
-        _reap_incomplete_generations(cfg, incident_id)
+    created_rank = {incident_id: index for index, incident_id in enumerate(created_order)}
+
+    def defer(identifiers: Iterable[str], reason: str) -> None:
+        for value in dict.fromkeys(str(item) for item in identifiers if str(item)):
+            if value in summary["built"] or value in resolved_queue or value in summary["deferred"]:
+                continue
+            _record_evidence_debt(
+                cfg, value, reason, preserve_incident_state=value not in created_rank
+            )
+            summary["deferred"].append(value)
+
+    def finish() -> dict[str, Any]:
+        summary["bytes"] = int(budget.get("bytes", 0))
+        if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
+            summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
+        _LAST_EVIDENCE_CYCLE["built"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("built", []), *summary["built"]]))
+        _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *summary["deferred"]]))
+        _LAST_EVIDENCE_CYCLE["attempted"] = int(_LAST_EVIDENCE_CYCLE.get("attempted", 0)) + int(summary["attempted"])
+        _LAST_EVIDENCE_CYCLE["validated"] = int(_LAST_EVIDENCE_CYCLE.get("validated", 0)) + int(summary["validated"])
+        _LAST_EVIDENCE_CYCLE["bytes"] = max(int(_LAST_EVIDENCE_CYCLE.get("bytes", 0)), int(summary["bytes"]))
+        return summary
+    try:
+        candidates = set(created_order)
+        queue_limit = max(1, int(cfg["loop"].get("evidence_queue_batch_size", 32)))
+        queued_ids: list[str] = []
+        queue_cursor = 0
+        with memory(cfg) as mem:
+            _evidence_guard()
+            try:
+                queue_cursor = max(0, int(meta_get(mem, "evidence_queue_cursor", "0")))
+                queued_ids = [str(value) for value in json.loads(meta_get(mem, "evidence_queue", "[]"))][:queue_limit]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                queued_ids = []
+            if scan_all or not queued_ids:
+                query = (
+                    "SELECT incident_id FROM incidents WHERE kind='hard' "
+                    "ORDER BY CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END, "
+                    "priority DESC, detected_at DESC, incident_id LIMIT ? OFFSET ?"
+                )
+                queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, queue_cursor)).fetchall()]
+                if not queued_ids and queue_cursor:
+                    queue_cursor = 0
+                    queued_ids = [str(row[0]) for row in mem.execute(query, (queue_limit, 0)).fetchall()]
+                meta_set(mem, "evidence_queue", json.dumps(queued_ids, separators=(",", ":")))
+                mem.commit()
+            candidates.update(queued_ids)
+            debts = mem.execute(
+                "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
+                "ORDER BY updated_at DESC LIMIT ?", (queue_limit,)
+            ).fetchall()
+            _evidence_guard()
+            candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
+        if not candidates:
+            return finish()
+        with memory(cfg) as mem:
+            _evidence_guard()
+            rows = []
+            candidate_list = list(candidates)
+            for offset in range(0, len(candidate_list), 900):
+                chunk = candidate_list[offset:offset + 900]
+                rows.extend(mem.execute(
+                    "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
+                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
+                ).fetchall())
+        positions: dict[str, dict[str, Any]] = {}
+        try:
+            with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+                _apply_evidence_sql_budget(trades, budget)
+                position_ids = list(dict.fromkeys(str(row[2]) for row in rows))
+                for offset in range(0, len(position_ids), 900):
+                    chunk = position_ids[offset:offset + 900]
+                    if not chunk:
+                        continue
+                    for row in trades.execute(
+                        "SELECT position_id,phase,city,updated_at FROM position_current WHERE position_id IN "
+                        f"({','.join('?' for _ in chunk)})", tuple(chunk)
+                    ).fetchall():
+                        positions[str(row[0])] = dict(row)
+        except (OSError, sqlite3.Error):
+            positions = {}
+        status_rank = {"queued": 0, "retry_pending": 0, "blocked": 1, "observing": 2, "running": 3}
+        open_rank = {phase: 0 for phase in OPEN_PHASES}
+        row_by_id = {str(row[0]): row for row in rows}
+        created_rank = {incident_id: index for index, incident_id in enumerate(created_order)}
+        def priority(incident_id: str) -> tuple[Any, ...]:
+            row = row_by_id[incident_id]
+            position = positions.get(str(row[2]), {})
+            detected = parse_time(str(row[3]))
+            return (
+                0 if incident_id in created_rank else 1,
+                created_rank.get(incident_id, 10**9),
+                open_rank.get(str(position.get("phase") or ""), 2),
+                0 if str(position.get("city") or "").casefold() == "tel aviv" else 1,
+                status_rank.get(str(row[1]), 9),
+                -(detected.timestamp() if detected else 0.0),
+                incident_id,
+            )
+        ordered = sorted(row_by_id, key=priority)
+    except EvidenceCapacityExceeded as exc:
+        recovered, recovery_error = _recover_evidence_candidate_ids(cfg, limit=queue_limit)
+        candidate_ids = list(dict.fromkeys([*candidates, *recovered]))
+        if recovery_error:
+            _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
+        defer(candidate_ids, f"evidence_snapshot_capacity_failure:{exc}")
+        return finish()
+    except sqlite3.OperationalError as exc:
+        if "interrupted" not in str(exc).lower():
+            raise
+        recovered, recovery_error = _recover_evidence_candidate_ids(cfg, limit=queue_limit)
+        candidate_ids = list(dict.fromkeys([*candidates, *recovered]))
+        if recovery_error:
+            _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
+        defer(candidate_ids, f"evidence_snapshot_capacity_failure:{exc}")
+        return finish()
+    for index, incident_id in enumerate(ordered):
+        try:
+            _evidence_guard()
+        except EvidenceCapacityExceeded as exc:
+            defer(ordered[index:], f"evidence_snapshot_capacity_failure:{exc}")
+            break
+        try:
+            _reap_incomplete_generations(cfg, incident_id)
+        except EvidenceCapacityExceeded as exc:
+            defer(ordered[index:], f"evidence_snapshot_capacity_failure:{exc}")
+            break
         try:
             pair_valid = _capture_pair_valid(cfg, incident_id, budget)
         except EvidenceCapacityExceeded as exc:
@@ -3322,7 +3484,12 @@ def _capture_hard_evidence_inner(
             summary["deferred"].append(incident_id)
             continue
         if pair_valid:
-            _resolve_evidence_debt(cfg, incident_id)
+            previous_context = _EVIDENCE_BUILD_CONTEXT
+            _EVIDENCE_BUILD_CONTEXT = None
+            try:
+                _resolve_evidence_debt(cfg, incident_id)
+            finally:
+                _EVIDENCE_BUILD_CONTEXT = previous_context
             resolved_queue.add(incident_id)
             continue
         summary["validated"] += 1
@@ -3355,11 +3522,11 @@ def _capture_hard_evidence_inner(
         try:
             _evidence_guard()
             fingerprints = _evidence_fingerprints(cfg, incident_id, budget)
-        except Exception as exc:
+        except EvidenceCapacityExceeded as exc:
             _record_evidence_debt(
                 cfg,
                 incident_id,
-                f"{type(exc).__name__}:{exc}",
+                f"evidence_snapshot_capacity_failure:{exc}",
                 preserve_incident_state=incident_id not in created_rank,
             )
             summary["deferred"].append(incident_id)
@@ -3385,38 +3552,60 @@ def _capture_hard_evidence_inner(
             _run_bounded_evidence_build(cfg, incident_id, budget)
             budget["built"] = int(budget.get("built", 0)) + 1
             summary["built"].append(incident_id)
+        except EvidenceCapacityExceeded as exc:
+            _record_evidence_debt(
+                cfg, incident_id, f"evidence_snapshot_capacity_failure:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        except OSError as exc:
+            _record_evidence_debt(
+                cfg, incident_id, f"{type(exc).__name__}:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        except sqlite3.Error as exc:
+            if "interrupted" not in str(exc).lower():
+                raise
+            _record_evidence_debt(
+                cfg, incident_id, f"evidence_snapshot_capacity_failure:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
         except RuntimeError as exc:
-            if isinstance(exc, EvidenceCapacityExceeded):
-                _record_evidence_debt(
-                    cfg,
-                    incident_id,
-                    f"evidence_snapshot_capacity_failure:{exc}",
-                    preserve_incident_state=incident_id not in created_rank,
-                    fingerprints=fingerprints,
-                )
-                summary["deferred"].append(incident_id)
-                continue
-            if "position missing" in str(exc):
-                _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
-                continue
-            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
-        except Exception as exc:
-            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
+            if "position missing" not in str(exc):
+                raise
+            _record_evidence_debt(
+                cfg, incident_id, f"{type(exc).__name__}:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
         else:
             _resolve_evidence_debt(cfg, incident_id)
             resolved_queue.add(incident_id)
         finally:
             _EVIDENCE_BUILD_CONTEXT = None
-    if queued_ids and resolved_queue:
-        _evidence_guard()
-        with memory(cfg) as mem:
-            remaining = [value for value in queued_ids if value not in resolved_queue]
-            meta_set(mem, "evidence_queue", json.dumps(remaining, separators=(",", ":")))
-            if len(remaining) == 0:
-                meta_set(mem, "evidence_queue_cursor", str(queue_cursor + len(queued_ids)))
-            mem.commit()
+    if queued_ids and resolved_queue and time.monotonic() < float(budget["deadline"]):
+        try:
+            with memory(cfg) as mem:
+                remaining = [value for value in queued_ids if value not in resolved_queue]
+                meta_set(mem, "evidence_queue", json.dumps(remaining, separators=(",", ":")))
+                if len(remaining) == 0:
+                    meta_set(mem, "evidence_queue_cursor", str(queue_cursor + len(queued_ids)))
+                mem.commit()
+        except EvidenceCapacityExceeded:
+            pass
     summary["bytes"] = int(budget.get("bytes", 0))
-    _evidence_guard()
+    if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
+        summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
     _LAST_EVIDENCE_CYCLE["built"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("built", []), *summary["built"]]))
     _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *summary["deferred"]]))
     _LAST_EVIDENCE_CYCLE["attempted"] = int(_LAST_EVIDENCE_CYCLE.get("attempted", 0)) + int(summary["attempted"])
@@ -3425,6 +3614,53 @@ def _capture_hard_evidence_inner(
     return summary
 
 
+_EVIDENCE_CANDIDATE_RECOVERY_SECONDS = 0.25
+
+
+def _recover_evidence_candidate_ids(
+    cfg: Mapping[str, Any], *, limit: int | None = None
+) -> tuple[list[str], str | None]:
+    limit = max(1, int(limit or cfg["loop"].get("evidence_queue_batch_size", 32)))
+    deadline = time.monotonic() + _EVIDENCE_CANDIDATE_RECOVERY_SECONDS
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(runtime_dir(cfg) / "memory.db", timeout=max(0.001, _EVIDENCE_CANDIDATE_RECOVERY_SECONDS))
+        conn.execute(f"PRAGMA busy_timeout={max(1, int((deadline - time.monotonic()) * 1000))}")
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        hard = conn.execute(
+            "SELECT incident_id FROM incidents WHERE kind='hard' "
+            "ORDER BY CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END, "
+            "priority DESC, detected_at DESC, incident_id LIMIT ?", (limit,)
+        ).fetchall()
+        debts = conn.execute(
+            "SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
+            "ORDER BY updated_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        values: list[str] = []
+        for row in [*hard, *debts]:
+            value = str(row[0])
+            if value.startswith("evidence_snapshot:"):
+                value = value.removeprefix("evidence_snapshot:")
+            if value and value not in values:
+                values.append(value)
+            if len(values) >= limit:
+                break
+        return values, None
+    except (OSError, sqlite3.Error) as exc:
+        return [], f"{type(exc).__name__}:{exc}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _publish_evidence_controller_degraded(reason_code: str, error: str) -> dict[str, Any]:
+    payload = {"status": "controller_degraded", "reason_code": reason_code, "error": error}
+    _LAST_EVIDENCE_CYCLE["controller_degraded"] = payload
+    try:
+        print("EVIDENCE_CONTROLLER_DEGRADED " + json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
+    except OSError:
+        pass
+    return payload
 def _capture_hard_evidence(
     cfg: Mapping[str, Any],
     incident_ids: Iterable[str] = (),
@@ -3435,7 +3671,25 @@ def _capture_hard_evidence(
     """Run the whole evidence slice under one absolute deadline."""
 
     global _EVIDENCE_BUILD_CONTEXT
+    incident_ids = tuple(dict.fromkeys(str(value) for value in incident_ids if str(value)))
     budget = budget or _new_evidence_budget(cfg)
+    if time.monotonic() >= float(budget["deadline"]):
+        recovered, recovery_error = _recover_evidence_candidate_ids(cfg)
+        deferred = list(dict.fromkeys([*incident_ids, *recovered]))
+        if recovery_error:
+            _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
+        previous_context = _EVIDENCE_BUILD_CONTEXT
+        _EVIDENCE_BUILD_CONTEXT = budget
+        try:
+            for incident_id in deferred:
+                _record_evidence_debt(cfg, incident_id, "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget")
+        finally:
+            _EVIDENCE_BUILD_CONTEXT = previous_context
+        summary = {"built": [], "deferred": deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
+        if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
+            summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
+        _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *deferred]))
+        return summary
     previous = _EVIDENCE_BUILD_CONTEXT
     _EVIDENCE_BUILD_CONTEXT = budget
     try:

@@ -1540,6 +1540,261 @@ def test_evidence_failure_debt_recovers_same_incident_without_spawn(
     assert loop._evidence_pair_valid(cfg, incident_id)
 
 
+def test_interrupted_fingerprint_uses_emergency_debt_without_killing_scan_or_spawning(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exhausted evidence deadline cannot turn committed incident debt into controller exit."""
+    _position(cfg, position_id="emergency-debt")
+    _quote(cfg, "emergency-debt-q", "2026-08-22T09:00:02+00:00", 0.01)
+    original_fingerprints = loop._evidence_fingerprints
+    failed = {"value": False}
+    spawned: list[object] = []
+
+    def interrupt_after_incident(_cfg, incident_id, budget):
+        if not failed["value"]:
+            failed["value"] = True
+            budget["deadline"] = loop.time.monotonic() - 1.0
+            raise loop.EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+        return original_fingerprints(_cfg, incident_id, budget)
+
+    monkeypatch.setattr(loop, "_evidence_fingerprints", interrupt_after_incident)
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: spawned.append(True))
+
+    created = loop.detect(cfg)
+    assert len(created) == 1
+    incident_id = created[0]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT kind,status,reason FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()
+    assert tuple(debt[:2]) == ("evidence_snapshot", "retry_pending")
+    assert "evidence_snapshot" in str(debt[2])
+    with loop.memory(cfg) as mem:
+        incident_state = mem.execute(
+            "SELECT stage,status FROM incidents WHERE incident_id=?", (incident_id,)
+        ).fetchone()
+    assert tuple(incident_state) == ("evidence", "blocked")
+    receipt = json.loads(
+        (Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "emergency-evidence-debt.json").read_text()
+    )
+    assert receipt["incident_id"] == incident_id
+    assert receipt["status"] == "retry_pending"
+    assert spawned == []
+
+    monkeypatch.setattr(loop, "_evidence_fingerprints", lambda *_args: ("fp", "cfg", "cap", "data"))
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda local_cfg, value: Path(local_cfg["paths"]["runtime"]) / "incidents" / value / "evidence.db",
+    )
+    next_cycle = loop._capture_hard_evidence(
+        cfg,
+        [incident_id],
+        budget=loop._new_evidence_budget(cfg),
+    )
+    assert next_cycle["built"] == [incident_id]
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()[0] == "resolved"
+
+def test_emergency_evidence_debt_bypasses_expired_memory_guard(cfg: dict) -> None:
+    """The independent debt writer never re-enters the exhausted evidence context."""
+    incident_id = "expired-memory-debt"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "e1", "below_floor", "yes-token", "sell_yes", 0.05,
+             "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    loop._EVIDENCE_BUILD_CONTEXT = {"deadline": loop.time.monotonic() - 1.0}
+    try:
+        loop._record_evidence_debt(
+            cfg, incident_id, "evidence_snapshot_deferred:time_budget",
+            fingerprints=("fp", "cfg", "cap", "data"),
+        )
+    finally:
+        loop._EVIDENCE_BUILD_CONTEXT = None
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM controller_debt WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()[0] == "retry_pending"
+
+def test_emergency_evidence_debt_reports_typed_degradation_on_short_sqlite_contention(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked emergency write is bounded and degrades the controller instead of exiting."""
+    incident_id = "contended-emergency-debt"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "e1", "below_floor", "yes-token", "sell_yes", 0.05,
+             "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    locker = sqlite3.connect(Path(cfg["paths"]["runtime"]) / "memory.db")
+    locker.execute("BEGIN EXCLUSIVE")
+    monkeypatch.setattr(loop, "_EMERGENCY_EVIDENCE_DEBT_WRITE_SECONDS", 0.001)
+    loop._EVIDENCE_BUILD_CONTEXT = {"deadline": loop.time.monotonic() - 1.0}
+    try:
+        loop._record_evidence_debt(
+            cfg, incident_id, "evidence_snapshot_deferred:time_budget",
+            fingerprints=("fp", "cfg", "cap", "data"),
+        )
+    finally:
+        loop._EVIDENCE_BUILD_CONTEXT = None
+        locker.rollback()
+        locker.close()
+    receipt = json.loads(
+        (Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "emergency-evidence-debt.json").read_text()
+    )
+    assert receipt["status"] == "controller_degraded"
+    assert receipt["reason_code"] == "EVIDENCE_EMERGENCY_DEBT_DB_UNWRITABLE"
+    heartbeat = json.loads((Path(cfg["paths"]["runtime"]) / "status.json").read_text())
+    assert heartbeat["phase"] == "evidence_controller_degraded"
+
+
+
+def test_scan_all_empty_explicit_ids_does_not_create_debt(cfg: dict) -> None:
+    result = loop._capture_hard_evidence(cfg, [], scan_all=True)
+    assert result["built"] == []
+    assert result["deferred"] == []
+
+
+def test_evidence_capture_materializes_generator_ids_once(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    _position(cfg, position_id="generator-position")
+    incident_id = "generator-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "generator-position", "generator-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "build_evidence", lambda local_cfg, value: Path(local_cfg["paths"]["runtime"]) / "incidents" / value / "evidence.db")
+    result = loop._capture_hard_evidence(cfg, (value for value in [incident_id]))
+    assert result["built"] == [incident_id]
+    assert result["deferred"] == []
+
+
+def test_final_guard_after_successful_pair_does_not_reopen_debt(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    _position(cfg, position_id="final-guard-position")
+    incident_id = "final-guard-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "final-guard-position", "final-guard-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "blocked", "evidence", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.execute("INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?)", (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "old", "2026-08-22T12:00:00+00:00"))
+        mem.commit()
+    validated = {"value": False}
+    def pair(_cfg, value, **_kwargs):
+        if value == incident_id:
+            validated["value"] = True
+        return True
+    def guard():
+        if validated["value"]:
+            raise loop.EvidenceCapacityExceeded("final bookkeeping guard")
+    monkeypatch.setattr(loop, "_evidence_pair_valid", pair)
+    monkeypatch.setattr(loop, "_evidence_guard", guard)
+    result = loop._capture_hard_evidence(cfg, [incident_id])
+    assert result["deferred"] == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM controller_debt WHERE debt_id=?", (f"evidence_snapshot:{incident_id}",)).fetchone()[0] == "resolved"
+
+
+def test_triple_evidence_persistence_failure_is_visible(cfg: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    incident_id = "triple-persistence-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "triple-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "atomic_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("persistence full")))
+    loop._EVIDENCE_BUILD_CONTEXT = {"deadline": loop.time.monotonic() - 1.0}
+    try:
+        loop._record_evidence_debt(cfg, incident_id, "evidence_snapshot_deferred:time_budget", fingerprints=("fp", "cfg", "cap", "data"))
+    finally:
+        loop._EVIDENCE_BUILD_CONTEXT = None
+    assert loop._LAST_EVIDENCE_CYCLE["controller_degraded"]["reason_code"] == "EVIDENCE_EMERGENCY_DEBT_PERSISTENCE_FAILED"
+    assert "EVIDENCE_CONTROLLER_DEGRADED" in capsys.readouterr().err
+
+
+
+def test_expired_scan_all_recovers_queued_debt(cfg: dict) -> None:
+    incident_id = "expired-scan-all-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "expired-scan-all-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    budget = {"deadline": loop.time.monotonic() - 1.0, "remaining": 1, "max_bytes": 1024}
+    result = loop._capture_hard_evidence(cfg, [], scan_all=True, budget=budget)
+    assert incident_id in result["deferred"]
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM controller_debt WHERE debt_id=?", (f"evidence_snapshot:{incident_id}",)).fetchone()[0] == "retry_pending"
+
+
+def test_early_memory_guard_interrupt_recovers_candidates_without_raise(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    incident_id = "early-memory-guard-incident"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "early-memory-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    calls = {"count": 0}
+    original = loop._evidence_guard
+    def interrupt_once():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise loop.EvidenceCapacityExceeded("early memory guard")
+        original()
+    monkeypatch.setattr(loop, "_evidence_guard", interrupt_once)
+    result = loop._capture_hard_evidence(cfg, [incident_id])
+    assert incident_id in result["deferred"]
+
+
+def test_capture_summary_exposes_triple_degradation(cfg: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    incident_id = "summary-triple-degradation"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "summary-triple-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "atomic_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("persistence full")))
+    result = loop._capture_hard_evidence(cfg, [], scan_all=True, budget={"deadline": loop.time.monotonic() - 1.0, "remaining": 1, "max_bytes": 1024})
+    assert result["controller_degraded"]["status"] == "controller_degraded"
+    assert "EVIDENCE_CONTROLLER_DEGRADED" in capsys.readouterr().err
+
+
+def test_reaper_capacity_interrupt_defers_current_and_remaining_ids(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    ids = ["reaper-current", "reaper-remaining"]
+    with loop.memory(cfg) as mem:
+        for incident_id in ids:
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, "hard", "p1", f"{incident_id}-evidence", "below_floor", "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+            )
+        mem.commit()
+    monkeypatch.setattr(loop, "_reap_incomplete_generations", lambda *_args: (_ for _ in ()).throw(loop.EvidenceCapacityExceeded("reaper budget")))
+    result = loop._capture_hard_evidence(cfg, ids)
+    assert set(result["deferred"]) == set(ids)
+    with loop.memory(cfg) as mem:
+        rows = mem.execute(
+            "SELECT debt_id,status FROM controller_debt WHERE debt_id IN (?,?) ORDER BY debt_id",
+            tuple(f"evidence_snapshot:{value}" for value in ids),
+        ).fetchall()
+    assert {str(row[0]) for row in rows} == {f"evidence_snapshot:{value}" for value in ids}
+    assert all(str(row[1]) == "retry_pending" for row in rows)
 def test_pointer_replace_failure_keeps_previous_pair_valid(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
