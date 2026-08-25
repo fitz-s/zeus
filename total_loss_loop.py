@@ -2584,6 +2584,271 @@ def _apply_evidence_sql_budget(conn: sqlite3.Connection, budget: Mapping[str, An
     )
 
 
+_EXIT_CLOCK_EVENTS = {
+    "EXIT_INTENT", "EXIT_ORDER_POSTED", "EXIT_ORDER_FILLED",
+    "EXIT_ORDER_REJECTED", "EXIT_RETRY_RELEASED",
+}
+
+
+def _quote_stream_guard(budget: Mapping[str, Any]) -> None:
+    if time.monotonic() >= float(budget["deadline"]):
+        raise EvidenceCapacityExceeded("evidence_snapshot_quote_stream_deferred:time_budget")
+
+
+def _quote_metadata_payload_bytes(row: Mapping[str, Any]) -> int:
+    """Conservative metadata-only gate before reading a depth payload."""
+    values = (str(row[key] or "") for key in row.keys() if key != "depth_bytes")
+    return int(row["depth_bytes"] or 0) + sum(len(value.encode()) for value in values) + 256
+
+
+def _quote_payload_bytes(row: Mapping[str, Any]) -> int:
+    return len(json.dumps(dict(row), default=str, separators=(",", ":")).encode())
+
+
+def _monitor_anchor_signature(row: sqlite3.Row) -> tuple[Any, ...]:
+    payload = read_json_text(str(row["payload_json"] or "{}"))
+    return (
+        payload.get("exit_decision_should_exit"),
+        payload.get("exit_decision_reason"),
+        payload.get("exit_decision_trigger"),
+        next((payload.get(key) for key in ("q_version", "posterior_id", "posterior_revision", "probability_identity") if key in payload), None),
+        next((payload.get(key) for key in ("last_monitor_prob_is_fresh", "probability_is_fresh", "source_available", "availability_state") if key in payload), None),
+    )
+
+
+def _monitor_is_red_or_exit(row: sqlite3.Row) -> bool:
+    payload = read_json_text(str(row["payload_json"] or "{}"))
+    if bool(payload.get("exit_decision_should_exit")):
+        return True
+    return any(str(payload.get(key) or "").upper() == "RED" for key in ("risk_level", "overall_risk", "risk"))
+
+
+def _select_critical_clock_times(
+    events: Iterable[sqlite3.Row], commands: Iterable[sqlite3.Row], *, limit: int
+) -> tuple[list[datetime], dict[str, int]]:
+    monitors = sorted(
+        (row for row in events if str(row["event_type"]) == "MONITOR_REFRESHED"),
+        key=lambda row: (str(row["occurred_at"]), str(row["event_id"])),
+    )
+    exits = sorted(
+        (row for row in events if str(row["event_type"]) in _EXIT_CLOCK_EVENTS),
+        key=lambda row: (str(row["occurred_at"]), str(row["event_id"])),
+    )
+    candidates: list[tuple[str, datetime]] = []
+    if monitors:
+        for row in (monitors[0], monitors[-1]):
+            if (at := parse_time(str(row["occurred_at"]))) is not None:
+                candidates.append(("monitor_boundary", at))
+        for row in monitors:
+            if _monitor_is_red_or_exit(row):
+                if (at := parse_time(str(row["occurred_at"]))) is not None:
+                    candidates.append(("monitor_first_red_or_exit", at))
+                break
+        previous: tuple[Any, ...] | None = None
+        for row in monitors:
+            signature = _monitor_anchor_signature(row)
+            if previous is not None and signature != previous:
+                if (at := parse_time(str(row["occurred_at"]))) is not None:
+                    candidates.append(("monitor_state_change", at))
+            previous = signature
+    for row in exits:
+        if (at := parse_time(str(row["occurred_at"]))) is not None:
+            candidates.append(("exit", at))
+    for row in commands:
+        for value in (row["created_at"], row["updated_at"]):
+            if (at := parse_time(str(value or ""))) is not None:
+                candidates.append(("command", at))
+    # Keep deterministic, high-value categories first; duplicate timestamps
+    # collapse to one pair of quote brackets.
+    ranked = {
+        "monitor_boundary": 0,
+        "monitor_first_red_or_exit": 1,
+        "exit": 2,
+        "command": 3,
+        "monitor_state_change": 4,
+    }
+    unique: list[tuple[str, datetime]] = []
+    seen: set[datetime] = set()
+    for kind, at in sorted(candidates, key=lambda value: (ranked[value[0]], value[1])):
+        if at not in seen:
+            unique.append((kind, at))
+            seen.add(at)
+    selected = unique[:limit]
+    counts = {
+        "monitor_events_total": len(monitors),
+        "exit_events_total": len(exits),
+        "command_clock_total": sum(1 for row in commands for value in (row["created_at"], row["updated_at"]) if parse_time(str(value or "")) is not None),
+        "clock_candidates_total": len(unique),
+        "clock_candidates_selected": len(selected),
+        "clock_candidates_omitted": max(0, len(unique) - len(selected)),
+    }
+    return [at for _kind, at in selected], counts
+
+
+def _quote_meta(
+    trades: sqlite3.Connection, where: str, values: Iterable[Any], *, order: str = ""
+) -> sqlite3.Row | None:
+    return trades.execute(
+        "SELECT rowid,evidence_id,event_id,condition_id,token_id,outcome_label,direction,quote_seen_at,"
+        "book_hash_before,best_bid_before,best_ask_before,LENGTH(depth_before_json) AS depth_bytes,"
+        "created_at,schema_version FROM execution_feasibility_evidence WHERE " + where + order,
+        tuple(values),
+    ).fetchone()
+
+
+def _select_evidence_quotes(
+    trades: sqlite3.Connection,
+    *,
+    token_id: str,
+    crossing_evidence_id: str,
+    floor_at: datetime | None,
+    clock_times: Iterable[datetime],
+    start: datetime,
+    end: datetime,
+    row_limit: int,
+    cfg: Mapping[str, Any],
+    budget: Mapping[str, Any],
+    quote_crossing_required: bool = True,
+) -> tuple[list[sqlite3.Row], dict[str, Any]]:
+    """Metadata-first evidence selection with strict floor brackets.
+
+    SCOPE: one incident token/window. DRAIN: a successful bounded generation;
+    RESET: its published manifest.  Missing required critical facts are debts,
+    while noncritical trajectory loss is explicitly marked sampled.
+    """
+    settings = cfg["loop"]
+    batch_rows = min(256, max(1, int(settings.get("evidence_quote_fetch_batch_rows", 32))))
+    source_limit = min(int(budget["max_bytes"]), max(1, int(settings.get("evidence_quote_source_max_bytes", int(budget["max_bytes"]) // 2))))
+    anchor_limit = min(128, max(1, int(settings.get("evidence_quote_anchor_limit", 128))))
+    selected: dict[int, sqlite3.Row] = {}
+    critical_ids: set[str] = set()
+    noncritical_ids: set[str] = set()
+    source_bytes = 0
+    omissions: list[dict[str, str]] = []
+
+    def retain(meta: sqlite3.Row | None, *, required: bool, label: str) -> bool:
+        nonlocal source_bytes
+        if meta is None:
+            if required:
+                raise EvidenceCapacityExceeded(f"evidence_snapshot_quote_required_missing:{label}")
+            omissions.append({"label": label, "reason": "query_omission"})
+            return False
+        _quote_stream_guard(budget)
+        rowid = int(meta["rowid"])
+        if rowid in selected:
+            if required:
+                critical_ids.add(str(meta["evidence_id"]))
+            return True
+        estimate = _quote_metadata_payload_bytes(meta)
+        if source_bytes + estimate > source_limit:
+            if required:
+                raise EvidenceCapacityExceeded(f"evidence_snapshot_quote_critical_capacity:{label}:bytes={source_bytes + estimate}")
+            return False
+        row = trades.execute("SELECT * FROM execution_feasibility_evidence WHERE rowid=?", (rowid,)).fetchone()
+        if row is None:
+            if required:
+                raise EvidenceCapacityExceeded(f"evidence_snapshot_quote_required_missing:{label}:rowid")
+            omissions.append({"label": label, "reason": "rowid_missing"})
+            return False
+        payload_bytes = _quote_payload_bytes(row)
+        if source_bytes + payload_bytes > source_limit:
+            if required:
+                raise EvidenceCapacityExceeded(f"evidence_snapshot_quote_critical_capacity:{label}:bytes={source_bytes + payload_bytes}")
+            return False
+        selected[rowid] = row
+        source_bytes += payload_bytes
+        if required:
+            critical_ids.add(str(row["evidence_id"]))
+        else:
+            noncritical_ids.add(str(row["evidence_id"]))
+        return True
+
+    required_crossing = True
+    if quote_crossing_required:
+        retain(
+            _quote_meta(trades, "evidence_id=? AND token_id=?", (crossing_evidence_id, token_id)),
+            required=True,
+            label="crossing",
+        )
+    strict_status: dict[str, str] = {}
+    if floor_at is not None:
+        for side, operator, order in (("pre", "<", " ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1"), ("post", ">", " ORDER BY quote_seen_at ASC,rowid ASC LIMIT 1")):
+            meta = _quote_meta(
+                trades,
+                f"token_id=? AND quote_seen_at BETWEEN ? AND ? AND quote_seen_at {operator} ?",
+                (token_id, iso(start), iso(end), iso(floor_at)),
+                order=order,
+            )
+            retain(meta, required=True, label=f"t_floor_strict_{side}")
+            strict_status[side] = "retained"
+    selected_clocks = sorted(set(clock_times))[:anchor_limit]
+    for at in selected_clocks:
+        for side, operator, order in (("pre", "<", " ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1"), ("post", ">", " ORDER BY quote_seen_at ASC,rowid ASC LIMIT 1")):
+            retain(
+                _quote_meta(trades, f"token_id=? AND quote_seen_at {operator} ?", (token_id, iso(at)), order=order),
+                required=False,
+                label=f"clock_{side}",
+            )
+    trajectory_rows = 0
+    trajectory_reason: str | None = None
+    cursor = trades.execute(
+        "SELECT rowid,evidence_id,event_id,condition_id,token_id,outcome_label,direction,quote_seen_at,"
+        "book_hash_before,best_bid_before,best_ask_before,LENGTH(depth_before_json) AS depth_bytes,created_at,schema_version "
+        "FROM execution_feasibility_evidence WHERE token_id=? AND quote_seen_at BETWEEN ? AND ? ORDER BY quote_seen_at,rowid",
+        (token_id, iso(start), iso(end)),
+    )
+    while trajectory_rows < row_limit and trajectory_reason is None:
+        if time.monotonic() >= float(budget["deadline"]):
+            trajectory_reason = "deadline"
+            break
+        try:
+            batch = cursor.fetchmany(batch_rows)
+        except sqlite3.OperationalError as exc:
+            if "interrupted" not in str(exc).lower():
+                raise
+            trajectory_reason = "deadline_sql_interrupted"
+            break
+        if time.monotonic() >= float(budget["deadline"]):
+            trajectory_reason = "deadline"
+            break
+        if not batch:
+            break
+        for meta in batch:
+            if time.monotonic() >= float(budget["deadline"]):
+                trajectory_reason = "deadline"
+                break
+            if int(meta["rowid"]) in selected:
+                continue
+            if not retain(meta, required=False, label="trajectory"):
+                trajectory_reason = "source_payload_limit"
+                break
+            trajectory_rows += 1
+    if trajectory_reason is None and trajectory_rows >= row_limit:
+        trajectory_reason = "row_limit"
+    rows = [*sorted((row for row in selected.values() if str(row["evidence_id"]) in critical_ids), key=lambda row: (str(row["quote_seen_at"]), str(row["evidence_id"]))), *sorted((row for row in selected.values() if str(row["evidence_id"]) not in critical_ids), key=lambda row: (str(row["quote_seen_at"]), str(row["evidence_id"])))]
+    return rows, {
+        "strategy": "metadata_first_critical_brackets_then_batched_trajectory",
+        "causal_completeness": "complete" if trajectory_reason is None else "sampled_not_complete",
+        "truncation_reason": trajectory_reason,
+        "critical_rows": len(critical_ids),
+        "trajectory_rows": trajectory_rows,
+        "trajectory_row_cap": row_limit,
+        "critical_rows_reserved_outside_trajectory_cap": len(critical_ids),
+        "critical_crossing_required": required_crossing,
+        "critical_crossing_retained": crossing_evidence_id in critical_ids,
+        "critical_crossing_plane": "execution_feasibility_evidence" if quote_crossing_required else "position_events",
+        "t_floor_strict_brackets": strict_status,
+        "clock_anchor_limit": anchor_limit,
+        "clock_anchor_selected": len(selected_clocks),
+        "clock_anchor_omitted": max(0, len(set(clock_times)) - len(selected_clocks)),
+        "omissions": omissions,
+        "source_payload_bytes": source_bytes,
+        "source_payload_limit": source_limit,
+        "fetch_batch_rows": batch_rows,
+        "_noncritical_ids": sorted(noncritical_ids),
+    }
+
+
 def _cleanup_unpublished_generation(
     incident_dir: Path, generation_id: str, generation_dir: Path
 ) -> None:
@@ -2659,14 +2924,6 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
         event_times = [value for value in event_times if value is not None]
         start = max(window_start, min(event_times) - timedelta(hours=1) if event_times else window_start)
         end = min(window_end, max(start, max(event_times) + timedelta(hours=6) if event_times else window_end))
-        quote_rows = trades.execute(
-            """
-            SELECT * FROM execution_feasibility_evidence
-             WHERE token_id=? AND quote_seen_at BETWEEN ? AND ?
-             ORDER BY quote_seen_at,rowid LIMIT ?
-            """,
-            (incident["held_token_id"], iso(start), iso(end), row_limit),
-        ).fetchall()
         latest = trades.execute(
             "SELECT * FROM execution_feasibility_latest WHERE token_id=? ORDER BY direction",
             (incident["held_token_id"],),
@@ -2675,6 +2932,29 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
             "SELECT * FROM venue_commands WHERE position_id=? AND created_at BETWEEN ? AND ? ORDER BY created_at LIMIT ?",
             (incident["position_id"], iso(window_start), iso(window_end), row_limit),
         ).fetchall()
+        clock_times, clock_coverage = _select_critical_clock_times(
+            events,
+            commands,
+            limit=min(128, max(1, int(cfg["loop"].get("evidence_quote_anchor_limit", 128)))),
+        )
+        quote_crossing_required = str(incident["crossing_kind"] or "") != "settlement_full_loss"
+        quote_rows, quote_selection = _select_evidence_quotes(
+            trades,
+            token_id=str(incident["held_token_id"]),
+            crossing_evidence_id=str(incident["crossing_evidence_id"] or ""),
+            floor_at=parse_time(str(incident["t_floor"] or "")),
+            clock_times=clock_times,
+            start=start,
+            end=end,
+            row_limit=row_limit,
+            cfg=cfg,
+            budget=build_budget,
+            quote_crossing_required=quote_crossing_required,
+        )
+        if not quote_crossing_required:
+            quote_selection["critical_crossing_retained"] = True
+            quote_selection["critical_crossing_plane"] = "incident_settlement_identity"
+        quote_selection["clock_coverage"] = clock_coverage
         command_ids = [str(row["command_id"]) for row in commands]
         order_facts: list[sqlite3.Row] = []
         trade_facts: list[sqlite3.Row] = []
@@ -2722,15 +3002,26 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
             out.execute("INSERT INTO incident VALUES (?,?)", (str(key), json.dumps(value, default=str)))
         out.execute("INSERT INTO position VALUES (?,?)", (incident["position_id"], json.dumps(position, default=str)))
         seen_quotes: set[str] = set()
+        noncritical_quote_ids = set(quote_selection.pop("_noncritical_ids", []))
         for raw in [*quote_rows, *latest]:
-            _budget_check(evidence, out)
             row = dict(raw)
             key = str(row["evidence_id"])
             if key in seen_quotes:
                 continue
             seen_quotes.add(key)
             raw_json = json.dumps(row, default=str)
-            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            try:
+                _budget_check(evidence, out)
+                _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            except EvidenceCapacityExceeded:
+                if key not in noncritical_quote_ids:
+                    raise
+                quote_selection["causal_completeness"] = "sampled_not_complete"
+                quote_selection["truncation_reason"] = "output_capacity"
+                quote_selection["output_trajectory_rows_omitted"] = (
+                    int(quote_selection.get("output_trajectory_rows_omitted", 0)) + 1
+                )
+                continue
             out.execute(
                 "INSERT INTO price_ticks VALUES (?,?,?,?,?,?,?,?)",
                 (key, row["quote_seen_at"], row.get("best_bid_before"), row.get("best_ask_before"), row.get("depth_before_json"), row.get("book_hash_before"), row.get("direction"), raw_json),
@@ -2833,6 +3124,7 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
                 "window_days": window_days,
             },
             "coverage": coverage,
+            "selection": {"quotes": quote_selection},
             "loaded_sha": _active_loaded_sha(cfg),
             "created_at": iso(),
             "sha256": sha256,
@@ -2900,11 +3192,17 @@ def _evidence_fingerprints(
         "window_days": min(7, max(1, int(settings.get("evidence_window_days", 7)))),
         "rows": int(settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000))),
         "source_rows": int(settings.get("evidence_source_rows", 1000)),
+        "quote_fetch_batch_rows": int(settings.get("evidence_quote_fetch_batch_rows", 32)),
+        "quote_source_max_bytes": settings.get("evidence_quote_source_max_bytes"),
+        "quote_anchor_limit": int(settings.get("evidence_quote_anchor_limit", 128)),
     }
     capacity_payload = {
         "builds_per_cycle": int(settings.get("evidence_builds_per_cycle", 1)),
         "budget_ms": float(settings.get("evidence_build_budget_ms", 1000)),
         "max_bytes": int(settings.get("evidence_max_bytes", 32 * 1024 * 1024)),
+        "quote_fetch_batch_rows": int(settings.get("evidence_quote_fetch_batch_rows", 32)),
+        "quote_source_max_bytes": settings.get("evidence_quote_source_max_bytes"),
+        "quote_anchor_limit": int(settings.get("evidence_quote_anchor_limit", 128)),
     }
     with memory(cfg) as mem:
         incident = mem.execute(
@@ -3032,11 +3330,17 @@ def _evidence_identity_fingerprints_inner(
         "window_days": min(7, max(1, int(settings.get("evidence_window_days", 7)))),
         "rows": int(settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000))),
         "source_rows": int(settings.get("evidence_source_rows", 1000)),
+        "quote_fetch_batch_rows": int(settings.get("evidence_quote_fetch_batch_rows", 32)),
+        "quote_source_max_bytes": settings.get("evidence_quote_source_max_bytes"),
+        "quote_anchor_limit": int(settings.get("evidence_quote_anchor_limit", 128)),
     }
     capacity_payload = {
         "builds_per_cycle": int(settings.get("evidence_builds_per_cycle", 1)),
         "budget_ms": float(settings.get("evidence_build_budget_ms", 1000)),
         "max_bytes": int(settings.get("evidence_max_bytes", 32 * 1024 * 1024)),
+        "quote_fetch_batch_rows": int(settings.get("evidence_quote_fetch_batch_rows", 32)),
+        "quote_source_max_bytes": settings.get("evidence_quote_source_max_bytes"),
+        "quote_anchor_limit": int(settings.get("evidence_quote_anchor_limit", 128)),
     }
     with memory(cfg) as mem:
         _apply_evidence_sql_budget(mem, budget)

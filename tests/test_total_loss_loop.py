@@ -225,6 +225,14 @@ def _quote(
             )
 
 
+def _evidence_quote_triplet(cfg: dict, evidence_id: str, at: str, bid: float | None) -> None:
+    stamp = loop.parse_time(at)
+    assert stamp is not None
+    _quote(cfg, f"{evidence_id}-pre", loop.iso(stamp - timedelta(seconds=1)), 0.08, latest=False)
+    _quote(cfg, evidence_id, at, bid)
+    _quote(cfg, f"{evidence_id}-post", loop.iso(stamp + timedelta(seconds=1)), 0.08, latest=False)
+
+
 def _event(
     cfg: dict,
     event_id: str,
@@ -595,6 +603,7 @@ def test_provider_backoff_suppresses_global_launch_but_detector_continues(
         mem.commit()
     _queue_blind_dispatch_debt(cfg, incident_id="blocked-by-provider")
     _position(cfg)
+    _evidence_quote_triplet(cfg, "q1", "2026-08-22T09:00:02+00:00", 0.01)
     monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("provider backoff must block all new model runs"))
     assert loop.dispatch(cfg) == []
@@ -799,6 +808,8 @@ def test_real_large_snapshot_hits_tiny_capacity_once_then_next_incident_advances
     cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=15000, evidence_max_bytes=1024 * 1024)
     _position(cfg, position_id="real-large-a")
     _position(cfg, position_id="real-large-b")
+    _quote(cfg, "real-evidence-0", "2026-08-22T09:00:01+00:00", 0.01, latest=False)
+    _quote(cfg, "real-evidence-1", "2026-08-22T09:00:02+00:00", 0.01, latest=False)
     _event(
         cfg,
         "large-monitor",
@@ -1526,7 +1537,7 @@ def test_evidence_failure_debt_recovers_same_incident_without_spawn(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "capture-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "capture-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
     original = loop.build_evidence
     monkeypatch.setattr(loop, "build_evidence", lambda *_args: (_ for _ in ()).throw(OSError("snapshot disk")))
     incident_id = loop.detect(cfg)[0]
@@ -1843,7 +1854,7 @@ def test_pointer_replace_failure_keeps_previous_pair_valid(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "pointer-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "pointer-failure-q", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     prior = (incident_dir / "CURRENT").read_text()
@@ -1905,7 +1916,7 @@ def test_dispatch_uses_real_current_generation_pair_and_loaded_sha(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "dispatch-generation-q", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "dispatch-generation-q", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     generation = (incident_dir / "CURRENT").read_text().strip()
@@ -3624,7 +3635,9 @@ def test_monitor_dynamics_detect_market_moving_before_probability(cfg: dict) -> 
 
 def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: dict) -> None:
     _position(cfg)
+    _quote(cfg, "q-before", "2026-08-22T09:00:01+00:00", 0.08, latest=False)
     _quote(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
+    _quote(cfg, "q-after", "2026-08-22T09:00:03+00:00", 0.02, latest=False)
     incident_id = loop.detect(cfg)[0]
 
     evidence = loop.build_evidence(cfg, incident_id)
@@ -3645,10 +3658,137 @@ def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: d
     assert evidence.stat().st_size < Path(cfg["paths"]["trades_db"]).stat().st_size * 20
 
 
+def test_quote_evidence_metadata_stream_preserves_required_clocks_and_truthfully_truncates(
+    cfg: dict,
+) -> None:
+    source = inspect.getsource(loop._select_evidence_quotes)
+    assert ".fetchall(" not in source
+    assert "fetchmany(batch_rows)" in source
+    assert "LENGTH(depth_before_json)" in source
+    assert "WHERE rowid=?" in source
+    _position(cfg)
+    _quote(cfg, "strict-pre", "2026-08-22T09:00:01+00:00", 0.08, latest=False)
+    _quote(cfg, "strict-crossing", "2026-08-22T09:00:02+00:00", 0.01)
+    _quote(cfg, "strict-post", "2026-08-22T09:00:03+00:00", 0.02, latest=False)
+    _quote(cfg, "large-trajectory", "2026-08-22T09:00:04+00:00", 0.03, latest=False)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json=? WHERE evidence_id='large-trajectory'",
+            (json.dumps({"bids": [{"price": "0.03", "size": "x" * 8192}]}),),
+        )
+    incident_id = loop.detect(cfg)[0]
+    cfg["loop"].update(evidence_quote_source_max_bytes=4096, evidence_max_bytes=1024 * 1024)
+    evidence = loop.build_evidence(cfg, incident_id)
+    with sqlite3.connect(evidence) as conn:
+        ids = {row[0] for row in conn.execute("SELECT evidence_id FROM price_ticks")}
+    assert {"strict-pre", "strict-crossing", "strict-post"} <= ids
+    manifest = json.loads((evidence.parent / "manifest.json").read_text())
+    selection = manifest["selection"]["quotes"]
+    assert selection["critical_crossing_retained"] is True
+    assert selection["t_floor_strict_brackets"] == {"pre": "retained", "post": "retained"}
+    assert selection["causal_completeness"] == "sampled_not_complete"
+    assert selection["truncation_reason"] == "source_payload_limit"
+    assert selection["critical_rows_reserved_outside_trajectory_cap"] >= 3
+
+
+def test_monitor_anchor_cap_missing_critical_and_capacity_fingerprint_are_explicit(
+    cfg: dict,
+) -> None:
+    _position(cfg)
+    _quote(cfg, "anchor-pre", "2026-08-22T09:00:01+00:00", 0.08, latest=False)
+    _quote(cfg, "anchor-crossing", "2026-08-22T09:00:02+00:00", 0.01)
+    _quote(cfg, "anchor-post", "2026-08-22T09:00:03+00:00", 0.02, latest=False)
+    incident_id = loop.detect(cfg)[0]
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    f"monitor-{index}", "p1", index + 1, "MONITOR_REFRESHED",
+                    (datetime(2026, 8, 22, 10, tzinfo=UTC) + timedelta(seconds=index)).isoformat(),
+                    None,
+                    json.dumps({"exit_decision_should_exit": False, "q_version": "q1", "probability_is_fresh": True}),
+                    "active", "active",
+                )
+                for index in range(6500)
+            ],
+        )
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        monitors = trades.execute("SELECT * FROM position_events WHERE position_id='p1' ORDER BY occurred_at,event_id").fetchall()
+        clocks, coverage = loop._select_critical_clock_times(monitors, [], limit=128)
+        budget = {"deadline": loop.time.monotonic() + 1.0, "max_bytes": 1024 * 1024}
+        with pytest.raises(loop.EvidenceCapacityExceeded, match="required_missing:crossing"):
+            loop._select_evidence_quotes(
+                trades, token_id="yes-token", crossing_evidence_id="missing", floor_at=loop.parse_time("2026-08-22T09:00:02+00:00"),
+                clock_times=clocks, start=loop.parse_time("2026-08-21T00:00:00+00:00"), end=loop.parse_time("2026-08-23T00:00:00+00:00"),
+                row_limit=1, cfg=cfg, budget=budget,
+            )
+    assert coverage["monitor_events_total"] == 6500
+    assert len(clocks) <= 128
+    assert coverage["clock_candidates_omitted"] == 0
+    budget = loop._new_evidence_budget(cfg)
+    first = loop._evidence_identity_fingerprints(cfg, incident_id, budget)[0]
+    cfg["loop"]["evidence_quote_fetch_batch_rows"] = 7
+    second = loop._evidence_identity_fingerprints(cfg, incident_id, loop._new_evidence_budget(cfg))[0]
+    assert first != second
+
+
+def test_single_critical_depth_blob_becomes_typed_capacity_debt(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "blob-pre", "2026-08-22T09:00:01+00:00", 0.08, latest=False)
+    _quote(cfg, "blob-crossing", "2026-08-22T09:00:02+00:00", 0.01)
+    _quote(cfg, "blob-post", "2026-08-22T09:00:03+00:00", 0.02, latest=False)
+    incident_id = loop.detect(cfg)[0]
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json=? WHERE evidence_id='blob-crossing'",
+            (json.dumps({"bids": [{"price": "0.01", "size": "x" * 65536}]}),),
+        )
+    cfg["loop"]["evidence_quote_source_max_bytes"] = 1024
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        with pytest.raises(loop.EvidenceCapacityExceeded, match="quote_critical_capacity:crossing"):
+            loop._select_evidence_quotes(
+                trades, token_id="yes-token", crossing_evidence_id="blob-crossing",
+                floor_at=loop.parse_time("2026-08-22T09:00:02+00:00"), clock_times=[],
+                start=loop.parse_time("2026-08-21T00:00:00+00:00"), end=loop.parse_time("2026-08-23T00:00:00+00:00"),
+                row_limit=1, cfg=cfg, budget=loop._new_evidence_budget(cfg),
+            )
+    assert incident_id
+
+
+def test_no_bid_crossing_is_retained_outside_trajectory_window(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "outside-no-bid", "2026-08-20T09:00:00+00:00", None, latest=False)
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        rows, selection = loop._select_evidence_quotes(
+            trades, token_id="yes-token", crossing_evidence_id="outside-no-bid", floor_at=None,
+            clock_times=[], start=loop.parse_time("2026-08-22T00:00:00+00:00"),
+            end=loop.parse_time("2026-08-23T00:00:00+00:00"), row_limit=1,
+            cfg=cfg, budget=loop._new_evidence_budget(cfg),
+        )
+    assert [row["evidence_id"] for row in rows] == ["outside-no-bid"]
+    assert selection["critical_crossing_required"] is True
+    assert selection["critical_crossing_retained"] is True
+
+
+def test_missing_t_floor_boundary_bracket_is_typed_capacity_debt(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "boundary-crossing", "2026-08-22T09:00:02+00:00", 0.01, latest=False)
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        with pytest.raises(loop.EvidenceCapacityExceeded, match="required_missing:t_floor_strict_pre"):
+            loop._select_evidence_quotes(
+                trades, token_id="yes-token", crossing_evidence_id="boundary-crossing",
+                floor_at=loop.parse_time("2026-08-22T09:00:02+00:00"), clock_times=[],
+                start=loop.parse_time("2026-08-21T00:00:00+00:00"),
+                end=loop.parse_time("2026-08-23T00:00:00+00:00"), row_limit=1,
+                cfg=cfg, budget=loop._new_evidence_budget(cfg),
+            )
+
+
 def test_incomplete_generation_is_reaped_without_disturbing_current_pair(cfg: dict) -> None:
     cfg["loop"]["evidence_generation_reap_age_seconds"] = 0
     _position(cfg)
-    _quote(cfg, "reap-q", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "reap-q", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     incomplete = incident_dir / "generations" / "interrupted-generation"
@@ -3664,7 +3804,7 @@ def test_pair_validation_uses_manifest_stat_gate_without_full_read_each_cycle(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "pair-stat", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "pair-stat", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("pair validation must not read full DB"))
     assert loop._evidence_pair_valid(cfg, incident_id)
@@ -3674,7 +3814,7 @@ def test_pair_hash_mismatch_uses_shared_deadline_and_records_typed_defer(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "pair-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "pair-timeout", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     pair = loop._evidence_pair_paths(cfg, incident_id)
     assert pair is not None
@@ -3691,7 +3831,7 @@ def test_coverage_timeout_is_typed_and_never_publishes_new_current_pair(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "coverage-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "coverage-timeout", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     prior = (incident_dir / "CURRENT").read_text()
@@ -3713,7 +3853,7 @@ def test_hash_exception_cleans_orphan_generation_immediately(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "hash-orphan", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "hash-orphan", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     prior = (incident_dir / "CURRENT").read_text()
@@ -3736,7 +3876,7 @@ def test_publish_boundaries_guard_same_budget_and_keep_old_current(
     cfg: dict, monkeypatch: pytest.MonkeyPatch, boundary: str
 ) -> None:
     _position(cfg)
-    _quote(cfg, f"publish-{boundary}", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, f"publish-{boundary}", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
     prior = (incident_dir / "CURRENT").read_text()
@@ -3780,7 +3920,7 @@ def test_pair_identity_sqlite_interrupt_is_typed_defer(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _position(cfg)
-    _quote(cfg, "identity-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "identity-timeout", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     monkeypatch.setattr(
         loop,
@@ -3796,7 +3936,7 @@ def test_evidence_wallet_fills_follow_command_trade_ids_without_token_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _position(cfg)
-    _quote(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
+    _evidence_quote_triplet(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
     incident_id = loop.detect(cfg)[0]
     with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
         conn.execute(
