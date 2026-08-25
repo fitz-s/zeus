@@ -3615,6 +3615,23 @@ def _capture_hard_evidence_inner(
             defer(ordered[index:], f"evidence_snapshot_capacity_failure:{exc}")
             break
         try:
+            retry_fingerprints, debt = _evidence_retry_state(cfg, incident_id, budget)
+        except EvidenceCapacityExceeded as exc:
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                f"evidence_snapshot_capacity_failure:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        if _evidence_retry_deferred(retry_fingerprints, debt):
+            # Read the cheap durable identity before hashing the evidence pair:
+            # not-due debt must not touch the snapshot or forecast DBs.
+            summary["deferred"].append(incident_id)
+            continue
+        retry_identity = retry_fingerprints[0]
+        try:
             _reap_incomplete_generations(cfg, incident_id)
         except EvidenceCapacityExceeded as exc:
             defer(ordered[index:], f"evidence_snapshot_capacity_failure:{exc}")
@@ -3640,23 +3657,6 @@ def _capture_hard_evidence_inner(
             resolved_queue.add(incident_id)
             continue
         summary["validated"] += 1
-        try:
-            retry_fingerprints, debt = _evidence_retry_state(cfg, incident_id, budget)
-        except EvidenceCapacityExceeded as exc:
-            _record_evidence_debt(
-                cfg,
-                incident_id,
-                f"evidence_snapshot_capacity_failure:{exc}",
-                preserve_incident_state=incident_id not in created_rank,
-            )
-            summary["deferred"].append(incident_id)
-            continue
-        if _evidence_retry_deferred(retry_fingerprints, debt):
-            # A retry observation is intentionally read-only: no forecast
-            # fingerprint query, attempts increment, or updated_at churn.
-            summary["deferred"].append(incident_id)
-            continue
-        retry_identity = retry_fingerprints[0]
         if int(budget["remaining"]) <= 0:
             _record_evidence_debt(
                 cfg,

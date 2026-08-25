@@ -4859,3 +4859,62 @@ def test_expired_budget_retry_backoff_is_stable_until_identity_changes(
         ).fetchone()
     assert after_change[0] == 2
     assert after_change[1] != before[3]
+
+
+def test_large_not_due_debt_slice_skips_pair_and_heavy_queries(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_queue_batch_size=700, evidence_builds_per_cycle=3)
+    _position(cfg, position_id="bulk-retry-position")
+    debt_ids = [f"bulk-debt-{index:03d}" for index in range(700)]
+    with loop.memory(cfg) as mem:
+        for incident_id in debt_ids:
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, "hard", "bulk-retry-position", f"{incident_id}-evidence", "below_floor", "yes-token", "sell_yes", .05,
+                 "2026-08-24T12:00:00+00:00", 1.0, "blocked", "evidence", "2026-08-24T12:00:00+00:00"),
+            )
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,retry_identity,next_retry_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "old", "2026-08-24T12:00:00+00:00", f"identity:{incident_id}", "2099-01-01T00:00:00+00:00"),
+            )
+        mem.commit()
+    fixed = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    pair_calls: list[str] = []
+    heavy_calls: list[str] = []
+    monkeypatch.setattr(loop, "_evidence_identity_fingerprints", lambda _cfg, incident_id, _budget: (f"identity:{incident_id}", "cfg", "cap", "data"))
+    monkeypatch.setattr(loop, "_capture_pair_valid", lambda _cfg, incident_id, _budget: pair_calls.append(incident_id) or False)
+    monkeypatch.setattr(loop, "_evidence_fingerprints", lambda _cfg, incident_id, _budget: heavy_calls.append(incident_id) or ("full", "cfg", "cap", "data"))
+    first = loop._capture_hard_evidence(cfg, [], scan_all=True)
+    assert len(first["deferred"]) == 700
+    assert pair_calls == []
+    assert heavy_calls == []
+
+    _queue_evidence_retry_incident(cfg, "bulk-new-hard", "bulk-new-position")
+    build_calls: list[str] = []
+    monkeypatch.setattr(loop, "build_evidence", lambda local_cfg, incident_id: build_calls.append(incident_id) or Path(local_cfg["paths"]["runtime"]) / incident_id / "evidence.db")
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE controller_debt SET status='resolved' WHERE kind='evidence_snapshot' AND debt_id NOT IN (?,?)", ("evidence_snapshot:bulk-debt-000", "evidence_snapshot:bulk-debt-001"))
+        loop.meta_set(mem, "evidence_queue", json.dumps(["bulk-new-hard"]))
+        mem.commit()
+    loop._capture_hard_evidence(cfg, ["bulk-new-hard"])
+    assert build_calls == ["bulk-new-hard"]
+
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE controller_debt SET retry_identity=? WHERE debt_id=?", ("old-identity", "evidence_snapshot:bulk-debt-000"))
+        mem.execute("UPDATE controller_debt SET next_retry_at=? WHERE debt_id=?", ("2099-01-01T00:00:00+00:00", "evidence_snapshot:bulk-debt-001"))
+        loop.meta_set(mem, "evidence_queue", json.dumps(["bulk-debt-000"]))
+        mem.commit()
+    loop._capture_hard_evidence(cfg, ["bulk-debt-000"])
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE controller_debt SET next_retry_at=? WHERE debt_id=?", ("2020-01-01T00:00:00+00:00", "evidence_snapshot:bulk-debt-001"))
+        loop.meta_set(mem, "evidence_queue", json.dumps(["bulk-debt-001"]))
+        mem.commit()
+    loop._capture_hard_evidence(cfg, ["bulk-debt-001"])
+    assert pair_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
+    assert heavy_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
+    assert build_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
