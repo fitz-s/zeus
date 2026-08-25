@@ -160,6 +160,7 @@ import sqlite3
 import threading
 import time as _time
 import zlib
+from copy import deepcopy
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
@@ -36238,6 +36239,7 @@ def _day0_remaining_global_probability_components(
     payload: dict[str, object],
     decision_time: datetime,
     snapshot: Mapping[str, object] | None = None,
+    entry_authority: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     """Build the global Day0 simplex from the live remaining-day q object.
 
@@ -36272,6 +36274,7 @@ def _day0_remaining_global_probability_components(
         payload=payload,
         decision_time=decision_time,
         day0_seed_members=seed_members,
+        entry_authority=entry_authority,
     )
     from src.config import edge_n_bootstrap
 
@@ -37538,6 +37541,7 @@ def _prepare_current_global_probability_family(
                     payload=payload,
                     decision_time=decision_time,
                     snapshot=day0_snapshot,
+                    entry_authority=entry_authority,
                 )
                 probability_authority = (
                     "day0_remaining_day_global_probability_v1"
@@ -37609,6 +37613,7 @@ def _prepare_current_global_probability_family(
                         payload=payload,
                         decision_time=decision_time,
                         snapshot=day0_snapshot,
+                        entry_authority=entry_authority,
                     )
                 except ValueError as exc:
                     if str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
@@ -37803,6 +37808,7 @@ def _prepare_current_global_probability_family(
                     payload=payload,
                     decision_time=decision_time,
                     snapshot=day0_snapshot,
+                    entry_authority=entry_authority,
                 )
             probability_authority = "day0_remaining_day_global_probability_v1"
             payload.update(
@@ -40676,6 +40682,7 @@ def _market_analysis_from_event_snapshot(
     payload: dict[str, object],
     decision_time: datetime | None,
     day0_seed_members: "np.ndarray | None" = None,
+    entry_authority: bool = False,
 ) -> MarketAnalysis:
     from src.strategy.market_analysis import MarketAnalysis
     from src.config import settings
@@ -40866,6 +40873,7 @@ def _market_analysis_from_event_snapshot(
                 probability_time=day0_probability_time,
                 world_conn=calibration_conn,
                 forecast_conn=hourly_vector_conn,
+                entry_authority=entry_authority,
             )
             if _day0_rd_members is None:
                 payload["_edli_day0_q_mode"] = "remaining_day_unavailable"
@@ -43072,28 +43080,63 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     )
 
 
-def _rebuild_held_day0_shared_carrier(
+def _snapshot_day0_source_clock_carrier_provenance(
+    payload: dict[str, object],
+) -> None:
+    """Retain the materialized source-clock carrier before current-q rebinding."""
+    if "_edli_day0_source_clock_carrier_provenance" in payload:
+        return
+    carrier_fields = (
+        "_edli_day0_remaining_content_identity",
+        "_edli_day0_probability_operator",
+        "_edli_day0_remaining_carrier_q",
+        "_edli_day0_remaining_probability_samples",
+        "_edli_day0_remaining_probability_sample_count",
+        "_edli_day0_remaining_carrier_future_extremes_c",
+        "_edli_day0_remaining_carrier_path_error_sigma_c",
+        "_edli_day0_remaining_carrier_probability_cutoff_utc",
+        "_edli_day0_remaining_vector_witness",
+    )
+    payload["_edli_day0_source_clock_carrier_provenance"] = {
+        field.removeprefix("_edli_day0_"): deepcopy(payload[field])
+        for field in carrier_fields
+        if field in payload
+    }
+
+
+def _rebuild_decision_time_day0_carrier(
     *,
     payload: dict[str, object],
     family,
     unit: str,
     decision_time: datetime,
     future_extremes_c: object,
+    authority_kind: str,
+    entry_authority: bool,
 ) -> None:
-    """Rebuild a held Day0 carrier from the current causal hourly vectors.
+    """Rebuild the effective Day0 carrier from current causal hourly vectors.
 
-    This is the A' exception: a held/reduce-only redecision may reuse the prior
-    complete source-clock bundle while a newer ENS wave is incomplete.  The
-    reusable bundle supplies the typed provisional likelihood and total source
-    sigma; the current complete hourly vectors supply the remaining path.  The
-    unresolved sigma subtracts only trajectory spread, never provider spread as
-    common error, and the existing instrument/latency floor remains in the
-    process-sigma helper.
+    ENTRY must use the current bundle's empirical likelihood; it cannot borrow
+    held A' pinned/prior-only authority. Held A' remains the sole reduce-only
+    exception that can use its prior complete source-clock bundle. In both
+    cases the current vector witness was already compared at the selection seam
+    and the source-clock carrier remains immutable provenance.
     """
-    if payload.get("_edli_day0_redecision_authority_scope") != (
-        "held_exposure_current_day0_only_v1"
-    ):
-        raise ValueError("DAY0_HELD_SHARED_CARRIER_AUTHORITY_REQUIRED")
+    held_scope = payload.get("_edli_day0_redecision_authority_scope")
+    if authority_kind == "entry_current_remaining_path":
+        if entry_authority is not True or held_scope is not None:
+            raise ValueError("DAY0_ENTRY_CURRENT_CARRIER_AUTHORITY_REQUIRED")
+        rebuild_basis = "entry_current_state_same_vector_witness_v1"
+    elif authority_kind == "held_a_prime":
+        if (
+            entry_authority is not False
+            or held_scope != "held_exposure_current_day0_only_v1"
+        ):
+            raise ValueError("DAY0_HELD_SHARED_CARRIER_AUTHORITY_REQUIRED")
+        rebuild_basis = "held_a_prime_current_state_same_vector_witness_v1"
+    else:
+        raise ValueError("DAY0_DECISION_CARRIER_AUTHORITY_KIND_INVALID")
+    _snapshot_day0_source_clock_carrier_provenance(payload)
     from src.data.day0_hourly_vectors import (
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
@@ -43213,13 +43256,39 @@ def _rebuild_held_day0_shared_carrier(
                 else extra_sigma_native * 5.0 / 9.0
             ),
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
-            "_edli_day0_held_carrier_rebuild_basis": (
-                "prior_complete_source_clock_plus_current_causal_hourly_vectors_v1"
-            ),
+            "_edli_day0_decision_carrier_rebuild_basis": rebuild_basis,
             "_edli_day0_remaining_path_center_sigma_native": float(
                 np.std(np.asarray(values_native, dtype=float), ddof=0)
             ),
         }
+    )
+    if authority_kind == "held_a_prime":
+        payload["_edli_day0_held_carrier_rebuild_basis"] = (
+            "prior_complete_source_clock_plus_current_causal_hourly_vectors_v1"
+        )
+
+
+def _rebuild_held_day0_shared_carrier(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: datetime,
+    future_extremes_c: object,
+) -> None:
+    """Compatibility wrapper retaining the narrowed held A' authority gate."""
+    if payload.get("_edli_day0_redecision_authority_scope") != (
+        "held_exposure_current_day0_only_v1"
+    ):
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_AUTHORITY_REQUIRED")
+    _rebuild_decision_time_day0_carrier(
+        payload=payload,
+        family=family,
+        unit=unit,
+        decision_time=decision_time,
+        future_extremes_c=future_extremes_c,
+        authority_kind="held_a_prime",
+        entry_authority=False,
     )
 
 
@@ -43332,6 +43401,7 @@ def _day0_remaining_day_members(
     probability_time: "datetime | None" = None,
     world_conn: sqlite3.Connection | None = None,
     forecast_conn: sqlite3.Connection | None = None,
+    entry_authority: bool = False,
 ) -> "np.ndarray | None":
     """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
     the absorbing physical law. None means no fresh persisted high-res vectors
@@ -43343,6 +43413,8 @@ def _day0_remaining_day_members(
     running min) — below-floor remaining mass lands IN the floor bin.
     """
     if decision_time is None:
+        return None
+    if not isinstance(entry_authority, bool):
         return None
     try:
         from src.data.day0_hourly_vectors import (
@@ -43522,11 +43594,31 @@ def _day0_remaining_day_members(
         payload["_edli_day0_unclamped_remaining_extrema_native"] = [
             float(value) for value in values.tolist()
         ]
-        if (
+        from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+        is_noaa_preliminary = day0_is_noaa_preliminary_source(
+            payload.get("settlement_source")
+            or payload.get("observation_source")
+            or ""
+        )
+        has_likelihood = isinstance(
+            payload.get("_edli_day0_provisional_revision_likelihood"), Mapping
+        )
+        if entry_authority and is_noaa_preliminary and has_likelihood:
+            _rebuild_decision_time_day0_carrier(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                future_extremes_c=extremes_c,
+                authority_kind="entry_current_remaining_path",
+                entry_authority=True,
+            )
+        elif (
             payload.get("_edli_day0_redecision_authority_scope")
             == "held_exposure_current_day0_only_v1"
-            and payload.get("_edli_day0_provisional_revision_likelihood")
-            is not None
+            and is_noaa_preliminary
+            and has_likelihood
         ):
             _rebuild_held_day0_shared_carrier(
                 payload=payload,

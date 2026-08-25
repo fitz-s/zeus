@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-23
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Last reused or audited: 2026-08-25
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-25; last_reused=2026-08-25
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -839,6 +839,9 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
     assert payload["_edli_day0_held_carrier_rebuild_basis"].startswith(
         "prior_complete_source_clock_plus_current_causal_hourly_vectors"
     )
+    assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "held_a_prime_current_state_same_vector_witness_v1"
+    )
     assert payload["_edli_day0_remaining_content_identity"]
     assert payload["_edli_day0_remaining_carrier_path_error_sigma_c"] >= 0.0
 
@@ -862,6 +865,108 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
             unit="C",
             decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
             future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+        )
+
+
+def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_authority():
+    """ENTRY rebuilds from A(now), while the source-clock carrier stays provenance."""
+    import src.engine.event_reactor_adapter as era
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    bounds = [(None, 29)] + [(value, value) for value in range(30, 39)] + [(39, None)]
+    family = SimpleNamespace(
+        city="Tel Aviv",
+        metric="high",
+        candidates=[
+            SimpleNamespace(bin=Bin(low, high, "C", f"bin-{index}"))
+            for index, (low, high) in enumerate(bounds)
+        ],
+    )
+    decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
+    source_clock_vector = [27.0, 27.5, 28.0, 28.5]
+    current_vector = (28.5, 29.0, 30.5, 31.25)
+    payload = {
+        "metric": "high",
+        "rounded_value": 33.0,
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_probability_boundary_native": 33.0,
+        "_edli_day0_source_clock_predictive_sigma_native": 1.2,
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+        "_edli_day0_provisional_revision_likelihood": {
+            "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+            "identity_hash": "entry-empirical-likelihood",
+            "boundary_survival_probability": 0.95,
+            "station_id": "LLBG",
+            "source_channel_pair": {
+                "awc": "aviationweather_metar",
+                "ogimet": "ogimet_metar_llbg",
+            },
+        },
+        "_edli_day0_remaining_content_identity": "source-clock-identity",
+        "_edli_day0_probability_operator": "source-clock-operator",
+        "_edli_day0_remaining_carrier_q": [1.0],
+        "_edli_day0_remaining_probability_samples": [[1.0]],
+        "_edli_day0_remaining_probability_sample_count": 1,
+        "_edli_day0_remaining_carrier_future_extremes_c": source_clock_vector,
+        "_edli_day0_remaining_carrier_path_error_sigma_c": 0.25,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": decision_time.isoformat(),
+        "_edli_day0_remaining_vector_witness": {
+            "vector_id": "same-vector",
+            "expected_models": ["ecmwf_ifs"],
+            "actual_models": ["ecmwf_ifs"],
+            "capture_times_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+            "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+            "provider_source_available_at_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
+            "source_run_id_by_model": {"ecmwf_ifs": "source-run"},
+            "provider_run_id_by_model": {"ecmwf_ifs": "provider-run"},
+            "request_hash_by_model": {"ecmwf_ifs": "request-hash"},
+        },
+    }
+
+    era._rebuild_decision_time_day0_carrier(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=decision_time,
+        future_extremes_c=current_vector,
+        authority_kind="entry_current_remaining_path",
+        entry_authority=True,
+    )
+
+    assert payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(current_vector)
+    assert payload["_edli_day0_source_clock_carrier_provenance"][
+        "remaining_carrier_future_extremes_c"
+    ] == source_clock_vector
+    assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "entry_current_state_same_vector_witness_v1"
+    )
+    city = runtime_cities_by_name()["Tel Aviv"]
+    replay = era._day0_remaining_p_raw_vector(
+        np.asarray(current_vector),
+        city=city,
+        settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[candidate.bin for candidate in family.candidates],
+        payload=payload,
+        extra_member_sigma=0.0,
+        decision_time=decision_time,
+    )
+    assert replay.tolist() == pytest.approx(payload["_edli_day0_remaining_carrier_q"])
+
+    held_payload = dict(payload)
+    held_payload["_edli_day0_redecision_authority_scope"] = (
+        "held_exposure_current_day0_only_v1"
+    )
+    with pytest.raises(ValueError, match="DAY0_ENTRY_CURRENT_CARRIER_AUTHORITY_REQUIRED"):
+        era._rebuild_decision_time_day0_carrier(
+            payload=held_payload,
+            family=family,
+            unit="C",
+            decision_time=decision_time,
+            future_extremes_c=current_vector,
+            authority_kind="entry_current_remaining_path",
+            entry_authority=True,
         )
 
 
@@ -2728,6 +2833,41 @@ class TestRemainingDayMembers:
             "2026-06-10T09:00:00+00:00"
         )
         assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
+
+    def test_current_vector_witness_mismatch_blocks_before_carrier_rebuild(
+        self, monkeypatch, caplog
+    ):
+        """A new carrier is never made from vectors outside its source witness."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = _vector(model="ecmwf_ifs", temps=[25.0] * 24)
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **_kwargs: [vector],
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: {"vector_id": "current-vector"},
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 20.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "_edli_day0_remaining_vector_witness": {"vector_id": "source-vector"},
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            forecast_conn=object(),
+        )
+
+        assert members is None
+        assert "DAY0_CURRENT_VECTOR_WITNESS_MISMATCH" in caplog.text
 
     def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era
