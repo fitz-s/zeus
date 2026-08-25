@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Lifecycle: created=2026-08-22; last_reviewed=2026-08-25; last_reused=2026-08-25
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
 """Relationship antibodies for the event-time total-loss loop."""
@@ -809,6 +809,12 @@ def test_new_position_event_changes_data_fingerprint_and_retries_capacity_debt(
                 "2026-08-22T12:01:00+00:00", None, json.dumps({"new": "evidence"}), "active", "active",
             ),
         )
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE incidents SET evidence_revision=evidence_revision+1 "
+            "WHERE incident_id='fingerprint-incident'"
+        )
+        mem.commit()
     result = loop._capture_hard_evidence(cfg, ["fingerprint-incident"])
     assert result["built"] == ["fingerprint-incident"]
     assert calls == ["fingerprint-incident", "fingerprint-incident"]
@@ -1735,6 +1741,18 @@ def test_final_guard_after_successful_pair_does_not_reopen_debt(cfg: dict, monke
             raise loop.EvidenceCapacityExceeded("final bookkeeping guard")
     monkeypatch.setattr(loop, "_evidence_pair_valid", pair)
     monkeypatch.setattr(loop, "_evidence_guard", guard)
+    first = loop._capture_hard_evidence(cfg, [incident_id])
+    assert first["deferred"] == [incident_id]
+    assert validated["value"] is False
+    with loop.memory(cfg) as mem:
+        retry_at = loop.parse_time(
+            mem.execute(
+                "SELECT next_retry_at FROM controller_debt WHERE debt_id=?",
+                (f"evidence_snapshot:{incident_id}",),
+            ).fetchone()[0]
+        )
+    assert retry_at is not None
+    monkeypatch.setattr(loop, "now", lambda: retry_at + timedelta(seconds=1))
     result = loop._capture_hard_evidence(cfg, [incident_id])
     assert result["deferred"] == []
     with loop.memory(cfg) as mem:
@@ -4949,6 +4967,12 @@ def test_evidence_retry_identity_change_bypasses_backoff(cfg: dict, monkeypatch:
     loop._capture_hard_evidence(cfg, ["retry-identity"])
     with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
         conn.execute("UPDATE position_current SET updated_at=? WHERE position_id=?", ("2026-08-22T13:00:00+00:00", "identity-position"))
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE incidents SET evidence_revision=evidence_revision+1 "
+            "WHERE incident_id='retry-identity'"
+        )
+        mem.commit()
     loop._capture_hard_evidence(cfg, ["retry-identity"])
     assert heavy_calls == ["retry-identity", "retry-identity"]
     with loop.memory(cfg) as mem:
@@ -4968,7 +4992,7 @@ def test_evidence_debt_fifo_keeps_new_hard_incident_first(cfg: dict, monkeypatch
     monkeypatch.setattr(loop, "_evidence_fingerprints", lambda *_args: ("full", "cfg", "cap", "data"))
     monkeypatch.setattr(loop, "build_evidence", lambda local_cfg, incident_id: order.append(incident_id) or Path(local_cfg["paths"]["runtime"]) / incident_id / "evidence.db")
     result = loop._capture_hard_evidence(cfg, ["new-hard"], scan_all=True)
-    assert result["built"] == ["new-hard", "debt-b", "debt-a"]
+    assert result["built"] == ["new-hard", "debt-b"]
     assert order == result["built"]
 
 
@@ -5049,6 +5073,12 @@ def test_expired_budget_retry_backoff_is_stable_until_identity_changes(
             "UPDATE position_current SET updated_at=? WHERE position_id=?",
             ("2026-08-24T13:00:00+00:00", "expired-position"),
         )
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE incidents SET evidence_revision=evidence_revision+1 WHERE incident_id=?",
+            ("expired-budget",),
+        )
+        mem.commit()
     changed = loop._capture_hard_evidence(
         cfg,
         ["expired-budget"],
@@ -5108,10 +5138,32 @@ def test_large_not_due_debt_slice_skips_pair_and_heavy_queries(
     assert build_calls == ["bulk-new-hard"]
 
     with loop.memory(cfg) as mem:
-        mem.execute("UPDATE controller_debt SET retry_identity=? WHERE debt_id=?", ("old-identity", "evidence_snapshot:bulk-debt-000"))
+        incident = mem.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,evidence_revision "
+            "FROM incidents WHERE incident_id='bulk-debt-000'"
+        ).fetchone()
+        mem.execute(
+            "UPDATE controller_debt SET retry_identity=? WHERE debt_id=?",
+            (loop._memory_only_evidence_retry_identity(cfg, incident), "evidence_snapshot:bulk-debt-000"),
+        )
+        mem.execute(
+            "UPDATE incidents SET evidence_revision=evidence_revision+1 "
+            "WHERE incident_id='bulk-debt-000'"
+        )
         mem.execute("UPDATE controller_debt SET next_retry_at=? WHERE debt_id=?", ("2099-01-01T00:00:00+00:00", "evidence_snapshot:bulk-debt-001"))
         loop.meta_set(mem, "evidence_queue", json.dumps(["bulk-debt-000"]))
         mem.commit()
+    assert loop._memory_only_evidence_due_filter(
+        cfg,
+        ["bulk-debt-000"],
+        created_order=["bulk-debt-000"],
+        debt_order={"bulk-debt-000": 0},
+    )[0] == ["bulk-debt-000"]
+    monkeypatch.setattr(
+        loop,
+        "_evidence_retry_state",
+        lambda *_args: (("full", "cfg", "cap", "data"), None),
+    )
     loop._capture_hard_evidence(cfg, ["bulk-debt-000"])
     with loop.memory(cfg) as mem:
         mem.execute("UPDATE controller_debt SET next_retry_at=? WHERE debt_id=?", ("2020-01-01T00:00:00+00:00", "evidence_snapshot:bulk-debt-001"))
@@ -5121,3 +5173,162 @@ def test_large_not_due_debt_slice_skips_pair_and_heavy_queries(
     assert pair_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
     assert heavy_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
     assert build_calls == ["bulk-new-hard", "bulk-debt-000", "bulk-debt-001"]
+
+
+def test_memory_gate_upgrades_legacy_and_skips_not_due_without_canonical_open(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """100 legacy/not-due rows are settled in memory before any canonical read."""
+    cfg["loop"].update(evidence_queue_batch_size=128, evidence_retry_base_seconds=60)
+    fixed = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    with loop.memory(cfg) as mem:
+        for index in range(100):
+            incident_id = f"memory-gate-{index:03d}"
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, "hard", f"p-{index}", f"e-{index}", "below_floor", "yes-token", "sell_yes", .05,
+                 fixed.isoformat(), 1.0, "blocked", "evidence", fixed.isoformat()),
+            )
+            if index < 50:
+                mem.execute(
+                    "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,attempts,retry_identity,next_retry_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "legacy", fixed.isoformat(), 0,
+                     "", None),
+                )
+            else:
+                mem.execute(
+                    "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,attempts,retry_identity,next_retry_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "not_due", fixed.isoformat(), 0,
+                     f"stable-{index}", "2099-01-01T00:00:00+00:00"),
+                )
+        mem.commit()
+    opens: list[Path] = []
+    real_open_ro = loop.open_ro
+
+    def counted_open_ro(path: Path, **kwargs):
+        opens.append(Path(path))
+        return real_open_ro(path, **kwargs)
+
+    monkeypatch.setattr(loop, "open_ro", counted_open_ro)
+    monkeypatch.setattr(
+        loop, "_capture_pair_valid", lambda *_args, **_kwargs: pytest.fail("not-due must not validate pair")
+    )
+    monkeypatch.setattr(
+        loop, "_evidence_fingerprints", lambda *_args, **_kwargs: pytest.fail("not-due must not fingerprint")
+    )
+    first = loop._capture_hard_evidence(cfg, [], scan_all=True)
+    second = loop._capture_hard_evidence(cfg, [], scan_all=True)
+    assert len(first["deferred"]) == 100
+    assert len(second["deferred"]) == 100
+    assert opens == []
+    with loop.memory(cfg) as mem:
+        rows = mem.execute(
+            "SELECT attempts,retry_identity,next_retry_at FROM controller_debt "
+            "WHERE kind='evidence_snapshot' ORDER BY debt_id"
+        ).fetchall()
+    assert len(rows) == 100
+    assert all(int(row[0]) == 0 for row in rows)
+    assert all(str(row[1]) for row in rows)
+    assert all(loop.parse_time(str(row[2])) > fixed for row in rows)
+
+
+def test_memory_gate_runs_one_due_lane_and_still_constructs_new_incident(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only one true due lane is expensive; an incident with no debt is new work."""
+    cfg["loop"].update(evidence_queue_batch_size=16, evidence_builds_per_cycle=8)
+    due_ids = ["due-lane-a", "due-lane-b"]
+    with loop.memory(cfg) as mem:
+        for incident_id in [*due_ids, "new-lane"]:
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, "hard", f"{incident_id}-position", f"{incident_id}-evidence", "below_floor", "yes-token", "sell_yes", .05,
+                 "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+            )
+        for incident_id in due_ids:
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,retry_identity,next_retry_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "due", "2026-08-22T12:00:00+00:00", incident_id,
+                 "2000-01-01T00:00:00+00:00"),
+            )
+        mem.commit()
+    calls: list[str] = []
+    fingerprints = ("retry", "cfg", "cap", "data")
+    monkeypatch.setattr(loop, "_evidence_retry_state", lambda *_args: (fingerprints, None))
+    monkeypatch.setattr(loop, "_capture_pair_valid", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(loop, "_evidence_fingerprints", lambda *_args: fingerprints)
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda _cfg, incident_id: calls.append(incident_id)
+        or Path(_cfg["paths"]["runtime"]) / incident_id / "evidence.db",
+    )
+    due = loop._capture_hard_evidence(cfg, due_ids, scan_all=True)
+    assert due["built"][0] == "new-lane"
+    assert len([value for value in due["built"] if value in due_ids]) == 1
+    assert calls == due["built"]
+
+    calls.clear()
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE controller_debt SET status='resolved' WHERE kind='evidence_snapshot'")
+        mem.commit()
+    new = loop._capture_hard_evidence(cfg, ["new-lane"])
+    assert new["built"] == ["new-lane"]
+    assert calls == ["new-lane"]
+
+
+def test_memory_gate_ignores_raw_trade_revision_while_not_due(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw trades DB update cannot bypass a memory-owned future retry gate."""
+    incident_id = "raw-trade-not-due"
+    _queue_evidence_retry_incident(cfg, incident_id, "raw-trade-position")
+    with loop.memory(cfg) as mem:
+        incident = mem.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,evidence_revision "
+            "FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        mem.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,retry_identity,next_retry_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                f"evidence_snapshot:{incident_id}",
+                "evidence_snapshot",
+                "retry_pending",
+                "not_due",
+                "2026-08-25T12:00:00+00:00",
+                loop._memory_only_evidence_retry_identity(cfg, incident),
+                "2099-01-01T00:00:00+00:00",
+            ),
+        )
+        mem.commit()
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as trades:
+        trades.execute(
+            "UPDATE position_current SET updated_at=? WHERE position_id=?",
+            ("2026-08-25T12:01:00+00:00", "raw-trade-position"),
+        )
+    opens: list[Path] = []
+    real_open_ro = loop.open_ro
+    monkeypatch.setattr(
+        loop,
+        "open_ro",
+        lambda path, **kwargs: opens.append(Path(path)) or real_open_ro(path, **kwargs),
+    )
+    monkeypatch.setattr(
+        loop, "_capture_pair_valid", lambda *_args, **_kwargs: pytest.fail("raw change must not validate")
+    )
+    monkeypatch.setattr(
+        loop, "_evidence_fingerprints", lambda *_args, **_kwargs: pytest.fail("raw change must not fingerprint")
+    )
+    result = loop._capture_hard_evidence(cfg, [incident_id])
+    assert result["deferred"] == [incident_id]
+    assert opens == []

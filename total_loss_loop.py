@@ -3473,6 +3473,158 @@ def _evidence_retry_deferred(
     return retry_at is not None and now() < retry_at
 
 
+def _memory_only_evidence_retry_identity(
+    cfg: Mapping[str, Any], incident: Mapping[str, Any]
+) -> str:
+    """Stable retry identity for legacy debt migration without canonical I/O."""
+    settings = cfg["loop"]
+    return "memory:" + digest(
+        "evidence_snapshot_memory_retry_v1",
+        str(incident["incident_id"]),
+        str(incident["position_id"] or ""),
+        str(incident["crossing_evidence_id"] or ""),
+        int(incident["evidence_revision"] or 0),
+        settings.get("evidence_window_days", 7),
+        settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000)),
+        settings.get("evidence_builds_per_cycle", 1),
+        settings.get("evidence_build_budget_ms", 1000),
+        settings.get("evidence_max_bytes", 32 * 1024 * 1024),
+        length=32,
+    )
+
+
+def _memory_only_evidence_retry_identity_for_debt(
+    cfg: Mapping[str, Any], incident_id: str
+) -> str:
+    try:
+        with memory(cfg) as mem:
+            row = mem.execute(
+                "SELECT incident_id,position_id,crossing_evidence_id,evidence_revision "
+                "FROM incidents WHERE incident_id=?",
+                (incident_id,),
+            ).fetchone()
+        if row is not None:
+            return _memory_only_evidence_retry_identity(cfg, row)
+    except (EvidenceCapacityExceeded, OSError, sqlite3.Error):
+        pass
+    return "memory:" + digest("evidence_snapshot_memory_retry_fallback_v1", incident_id, length=32)
+
+
+def _memory_only_evidence_due_filter(
+    cfg: Mapping[str, Any],
+    candidate_ids: Iterable[str],
+    *,
+    created_order: Iterable[str],
+    debt_order: Mapping[str, int],
+) -> tuple[list[str], list[str]]:
+    """Choose one new/due evidence lane before opening canonical databases.
+
+    SCOPE: one controller evidence slice. DRAIN: the selected new or due lane
+    reaches pair/fingerprint/build work. RESET: a future retry clock defers the
+    same stable debt; a resolved debt is complete until a new incident revision
+    creates fresh work. Legacy rows are migrated in memory once, without
+    consuming an evidence attempt or opening trades/forecasts.
+    """
+    ordered_ids = list(dict.fromkeys(str(value) for value in candidate_ids if str(value)))
+    created_rank = {
+        incident_id: index
+        for index, incident_id in enumerate(
+            dict.fromkeys(str(value) for value in created_order if str(value))
+        )
+    }
+    if not ordered_ids:
+        return [], []
+    rows_by_id: dict[str, sqlite3.Row] = {}
+    debts_by_id: dict[str, sqlite3.Row] = {}
+    deferred: list[str] = []
+    due: list[str] = []
+    new: list[str] = []
+    stamp = iso()
+    checked_at = now()
+    with memory(cfg) as mem:
+        for offset in range(0, len(ordered_ids), 900):
+            chunk = ordered_ids[offset:offset + 900]
+            marks = ",".join("?" for _ in chunk)
+            for row in mem.execute(
+                "SELECT incident_id,status,position_id,crossing_evidence_id,evidence_revision,priority,detected_at "
+                "FROM incidents WHERE kind='hard' AND incident_id IN "
+                f"({marks})",
+                tuple(chunk),
+            ).fetchall():
+                rows_by_id[str(row["incident_id"])] = row
+            for row in mem.execute(
+                "SELECT debt_id,status,retry_identity,next_retry_at,attempts "
+                "FROM controller_debt WHERE kind='evidence_snapshot' AND debt_id IN "
+                f"({marks})",
+                tuple(_evidence_debt_id(value) for value in chunk),
+            ).fetchall():
+                debts_by_id[str(row["debt_id"]).removeprefix("evidence_snapshot:")] = row
+        for incident_id in ordered_ids:
+            incident = rows_by_id.get(incident_id)
+            if incident is None:
+                continue
+            debt = debts_by_id.get(incident_id)
+            if debt is None:
+                new.append(incident_id)
+                continue
+            if str(debt["status"] or "") == "resolved":
+                continue
+            if str(debt["status"] or "") != "retry_pending":
+                new.append(incident_id)
+                continue
+            retry_at = parse_time(str(debt["next_retry_at"] or ""))
+            stable_identity = _memory_only_evidence_retry_identity(cfg, incident)
+            retry_identity = str(debt["retry_identity"] or "")
+            if not retry_identity or retry_at is None:
+                attempts = int(debt["attempts"] or 0)
+                next_retry_at = iso(
+                    checked_at + timedelta(
+                        seconds=_evidence_retry_delay(cfg, max(1, attempts))
+                    )
+                )
+                mem.execute(
+                    "UPDATE controller_debt SET reason=?,updated_at=?,retry_identity=?,next_retry_at=? "
+                    "WHERE debt_id=? AND kind='evidence_snapshot'",
+                    (
+                        "evidence_snapshot_capacity_failure:legacy_debt_upgrade",
+                        stamp,
+                        stable_identity,
+                        next_retry_at,
+                        _evidence_debt_id(incident_id),
+                    ),
+                )
+                deferred.append(incident_id)
+                continue
+            if retry_identity.startswith("memory:") and retry_identity != stable_identity:
+                due.append(incident_id)
+                continue
+            if checked_at < retry_at:
+                deferred.append(incident_id)
+                continue
+            due.append(incident_id)
+        mem.commit()
+
+    def priority(incident_id: str) -> tuple[Any, ...]:
+        incident = rows_by_id[incident_id]
+        if incident_id in created_rank:
+            return (0, created_rank[incident_id], incident_id)
+        if incident_id in debt_order:
+            return (1, debt_order[incident_id], incident_id)
+        detected_at = parse_time(str(incident["detected_at"] or ""))
+        return (
+            2,
+            -float(incident["priority"] or 0.0),
+            -(detected_at.timestamp() if detected_at is not None else 0.0),
+            incident_id,
+        )
+
+    # New incidents are not retry debt and retain the ordinary bounded batch.
+    # At most one retry-pending lane may cross into canonical I/O per cycle.
+    eligible_new = sorted(dict.fromkeys(new), key=priority)
+    eligible_due = sorted(dict.fromkeys(due), key=priority)[:1]
+    return [*eligible_new, *eligible_due], deferred
+
+
 def _has_capacity_failure_debt(cfg: Mapping[str, Any], incident_id: str) -> bool:
     with memory(cfg) as mem:
         row = mem.execute(
@@ -3508,9 +3660,10 @@ def _record_evidence_debt(
 ) -> None:
     stamp = iso()
     fingerprint, config_fp, capacity_fp, data_fp = fingerprints or ("", "", "", "")
-    retry_identity = str(retry_identity or fingerprint or "")
-    if not retry_identity:
-        retry_identity = _evidence_retry_identity_for_debt(cfg, incident_id)
+    # Retry wake-up is memory-owned: raw canonical DB changes cannot defeat a
+    # future backoff without a detector/trigger advancing evidence_revision.
+    if not str(retry_identity or "").startswith("memory:"):
+        retry_identity = _memory_only_evidence_retry_identity_for_debt(cfg, incident_id)
     try:
         with memory(cfg) as mem:
             prior = mem.execute(
@@ -3588,7 +3741,8 @@ def _record_emergency_evidence_debt(
 
     stamp = iso()
     fingerprint, config_fp, capacity_fp, data_fp = fingerprints
-    retry_identity = str(retry_identity or fingerprint or "")
+    if not str(retry_identity or "").startswith("memory:"):
+        retry_identity = _memory_only_evidence_retry_identity_for_debt(cfg, incident_id)
     deadline = time.monotonic() + _EMERGENCY_EVIDENCE_DEBT_WRITE_SECONDS
     debt_id = _evidence_debt_id(incident_id)
     payload: dict[str, Any] = {
@@ -3856,54 +4010,19 @@ def _capture_hard_evidence_inner(
             candidates.update(debt_order)
         if not candidates:
             return finish()
-        with memory(cfg) as mem:
-            _evidence_guard()
-            rows = []
-            candidate_list = list(candidates)
-            for offset in range(0, len(candidate_list), 900):
-                chunk = candidate_list[offset:offset + 900]
-                rows.extend(mem.execute(
-                    "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
-                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
-                ).fetchall())
-        positions: dict[str, dict[str, Any]] = {}
-        try:
-            with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
-                _apply_evidence_sql_budget(trades, budget)
-                position_ids = list(dict.fromkeys(str(row[2]) for row in rows))
-                for offset in range(0, len(position_ids), 900):
-                    chunk = position_ids[offset:offset + 900]
-                    if not chunk:
-                        continue
-                    for row in trades.execute(
-                        "SELECT position_id,phase,city,updated_at FROM position_current WHERE position_id IN "
-                        f"({','.join('?' for _ in chunk)})", tuple(chunk)
-                    ).fetchall():
-                        positions[str(row[0])] = dict(row)
-        except (OSError, sqlite3.Error):
-            positions = {}
-        status_rank = {"queued": 0, "retry_pending": 0, "blocked": 1, "observing": 2, "running": 3}
-        open_rank = {phase: 0 for phase in OPEN_PHASES}
-        row_by_id = {str(row[0]): row for row in rows}
+        candidate_order = list(
+            dict.fromkeys([*created_order, *queued_ids, *debt_order])
+        )
+        ordered, memory_deferred = _memory_only_evidence_due_filter(
+            cfg,
+            candidate_order,
+            created_order=created_order,
+            debt_order=debt_order,
+        )
+        summary["deferred"].extend(memory_deferred)
+        if not ordered:
+            return finish()
         created_rank = {incident_id: index for index, incident_id in enumerate(created_order)}
-        def priority(incident_id: str) -> tuple[Any, ...]:
-            row = row_by_id[incident_id]
-            position = positions.get(str(row[2]), {})
-            detected = parse_time(str(row[3]))
-            if incident_id in created_rank:
-                return (0, created_rank[incident_id], incident_id)
-            if incident_id in debt_order:
-                return (1, debt_order[incident_id], incident_id)
-            return (
-                2,
-                10**9,
-                open_rank.get(str(position.get("phase") or ""), 2),
-                0 if str(position.get("city") or "").casefold() == "tel aviv" else 1,
-                status_rank.get(str(row[1]), 9),
-                -(detected.timestamp() if detected else 0.0),
-                incident_id,
-            )
-        ordered = sorted(row_by_id, key=priority)
     except EvidenceCapacityExceeded as exc:
         recovered, recovery_error = _recover_evidence_candidate_ids(cfg, limit=queue_limit)
         candidate_ids = list(dict.fromkeys([*candidates, *recovered]))
@@ -4168,24 +4287,39 @@ def _capture_hard_evidence(
     budget = budget or _new_evidence_budget(cfg)
     if time.monotonic() >= float(budget["deadline"]):
         recovered, recovery_error = _recover_evidence_candidate_ids(cfg)
-        deferred = list(dict.fromkeys([*incident_ids, *recovered]))
+        candidates = list(dict.fromkeys([*incident_ids, *recovered]))
         if recovery_error:
             _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
+        # Even an exhausted cycle must classify retry debt from memory before it
+        # records another backoff: a future memory identity is not executable
+        # work, while a revision change is the bounded wake signal.
+        eligible, deferred = _memory_only_evidence_due_filter(
+            cfg,
+            candidates,
+            created_order=incident_ids,
+            debt_order={},
+        )
+        retry_identities = {
+            incident_id: _memory_only_evidence_retry_identity_for_debt(cfg, incident_id)
+            for incident_id in eligible
+        }
         previous_context = _EVIDENCE_BUILD_CONTEXT
         _EVIDENCE_BUILD_CONTEXT = budget
         try:
-            for incident_id in deferred:
+            for incident_id in eligible:
                 _record_evidence_debt(
                     cfg,
                     incident_id,
                     "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
+                    retry_identity=retry_identities[incident_id],
                 )
         finally:
             _EVIDENCE_BUILD_CONTEXT = previous_context
-        summary = {"built": [], "deferred": deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
+        all_deferred = list(dict.fromkeys([*deferred, *eligible]))
+        summary = {"built": [], "deferred": all_deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
         if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
             summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
-        _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *deferred]))
+        _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *all_deferred]))
         return summary
     previous = _EVIDENCE_BUILD_CONTEXT
     _EVIDENCE_BUILD_CONTEXT = budget
