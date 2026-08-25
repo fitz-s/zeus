@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -38,6 +38,148 @@ COMPACT_CAPTURE_TRIGGERS: frozenset[str] = frozenset({
 })
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------
+# Bounded-by-construction inline retention (2026-08-25, operator redirect:
+# storage must be bounded by construction, not periodic cleanup -- see
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 13).
+#
+# This table is APPEND-ONLY by DB trigger (NC-NEW-B):
+# no_update_executable_market_snapshots / no_delete_executable_market_snapshots
+# RAISE(ABORT) on any UPDATE/DELETE. insert_snapshot() is called roughly once
+# per second across many live call sites (market_scanner discovery sweeps,
+# monitor_refresh, event reactor, exit_lifecycle, ...), each a single-row
+# INSERT -- doing the sanctioned trigger drop/verify/re-create dance
+# (precedent: scripts/repair_executable_snapshot_corruption.py) on EVERY
+# insert would multiply the trigger-absent exposure window by the table's
+# full insert frequency for no benefit, since a single firing's LIMIT already
+# clears far more backlog than accumulates between firings. Cadence-gated
+# instead: fires roughly once every _INLINE_EXPIRE_THROTTLE inserts, via
+# last_insert_rowid() modulo -- a deterministic SQL-native throttle with no
+# in-process state (safe across threads/processes, unlike a Python counter).
+#
+# Uses SAVEPOINT, not BEGIN/BEGIN IMMEDIATE: insert_snapshot's caller already
+# holds an open transaction by the time this runs (sqlite3's default
+# isolation_level="" opens an implicit DEFERRED transaction on the INSERT
+# above), and SQLite does not support a nested BEGIN. SAVEPOINT nests
+# correctly regardless of whether an outer transaction is already active,
+# giving the same all-or-nothing guarantee for the drop/delete/recreate
+# sequence without disturbing the caller's transaction boundary.
+#
+# scripts/migrations/202608_executable_market_snapshots_retention.py remains
+# available as the one-time backlog-drain tool for rows written before this
+# inline mechanism existed; its companion launchd plist is optional in
+# steady state.
+_SNAPSHOT_KEEP_DAYS = 30
+_SNAPSHOT_INLINE_EXPIRE_LIMIT = 50
+_SNAPSHOT_INLINE_EXPIRE_THROTTLE = 500
+_SNAPSHOT_DELETE_TRIGGER_NAME = "no_delete_executable_market_snapshots"
+_SNAPSHOT_ANCHOR_EXCEPT_CLAUSE = """
+      AND snapshot_id NOT IN (
+        SELECT snapshot_id FROM venue_commands WHERE snapshot_id IS NOT NULL
+        UNION
+        SELECT snapshot_id FROM position_events WHERE snapshot_id IS NOT NULL
+      )
+"""
+
+
+def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None:
+    """Cadence-gated inline retention for executable_market_snapshots.
+
+    Never raises -- a bug here must not block a legitimate snapshot write;
+    failures roll back only this helper's SAVEPOINT and are logged, leaving
+    the caller's own transaction and the append-only trigger untouched.
+    """
+    try:
+        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        if rowid is None or int(rowid) % _SNAPSHOT_INLINE_EXPIRE_THROTTLE != 0:
+            return
+
+        # The row just inserted by this same call (rowid = last_insert_rowid())
+        # is excluded below so a legitimately old-timestamped write (e.g. a
+        # backfill/catch-up insert) is never deleted by the very insert that
+        # created it.
+        just_inserted = conn.execute(
+            "SELECT snapshot_id FROM executable_market_snapshots WHERE rowid = ?",
+            (rowid,),
+        ).fetchone()
+        just_inserted_id = just_inserted[0] if just_inserted is not None else None
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_KEEP_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        has_anchors = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='venue_commands'"
+            ).fetchone() is not None
+            and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_events'"
+            ).fetchone() is not None
+        )
+        except_clause = _SNAPSHOT_ANCHOR_EXCEPT_CLAUSE if has_anchors else ""
+        exclude_clause = "AND snapshot_id != ?" if just_inserted_id is not None else ""
+        params: tuple = (cutoff,)
+        if just_inserted_id is not None:
+            params += (just_inserted_id,)
+        params += (_SNAPSHOT_INLINE_EXPIRE_LIMIT,)
+        ids = [
+            row[0]
+            for row in conn.execute(
+                f"""
+                SELECT snapshot_id FROM executable_market_snapshots
+                WHERE captured_at < ?
+                {exclude_clause}
+                {except_clause}
+                ORDER BY snapshot_id
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        ]
+        if not ids:
+            return
+
+        trigger_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?",
+            (_SNAPSHOT_DELETE_TRIGGER_NAME,),
+        ).fetchone()
+        if trigger_row is None or not trigger_row[0]:
+            logger.warning(
+                "_inline_expire_executable_market_snapshots: append-only delete "
+                "trigger %s is missing; skipping this firing",
+                _SNAPSHOT_DELETE_TRIGGER_NAME,
+            )
+            return
+        trigger_sql = trigger_row[0]
+
+        conn.execute("SAVEPOINT inline_snapshot_expire")
+        try:
+            conn.execute(f"DROP TRIGGER {_SNAPSHOT_DELETE_TRIGGER_NAME}")
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"DELETE FROM executable_market_snapshots WHERE snapshot_id IN ({placeholders})",
+                ids,
+            )
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            if int(changed) != len(ids):
+                raise RuntimeError(
+                    f"inline snapshot expire changes() mismatch: expected {len(ids)}, got {changed}"
+                )
+            conn.execute(trigger_sql)
+            conn.execute("RELEASE inline_snapshot_expire")
+        except BaseException:
+            conn.execute("ROLLBACK TO inline_snapshot_expire")
+            conn.execute("RELEASE inline_snapshot_expire")
+            raise
+        # No-op today (auto_vacuum=0 live); activates automatically once the
+        # one-time VACUUM reset (scripts/ops/vacuum_reset_trades_db.py,
+        # documented but not yet run) converts the DB to auto_vacuum=
+        # INCREMENTAL. Outside the SAVEPOINT: this reclaims freelist pages
+        # database-wide, not specific to the trigger-guarded delete above.
+        conn.execute("PRAGMA incremental_vacuum(1000)")
+    except Exception:  # noqa: BLE001 - inline expiry must never block a real write
+        logger.exception("_inline_expire_executable_market_snapshots failed (write unaffected)")
 
 # capture_policy_spec.md §2 full-capture trigger taxonomy. The DB column is
 # deliberately UNCONSTRAINED (a CHECK on ADD COLUMN full-scans the ~43GB live
@@ -313,6 +455,7 @@ def insert_snapshot(
     )
     if advance_latest:
         _upsert_latest_snapshot(conn, row)
+    _inline_expire_executable_market_snapshots(conn)
 
 
 def insert_compact_snapshot(

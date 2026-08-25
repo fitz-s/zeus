@@ -2592,6 +2592,44 @@ scripts:
       - src.state.db_writer_lock.db_writer_lock
     required_tests:
       - tests/test_executable_market_snapshots_retention_migration.py
+  scripts/ops/vacuum_reset_trades_db.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: operator_invoked
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--vacuum-into DEST / --swap DEST --operator-confirms-fenced"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python3 scripts/ops/vacuum_reset_trades_db.py --check | --vacuum-into DEST | --swap DEST --operator-confirms-fenced [--db PATH] [--backup-manifest PATH] [--backup-max-age-hours N]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      One-time reset: DELETE-based retention (items 11-13) leaves auto_vacuum=0's
+      freed pages internal (freelist) rather than shrinking the file. Three
+      explicit phases (--check read-only; --vacuum-into writes a NEW compacted
+      file elsewhere, never touches the live DB; --swap atomically replaces the
+      live file, requires --operator-confirms-fenced). Converts the DB to
+      auto_vacuum=INCREMENTAL so item 13's already-wired no-op
+      PRAGMA incremental_vacuum(1000) piggyback activates automatically in
+      steady state -- no further code changes needed after the swap.
+    do_not_use_when: >
+      THIS SCRIPT HAS NEVER BEEN RUN as of 2026-08-25 -- documentation-grade,
+      its precondition/assertion logic is unit-tested against disposable
+      fixture files only (tests/test_vacuum_reset_trades_db.py). Do not run
+      --swap without a fresh --backup-manifest, zero open positions (or
+      entries_paused, which does NOT stop monitor/exit/settlement/reconcile
+      writers -- the writer-plane fence is mandatory regardless), and every
+      zeus daemon actually stopped (launchctl bootout each com.zeus.* label,
+      not scripts/deploy_live.py restart).
+    promotion_barrier: "--swap refuses without --operator-confirms-fenced AND a clean ps-based scan for zeus daemon processes; refuses without a --vacuum-into receipt proving integrity_check + auto_vacuum=INCREMENTAL + matching row counts; re-verifies every --check precondition immediately before the atomic rename."
+    unguarded_write_rationale: "Deliberately outside db_writer_lock: --check/--vacuum-into open the live DB mode=ro only; --swap operates only after every zeus daemon is confirmed stopped (writer-plane fence), so no concurrent writer exists to serialize against. On any failure after the live path has been touched, the pre-swap backup is restored."
+    required_helpers:
+      - src.control.control_plane.is_entries_paused
+    required_tests:
+      - tests/test_vacuum_reset_trades_db.py
 
   measure_wu_obs_latency.py:
     class: telemetry_read

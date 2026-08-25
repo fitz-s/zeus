@@ -139,17 +139,10 @@ DEFAULT_KEEP_DAYS = 30
 MIN_KEEP_DAYS = 7
 DEFAULT_CHUNK_SIZE = 2000
 
-_TIER0_EXCEPT_CLAUSE = """
-      AND NOT (
-        mode = 'global_single_order_auction'
-        AND EXISTS (
-          SELECT 1 FROM tier0_candidate_set_provenance t
-          WHERE t.selection_epoch_identity = json_extract(
-            decision_log.artifact_json, '$.summary.selection_epoch_identity'
-          )
-        )
-      )
-"""
+# Shared with the inline piggybacked expiry in src/state/decision_chain.py
+# (2026-08-25 bounded-by-construction redesign) -- single definition, no
+# drift between the periodic backlog-drain tool and the inline mechanism.
+from src.state.decision_chain import TIER0_EXCEPT_CLAUSE as _TIER0_EXCEPT_CLAUSE
 
 
 def _get_default_db_path() -> Path:

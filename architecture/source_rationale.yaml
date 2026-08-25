@@ -2022,7 +2022,7 @@ files:
   src/events/triggers/market_channel_ingestor.py:
     zone: K2_runtime
     authority_role: market_channel_quote_projection
-    why: Normalizes CLOB market-channel facts into the bounded execution-feasibility projection and resolves current token metadata for entry and held-exit refresh. Entry requires active, open, pre-end markets; held-exit refresh follows explicit enable_orderbook and accepting_orders truth even when Gamma reports active=false, so held exposure cannot lose quote coverage from a non-authoritative lifecycle flag.
+    why: Normalizes CLOB market-channel facts into the bounded execution-feasibility projection and resolves current token metadata for entry and held-exit refresh. Entry requires active, open, pre-end markets; held-exit refresh follows explicit enable_orderbook and accepting_orders truth even when Gamma reports active=false, so held exposure cannot lose quote coverage from a non-authoritative lifecycle flag. As of 2026-08-25, insert_execution_feasibility_evidence_batch piggybacks a bounded inline expiry (_inline_expire_execution_feasibility_evidence) per batch, excluding the rows just inserted, so execution_feasibility_evidence is bounded by construction rather than needing periodic cleanup.
     downstream:
     - src/ingest/price_channel_ingest.py
   src/events/continuous_redecision.py:
@@ -2692,7 +2692,7 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; full snapshots are immutable evidence for venue_commands. A separate append-only executable_market_snapshot_compact table stores discovery-only scalar/hash/top-K time-series and is never executable, command, recovery, held-position, or submit authority. The repo also maintains executable_market_snapshot_latest as a bounded full-evidence read model so hot refresh-priority paths do not scan the append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer full snapshot evidence exists.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; full snapshots are immutable evidence for venue_commands. A separate append-only executable_market_snapshot_compact table stores discovery-only scalar/hash/top-K time-series and is never executable, command, recovery, held-position, or submit authority. The repo also maintains executable_market_snapshot_latest as a bounded full-evidence read model so hot refresh-priority paths do not scan the append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer full snapshot evidence exists. As of 2026-08-25, insert_snapshot piggybacks a throttled, SAVEPOINT-nested inline expiry (_inline_expire_executable_market_snapshots) that drops/verifies/re-creates the no_delete append-only trigger per firing and protects any snapshot_id still referenced by venue_commands or position_events, so the table is bounded by construction rather than needing periodic cleanup.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
@@ -2847,7 +2847,7 @@ files:
   src/state/decision_chain.py:
     zone: K2_runtime
     authority_role: decision_fact_logging
-    why: Records decision and rejection facts for explainability.
+    why: Records decision and rejection facts for explainability. As of 2026-08-25, every store_artifact/store_settlement_records write piggybacks a bounded, per-mode, tier0-anchor-respecting inline expiry (_inline_expire_decision_log) so decision_log is bounded by construction rather than needing periodic cleanup.
     write_routes:
     - decision_artifact_write
     downstream:
