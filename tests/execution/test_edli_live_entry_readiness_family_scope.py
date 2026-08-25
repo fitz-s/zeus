@@ -1,13 +1,8 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-24
-# Authority basis: 7-day production block-event audit (32,763 blocking
-#   instances, 20.97h/7d global entry admission blocked, worst episode
-#   7h17m) -- the composite live-block string
-#   "entry_readiness:EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:N,
-#   EDLI_STAGE_LIVE_CAP_RESERVED:N" is a coupled pair (one stuck order holds
-#   both an unresolved projection row and its cap reservation) and was 100%
-#   of observed blocking instances. Both whole-universe COUNT(*) gates are
-#   narrowed to per-family together in this commit.
+# Last reused/audited: 2026-08-24
+# Authority basis: EDLI K2 readiness admission contract: status_summary.json
+#   is operator telemetry only; source_health.json and canonical DB facts own
+#   boot/per-cycle BUY admission. Per-family debt narrowing remains covered.
 """Per-family narrowing of the EDLI live entry-readiness BUY gate.
 
 Before this change, ``src.main._edli_live_entry_readiness_block`` returned one
@@ -22,6 +17,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import Path
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -516,11 +512,14 @@ def test_readiness_block_falls_back_globally_when_family_unresolvable(
     assert family_reasons == {}
 
 
-def test_readiness_block_preserves_genuinely_global_freshness_reasons(
-    tmp_path, monkeypatch, _fresh_readiness_files
+@pytest.mark.parametrize(
+    "source_health",
+    [None, json.dumps({"generated_at": "2020-01-01T00:00:00Z"})],
+)
+def test_readiness_block_preserves_source_health_freshness_reasons(
+    tmp_path, monkeypatch, _fresh_readiness_files, source_health
 ):
-    """Source-health/status-summary staleness are genuinely bankroll-wide and
-    must stay global -- untouched by the per-family narrowing."""
+    """Missing or stale source health is bankroll-wide and stays global."""
 
     world_db = _make_world_db(tmp_path)  # no stuck rows at all
 
@@ -530,14 +529,50 @@ def test_readiness_block_preserves_genuinely_global_freshness_reasons(
         lambda name, default=None: {"world_db": world_db} if name == "state" else default,
     )
 
-    _, status_summary_path = _fresh_readiness_files
-    missing_source_health = str(tmp_path / "does_not_exist.json")
+    source_health_path, status_summary_path = _fresh_readiness_files
+    if source_health is None:
+        Path(source_health_path).unlink()
+        expected_reason = "EDLI_STAGE_SOURCE_HEALTH_MISSING"
+    else:
+        Path(source_health_path).write_text(source_health)
+        expected_reason = "EDLI_STAGE_SOURCE_HEALTH_STALE"
     global_reason, family_reasons = main_mod._edli_live_entry_readiness_block(
-        _edli_cfg(missing_source_health, status_summary_path)
+        _edli_cfg(source_health_path, status_summary_path)
     )
 
     assert global_reason is not None
-    assert "EDLI_STAGE_SOURCE_HEALTH_MISSING" in global_reason
+    assert expected_reason in global_reason
+    assert family_reasons == {}
+
+
+@pytest.mark.parametrize(
+    "status_summary",
+    [None, "{malformed json", json.dumps({"generated_at": "2020-01-01T00:00:00Z"})],
+)
+def test_readiness_block_ignores_status_summary_failures(
+    tmp_path, monkeypatch, _fresh_readiness_files, status_summary
+):
+    """Malformed, missing, or stale operator telemetry cannot block BUY."""
+
+    world_db = _make_world_db(tmp_path)
+    monkeypatch.setattr(
+        main_mod,
+        "_settings_section",
+        lambda name, default=None: {"world_db": world_db}
+        if name == "state"
+        else default,
+    )
+    source_health_path, status_summary_path = _fresh_readiness_files
+    if status_summary is None:
+        Path(status_summary_path).unlink()
+    else:
+        Path(status_summary_path).write_text(status_summary)
+
+    global_reason, family_reasons = main_mod._edli_live_entry_readiness_block(
+        _edli_cfg(source_health_path, status_summary_path)
+    )
+
+    assert global_reason is None
     assert family_reasons == {}
 
 
@@ -574,4 +609,34 @@ def test_readiness_block_samples_freshness_clock_at_each_file_read(
 
     assert global_reason is None
     assert family_reasons == {}
-    assert observed_now_args == [None, None]
+    assert len(observed_now_args) == 1
+    assert isinstance(observed_now_args[0], datetime)
+
+
+@pytest.mark.parametrize("status_summary", [None, "{malformed json"])
+def test_boot_readiness_ignores_status_summary_failures(
+    tmp_path, monkeypatch, _fresh_readiness_files, status_summary
+):
+    """A K2 operator read-model must not gate canonical BUY admission."""
+
+    world_db = _make_world_db(tmp_path)
+    monkeypatch.setattr(
+        main_mod,
+        "_settings_section",
+        lambda name, default=None: {"world_db": world_db}
+        if name == "state"
+        else default,
+    )
+    source_health_path, status_summary_path = _fresh_readiness_files
+    if status_summary is None:
+        Path(status_summary_path).unlink()
+    else:
+        with open(status_summary_path, "w") as handle:
+            handle.write(status_summary)
+
+    report = main_mod._assert_edli_stage_readiness(
+        _edli_cfg(source_health_path, status_summary_path)
+    )
+
+    assert report.status == main_mod.EDLI_STAGE_PASS
+    assert report.live_entries_allowed is True

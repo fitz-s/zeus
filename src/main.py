@@ -276,17 +276,10 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_LIVE_CAP_RESERVED",
     "EDLI_STAGE_SOURCE_HEALTH_STALE",
     "EDLI_STAGE_SOURCE_HEALTH_MISSING",
-    "EDLI_STAGE_STATUS_SUMMARY_STALE",
-    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
 EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS = 5.0
-_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
-    "EDLI_STAGE_STATUS_SUMMARY_STALE",
-    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
-)
 REQUIRED_EDLI_STAGE_FILES = (
     "edli_stage_source_health_json",
-    "edli_stage_status_json",
 )
 
 # Immutable process identity populated in main() at boot for receipts and operators.
@@ -1491,7 +1484,6 @@ def evaluate_edli_stage_readiness(
     forecasts_db_path: str | None = None,
     loaded_sha_file: str | None = None,
     source_health_json: str | None = None,
-    status_json: str | None = None,
     max_age_seconds: int = 15 * 60,
 ) -> EdliStageReadiness:
     del trade_db_path, forecasts_db_path
@@ -1532,15 +1524,6 @@ def evaluate_edli_stage_readiness(
                     now=now,
                 )
             )
-        if status_json:
-            reasons.extend(
-                _edli_stage_fresh_file_reasons(
-                    name="STATUS_SUMMARY",
-                    path=status_json,
-                    max_age_seconds=max_age_seconds,
-                    now=now,
-                )
-            )
     finally:
         conn.close()
 
@@ -1564,20 +1547,12 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         loaded_sha_file=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_loaded_sha_file")),
         source_health_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_source_health_json")),
-        status_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_status_json")),
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
-    # The boot-resilience logic (crash-loop antibody + status-summary deferral)
-    # is the one EDLI live readiness path. Operator arm remains its sole submit
-    # authority gate.
-    deferred = [
-        reason for reason in (report.reasons or ())
-        if reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
-    ]
-    blocking = [
-        reason for reason in (report.reasons or ())
-        if not reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
-    ]
+    # Operator arm remains the sole submit authority gate.  The report contains
+    # only canonical admission facts; status_summary.json is an operator
+    # read-model and is intentionally absent from this boot decision.
+    blocking = list(report.reasons or ())
     risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
     if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
         # BOOT CRASH-LOOP ANTIBODY (2026-06-12, 3 incidents same day): when
@@ -1600,21 +1575,6 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
     if risk_reasons:
         raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(risk_reasons))
-    if deferred:
-        logger.warning(
-            "EDLI live boot: status_summary freshness is deferred "
-            "until the scheduler emits its first genuine cycle pulse: %s",
-            ", ".join(deferred),
-        )
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
-            return EdliStageReadiness(
-                stage="edli_live",
-                status=EDLI_STAGE_WAITING,
-                live_entries_allowed=True,
-                submit_allowed=True,
-                scaleout_allowed=True,
-                reasons=tuple(deferred),
-            )
     if report.submit_allowed is not True:
         raise RuntimeError("EDLI_LIVE_SUBMIT_NOT_ALLOWED")
     if report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True:
@@ -1630,7 +1590,7 @@ def _edli_live_entry_readiness_block(
     Returns ``(global_block_reason, family_block_reasons)``:
       - ``global_block_reason`` blocks EVERY family this cycle (cap-reservation
         or pending-reconcile rows whose family_id could not be resolved --
-        fail-closed --, source-health/status-summary staleness, or any read
+        fail-closed --, source-health staleness, or any read
         error -- unreadable admission truth blocks BUY exactly as before).
       - ``family_block_reasons`` blocks ONLY the named family_id: a resolved
         stuck order narrows admission to its own family instead of the whole
@@ -1640,7 +1600,7 @@ def _edli_live_entry_readiness_block(
     # SCOPE: per-family when a pending_reconcile/RESERVED-cap row resolves to a
     # family_id (see the two `_edli_stage_*_families` helpers below); GLOBAL
     # (blocks BUY for every family this cycle) only for an unresolvable row,
-    # source-health/status-summary staleness, or any read error -- unreadable
+    # source-health staleness, or any read error -- unreadable
     # admission truth stays fail-closed at global scope. INV-47: an earlier
     # version ran a bare COUNT(*) here that scoped every RESERVED/pending row
     # globally, once blocking all 57 families for 20.97h; this per-family
@@ -1686,9 +1646,6 @@ def _edli_live_entry_readiness_block(
         source_health_json = _resolve_edli_stage_runtime_path(
             edli_cfg.get("edli_stage_source_health_json")
         )
-        status_json = _resolve_edli_stage_runtime_path(
-            edli_cfg.get("edli_stage_status_json")
-        )
         max_age_seconds = int(
             edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
         )
@@ -1729,15 +1686,6 @@ def _edli_live_entry_readiness_block(
                     _edli_stage_fresh_file_reasons(
                         name="SOURCE_HEALTH",
                         path=source_health_json,
-                        max_age_seconds=max_age_seconds,
-                        now=now,
-                    )
-                )
-            if status_json:
-                global_reasons.extend(
-                    _edli_stage_fresh_file_reasons(
-                        name="STATUS_SUMMARY",
-                        path=status_json,
                         max_age_seconds=max_age_seconds,
                         now=now,
                     )
