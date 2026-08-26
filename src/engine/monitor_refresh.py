@@ -613,8 +613,9 @@ def _monitor_snapshot_has_held_exit_evidence(
     active: object,
     closed: object,
     accepting_orders: object,
+    tradeability_status_json: object | None = None,
 ) -> bool:
-    """Accept an open, accepting snapshot as held-monitor quote evidence.
+    """Accept normalized executable or legacy open held-monitor quote evidence.
 
     ``executable_allowed`` is the entry/submit predicate.  A held Day0
     monitor may still consume a durable one-sided book: a positive bid is a
@@ -622,6 +623,13 @@ def _monitor_snapshot_has_held_exit_evidence(
     ask-only books become the typed zero-liquidation-value quote downstream.
     """
 
+    if _monitor_snapshot_is_executable(
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+        tradeability_status_json=tradeability_status_json,
+    ):
+        return True
     return bool(active) and not bool(closed) and accepting_orders == 1
 
 
