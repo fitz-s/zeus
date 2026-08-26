@@ -4326,6 +4326,26 @@ _DURABLE_LIVE_CAP_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
+# A durable reservation is RESOLVED the moment its token reached ANY position
+# phase: open phases carry the exposure inside portfolio truth (counted by
+# total_exposure_usd), and terminal phases mean the exposure came and went.
+# Either way it is no longer an unmaterialized in-flight claim. Distinct from
+# the open-only set above, which _ENTRY_HELD_POSITION_BLOCKING_PHASES also
+# consumes (extending THAT would wrongly treat settled history as held).
+# Open-only resolution leaked every FILLED->settled reservation forever (live
+# 2026-08-26: June rows still seeding phantom open cost into the tier0
+# aggregate ceiling months after settlement).
+_DURABLE_LIVE_CAP_RESOLVED_POSITION_PHASES = frozenset(
+    {
+        "active",
+        "day0_window",
+        "pending_exit",
+        "settled",
+        "economically_closed",
+        "admin_closed",
+        "voided",
+    }
+)
 _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
     {"pending_entry", *_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES}
 )
@@ -4560,7 +4580,7 @@ def _durable_live_cap_represented_pairs(
             columns = _position_current_columns(trade_conn)
             phase_sql, phase_params = _position_phase_or_positive_chain_clause(
                 columns,
-                _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
+                _DURABLE_LIVE_CAP_RESOLVED_POSITION_PHASES,
             )
             positive_terms = [
                 f"COALESCE({name}, 0) > 0"
