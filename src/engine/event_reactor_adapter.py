@@ -17348,6 +17348,28 @@ def _current_global_actuation_prepared_family(
         <= decision_time.astimezone(UTC)
     ):
         revalidation_time = selected_captured_at.astimezone(UTC)
+        # The winner carrier event is stamped at TARGETING time (milliseconds
+        # after the selection cut, _next_claim_carrier), so the family-binding
+        # availability assert (received_at <= decision_time) would reject the
+        # carrier against the bare certificate instant. Advance to the
+        # carrier's own stamps — same auction cycle, so the as-of world state
+        # (hourly vectors, ~40s-cadence observation prints) is unchanged and
+        # the reproduction stays bit-stable; still never past wall clock.
+        for stamp_field in ("available_at", "received_at"):
+            raw_stamp = getattr(event, stamp_field, None)
+            if not raw_stamp:
+                continue
+            try:
+                stamp = datetime.fromisoformat(
+                    str(raw_stamp).replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if stamp.tzinfo is None:
+                continue
+            stamp = stamp.astimezone(UTC)
+            if revalidation_time < stamp <= decision_time.astimezone(UTC):
+                revalidation_time = stamp
     else:
         revalidation_time = decision_time
     pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
