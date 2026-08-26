@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-26; last_reused=2026-08-26
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-26
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -2210,6 +2210,47 @@ def test_held_monitor_evidence_rejects_non_open_or_non_accepting_snapshot(
         closed=closed,
         accepting_orders=accepting_orders,
     )
+
+
+def test_held_monitor_accepts_normalized_executable_child_inactive_snapshot(
+    tmp_path,
+):
+    from src.engine import cycle_runtime
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "normalized-held-monitor.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="normalized-child-inactive",
+        selected_outcome_token_id="held-token",
+        yes_token_id="held-token",
+        no_token_id="held-no",
+        condition_id="held-condition",
+        captured_at=now_utc - timedelta(seconds=1),
+        active=False,
+        accepting_orders=True,
+        executable_allowed=True,
+    )
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        (_position(condition_id="held-condition", token_id="held-token"),),
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    )
+
+    assert books["held-token"]["asset_id"] == "held-token"
+    assert books["held-token"]["bids"][0]["price"] == "0.34"
+    conn.close()
 
 
 def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mismatch(

@@ -5208,6 +5208,7 @@ def _fresh_local_held_monitor_orderbooks(
                     active=row[3],
                     closed=row[4],
                     accepting_orders=row[5],
+                    tradeability_status_json=row[6],
                 ):
                     continue
                 book = json.loads(str(raw_book))
@@ -5395,6 +5396,7 @@ def _fresh_local_held_monitor_orderbooks(
                 active=row[3],
                 closed=row[4],
                 accepting_orders=row[5],
+                tradeability_status_json=row[6],
             ):
                 continue
             book = json.loads(str(row[1]))
