@@ -25,8 +25,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Decision-time executable side price must be strictly below this to be
-# Tier-0 eligible (plan item 6, rule 1).
-TIER0_MAX_ENTRY_PRICE: float = 0.25
+# Tier-0 eligible. 2026-08-26 window correction (operator-directed): the
+# original 0.25 cheap-only cap encoded a tail-lottery prior that the
+# fills-frequency audit REFUTED on this engine's own history — price<0.25
+# classes carry zero-to-negative edge (86 sub-0.05 fills, 2 wins) while the
+# only positive-edge class observed (price>0.75, +5.6pp) was categorically
+# banned by the cap. Risk is unchanged: the stake is still flat venue-min
+# shares, one entry per (city,target_date) cluster, 2% aggregate open-loss
+# ceiling, 10% drawdown auto-kill. The venue band [0.05,0.95] now bounds
+# admission; the per-fill max loss remains ~$1-5 either way.
+TIER0_MAX_ENTRY_PRICE: float = 0.95
 
 # Only a marketable/taker entry is admissible; a resting maker order can sit
 # at or rest toward the cap without ever crossing it, which is not the same

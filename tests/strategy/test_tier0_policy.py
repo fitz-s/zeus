@@ -57,7 +57,9 @@ def _admit(**over):
 
 # (a) price 0.30 candidate rejected typed
 def test_price_above_cap_rejected_typed():
-    reason = _admit(candidate=_facts(execution_price=0.30, limit_price=0.30))
+    # 2026-08-26 window correction: the cap is the venue band ceiling (0.95),
+    # not the refuted 0.25 tail-lottery prior. Above-band still rejects typed.
+    reason = _admit(candidate=_facts(execution_price=0.96, limit_price=0.96))
     assert reason is not None
     assert reason.startswith(TIER0_REJECT_PRICE_TOO_HIGH)
 
@@ -68,8 +70,15 @@ def test_price_at_cap_rejected():
     assert reason.startswith(TIER0_REJECT_PRICE_TOO_HIGH)
 
 
+def test_mid_and_rich_prices_now_admitted():
+    # The fills audit's only positive-edge class (price>0.75) must be
+    # admissible; risk is bounded by flat venue-min stake, not by price.
+    for price in (0.30, 0.60, 0.85, 0.94):
+        assert _admit(candidate=_facts(execution_price=price, limit_price=price)) is None
+
+
 def test_limit_price_crossing_cap_rejected_even_if_execution_price_ok():
-    reason = _admit(candidate=_facts(execution_price=0.10, limit_price=0.30))
+    reason = _admit(candidate=_facts(execution_price=0.10, limit_price=0.96))
     assert reason is not None
     assert reason.startswith(TIER0_REJECT_LIMIT_CROSSES_CAP)
 

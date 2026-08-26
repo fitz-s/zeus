@@ -131,13 +131,26 @@ def test_flag_on_maker_rest_rejected_typed(monkeypatch):
 
 
 def test_flag_on_price_above_cap_rejected_typed(monkeypatch):
+    # 2026-08-26 window correction: cap is the venue band ceiling (0.95).
+    monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: True)
+    reason = _drive_candidate_policy(
+        monkeypatch,
+        _candidate(execution_mode="TAKER_LIMIT", limit_price=0.96),
+    )
+    assert reason is not None
+    assert reason.startswith("TIER0_MAX_ENTRY_PRICE_EXCEEDED")
+
+
+def test_flag_on_rich_taker_now_admitted(monkeypatch):
+    # price>0.75 is the only positive-edge class in the fills audit; it must
+    # pass the tier0 price gate (risk bounded by flat venue-min stake).
     monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: True)
     reason = _drive_candidate_policy(
         monkeypatch,
         _candidate(execution_mode="TAKER_LIMIT", limit_price=0.90),
+        held_families=(),
     )
-    assert reason is not None
-    assert reason.startswith("TIER0_MAX_ENTRY_PRICE_EXCEEDED")
+    assert reason is None
 
 
 def test_flag_on_cheap_taker_unoccupied_cluster_reaches_capital_policy(monkeypatch):
