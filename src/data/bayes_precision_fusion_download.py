@@ -621,6 +621,12 @@ def bayes_precision_fusion_held_quota_priority():
     return _BPF_OPENMETEO_QUOTA_TRACKER.critical_lane()
 
 
+def bayes_precision_fusion_recovery_quota_priority():
+    """Borrow only the BPF transport quota outside the held-capital floor."""
+
+    return _BPF_OPENMETEO_QUOTA_TRACKER.recovery_lane()
+
+
 @dataclass(frozen=True)
 class BayesPrecisionFusionDownloadTarget:
     """One current-target the extra models are captured for."""

@@ -1381,6 +1381,11 @@ def maybe_refresh_day0_hourly_vectors(
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
+    from src.data.bayes_precision_fusion_download import (
+        bayes_precision_fusion_held_quota_priority,
+        bayes_precision_fusion_recovery_quota_priority,
+        bayes_precision_fusion_source_clock_quota_priority,
+    )
 
     def strict_window_start(city: Any, target_date: str) -> datetime | None:
         explicit = (remaining_window_starts or {}).get(
@@ -1490,6 +1495,9 @@ def maybe_refresh_day0_hourly_vectors(
             if city_index < critical_city_count:
                 quota_lane = "critical"
                 quota_context = quota_tracker.critical_lane()
+                transport_quota_context = (
+                    bayes_precision_fusion_held_quota_priority()
+                )
             elif city_index < critical_city_count + priority_city_count:
                 quota_lane = "priority"
                 if allow_priority_recovery:
@@ -1502,9 +1510,15 @@ def maybe_refresh_day0_hourly_vectors(
                     if quota_lane == "recovery"
                     else quota_tracker.priority_lane()
                 )
+                transport_quota_context = (
+                    bayes_precision_fusion_recovery_quota_priority()
+                    if quota_lane == "recovery"
+                    else bayes_precision_fusion_source_clock_quota_priority()
+                )
             else:
                 quota_lane = "maintenance"
                 quota_context = nullcontext()
+                transport_quota_context = nullcontext()
             with _REFRESH_LOCK:
                 retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(
                     refresh_key
@@ -1522,7 +1536,12 @@ def maybe_refresh_day0_hourly_vectors(
                 ):
                     skipped_throttle += 1
                     continue
-            with quota_context:
+            # The hourly builder delegates exact-run transport to the BPF
+            # module, which owns a separate process-local tracker instance over
+            # the same durable quota file.  Carry the selected economic lane to
+            # both trackers; otherwise priority/recovery work is silently
+            # reclassified as maintenance at the HTTP reservation boundary.
+            with quota_context, transport_quota_context:
                 if not quota_tracker.can_call():
                     skipped_quota += 1
                     if quota_lane in {"priority", "recovery"}:
