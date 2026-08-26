@@ -12609,9 +12609,21 @@ def _persist_global_candidate_executable_snapshot(
             ),
             token_id=candidate_token,
         )
-        if Decimal(str(fee_rate_fraction_from_details(fee_details))) != Decimal(
-            curve.fee_model.fee_rate
-        ):
+        # fee_details carries the venue SCHEDULE (the ceiling); the curve's
+        # fee_model carries the RESOLVED fee (realized-fill evidence first,
+        # schedule fallback — src/contracts/fee_authority.py). Provenance
+        # therefore means "the model rate is what the resolver derives from
+        # these details", not raw equality: comparing schedule to resolved
+        # directly rejects every candidate whenever evidence licenses a
+        # lower-than-schedule fee (live incident 2026-08-26 after the fee
+        # artifact refit: schedule 10% vs resolved 0%). Mirrors the durable
+        # JIT path, which already resolves before comparing.
+        from src.contracts.fee_authority import resolve_taker_fee_fraction
+
+        resolved_fee, _resolved_source = resolve_taker_fee_fraction(
+            fee_rate_fraction_from_details(fee_details)
+        )
+        if Decimal(str(resolved_fee)) != Decimal(curve.fee_model.fee_rate):
             raise ValueError("GLOBAL_JIT_SNAPSHOT_FEE_PROVENANCE_MISMATCH")
     else:
         fee_details = canonicalize_fee_details(
