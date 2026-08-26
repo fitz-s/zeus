@@ -82,6 +82,82 @@ def test_stale_evidence_degrades_to_schedule(artifact_path, monkeypatch):
     assert "evidence_stale" in source
 
 
+def test_stale_evidence_warns_once_per_episode(artifact_path, monkeypatch, caplog):
+    """Recurrence 2026-07-12 -> 2026-08-24: staleness was silent for ~6 weeks. The
+    fallback direction (schedule fee) is correct and must not change; only the
+    silence was the defect. One WARNING per staleness episode, not per call
+    (this path runs on the hot EV-decision loop)."""
+    import os
+
+    _write(artifact_path)
+    old = time.time() - (fa.MAX_EVIDENCE_AGE_DAYS + 5) * 86400
+    os.utime(artifact_path, (old, old))
+    fa._cache["mtime"] = None
+    monkeypatch.setattr(fa, "_stale_warned", False)
+
+    with caplog.at_level("WARNING", logger="src.contracts.fee_authority"):
+        fa.resolve_taker_fee_fraction(0.10)
+        fa.resolve_taker_fee_fraction(0.10)  # second call, same episode: no new warning
+    stale_records = [r for r in caplog.records if "evidence is stale" in r.message]
+    assert len(stale_records) == 1
+
+    # Recovery (fresh evidence) clears the episode flag.
+    _write(artifact_path)
+    os.utime(artifact_path, None)
+    fa._cache["mtime"] = None
+    fraction, source = fa.resolve_taker_fee_fraction(0.10)
+    assert source.startswith("realized_fills_n=")
+    assert fa._stale_warned is False
+
+    # A NEW staleness episode warns again.
+    os.utime(artifact_path, (old, old))
+    fa._cache["mtime"] = None
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="src.contracts.fee_authority"):
+        fa.resolve_taker_fee_fraction(0.10)
+    stale_records2 = [r for r in caplog.records if "evidence is stale" in r.message]
+    assert len(stale_records2) == 1
+
+
+def test_refit_writes_valid_licensable_artifact_from_fixture_db(tmp_path):
+    """The extracted refit() core (imported by the daemon scheduler) must produce the
+    same artifact shape the CLI writes, from a plain fixture DB -- no live zeus_trades.db
+    dependency."""
+    import sqlite3
+
+    import scripts.reconcile_realized_fees as recon
+
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE venue_order_facts (venue_order_id TEXT, state TEXT, "
+        "matched_size TEXT, observed_at TEXT, raw_payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE position_current (city TEXT, target_date TEXT, "
+        "entry_price REAL, shares REAL, cost_basis_usd REAL)"
+    )
+    payload = json.dumps({"trade_fact_proof": {"trade": {"fee_rate_bps": "0"}}})
+    for i in range(12):
+        conn.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?,?,?)",
+            (f"o{i}", "MATCHED", "5.0", "2026-08-01T00:00:00Z", payload),
+        )
+    conn.commit()
+    conn.close()
+
+    out_path = tmp_path / "fee_reconciliation.json"
+    artifact = recon.refit(out_path=str(out_path), db_path=str(db_path))
+
+    assert artifact["n_fills"] == 12
+    assert artifact["observed_max_fee_fraction"] == 0.0
+    assert artifact["n_fills"] >= fa.MIN_FILLS_TO_LICENSE
+    written = json.loads(out_path.read_text())
+    assert written == artifact
+    # No leftover tmp file from the atomic write.
+    assert not (tmp_path / "fee_reconciliation.json.tmp").exists()
+
+
 def test_reconciler_excludes_schedule_envelope_fields():
     """The reconciler must read TRADE-level fee fields only — fee_details.* is the
     venue schedule CAP, the exact confusion this artifact exists to kill."""

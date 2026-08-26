@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-25; last_reused=2026-08-25
 # Purpose: fit the realized taker-fee fraction from venue trade-level fee fields —
 #   the evidence artifact behind src/contracts/fee_authority.py.
 # Reuse: READ-ONLY over zeus_trades.db (file:...?mode=ro): scans MATCHED
 #   venue_order_facts raw payloads for trade.fee_rate_bps + cross-checks
 #   position_current cost_basis vs entry_price*shares residuals. Writes ONLY
-#   state/fee_reconciliation.json. Registered in SQLITE_CONNECT_ALLOWLIST.
-#   Rerun after new fills (manual or scheduled); the authority degrades to the
-#   venue schedule when evidence is stale (>30d) or thin (<10 fills).
-# Last reused/audited: 2026-06-12
+#   state/fee_reconciliation.json (atomic tmp+replace). Registered in
+#   SQLITE_CONNECT_ALLOWLIST. The fitting core (``refit``/``collect_evidence``) is
+#   imported and run DAILY in-process by
+#   src/ingest/post_trade_capital_daemon.py (job id
+#   realized_fee_evidence_refit) so the artifact never ages past the
+#   fee_authority MAX_EVIDENCE_AGE_DAYS=30 staleness cutoff again; this CLI
+#   remains the manual/ad-hoc entry point over the same core.
+# Last reused/audited: 2026-08-25
 # Authority basis: incident 2026-06-12 — CLOB schedule base_fee=1000bps consumed as
 #   the actual fee while 12/12 realized fills carried fee_rate_bps=0; calibration
 #   authority Task 2.3 (fit fee model from history, reconcile against fills).
+#   RECURRENCE 2026-07-12 -> 2026-08-24: the artifact was fitted once (2026-06-12)
+#   and never rerun; it aged past the 30-day staleness cutoff and fee_authority
+#   silently fell back to the phantom 10% schedule fee for ~6 weeks (40,519/40,519
+#   realized fills show fee_rate_bps=0). Daily in-daemon refit + a staleness
+#   warning in fee_authority (below) close the recurrence, not just the value.
 """Reconcile realized venue fees from fills -> state/fee_reconciliation.json.
 
 USAGE
@@ -118,13 +127,35 @@ def collect_evidence(db_path: str = TRADES_DB) -> dict:
     }
 
 
+def _write_artifact(artifact: dict, out_path: str) -> None:
+    """Atomic write (tmp + replace) — fee_authority reads this file's mtime live."""
+    tmp_path = f"{out_path}.tmp"
+    with open(tmp_path, "w") as fh:
+        json.dump(artifact, fh, indent=1)
+    os.replace(tmp_path, out_path)
+
+
+def refit(out_path: str = OUT_DEFAULT, db_path: str = TRADES_DB) -> dict:
+    """Fit the artifact from realized fills and write it. Importable core for schedulers.
+
+    Identical read-only DB access and write target as the CLI's non-dry-run path
+    (below) — extracted so a daemon can call it in-process without a subprocess.
+    """
+    artifact = collect_evidence(db_path)
+    _write_artifact(artifact, out_path)
+    return artifact
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Reconcile realized venue fees from fills.")
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--db", default=TRADES_DB)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
-    artifact = collect_evidence(args.db)
+    if args.dry_run:
+        artifact = collect_evidence(args.db)
+    else:
+        artifact = refit(args.out, args.db)
     summary = (
         f"n_fills={artifact['n_fills']} max_fee_bps={artifact['observed_fee_bps_max']} "
         f"fraction={artifact['observed_max_fee_fraction']} "
@@ -133,8 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         sys.stdout.write("DRY-RUN " + summary + "\n")
         return 0
-    with open(args.out, "w") as fh:
-        json.dump(artifact, fh, indent=1)
     sys.stdout.write(f"wrote {args.out}  {summary}\n")
     return 0
 
