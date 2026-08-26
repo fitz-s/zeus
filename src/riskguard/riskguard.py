@@ -5814,21 +5814,19 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        qkernel_market_relative_alpha_gate_reason = (
-            _market_relative_alpha_gate_reason(
-                probability_semantics_binding,
-                qkernel_market_relative_alpha_gate_evidence,
-                required_evalue=market_relative_alpha_evalue,
-            )
+        (
+            qkernel_market_relative_alpha_gate_reason,
+            qkernel_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            probability_semantics_binding,
+            qkernel_market_relative_alpha_gate_evidence,
+            required_evalue=market_relative_alpha_evalue,
         )
-        qkernel_market_relative_alpha_gate_revisions = (
+        qkernel_market_relative_alpha_unproven_revisions = (
             _market_relative_alpha_unproven_revisions(
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_evidence,
             )
-        )
-        qkernel_market_relative_alpha_unproven_revisions = (
-            qkernel_market_relative_alpha_gate_revisions
         )
         (
             day0_market_relative_alpha_shadow_rows,
@@ -6566,7 +6564,7 @@ def _tick_once() -> RiskLevel:
                     qkernel_market_relative_alpha_unproven_revisions
                 ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_pretrade_proof_gate"
+                    "revision_scoped_rejection_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
