@@ -3943,11 +3943,15 @@ def process_replacement_forecast_live_materialization_queue(
         and not read_plan.stale_conflict_batches
         and not read_plan.claim.selected_files
         and not read_plan.claim.request_snapshot
+        and (seed_dir is None or seed_limit == 0)
     ):
-        # SCOPE: a genuinely empty priority queue snapshot. DRAIN: the next
-        # priority tick rebuilds the plan as queued work arrives. RESET: any
-        # request snapshot, selected work, or ownership conflict re-enters its
-        # existing gated path.
+        # SCOPE: a genuinely empty priority queue with seed transport disabled.
+        # DRAIN: the next priority tick rebuilds the plan as queued work arrives.
+        # RESET: any request snapshot, selected work, ownership conflict, or
+        # enabled seed tranche re-enters its existing gated path.  When seed
+        # transport is enabled, fall through to the flocked bridge below so a
+        # Day0/held priority seed can become a published request; background
+        # intentionally excludes that priority identity.
         return _claim_only_report(read_plan.claim)
 
     claim: _MaterializationQueueClaim | None = None

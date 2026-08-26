@@ -2509,7 +2509,7 @@ def test_day0_priority_lane_claims_while_background_runner_is_blocked(
     priority_started = threading.Event()
 
     def runner(command):
-        path = Path(command[-2])
+        path = Path(command[command.index("--input-json") + 1])
         if path.name == ordinary_path.name:
             background_started.set()
             assert release_background.wait(2.0)

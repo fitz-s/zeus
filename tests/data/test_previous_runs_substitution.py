@@ -3023,6 +3023,87 @@ def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path,
     )
 
 
+def test_priority_empty_request_queue_bridges_day0_seed(tmp_path, monkeypatch):
+    """The priority lane must publish its own seed before request claiming."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    seed = {
+        **_minimal_seed(upgrade=False),
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-11T14:50:00+00:00",
+        "day0_observed_extreme_c": 30.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    seed_path = seed_dir / "Beijing.2026-06-12.high.day0.json"
+    seed_path.write_text(json.dumps(seed), encoding="utf-8")
+    monkeypatch.setattr(queue_mod, "_seed_source_cycle_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda payload, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(payload),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_validate_request_payload",
+        lambda _path: (True, "", ""),
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=1,
+        discover=False,
+        limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=lambda argv: subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"committed":true,"posterior_id":42,'
+                '"reactor_wake_published":true}\n'
+            ),
+            stderr="",
+        ),
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.seed_processed_count == 1
+    assert report.processed_count == 1
+    assert report.committed_posterior_count == 1
+    assert report.reactor_wake_published_count == 1
+    assert not seed_path.exists()
+    assert not tuple(request_dir.glob("*.json"))
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
