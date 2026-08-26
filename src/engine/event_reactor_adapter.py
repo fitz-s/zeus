@@ -24249,6 +24249,38 @@ def _is_price_tick_aligned(price: float, tick_size: float) -> bool:
     return abs(price - units * tick_size) < 1e-9
 
 
+def _live_cap_requested_notional_usd(
+    receipt: EventSubmissionReceipt,
+) -> float:
+    """Return the notional authorized by the receipt's sizing authority."""
+
+    economics = receipt.qkernel_execution_economics
+    if not _declares_global_current_state_execution_economics(economics):
+        return float(receipt.kelly_size_usd or 0.0)
+    rejection = _global_current_state_execution_economics_rejection_reason(
+        economics,
+        direction=str(receipt.direction or ""),
+    )
+    if rejection is not None:
+        raise ValueError(f"GLOBAL_LIVE_CAP_ECONOMICS_INVALID:{rejection}")
+    decision = getattr(receipt.global_actuation, "decision", None)
+    try:
+        sealed_notional = Decimal(str(economics["global_max_spend_usd"]))
+        decision_notional = Decimal(str(decision.max_spend_usd))
+    except (ArithmeticError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_LIVE_CAP_NOTIONAL_MISSING") from exc
+    if (
+        not sealed_notional.is_finite()
+        or not decision_notional.is_finite()
+        or sealed_notional <= 0
+        or decision_notional <= 0
+    ):
+        raise ValueError("GLOBAL_LIVE_CAP_NOTIONAL_INVALID")
+    if sealed_notional != decision_notional:
+        raise ValueError("GLOBAL_LIVE_CAP_NOTIONAL_BINDING_MISMATCH")
+    return float(sealed_notional)
+
+
 def _build_live_cap_certificate_from_ledger(
     *,
     event: OpportunityEvent,
@@ -24264,10 +24296,11 @@ def _build_live_cap_certificate_from_ledger(
     # 2026-06-08 operator directive: the tiny_live $5 notional + per-day/window
     # order-count caps are DELETED. Order size is governed SOLELY by the
     # structural fractional-Kelly sizing upstream (money_path_adapters.evaluate_kelly).
-    # The reservation records the (uncapped) Kelly notional; it clamps NOTHING.
+    # The reservation records the selected sizing notional (sealed global spend
+    # or legacy Kelly); it clamps NOTHING.
     # A one-tick floor still guards against a sub-tick request.
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
-    kelly_usd = float(receipt.kelly_size_usd or 0.0)
+    kelly_usd = _live_cap_requested_notional_usd(receipt)
     min_order_notional = max(price, 0.01)
     requested_notional = max(kelly_usd, min_order_notional)
     usage_id = LiveCapLedger._usage_id(event.event_id, LIVE_EXECUTION_RESERVATION_SCOPE)
