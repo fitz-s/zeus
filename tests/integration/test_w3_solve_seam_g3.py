@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-26
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -16345,6 +16345,75 @@ def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
         "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.96"
     )
     assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
+
+
+def test_global_live_cap_reserves_sealed_single_order_spend(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    economics = {
+        "global_actuation_identity": "actuation-a",
+        "global_max_spend_usd": "2.64",
+    }
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_yes",
+        c_fee_adjusted=0.11,
+        kelly_size_usd=0.11,
+        qkernel_execution_economics=economics,
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(max_spend_usd=Decimal("2.64"))
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_current_state_execution_economics_rejection_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
+    certificate = era._build_live_cap_certificate_from_ledger(
+        event=event,
+        receipt=receipt,
+        decision_time=_dt.datetime(2026, 8, 26, tzinfo=_dt.timezone.utc),
+        live_cap_conn=object(),
+        persist=False,
+    )
+
+    assert certificate.payload["reserved_notional_usd"] == pytest.approx(2.64)
+
+
+def test_global_live_cap_rejects_unbound_single_order_spend(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_yes",
+        qkernel_execution_economics={
+            "global_actuation_identity": "actuation-a",
+            "global_max_spend_usd": "2.64",
+        },
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(max_spend_usd=Decimal("2.65"))
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_current_state_execution_economics_rejection_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_LIVE_CAP_NOTIONAL_BINDING_MISMATCH",
+    ):
+        era._build_live_cap_certificate_from_ledger(
+            event=event,
+            receipt=receipt,
+            decision_time=_dt.datetime(2026, 8, 26, tzinfo=_dt.timezone.utc),
+            live_cap_conn=object(),
+            persist=False,
+        )
 
 
 def _install_global_jit_market_authority_fetches(
