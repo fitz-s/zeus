@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-23
+# Last reused or audited: 2026-08-25
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -24,6 +24,9 @@ used to bundle with exit monitoring:
     cascade-liveness required poller, not on the settlement-grading path)
   - current-regime capital evidence (5-min; canonical DB read-only evaluator,
     atomic observational artifact refresh, never order authority)
+  - realized-fee evidence refit (24h; scripts.reconcile_realized_fees.refit -- keeps
+    state/fee_reconciliation.json inside fee_authority.MAX_EVIDENCE_AGE_DAYS=30 so the
+    taker-fee EV authority never silently reverts to the phantom schedule fee again)
 
 All cycle bodies live in ``src.execution.post_trade_capital`` (payout_observer_cycle
 lives in ``src.ingest.payout_observer`` instead — it is a read-only chain observer,
@@ -404,6 +407,34 @@ def _current_regime_capital_evidence_isolated() -> dict[str, object]:
     return artifact
 
 
+def _realized_fee_evidence_refit_cycle() -> None:
+    """Daily refit of state/fee_reconciliation.json (the taker-fee EV authority evidence).
+
+    Incident 2026-06-12 -> stale 2026-07-12 -> unnoticed through 2026-08-24: the artifact
+    was fitted once and never rerun. Once it aged past
+    src.contracts.fee_authority.MAX_EVIDENCE_AGE_DAYS (30), the authority silently fell
+    back to the phantom venue-schedule fee (10%) for ~6 weeks while 40,519/40,519 realized
+    fills showed fee_rate_bps=0 -- taxing every EV calculation and suppressing thin-edge
+    candidates. This job removes the "someone remembers to rerun the reconciler" dependency
+    structurally: a daily refit keeps the artifact's age at roughly one day forever, an
+    order of magnitude inside the 30-day cutoff.
+
+    Runs in-process, unlike the network-bound siblings above: scripts.reconcile_realized_
+    fees.refit() is a single mode=ro SQLite pass over venue_order_facts (seconds, no
+    network, no unkillable thread) followed by an atomic tmp+replace write, so it needs no
+    subprocess kill boundary.
+    """
+    from scripts.reconcile_realized_fees import refit
+
+    artifact = refit()
+    logger.info(
+        "realized-fee evidence refit: n_fills=%d observed_max_fee_fraction=%s fitted_at=%s",
+        artifact["n_fills"],
+        artifact["observed_max_fee_fraction"],
+        artifact["fitted_at"],
+    )
+
+
 def _assert_cascade_liveness_contract(scheduler) -> None:
     """Boot-time fail-closed mirror of src/main.py:_assert_cascade_liveness_contract.
 
@@ -605,6 +636,19 @@ def main() -> None:
             datetime.now(timezone.utc)
             + timedelta(seconds=_CAPITAL_EVIDENCE_START_DELAY_SECONDS)
         ),
+    )
+    # Daily realized-fee evidence refit (fee_authority.py incident 2026-06-12,
+    # recurrence 2026-07-12 -> 2026-08-24: the artifact went stale and nobody reran the
+    # reconciler). Read-only + fast (single mode=ro pass over venue_order_facts), so it
+    # runs immediately at boot as well as every 24h -- a freshly restarted daemon should
+    # not wait a day to close a staleness window inherited from downtime.
+    _scheduler.add_job(
+        _scheduler_job("realized_fee_evidence_refit")(
+            _realized_fee_evidence_refit_cycle
+        ),
+        "interval", hours=24, id="realized_fee_evidence_refit",
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
     )
 
     # 60s liveness heartbeat (file-only). The heartbeat-sensor watches this file's mtime.

@@ -241,6 +241,85 @@ def test_capital_evidence_avoids_boot_writer_contention_then_keeps_cadence():
     assert next_run.right.func.id == "timedelta"
 
 
+def test_realized_fee_evidence_refit_scheduled_daily_and_fail_soft():
+    """The realized-fee evidence artifact must be refit daily in this daemon (fee_authority
+    incident 2026-06-12, recurrence 2026-07-12 -> 2026-08-24: the artifact went stale
+    because nobody reran the reconciler). Daily keeps its age an order of magnitude inside
+    fee_authority.MAX_EVIDENCE_AGE_DAYS=30. Isolated/fail-soft like the sibling jobs: wrapped
+    in the same _scheduler_job() uniform error-swallowing decorator so a refit failure logs
+    and never breaks the daemon."""
+    call = _add_job_call(_P4_DAEMON, "realized_fee_evidence_refit")
+    assert call is not None, (
+        "post_trade_capital_daemon must register a 'realized_fee_evidence_refit' job"
+    )
+    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+    assert isinstance(keywords.get("hours"), ast.Constant)
+    assert keywords["hours"].value == 24
+    assert isinstance(keywords.get("max_instances"), ast.Constant)
+    assert keywords["max_instances"].value == 1
+    assert isinstance(keywords.get("coalesce"), ast.Constant)
+    assert keywords["coalesce"].value is True
+
+    # Wrapped in the uniform _scheduler_job() decorator (fail-soft: logs, never raises
+    # into the scheduler), same as every sibling job.
+    assert isinstance(call.func, ast.Attribute) and call.func.attr == "add_job"
+    job_arg = call.args[0]
+    assert isinstance(job_arg, ast.Call)
+    assert isinstance(job_arg.func, ast.Call)
+    assert isinstance(job_arg.func.func, ast.Name) and job_arg.func.func.id == "_scheduler_job"
+
+
+def test_realized_fee_evidence_refit_calls_the_extracted_script_core(monkeypatch):
+    """The daemon cycle must call the SAME importable core the CLI uses (no drift between
+    manual and scheduled paths), and never raise into the scheduler on failure."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    calls = []
+
+    def _fake_refit():
+        calls.append("refit")
+        return {
+            "n_fills": 40519,
+            "observed_max_fee_fraction": 0.0,
+            "fitted_at": "2026-08-25T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "scripts.reconcile_realized_fees.refit", _fake_refit
+    )
+
+    daemon._realized_fee_evidence_refit_cycle()
+
+    assert calls == ["refit"]
+
+
+def test_realized_fee_evidence_refit_failure_is_scheduler_health_failure_not_a_crash(
+    monkeypatch,
+):
+    """A refit failure (e.g. a locked/unreadable trades DB) must be recorded as a
+    scheduler-health failure and never propagate out of the wrapped job -- the daemon
+    keeps running and the schedule keeps retrying tomorrow."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    trace = []
+
+    def _boom():
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr("scripts.reconcile_realized_fees.refit", _boom)
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
+    )
+
+    # _scheduler_job wraps and swallows; must not raise.
+    daemon._scheduler_job("realized_fee_evidence_refit")(
+        daemon._realized_fee_evidence_refit_cycle
+    )()
+
+    assert trace == [("realized_fee_evidence_refit", True, "db locked")]
+
+
 def test_boot_identity_precedes_immediate_scheduler_work():
     """Deploy identity must not wait behind boot-triggered network/capital jobs."""
     main_node = _find_func(_P4_DAEMON, "main")
