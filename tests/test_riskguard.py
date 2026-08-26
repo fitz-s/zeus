@@ -4494,12 +4494,12 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_actuating_sample_size"] == 11
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
-        assert details["recommended_strategy_gates"] == [
-            "forecast_qkernel_entry",
-        ]
-        assert details["market_relative_alpha_gate_reason"].startswith(
-            "market_relative_alpha_unproven("
-        )
+        # 2026-08-26 restore of the 2026-08-17 law (a7c893018): with no
+        # capital-law cohort evidence there is nothing REJECTED, so neither
+        # strategy earns a durable gate — the day0 assertions below already
+        # encoded this; qkernel now follows the same rejection-only law.
+        assert details["recommended_strategy_gates"] == []
+        assert details["market_relative_alpha_gate_reason"] is None
         assert details["day0_market_relative_alpha_gate_required"] is False
         assert details["day0_market_relative_alpha_gate_reason"] is None
         assert details["market_relative_alpha_observation"].startswith(
@@ -4694,7 +4694,9 @@ class TestStrategyBrierMinSampleContinued:
                 True,
                 "not_applicable",
                 "portfolio_brier_thin_sample_no_verdict",
-                ["forecast_qkernel_entry"],
+                # 2026-08-26 rejection-only law restore (a7c893018): a thin
+                # sample carries no REJECTED capital law, so no durable gate.
+                [],
             ),
             (
                 10,
@@ -7026,17 +7028,17 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert details["market_relative_alpha_evidence"]["status"] == "no_evidence"
         assert details["market_relative_alpha_evidence"]["rejected"] is False
         assert details["market_relative_alpha_admission_role"] == (
-            "revision_scoped_pretrade_proof_gate"
+            "revision_scoped_rejection_gate"
         )
-        assert details["market_relative_alpha_gate_reason"].startswith(
-            "market_relative_alpha_unproven("
-        )
+        # 2026-08-26 restore of the 2026-08-17 law ("gate only rejected
+        # capital laws", a7c893018): missing history is NOT a gate. The
+        # observation surface still reports the unproven state; only the
+        # durable entry gate requires an explicit rejection.
+        assert details["market_relative_alpha_gate_reason"] is None
         assert details["market_relative_alpha_observation"].startswith(
             "market_relative_alpha_unproven("
         )
-        assert details["market_relative_alpha_gate_confirmation"] == {
-            "forecast_qkernel_entry": True,
-        }
+        assert details["market_relative_alpha_gate_confirmation"] == {}
         assert details["day0_market_relative_alpha_admission_role"] == (
             "revision_scoped_rejection_gate"
         )
@@ -7050,9 +7052,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "expired",
             "legacy_day0_alpha_gate",
         )
-        assert gate_state["forecast_qkernel_entry"] == (
-            "active",
-            details["market_relative_alpha_gate_reason"],
+        assert not any(
+            strategy == "forecast_qkernel_entry" and status == "active"
+            for strategy, (status, _reason) in gate_state.items()
         )
 
 
