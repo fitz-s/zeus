@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-25
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-25; last_reused=2026-08-25
+# Last reused or audited: 2026-08-26
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-26; last_reused=2026-08-26
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -5206,6 +5206,87 @@ class TestRequestHashProvenance:
         )
         assert second.cities_skipped_throttle == (0 if priority_cities else 1)
         assert attempts == {"fetch": 1 + priority_cities}
+
+    @pytest.mark.parametrize(
+        (
+            "critical_cities",
+            "priority_cities",
+            "allow_recovery",
+            "priority_available",
+            "expected_lane",
+        ),
+        (
+            (1, 0, False, True, (True, False, False)),
+            (0, 1, False, True, (False, True, False)),
+            (0, 1, True, False, (False, False, True)),
+        ),
+        ids=("critical", "priority", "recovery"),
+    )
+    def test_hourly_fetch_carries_quota_lane_to_bpf_transport(
+        self,
+        monkeypatch,
+        critical_cities,
+        priority_cities,
+        allow_recovery,
+        priority_available,
+        expected_lane,
+    ):
+        """The exact-run transport must consume the same reserved lane as its caller."""
+        import src.data.bayes_precision_fusion_download as bpf
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+        caller_tracker = OpenMeteoQuotaTracker()
+        transport_tracker = OpenMeteoQuotaTracker()
+        monkeypatch.setattr(hv, "quota_tracker", caller_tracker)
+        monkeypatch.setattr(
+            bpf,
+            "_BPF_OPENMETEO_QUOTA_TRACKER",
+            transport_tracker,
+        )
+        monkeypatch.setattr(
+            caller_tracker,
+            "can_call",
+            lambda: (
+                priority_available
+                or caller_tracker._is_critical()
+                or caller_tracker._is_recovery()
+            ),
+        )
+        observed = []
+
+        def unavailable(*_args, **_kwargs):
+            observed.append(
+                (
+                    (
+                        caller_tracker._is_critical(),
+                        caller_tracker._is_priority(),
+                        caller_tracker._is_recovery(),
+                    ),
+                    (
+                        transport_tracker._is_critical(),
+                        transport_tracker._is_priority(),
+                        transport_tracker._is_recovery(),
+                    ),
+                )
+            )
+            return [], ""
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", unavailable)
+        hv._LAST_REFRESH_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_STREAK.clear()
+
+        hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            interval_s=0.0,
+            quota_critical_cities=critical_cities,
+            quota_priority_cities=priority_cities,
+            allow_priority_recovery=allow_recovery,
+        )
+
+        assert observed == [(expected_lane, expected_lane)]
 
     @pytest.mark.parametrize(
         ("city_name", "timezone_name"),
