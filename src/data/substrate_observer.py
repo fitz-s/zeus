@@ -1592,6 +1592,7 @@ def _refresh_pending_family_snapshots(
     include_money_risk_families: bool = True,
     promote_pending_urgency: bool = True,
     request_priority: RequestPriority = RequestPriority.SCAN,
+    capture_trigger_override: str | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -2670,6 +2671,7 @@ def _refresh_pending_family_snapshots(
                 cooperative_write_busy_timeout_ms=(
                     SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS
                 ),
+                capture_trigger_override=capture_trigger_override,
             )
         finally:
             write_conn.close()
@@ -3721,6 +3723,7 @@ def refresh_money_path_substrate_now(
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = False,
     force_refresh: bool = False,
+    capture_trigger_override: str | None = None,
 ) -> dict:
     """Synchronously refresh the exact executable substrate needed by a money-path decision.
 
@@ -3888,6 +3891,7 @@ def refresh_money_path_substrate_now(
                 if force_refresh
                 else RequestPriority.HELD_REDUCE_ONLY
             ),
+            capture_trigger_override=capture_trigger_override,
         )
         out = dict(summary or {})
         out.update(

@@ -111,6 +111,50 @@ Everything else (EDLI-warm outcomes not priority, not near-threshold, not keyfra
 > full-eligible API value for a future evaluator-owned producer. No synthetic
 > threshold classification was added.
 
+> **CROSSING-INSTRUMENTATION INCREMENT (shipped 2026-08-25).**
+> Audit finding: `executable_market_snapshot_compact` was 100%
+> `DISCOVERY_SWEEP` pre-dawn rows -- nothing looked at the venue book at the
+> instant a Day0 running-extreme crossing may have physically decided some
+> bins (Austin 2026-07-20: 10 crossings, zero post-cross book samples). New
+> full-eligible taxonomy value `DAY0_EXTREME_EVENT`:
+> - stamped by `src/engine/event_reactor_adapter.py:_maybe_capture_day0_extreme_book`,
+>   fired unconditionally on every `DAY0_EXTREME_UPDATED` event reaching
+>   submit, independent of whether that event becomes an actionable decision;
+> - reuses `refresh_money_path_substrate_now` (the existing decision-triggered
+>   targeted refresher) via a new optional `capture_trigger_override` param
+>   threaded through it, `_refresh_pending_family_snapshots`, and
+>   `refresh_executable_market_substrate_snapshots` -- no new fetch/write
+>   machinery;
+> - runs on a background daemon thread and swallows every exception: this is
+>   measurement instrumentation and must never affect event processing or
+>   money-path latency;
+> - rate-bound to one capture sweep per `(city, target_date, metric)` family
+>   per 60 seconds (in-process dict + lock) -- crossings can burst on
+>   consecutive METAR ticks;
+> - deliberately kept FULL, not compact: the compact table's
+>   `capture_trigger` column carries a hard SQL `CHECK` enumerating exactly
+>   two values, and SQLite has no `ALTER`-CHECK -- widening it means a
+>   live-table rebuild, the exact O(rows) migration cost this taxonomy's
+>   unconstrained full-table column was built to avoid (§3 below explains the
+>   full-table precedent). A rare, physically significant instant also
+>   benefits more from the real book than a top-5 summary;
+> - no `+5m/+15m/+60m` follow-up scheduler: consecutive METAR ticks re-fire
+>   the same event (~5s upstream cadence), so the 60s rate bound alone turns
+>   the natural event stream into an adequate time series.
+>
+> **Known gap, not closed by this increment:** bin numeric range
+> (`range_low`/`range_high`) IS available live on the `outcome` dict at
+> capture time (sourced from `market_events`, not the frozen
+> `market_topology_state` this audit's premise referenced) -- confirmed at
+> `src/data/market_scanner.py` outcome construction and
+> `src/data/market_topology_rows.py:210-211`. Persisting it onto a
+> snapshot was scoped out here: it requires either extending the shared
+> frozen `ExecutableMarketSnapshot` dataclass (~13 money-path readers depend
+> on its exact shape -- this spec's own compact-table design explicitly
+> avoided touching any of them) or a new side table with its own registry
+> migration. Both are architecture decisions beyond a measurement-only
+> increment; left for a follow-up operator-fenced increment.
+
 ## 3. Compact-form schema
 
 ```sql
