@@ -17325,12 +17325,37 @@ def _current_global_actuation_prepared_family(
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
     probability_use = _current_probability_use_for_global_candidate(candidate)
+    # Re-derive AT THE SELECTION INSTANT, not at revalidation wall-clock. The
+    # Day0 remaining-window mode makes q a continuous function of
+    # decision_time (window_start and the running-extreme clamp both move
+    # every second), so a re-derivation at any later instant produces a
+    # different predictive identity by construction and the strict
+    # content-equality below rejects EVERY Day0 ENTRY deterministically
+    # (live 2026-08-26: 24/24 preflights, all-unique witness hashes, fields
+    # q_version/posterior_identity_hash/source_truth_identity). The law's
+    # question here is "does canonical DB truth still reproduce the frozen
+    # decision certificate" (root AGENTS.md §0: the decision probability is
+    # frozen at decision time), so the reproduction must run on the same
+    # clock. Freshness is owned by the independent gates that remain on
+    # revalidation wall-clock: the max_age window on this same call, the
+    # 15-minute FAST_OBSERVATION_ENTRY_STALE entry contract, and the
+    # submit-bound JIT book recapture.
+    selected_captured_at = getattr(selected, "captured_at_utc", None)
+    if (
+        isinstance(selected_captured_at, datetime)
+        and selected_captured_at.tzinfo is not None
+        and selected_captured_at.astimezone(UTC)
+        <= decision_time.astimezone(UTC)
+    ):
+        revalidation_time = selected_captured_at.astimezone(UTC)
+    else:
+        revalidation_time = decision_time
     pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
         event,
         selected=selected,
         probability_use=probability_use,
         forecast_conn=forecast_conn,
-        decision_time=decision_time,
+        decision_time=revalidation_time,
     )
     required_condition_id = str(
         getattr(candidate, "condition_id", "") or ""
@@ -17343,7 +17368,7 @@ def _current_global_actuation_prepared_family(
         forecast_conn=forecast_conn,
         topology_conn=topology_conn,
         observation_conn=observation_conn,
-        decision_time=decision_time,
+        decision_time=revalidation_time,
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
         required_condition_id=required_condition_id,
@@ -17396,7 +17421,7 @@ def _current_global_actuation_prepared_family(
                 forecast_conn=forecast_conn,
                 topology_conn=topology_conn,
                 observation_conn=observation_conn,
-                decision_time=decision_time,
+                decision_time=revalidation_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 required_condition_id=required_condition_id,
                 allow_partial_deterministic=False,
