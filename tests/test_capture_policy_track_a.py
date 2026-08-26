@@ -161,6 +161,7 @@ def test_capture_trigger_column_unconstrained_but_api_validates(conn):
         "NEAR_THRESHOLD_MATCH",
         "KEYFRAME",
         "JIT_SUBMIT",
+        "DAY0_EXTREME_EVENT",
     ],
 )
 def test_insert_snapshot_stamps_capture_trigger(conn, trigger):
@@ -236,6 +237,19 @@ def test_discovery_cannot_enter_full_executable_journal(conn):
             conn,
             _snapshot(snapshot_id="snap-discovery-full"),
             capture_trigger="DISCOVERY_SWEEP",
+        )
+
+
+def test_day0_extreme_event_cannot_enter_compact_journal(conn):
+    """Crossing-instrumentation increment: DAY0_EXTREME_EVENT is full-eligible
+    only. The compact table's capture_trigger CHECK enumerates exactly two
+    values and SQLite has no ALTER-CHECK, so this trigger stays off that table
+    by construction rather than requiring a live-table rebuild."""
+    with pytest.raises(ValueError, match="compact-eligible"):
+        insert_compact_snapshot(
+            conn,
+            _snapshot(snapshot_id="snap-day0-extreme-compact"),
+            capture_trigger="DAY0_EXTREME_EVENT",
         )
 
 

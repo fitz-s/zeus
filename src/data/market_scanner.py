@@ -4923,6 +4923,7 @@ def refresh_executable_market_substrate_snapshots(
     background_snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
     background_fast_yield: bool = False,
     cooperative_write_busy_timeout_ms: int | None = None,
+    capture_trigger_override: str | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -4937,6 +4938,10 @@ def refresh_executable_market_substrate_snapshots(
       (ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS).  In practice the budget
       limits the wall-clock cost; ~90 outcomes are captured per cycle (~30 cities).
       Operators can raise the budget or tighten per-city cap via env var.
+
+    ``capture_trigger_override``, when set, stamps every capture in this call
+    with that trigger value instead of the usual PRIORITY_MARKER/DISCOVERY_SWEEP
+    resolution (capture_policy_spec.md crossing-instrumentation increment).
     """
 
     captured = captured_at or datetime.now(timezone.utc)
@@ -5578,7 +5583,10 @@ def refresh_executable_market_substrate_snapshots(
                             )
                             is not None
                         ),
-                        capture_trigger="PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP",
+                        capture_trigger=(
+                            capture_trigger_override
+                            or ("PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP")
+                        ),
                     )
                     # EDLI live-probe WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
                     # capture_executable_market_snapshot does per-outcome venue HTTP

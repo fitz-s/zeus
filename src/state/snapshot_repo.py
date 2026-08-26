@@ -194,6 +194,19 @@ CAPTURE_TRIGGER_TAXONOMY: frozenset[str] = frozenset({
     "KEYFRAME",
     "JIT_SUBMIT",
     "DISCOVERY_SWEEP",
+    # Crossing-instrumentation increment (2026-08-25): a DAY0_EXTREME_UPDATED
+    # running-extreme event marks the instant a temperature crossing may have
+    # physically decided some bins (audit: executable_market_snapshot_compact
+    # was 100% DISCOVERY_SWEEP pre-dawn rows with zero post-cross book samples
+    # for the 2026-07-20 Austin case). Deliberately FULL, not compact: (a) the
+    # compact table's capture_trigger column carries a hard SQL CHECK
+    # enumerating exactly two values -- widening it needs a live-table rebuild
+    # (SQLite has no ALTER-CHECK), the exact boot-scan/migration cost this
+    # taxonomy's unconstrained full-table column was built to avoid; (b) a
+    # rare, physically significant instant is worth the real book, not a
+    # top-5 summary. See src/engine/event_reactor_adapter.py
+    # _maybe_capture_day0_extreme_book for the rate-bounded producer.
+    "DAY0_EXTREME_EVENT",
 })
 FULL_CAPTURE_TRIGGERS = CAPTURE_TRIGGER_TAXONOMY - COMPACT_CAPTURE_TRIGGERS
 

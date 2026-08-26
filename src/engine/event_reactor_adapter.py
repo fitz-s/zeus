@@ -3596,6 +3596,77 @@ def _is_day0_lane_event_type(event_type: object) -> bool:
     return str(event_type or "").strip() in _DAY0_LANE_EVENT_TYPES
 
 
+# Crossing-instrumentation increment (2026-08-25, capture_policy_spec.md):
+# a DAY0_EXTREME_UPDATED event marks the instant a temperature crossing may
+# have physically decided some bins, and today nothing looks at the venue
+# book at that instant (audit: executable_market_snapshot_compact was 100%
+# DISCOVERY_SWEEP pre-dawn rows; Austin 2026-07-20 had 10 crossings with zero
+# post-cross book samples). This measurement capture must never affect event
+# processing, so the venue fetch runs on a background thread and every
+# failure is swallowed. Rate-bound to one sweep per (family, 60s): crossings
+# can burst on consecutive METAR ticks. No +5m/+15m/+60m follow-up scheduler
+# is added -- consecutive METAR ticks re-fire this same event (~5s upstream
+# cadence), so the 60s bound alone turns the natural event stream into an
+# adequate time series without new scheduling machinery.
+_DAY0_EXTREME_CAPTURE_RATE_LIMIT_SECONDS = 60.0
+_day0_extreme_capture_lock = threading.Lock()
+_day0_extreme_capture_last_fired: dict[tuple[str, str, str], float] = {}
+
+
+def _maybe_capture_day0_extreme_book(event: "OpportunityEvent") -> None:
+    """Fire-and-forget full-book capture for a DAY0_EXTREME_UPDATED family."""
+
+    payload = _payload(event)
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or "").strip().lower()
+    if not city or not target_date or metric not in {"high", "low"}:
+        return
+    family = (city, target_date, metric)
+    now = _time.monotonic()
+    with _day0_extreme_capture_lock:
+        last_fired = _day0_extreme_capture_last_fired.get(family)
+        if (
+            last_fired is not None
+            and now - last_fired < _DAY0_EXTREME_CAPTURE_RATE_LIMIT_SECONDS
+        ):
+            return
+        _day0_extreme_capture_last_fired[family] = now
+
+    def _run() -> None:
+        try:
+            from src.data.substrate_observer import refresh_money_path_substrate_now
+
+            refresh_money_path_substrate_now(
+                families=[family],
+                reason="day0_extreme_event_capture",
+                capture_trigger_override="DAY0_EXTREME_EVENT",
+            )
+        except Exception:  # noqa: BLE001 - measurement capture, never affects event processing
+            logging.getLogger(__name__).warning(
+                "day0 extreme book capture failed for %s/%s/%s",
+                city,
+                target_date,
+                metric,
+                exc_info=True,
+            )
+
+    try:
+        threading.Thread(
+            target=_run,
+            name="day0-extreme-book-capture",
+            daemon=True,
+        ).start()
+    except Exception:  # noqa: BLE001 - thread spawn failure must not affect event processing
+        logging.getLogger(__name__).warning(
+            "day0 extreme book capture: failed to start capture thread for %s/%s/%s",
+            city,
+            target_date,
+            metric,
+            exc_info=True,
+        )
+
+
 def _uses_replacement_probability_authority(
     payload: Mapping[str, object],
 ) -> bool:
@@ -7705,6 +7776,11 @@ def event_bound_live_adapter_from_trade_conn(
         _FORECAST_LANE_EVENT_TYPES: frozenset[str] = _FORECAST_DECISION_EVENT_TYPES
         is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
         is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+        if is_day0_lane:
+            # Unconditional on every DAY0_EXTREME_UPDATED reaching submit --
+            # deliberately placed before any block/veto branch below so a
+            # blocked-entry or vetoed cycle still captures the crossing book.
+            _maybe_capture_day0_extreme_book(event)
 
         if not is_forecast_lane and not is_day0_lane:
             _logging.getLogger(__name__).error(
