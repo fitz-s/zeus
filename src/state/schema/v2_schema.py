@@ -373,12 +373,31 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
             """
         )
         columns.add("runtime_layer")
-    has_non_live_rows = conn.execute(
+    if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
+                ON forecast_posteriors(runtime_layer, city, target_date, temperature_metric, computed_at)
+        """)
+    runtime_layer_index_exists = conn.execute(
         """
         SELECT 1
-          FROM forecast_posteriors
+          FROM sqlite_master
+         WHERE type = 'index'
+           AND name = 'idx_forecast_posteriors_runtime_layer_target'
+        """
+    ).fetchone() is not None
+    indexed_by = (
+        "INDEXED BY idx_forecast_posteriors_runtime_layer_target"
+        if runtime_layer_index_exists
+        else ""
+    )
+    has_non_live_rows = conn.execute(
+        f"""
+        SELECT 1
+          FROM forecast_posteriors {indexed_by}
          WHERE runtime_layer IS NULL
-            OR runtime_layer != 'live'
+            OR runtime_layer < 'live'
+            OR runtime_layer > 'live'
          LIMIT 1
         """
     ).fetchone()
@@ -386,12 +405,8 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
         conn.execute("""
             DELETE FROM forecast_posteriors
              WHERE runtime_layer IS NULL
-                OR runtime_layer != 'live'
-        """)
-    if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
-                ON forecast_posteriors(runtime_layer, city, target_date, temperature_metric, computed_at)
+                OR runtime_layer < 'live'
+                OR runtime_layer > 'live'
         """)
 
 
