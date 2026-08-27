@@ -4193,6 +4193,37 @@ def test_deploy_live_loaded_restart_allows_paused_current_monitor_handoff(
     assert "probability_degraded_positions=1" in detail
 
 
+def test_deploy_live_waits_for_post_sidecar_handoff_recovery(monkeypatch):
+    dl = _load("deploy_live_restart_handoff_wait", "deploy_live.py")
+    outcomes = iter(
+        [
+            (False, "restart_blocking_stale_position_count=1"),
+            (True, "loaded live-trading repair handoff verified"),
+        ]
+    )
+    calls = []
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda labels, *, live_was_loaded: (
+            calls.append((tuple(labels), live_was_loaded)) or next(outcomes)
+        ),
+    )
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+
+    ok, detail = dl._wait_for_loaded_live_restart_handoff(
+        [dl.LIVE_TRADING_LABEL],
+        timeout_seconds=5,
+    )
+
+    assert ok is True
+    assert "handoff verified" in detail
+    assert calls == [
+        ((dl.LIVE_TRADING_LABEL,), True),
+        ((dl.LIVE_TRADING_LABEL,), True),
+    ]
+
+
 @pytest.mark.parametrize(
     ("issue", "probability_only_count", "expected_green"),
     (
@@ -4751,6 +4782,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("prerequisite", tuple(labels)))
         return True, "sidecar code identity verified"
 
+    def _handoff(labels, **kwargs):
+        calls.append(("pre_stop_handoff", tuple(labels)))
+        return True, "loaded live-trading repair handoff verified"
+
     def _monitor(**kwargs):
         calls.append(("monitor", "post-start"))
         return True, "post-start monitor cadence verified"
@@ -4769,6 +4804,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
     monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity", _prerequisite)
+    monkeypatch.setattr(dl, "_wait_for_loaded_live_restart_handoff", _handoff)
     monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
     monkeypatch.setattr(dl, "_wait_for_post_start_edli_queue_progress", _queue)
     monkeypatch.setattr(dl, "_wait_for_post_start_monitor_cadence", _monitor)
@@ -4797,6 +4833,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("pause_entries", tuple(expanded_labels)),
         *[("launch", label) for label in preflight_prerequisites],
         ("prerequisite", preflight_prerequisites),
+        ("pre_stop_handoff", tuple(expanded_labels)),
         ("stop", dl.LIVE_TRADING_LABEL),
         ("stop", heartbeat_supervisor),
         *[("stop", label) for label in preflight_prerequisites],

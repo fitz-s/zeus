@@ -162,6 +162,9 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS", "90")
 )
+LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS", "90")
+)
 # The runtime deliberately spreads a full held book over as many as three
 # two-minute monitor cycles.  Four minutes cannot prove that six-minute
 # contract; allow one additional cycle for launch jitter and DB observation.
@@ -1189,6 +1192,35 @@ def _loaded_live_restart_obligation_gate(
         "loaded live-trading restart obligation gate verified: "
         "open_positions=0 nonterminal_commands=0",
     )
+
+
+def _wait_for_loaded_live_restart_handoff(
+    labels: list[str],
+    *,
+    timeout_seconds: float = LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait while the loaded daemon restores a safe post-sidecar handoff.
+
+    Reloading prerequisite book/ingest daemons can briefly age held-side quote
+    evidence. The old live-trading process is still loaded, entries are already
+    durably paused, and no stop has happened, so the safe action is to wait for
+    its next complete monitor pass. The stop gate itself is unchanged: timeout
+    or any persistent command/quote/identity defect still refuses the restart.
+    """
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_detail = "not checked"
+    while True:
+        ok, detail = _loaded_live_restart_obligation_gate(
+            labels,
+            live_was_loaded=True,
+        )
+        if ok:
+            return True, detail
+        last_detail = detail
+        if time.monotonic() >= deadline:
+            return False, last_detail
+        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
 def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
@@ -2310,9 +2342,8 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         # during which Day0 evidence and executable bids could both move.  The
         # process-absent window starts only after every prerequisite is ready.
         if live_was_loaded_before:
-            handoff_ok, handoff_detail = _loaded_live_restart_obligation_gate(
+            handoff_ok, handoff_detail = _wait_for_loaded_live_restart_handoff(
                 labels,
-                live_was_loaded=True,
             )
             if not handoff_ok:
                 print(
