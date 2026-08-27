@@ -1189,6 +1189,53 @@ def test_prior_complete_reader_resets_when_newer_cycle_is_complete(monkeypatch) 
     assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
 
 
+def test_prior_complete_reader_defers_non_carrier_current_row_to_current_path(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+        city="Jinan",
+    )
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row[0])
+    provenance["day0_provisional_observation"] = {
+        "active": True,
+        "metric": "high",
+        "unit": "C",
+        "source": "wu_icao_history",
+    }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance, sort_keys=True), posterior_id),
+    )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 6), eligible=_dt(6, 6))
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Jinan",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
+    )
+
+    assert result.ok is False
+    assert result.status == "NOT_APPLICABLE"
+    assert result.reason_code == "REPLACEMENT_PINNED_CURRENT_CARRIER_NOT_CLAIMED"
+
+
 def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute(monkeypatch) -> None:
     conn = _conn()
     old_complete_id = _insert_posterior(

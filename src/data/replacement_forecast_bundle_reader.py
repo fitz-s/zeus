@@ -191,6 +191,30 @@ def _decorrelated_providers_complete(provenance: Mapping[str, Any]) -> bool:
     ) is True
 
 
+def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
+    """Return whether this posterior actually carries held-pin authority."""
+
+    likelihood = provenance.get("day0_preliminary_report_survival_likelihood")
+    witness = provenance.get("day0_remaining_vector_witness")
+    return (
+        isinstance(likelihood, Mapping)
+        and isinstance(witness, Mapping)
+        and all(
+            provenance.get(field) not in (None, "")
+            for field in (
+                "day0_remaining_carrier_content_identity",
+                "day0_remaining_carrier_operator",
+                "day0_remaining_carrier_q",
+                "day0_remaining_carrier_probability_samples",
+                "day0_remaining_carrier_sample_count",
+                "day0_remaining_carrier_future_extremes_c",
+                "day0_remaining_carrier_path_error_sigma_c",
+                "day0_remaining_carrier_probability_cutoff_utc",
+            )
+        )
+    )
+
+
 def _held_pinned_provenance_reason(
     provenance: Mapping[str, Any],
     *,
@@ -1365,6 +1389,11 @@ def read_prior_complete_replacement_forecast_bundle(
     )
     if _decorrelated_providers_complete(latest_provenance):
         if raw_input_hwm_conn is not None:
+            if not _held_pinned_carrier_claimed(latest_provenance):
+                return ReplacementForecastBundleReadResult(
+                    "NOT_APPLICABLE",
+                    "REPLACEMENT_PINNED_CURRENT_CARRIER_NOT_CLAIMED",
+                )
             try:
                 provenance_reason = _held_pinned_provenance_reason(
                     latest_provenance,
