@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-08
+# Last reused/audited: 2026-08-27
 # Authority basis: W4.2 relocation of the persisted-cancel journal engine out of the retired
 #   src/execution/maker_rest_escalation.py into src/execution/venue_cancel_journal.py (still used
 #   by main._edli_boot_invalid_pending_entry_authority_cancel_once,
@@ -593,6 +593,73 @@ def test_edli_recovery_cycle_defers_screen_debt_without_prepared_adapter(monkeyp
     main_module._edli_command_recovery_cycle.__wrapped__()
 
     assert calls == []
+
+
+def test_edli_recovery_cycle_screen_cancel_debt_bypasses_monitor_yield(monkeypatch):
+    from types import SimpleNamespace
+
+    import src.main as main_module
+    import src.execution.command_recovery as recovery_module
+    import src.state.db as state_db
+    from src.execution import venue_cancel_journal as journal_module
+
+    class FakeConn:
+        def set_progress_handler(self, *_args):
+            return None
+
+        def close(self):
+            return None
+
+    recovery_calls = []
+    defer_calls = []
+
+    def fake_reconcile(**kwargs):
+        recovery_calls.append(kwargs)
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda name: defer_calls.append(name) or True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_active",
+        SimpleNamespace(is_set=lambda: True),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        SimpleNamespace(is_set=lambda: True),
+    )
+    monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", SimpleNamespace(_client=object()))
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 11)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 11)
+    monkeypatch.setattr(
+        main_module,
+        "_consume_edli_command_recovery_summary",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(recovery_module, "scheduled_recovery_budget_seconds", lambda: 1.0)
+    monkeypatch.setattr(recovery_module, "capital_blocking_command_count", lambda _conn: 0)
+    monkeypatch.setattr(recovery_module, "reconcile_unresolved_commands", fake_reconcile)
+    monkeypatch.setattr(
+        journal_module,
+        "find_screen_redecision_cancel_obligations",
+        lambda _conn: [{"command_id": "screen-debt", "venue_order_id": "order-debt"}],
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic: FakeConn(),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert [call["scope"] for call in recovery_calls] == ["live_tick"]
+    assert defer_calls == []
 
 
 def test_edli_recovery_cycle_selector_uses_absolute_deadline_and_typed_defer(monkeypatch):
