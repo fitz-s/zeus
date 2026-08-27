@@ -3126,8 +3126,8 @@ def _live_realized_capital_curve(
     hybrid close, never as if the full entry were held to settlement. Gross
     canonical P&L is reduced by the frozen fee schedule because venue facts
     may omit fees.
-    This retrospective curve never licenses entry for either strategy. Day0's
-    revision-scoped probation guard may consume it only to bound an unproven
+    This retrospective curve never licenses entry for either strategy. Their
+    revision-scoped probation guards may consume it only to bound an unproven
     revision to one sequential in-flight probe; current causal alpha and the
     normal executable economics/risk stack remain the positive authority.
     """
@@ -4545,14 +4545,16 @@ def _market_relative_alpha_rejection_gate_reason(
     return reason, revisions
 
 
-def _day0_revision_probation_gate_reason(
+def _revision_probation_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     capital_curve: Mapping[str, object],
+    *,
+    reason_prefix: str,
 ) -> tuple[str | None, tuple[str, ...]]:
-    """Bound an unproven Day0 revision to one in-flight capital probe.
+    """Bound an unproven probability revision to one in-flight capital probe.
 
-    SCOPE: only the exact current Day0 probability revision. DRAIN: the existing
+    SCOPE: only the exact current strategy probability revision. DRAIN: existing
     monitor/exit/settlement lanes close the in-flight position while the
     no-money counterfactual lane keeps accumulating exact-selector evidence.
     RESET: validated same-revision capital evidence removes the bound; before
@@ -4596,26 +4598,52 @@ def _day0_revision_probation_gate_reason(
         or status in {"capital_truth_degraded", "capital_truth_unavailable"}
     ):
         reason = (
-            "day0_revision_probation_truth_degraded("
+            f"{reason_prefix}_revision_probation_truth_degraded("
             f"status={status or 'missing'},blocked={blocked_positions},"
             f"revision={revision})"
         )
         return reason, (revision,)
     if open_positions > 0:
         reason = (
-            "day0_revision_probation_in_flight("
+            f"{reason_prefix}_revision_probation_in_flight("
             f"open={open_positions},realized={realized_positions},"
             f"revision={revision})"
         )
         return reason, (revision,)
     if realized_positions > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
         reason = (
-            "day0_revision_probation_nonpositive("
+            f"{reason_prefix}_revision_probation_nonpositive("
             f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
             f"revision={revision})"
         )
         return reason, (revision,)
     return None, ()
+
+
+def _day0_revision_probation_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    capital_curve: Mapping[str, object],
+) -> tuple[str | None, tuple[str, ...]]:
+    return _revision_probation_gate_reason(
+        semantics_binding,
+        causal_alpha_evidence,
+        capital_curve,
+        reason_prefix="day0",
+    )
+
+
+def _qkernel_revision_probation_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    capital_curve: Mapping[str, object],
+) -> tuple[str | None, tuple[str, ...]]:
+    return _revision_probation_gate_reason(
+        semantics_binding,
+        causal_alpha_evidence,
+        capital_curve,
+        reason_prefix="qkernel",
+    )
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -4978,6 +5006,7 @@ def _sync_riskguard_strategy_gate_actions(
             (
                 "market_relative_alpha_unproven(",
                 "day0_revision_probation_",
+                "qkernel_revision_probation_",
             )
         ):
             marker = ",revision="
@@ -5829,6 +5858,17 @@ def _tick_once() -> RiskLevel:
             )
         )
         (
+            qkernel_revision_probation_gate_reason,
+            qkernel_revision_probation_gate_revisions,
+        ) = _qkernel_revision_probation_gate_reason(
+            probability_semantics_binding,
+            qkernel_market_relative_alpha_gate_evidence,
+            qkernel_live_realized_capital_curve,
+        )
+        qkernel_revision_probation_gate_required = (
+            qkernel_revision_probation_gate_reason is not None
+        )
+        (
             day0_market_relative_alpha_shadow_rows,
             day0_market_relative_alpha_shadow_status,
         ) = _settled_day0_market_relative_alpha_shadow_rows(
@@ -6035,13 +6075,12 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Qkernel retains its existing pretrade-proof gate. Day0 bootstraps one
-        # exact current q/book/wealth probe per revision; while that probe is
-        # unresolved, or after its realized capital is nonpositive, the same
-        # revision is gated until exact-selector counterfactual evidence validates
-        # it. Every ordinary source, price, Brier, Kelly, global-ranking, and
-        # submit-time JIT boundary stays cumulative; held monitoring and exits
-        # remain outside this entry policy.
+        # Each strategy bootstraps one exact current q/book/wealth probe per
+        # revision. While that probe is unresolved, or after its realized
+        # capital is nonpositive, the same revision is gated until exact-selector
+        # counterfactual evidence validates it. Every ordinary source, price,
+        # Brier, Kelly, global-ranking, and submit-time JIT boundary stays
+        # cumulative; held monitoring and exits remain outside this entry policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -6080,6 +6119,15 @@ def _tick_once() -> RiskLevel:
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
                 ).update(revisions)
+        if qkernel_revision_probation_gate_reason is not None:
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "forecast_qkernel_entry",
+                qkernel_revision_probation_gate_reason,
+            )
+            recommended_strategy_gate_scopes.setdefault(
+                "forecast_qkernel_entry", set()
+            ).update(qkernel_revision_probation_gate_revisions)
         if day0_revision_probation_gate_reason is not None:
             _append_reason(
                 recommended_strategy_gate_reasons,
@@ -6241,7 +6289,10 @@ def _tick_once() -> RiskLevel:
         )
         market_relative_alpha_gate_confirmation: dict[str, bool] = {}
         day0_market_relative_alpha_gate_confirmation: dict[str, bool] = {}
-        if qkernel_market_relative_alpha_gate_reason is not None:
+        if (
+            qkernel_market_relative_alpha_gate_reason is not None
+            or qkernel_revision_probation_gate_required
+        ):
             market_relative_alpha_gate_confirmation = (
                 _confirm_active_durable_strategy_gates(
                     zeus_conn,
@@ -6264,7 +6315,10 @@ def _tick_once() -> RiskLevel:
                 (
                     "forecast_qkernel_entry",
                     market_relative_alpha_gate_confirmation,
-                    qkernel_market_relative_alpha_gate_reason is not None,
+                    (
+                        qkernel_market_relative_alpha_gate_reason is not None
+                        or qkernel_revision_probation_gate_required
+                    ),
                 ),
                 (
                     "day0_nowcast_entry",
@@ -6279,7 +6333,9 @@ def _tick_once() -> RiskLevel:
         )
         if (
             qkernel_market_relative_alpha_gate_reason is not None
+            or qkernel_revision_probation_gate_required
             or day0_market_relative_alpha_gate_required
+            or day0_revision_probation_gate_required
         ) and not required_alpha_gates_confirmed:
             # A missing durable localized gate must not turn missing capital
             # authority into permission. DATA_DEGRADED blocks new entries while
@@ -6563,8 +6619,14 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_unproven_revisions": (
                     qkernel_market_relative_alpha_unproven_revisions
                 ),
+                "qkernel_revision_probation_gate_required": (
+                    qkernel_revision_probation_gate_required
+                ),
+                "qkernel_revision_probation_gate_reason": (
+                    qkernel_revision_probation_gate_reason
+                ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_gate"
+                    "revision_scoped_rejection_or_probation_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
