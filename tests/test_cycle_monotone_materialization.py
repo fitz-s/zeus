@@ -1,8 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-08-23 (same-cycle late ENS baseline reseed;
+# Last reused or audited: 2026-08-27 (Day0 same-cycle input revision reseed;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -1489,6 +1489,123 @@ def test_single_family_monitor_does_not_recompute_fresh_same_cycle_posterior(
 
     assert report["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
     assert report["enqueued"] is False
+
+
+def test_single_family_day0_monitor_recomputes_matching_but_older_posterior(
+    tmp_path, monkeypatch
+) -> None:
+    """New Day0 inputs must outrank an older posterior with the same observation identity."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle_advance._ensure_day0_conditioning_identity_column(conn)
+    cycle = datetime(2026, 8, 12, 6, tzinfo=UTC)
+    observation_time = "2026-08-12T09:30:00+00:00"
+    conditioning = {
+        "source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "observed_extreme_c": 27.0,
+        "unit": "C",
+    }
+    identity = cycle_advance._day0_conditioning_identity(**conditioning)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Jinan",
+        target_date="2026-08-12",
+        metric="high",
+        cycle_iso=cycle.isoformat(),
+        computed_at="2026-08-12T09:40:00+00:00",
+    )
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET provenance_json = ?
+         WHERE city = 'Jinan' AND target_date = '2026-08-12' AND temperature_metric = 'high'
+        """,
+        (
+            json.dumps(
+                {
+                    "openmeteo_anchor_artifact_id": 1,
+                    "day0_conditioning": conditioning,
+                }
+            ),
+        ),
+    )
+    old_seed = tmp_path / "seeds" / "drained-day0-seed.enqueue-owner.json"
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues (
+            enqueued_at, city, target_date, metric, consumed_cycle_time,
+            target_cycle_time, held_position, seed_file,
+            day0_observed_extreme_observation_time,
+            day0_conditioning_identity_json
+        ) VALUES ('2026-08-12T09:40:00+00:00', 'Jinan', '2026-08-12',
+                  'high', ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            cycle.isoformat(),
+            cycle.isoformat(),
+            str(old_seed),
+            observation_time,
+            identity,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_day0_enqueue_owner_request_check",
+        lambda **kwargs: cycle_advance._Day0EnqueueOwnerRequestCheck(
+            cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE,
+            "ABSENT",
+        ),
+    )
+
+    def _fake_build_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Jinan",
+        target_date="2026-08-12",
+        metric="high",
+        computed_at=datetime(2026, 8, 12, 10, tzinfo=UTC),
+        day0_observed_extreme_c=27.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=observation_time,
+        day0_observed_extreme_sample_count=12,
+        day0_observed_extreme_unit="C",
+        held_position=True,
+        minimum_posterior_computed_at=datetime(2026, 8, 12, 9, 55, tzinfo=UTC),
+    )
+
+    assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+    assert report["enqueued"] is True
+    assert json.loads(Path(str(report["seed_file"])).read_text()) == {
+        "upgrade_trigger": "day0_observation_advanced",
+    }
 
 
 def test_single_family_monitor_reseed_promotes_existing_enqueue_to_held_priority(

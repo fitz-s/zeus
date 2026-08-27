@@ -1,5 +1,5 @@
 # Created: prior
-# Last audited: 2026-08-12
+# Last audited: 2026-08-27
 # Authority basis: current replacement probability and held-position redecision law.
 """Monitor refresh: recompute fresh probability for held positions.
 
@@ -1631,8 +1631,15 @@ def _perform_single_family_belief_reseed_failsoft(
             input_revision_status = "BELIEF_INPUT_REVISION_RESEED_PENDING"
         from src.engine.position_belief import monitor_belief_max_age_hours
 
-        minimum_posterior_computed_at = datetime.now(timezone.utc) - timedelta(
-            hours=monitor_belief_max_age_hours()
+        repair_started_at = datetime.now(timezone.utc)
+        # Day0 hourly vectors can advance without changing the observation identity or
+        # carrier cycle. Once current-q construction rejects the old vector witness,
+        # only a posterior built after this repair began can prove the gap drained.
+        minimum_posterior_computed_at = (
+            repair_started_at
+            if day0_payload
+            else repair_started_at
+            - timedelta(hours=monitor_belief_max_age_hours())
         )
         report = enqueue_single_family_cycle_advance_reseed(
             forecast_db=Path(str(forecast_db)),
