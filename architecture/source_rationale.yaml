@@ -2864,7 +2864,7 @@ files:
   src/state/decision_chain.py:
     zone: K2_runtime
     authority_role: decision_fact_logging
-    why: Records decision and rejection facts for explainability. As of 2026-08-25, every store_artifact/store_settlement_records write piggybacks a bounded, per-mode, tier0-anchor-respecting inline expiry (_inline_expire_decision_log) so decision_log is bounded by construction rather than needing periodic cleanup. The expiry candidate scan is forced through the canonical timestamp index; an id-ordered full scan inside the caller transaction can monopolize the 186GB trade DB writer and block exit/cancel journals.
+    why: Records decision and rejection facts for explainability. As of 2026-08-25, every store_artifact/store_settlement_records write piggybacks a bounded, per-mode, tier0-anchor-respecting inline expiry (_inline_expire_decision_log) so decision_log is bounded by construction rather than needing periodic cleanup. The expiry candidate scan is forced through the canonical timestamp index and walks backward from the cutoff; an id-ordered full scan or an oldest-first walk across unrelated modes inside the caller transaction can monopolize the trade DB writer and block exit/cancel journals.
     write_routes:
     - decision_artifact_write
     downstream:

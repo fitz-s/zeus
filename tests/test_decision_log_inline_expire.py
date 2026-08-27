@@ -140,6 +140,23 @@ def test_expire_forces_timestamp_index_in_money_path_transaction() -> None:
     )
 
 
+def test_expire_walks_backward_from_cutoff_not_oldest_history() -> None:
+    conn = _decision_log_conn()
+    expired = [_iso(8 + offset) for offset in range(_INLINE_EXPIRE_LIMIT + 1)]
+    for ts in expired:
+        _seed(conn, mode="exit_monitor", ts=ts)
+
+    _inline_expire_decision_log(conn, "exit_monitor")
+
+    # The cutoff-side 50 rows drain first, leaving the single oldest row. This
+    # is the behavioral guard against walking unrelated ancient history while
+    # a money-path writer transaction is open.
+    remaining = conn.execute(
+        "SELECT timestamp FROM decision_log WHERE mode = 'exit_monitor'"
+    ).fetchall()
+    assert remaining == [(expired[-1],)]
+
+
 def test_store_artifact_piggybacks_expiry() -> None:
     conn = _decision_log_conn()
     old = _iso(10)
