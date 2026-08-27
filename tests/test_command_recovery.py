@@ -21523,6 +21523,63 @@ class TestRecoveryResolutionTable:
         assert trade_case["p_posterior"] == pytest.approx(0.91)
         assert trade_case["entry_ci_width"] == pytest.approx(0.18)
 
+    def test_edli_trade_case_skips_event_stream_when_certificate_pair_is_complete(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+
+        event_id = "edli_evt_certificate_complete"
+        no_token_id = "tok-no"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:{no_token_id}:{no_token_id}:buy_no"
+        monkeypatch.setattr(
+            command_recovery,
+            "_edli_certificate_payload",
+            lambda *_args, **_kwargs: {"event_id": event_id},
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_edli_live_order_event_context",
+            lambda *_args, **_kwargs: pytest.fail(
+                "complete certificate authority must not scan the event stream"
+            ),
+        )
+        actionable = {
+            "event_id": event_id,
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "condition_id": "condition-test",
+            "direction": "buy_no",
+            "token_id": no_token_id,
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "bin_label": "Will the highest temperature in Madrid be 33C on June 8?",
+            "temperature_metric": "high",
+            "unit": "C",
+            "strategy_key": "forecast_qkernel_entry",
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": {
+                "payoff_q_point": 0.91,
+                "payoff_q_lcb": 0.82,
+            },
+        }
+
+        trade_case = command_recovery._edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": no_token_id,
+                "env_condition_id": "condition-test",
+                "env_yes_token_id": "tok-yes",
+                "env_no_token_id": no_token_id,
+            },
+            actionable_payload=actionable,
+        )
+
+        assert trade_case["p_posterior"] == pytest.approx(0.91)
+        assert trade_case["entry_method"] == "qkernel_spine"
+
     def test_edli_filled_entry_recovery_binds_exact_global_auction_receipt(
         self,
         conn,
