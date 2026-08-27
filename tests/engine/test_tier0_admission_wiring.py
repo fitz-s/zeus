@@ -1,4 +1,5 @@
 # Created: 2026-08-24
+# Last reused/audited: 2026-08-27
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 6. Integration wiring for src/strategy/tier0_policy.py's admission
 #   gate inside event_bound_live_adapter_from_trade_conn's
@@ -47,8 +48,8 @@ def _make_event(*, city="Dallas", target_date="2026-08-25", metric="high", event
     )
 
 
-def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
-    """Wire a minimal adapter and return candidate_policy_rejection_resolver(candidate)."""
+def _drive_candidate_policies(monkeypatch, candidates, *, held_families=()):
+    """Wire one adapter and return the policy reason for each candidate."""
 
     captured = {}
 
@@ -65,7 +66,8 @@ def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
     def fake_process(events, **kwargs):
         receipt = kwargs["prepare_event"](events[0], NOW)
         assert receipt.prepared_global_family is not None
-        captured["reason"] = kwargs["candidate_policy_rejection_resolver"](candidate)
+        resolve = kwargs["candidate_policy_rejection_resolver"]
+        captured["reasons"] = [resolve(candidate) for candidate in candidates]
         return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
 
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
@@ -90,7 +92,15 @@ def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
         auction_capital_authority=SimpleNamespace(),
     )
     adapter.process_global_batch((_make_event(),), NOW)
-    return captured["reason"]
+    return captured["reasons"]
+
+
+def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
+    return _drive_candidate_policies(
+        monkeypatch,
+        (candidate,),
+        held_families=held_families,
+    )[0]
 
 
 def _candidate(*, execution_mode="TAKER_LIMIT", limit_price=0.15):
@@ -184,6 +194,21 @@ def test_flag_on_different_cluster_not_blocked(monkeypatch):
         held_families=(("Miami", "2026-08-25", "high"),),
     )
     assert reason is None
+
+
+def test_same_cluster_candidates_all_reach_global_capital_comparison(monkeypatch):
+    """A preliminary pass is not a fill and must not reserve the cluster."""
+
+    monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: True)
+    reasons = _drive_candidate_policies(
+        monkeypatch,
+        (
+            _candidate(execution_mode="TAKER_LIMIT", limit_price=0.15),
+            _candidate(execution_mode="TAKER_LIMIT", limit_price=0.30),
+        ),
+        held_families=(),
+    )
+    assert reasons == [None, None]
 
 
 # Once-per-cycle start-equity seed / drawdown-kill hook (reversal_plan_tier0
