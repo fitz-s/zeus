@@ -511,6 +511,7 @@ _ACKED_ORDER_STATES = frozenset({
     CommandState.POST_ACKED.value,
 })
 _POSITIVE_MATCH_RECOVERABLE_COMMAND_STATES = _ACKED_ORDER_STATES | frozenset({
+    CommandState.CANCEL_PENDING.value,
     CommandState.REVIEW_REQUIRED.value,
 })
 _TERMINAL_POSITIVE_MATCH_COMMAND_STATES = frozenset({
@@ -11805,9 +11806,14 @@ def reconcile_matched_order_facts(
                 summary["errors"] += 1
                 continue
             review_required_command = str(row.get("state") or "").upper() == CommandState.REVIEW_REQUIRED.value
+            cancel_pending_command = str(row.get("state") or "").upper() == CommandState.CANCEL_PENDING.value
             terminal_positive_fact = _is_terminal_positive_match_candidate(row)
             existing_fill_trade_fact_count = _fill_trade_fact_count(conn, command_id)
-            if existing_fill_trade_fact_count > 0 and not (terminal_positive_fact or review_required_command):
+            if existing_fill_trade_fact_count > 0 and not (
+                terminal_positive_fact
+                or review_required_command
+                or cancel_pending_command
+            ):
                 summary["stayed"] += 1
                 continue
             point_order = _order_fact_point_payload(row) if terminal_positive_fact else None
@@ -11894,6 +11900,19 @@ def reconcile_matched_order_facts(
                 continue
             event_type = _matched_event_type(row, matched_size, venue_status=venue_status)
             if (
+                cancel_pending_command
+                and event_type != CommandEventType.FILL_CONFIRMED.value
+            ):
+                # A cancel/fill race may expose a positive prefix while the
+                # remainder is still ambiguous. Only a terminal full match can
+                # clear CANCEL_PENDING; partial evidence waits for the existing
+                # authenticated-trade/terminal-partial recovery lanes.
+                summary["stayed"] += 1
+                continue
+            review_clearance_command = (
+                review_required_command or cancel_pending_command
+            )
+            if (
                 review_required_command
                 and event_type == CommandEventType.PARTIAL_FILL_OBSERVED.value
                 and str(row.get("intent_kind") or "").upper() == "EXIT"
@@ -11928,7 +11947,7 @@ def reconcile_matched_order_facts(
                 observed_at = _now_iso()
             payload_reason = (
                 "review_cleared_confirmed_fill"
-                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                if review_clearance_command and event_type == CommandEventType.FILL_CONFIRMED.value
                 else (
                     "terminal_order_fact_positive_match"
                     if terminal_positive_fact
@@ -11937,7 +11956,7 @@ def reconcile_matched_order_facts(
             )
             proof_class = (
                 "review_required_matched_order_fact_with_positive_trade_fact"
-                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                if review_clearance_command and event_type == CommandEventType.FILL_CONFIRMED.value
                 else "point_order_matched_fill"
             )
             required_predicates = (
@@ -11947,7 +11966,7 @@ def reconcile_matched_order_facts(
                     "positive_trade_fact": True,
                     "matched_order_fact_positive": True,
                 }
-                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                if review_clearance_command and event_type == CommandEventType.FILL_CONFIRMED.value
                 else {}
             )
             if required_predicates:
@@ -12018,6 +12037,18 @@ def reconcile_matched_order_facts(
                 # an impossible command-event transition such as
                 # CANCELLED -> FILL_CONFIRMED.
                 if not (terminal_positive_fact or command_already_terminal):
+                    if cancel_pending_command:
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type=CommandEventType.REVIEW_REQUIRED.value,
+                            occurred_at=observed_at,
+                            payload={
+                                **payload,
+                                "reason": "cancel_pending_terminal_full_match",
+                                "prior_state": CommandState.CANCEL_PENDING.value,
+                            },
+                        )
                     append_event(
                         conn,
                         command_id=command_id,
