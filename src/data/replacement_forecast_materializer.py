@@ -62,6 +62,7 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
+from src.data.replacement_input_hwm import ensemble_source_authority_sql
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.replacement_pipeline_files import (
@@ -3095,6 +3096,18 @@ def _current_evidence_snapshot_row(
         carrier_cycle_dt
         - timedelta(hours=replacement_source_cycle_max_age_hours())
     ).isoformat()
+    source_predicate, source_params = ensemble_source_authority_sql(
+        ensemble_alias="ensemble_snapshot",
+        source_run_ref="source_run",
+        source_run_clock_columns=(
+            "imported_at",
+            "fetch_finished_at",
+            "captured_at",
+            "source_available_at",
+        ),
+        coverage_ref="source_run_coverage",
+        decision_time=request.computed_at,
+    )
     params: tuple[object, ...] = (
         request.city,
         _date_text(request.target_date),
@@ -3102,7 +3115,7 @@ def _current_evidence_snapshot_row(
         carrier_cycle,
         min_evidence_cycle,
         decision_at,
-        decision_at,
+        *source_params,
     )
     query = f"""
         SELECT {select_sql}
@@ -3120,20 +3133,7 @@ def _current_evidence_snapshot_row(
            AND COALESCE(source_cycle_time, issue_time) <= ?
            AND COALESCE(source_cycle_time, issue_time) >= ?
            AND COALESCE(source_available_at, available_at) <= ?
-           AND EXISTS (
-               SELECT 1
-                 FROM source_run AS source_run
-                WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
-                  AND source_run.status = 'SUCCESS'
-                  AND source_run.completeness_status = 'COMPLETE'
-                  AND source_run.partial_run = 0
-                  AND datetime(COALESCE(
-                          source_run.imported_at,
-                          source_run.fetch_finished_at,
-                          source_run.captured_at,
-                          source_run.source_available_at
-                      )) <= datetime(?)
-           )
+           AND {source_predicate}
          ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
                   COALESCE(source_available_at, available_at) DESC,
                   snapshot_id DESC

@@ -311,6 +311,152 @@ def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | Non
     return None
 
 
+def ensemble_source_authority_sql(
+    *,
+    ensemble_alias: str,
+    source_run_ref: str,
+    source_run_clock_columns: tuple[str, ...],
+    coverage_ref: str | None,
+    decision_time: datetime,
+) -> tuple[str, tuple[object, ...]]:
+    """Build the shared decision-time ENS source-authority predicate.
+
+    A whole-run COMPLETE row remains sufficient.  An incrementally published
+    run is also sufficient only for the exact snapshot whose target-local-day
+    coverage is already COMPLETE/LIVE_ELIGIBLE, contains every required step
+    and expected member, and was durably recorded before the decision cut.
+    """
+
+    run_clock_expr = (
+        f"source_run.{source_run_clock_columns[0]}"
+        if len(source_run_clock_columns) == 1
+        else "COALESCE("
+        + ", ".join(
+            f"source_run.{column}" for column in source_run_clock_columns
+        )
+        + ")"
+    )
+
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    complete_run = """
+        source_run.status = 'SUCCESS'
+        AND source_run.completeness_status = 'COMPLETE'
+        AND source_run.partial_run = 0
+    """
+    partial_target = "0"
+    partial_params: tuple[object, ...] = ()
+    if coverage_ref is not None:
+        partial_target = f"""
+                source_run.status IN ('PARTIAL', 'SUCCESS')
+                AND source_run.completeness_status IN ('PARTIAL', 'COMPLETE')
+                AND EXISTS (
+                    SELECT 1
+                      FROM {coverage_ref} AS source_coverage
+                     WHERE source_coverage.source_run_id = source_run.source_run_id
+                       AND source_coverage.source_id = 'ecmwf_open_data'
+                       AND source_coverage.release_calendar_key = source_run.release_calendar_key
+                       AND source_coverage.track = source_run.track
+                       AND lower(source_coverage.city) = lower({ensemble_alias}.city)
+                       AND source_coverage.target_local_date = {ensemble_alias}.target_date
+                       AND source_coverage.temperature_metric = {ensemble_alias}.temperature_metric
+                       AND source_coverage.completeness_status = 'COMPLETE'
+                       AND source_coverage.readiness_status = 'LIVE_ELIGIBLE'
+                       AND source_coverage.expected_members > 0
+                       AND source_coverage.observed_members >= source_coverage.expected_members
+                       AND datetime(source_coverage.computed_at) <= datetime(?)
+                       AND datetime(source_coverage.recorded_at) <= datetime(?)
+                       AND source_coverage.expires_at IS NOT NULL
+                       AND datetime(source_coverage.expires_at) > datetime(?)
+                       AND json_valid(source_coverage.expected_steps_json)
+                       AND json_valid(source_coverage.observed_steps_json)
+                       AND json_array_length(source_coverage.expected_steps_json) > 0
+                       AND source_coverage.observed_steps_json = source_coverage.expected_steps_json
+                       AND json_valid(source_coverage.snapshot_ids_json)
+                       AND json_array_length(source_coverage.snapshot_ids_json) = 1
+                       AND CAST(json_extract(source_coverage.snapshot_ids_json, '$[0]') AS TEXT)
+                           = CAST({ensemble_alias}.snapshot_id AS TEXT)
+                )
+        """
+        partial_params = (decision_iso, decision_iso, decision_iso)
+
+    return (
+        f"""
+        EXISTS (
+            SELECT 1
+              FROM {source_run_ref} AS source_run
+             WHERE source_run.source_run_id = {ensemble_alias}.source_run_id
+               AND datetime({run_clock_expr}) <= datetime(?)
+               AND (({complete_run}) OR ({partial_target}))
+        )
+        """,
+        (decision_iso, *partial_params),
+    )
+
+
+def ensemble_source_authority_predicate(
+    conn: sqlite3.Connection,
+    *,
+    ensemble_alias: str,
+    decision_time: datetime,
+) -> tuple[str, tuple[object, ...]] | None:
+    """Bind the shared ENS predicate to the available authority tables."""
+
+    source_run_ref = _authority_table_ref(conn, "source_run")
+    if source_run_ref is None:
+        return None
+    source_run_columns = _hwm_table_ref_columns(conn, source_run_ref)
+    required_run_columns = {
+        "source_run_id",
+        "status",
+        "completeness_status",
+        "partial_run",
+    }
+    clock_columns = tuple(
+        column
+        for column in (
+            "imported_at",
+            "fetch_finished_at",
+            "captured_at",
+            "source_available_at",
+        )
+        if column in source_run_columns
+    )
+    if not required_run_columns.issubset(source_run_columns) or not clock_columns:
+        return None
+
+    coverage_ref = _authority_table_ref(conn, "source_run_coverage")
+    if coverage_ref is not None:
+        coverage_columns = _hwm_table_ref_columns(conn, coverage_ref)
+        required_coverage_columns = {
+            "source_run_id",
+            "source_id",
+            "release_calendar_key",
+            "track",
+            "city",
+            "target_local_date",
+            "temperature_metric",
+            "expected_members",
+            "observed_members",
+            "expected_steps_json",
+            "observed_steps_json",
+            "snapshot_ids_json",
+            "completeness_status",
+            "readiness_status",
+            "computed_at",
+            "expires_at",
+            "recorded_at",
+        }
+        if not required_coverage_columns.issubset(coverage_columns):
+            coverage_ref = None
+    return ensemble_source_authority_sql(
+        ensemble_alias=ensemble_alias,
+        source_run_ref=source_run_ref,
+        source_run_clock_columns=clock_columns,
+        coverage_ref=coverage_ref,
+        decision_time=decision_time,
+    )
+
+
 def latest_raw_model_input_cycle(
     conn: sqlite3.Connection,
     *,
@@ -1824,53 +1970,16 @@ def _latest_eligible_ensemble_input_mark(
     if "contributes_to_target_extrema" in columns:
         predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
     if "source_run_id" in columns:
-        source_run_ref = _authority_table_ref(conn, "source_run")
-        source_run_columns = (
-            frozenset()
-            if source_run_ref is None
-            else _hwm_table_ref_columns(conn, source_run_ref)
+        source_authority = ensemble_source_authority_predicate(
+            conn,
+            ensemble_alias="ensemble_snapshot",
+            decision_time=decision_time,
         )
-        required_run_columns = {
-            "source_run_id",
-            "status",
-            "completeness_status",
-            "partial_run",
-        }
-        clock_columns = tuple(
-            column
-            for column in (
-                "imported_at",
-                "fetch_finished_at",
-                "captured_at",
-                "source_available_at",
-            )
-            if column in source_run_columns
-        )
-        if (
-            source_run_ref is None
-            or not required_run_columns.issubset(source_run_columns)
-            or not clock_columns
-        ):
+        if source_authority is None:
             return None
-        run_clock_expr = (
-            f"source_run.{clock_columns[0]}"
-            if len(clock_columns) == 1
-            else f"COALESCE({', '.join(f'source_run.{column}' for column in clock_columns)})"
-        )
-        predicates.append(
-            f"""
-            EXISTS (
-                SELECT 1
-                  FROM {source_run_ref} AS source_run
-                 WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
-                   AND source_run.status = 'SUCCESS'
-                   AND source_run.completeness_status = 'COMPLETE'
-                   AND source_run.partial_run = 0
-                   AND datetime({run_clock_expr}) <= datetime(?)
-            )
-            """
-        )
-        params.append(decision_time.astimezone(UTC).isoformat())
+        source_predicate, source_params = source_authority
+        predicates.append(source_predicate)
+        params.extend(source_params)
     try:
         row = conn.execute(
             f"""
