@@ -571,10 +571,16 @@ def test_edli_recovery_cycle_defers_screen_debt_without_prepared_adapter(monkeyp
             return None
 
     calls = []
+    prewarm_calls = []
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
     monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", None)
+    monkeypatch.setattr(
+        main_module,
+        "_start_venue_order_truth_prewarm_async",
+        lambda: prewarm_calls.append(True) or "started",
+    )
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda *, deadline_monotonic: FakeConn())
     monkeypatch.setattr(recovery_module, "capital_blocking_command_count", lambda _conn: 0)
     monkeypatch.setattr(
@@ -593,6 +599,50 @@ def test_edli_recovery_cycle_defers_screen_debt_without_prepared_adapter(monkeyp
     main_module._edli_command_recovery_cycle.__wrapped__()
 
     assert calls == []
+    assert prewarm_calls == [True]
+
+
+def test_venue_order_truth_prewarm_prepares_external_runtime_adapter(monkeypatch):
+    """External heartbeat ownership must not leave command recovery unauthenticated."""
+    from types import SimpleNamespace
+
+    import src.main as main_module
+
+    adapter = SimpleNamespace(_client=None)
+
+    def prepare_order_truth_reader():
+        adapter._client = object()
+
+    adapter.prepare_order_truth_reader = prepare_order_truth_reader
+
+    class Client:
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+            self._alive = False
+
+        def start(self):
+            self._alive = True
+            try:
+                self._target()
+            finally:
+                self._alive = False
+
+        def is_alive(self):
+            return self._alive
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
+    monkeypatch.setattr(main_module, "_venue_heartbeat_adapter", None)
+    monkeypatch.setattr(main_module, "_venue_order_truth_prewarm_thread", None)
+
+    assert main_module._start_venue_order_truth_prewarm_async() == "started"
+    assert main_module._venue_heartbeat_adapter is adapter
+    assert adapter._client is not None
+    assert main_module._start_venue_order_truth_prewarm_async() == "ready"
 
 
 def test_edli_recovery_cycle_screen_cancel_debt_bypasses_monitor_yield(monkeypatch):

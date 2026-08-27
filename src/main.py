@@ -17,7 +17,7 @@ Advisory file lock infrastructure (src.data.job_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-08-27
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
 #   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -2352,6 +2352,8 @@ def _status_summary_refresh_can_defer() -> bool:
 _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
 _venue_heartbeat_thread = None
+_venue_order_truth_prewarm_lock = threading.Lock()
+_venue_order_truth_prewarm_thread = None
 _edli_reactor_active_lock = threading.Lock()
 _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 30.0
 _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 1.0
@@ -2454,6 +2456,57 @@ def _ensure_venue_read_side_adapter():
 
         _venue_heartbeat_adapter = PolymarketClient()._ensure_v2_adapter()
     return _venue_heartbeat_adapter
+
+
+def _venue_order_truth_adapter_ready() -> bool:
+    """Return whether this process can perform bounded authenticated order reads."""
+
+    return (
+        _venue_heartbeat_adapter is not None
+        and getattr(_venue_heartbeat_adapter, "_client", None) is not None
+    )
+
+
+def _start_venue_order_truth_prewarm_async() -> str:
+    """Prepare recovery's authenticated adapter outside its bounded deadline."""
+
+    global _venue_order_truth_prewarm_thread
+
+    if _venue_order_truth_adapter_ready():
+        return "ready"
+    with _venue_order_truth_prewarm_lock:
+        if _venue_order_truth_adapter_ready():
+            return "ready"
+        if (
+            _venue_order_truth_prewarm_thread is not None
+            and _venue_order_truth_prewarm_thread.is_alive()
+        ):
+            return "in_progress"
+
+        def _runner() -> None:
+            try:
+                adapter = _ensure_venue_read_side_adapter()
+                prepare = getattr(adapter, "prepare_order_truth_reader", None)
+                if not callable(prepare):
+                    raise RuntimeError(
+                        "venue adapter lacks authenticated order-truth prewarm"
+                    )
+                prepare()
+                if not _venue_order_truth_adapter_ready():
+                    raise RuntimeError(
+                        "authenticated venue client remained unavailable after prewarm"
+                    )
+                logger.info("venue order-truth adapter prewarm completed")
+            except Exception as exc:  # noqa: BLE001 - next recovery cadence retries.
+                logger.warning("venue order-truth adapter prewarm failed: %r", exc)
+
+        _venue_order_truth_prewarm_thread = threading.Thread(
+            target=_runner,
+            name="venue-order-truth-prewarm",
+            daemon=True,
+        )
+        _venue_order_truth_prewarm_thread.start()
+        return "started"
 
 
 def _refresh_global_collateral_snapshot_if_due(
@@ -7604,17 +7657,25 @@ def _edli_command_recovery_cycle() -> None:
         # Reuse only the client prepared by the live heartbeat/runtime owner.
         # A lazy adapter may derive credentials or perform SDK I/O; that work is
         # forbidden inside this bounded recovery lane.
+        # SCOPE: this process's authenticated order-truth adapter only; the
+        # missing client cannot authorize, cancel, or mutate any order. DRAIN:
+        # one daemon thread prepares it outside the recovery deadline and the
+        # next 60-second cadence retries the durable cancel obligation. RESET:
+        # adapter._client becomes non-None; a failed preparation is retried on
+        # each cadence and process restart starts from the same explicit state.
+        if not _venue_order_truth_adapter_ready():
+            prewarm_status = _start_venue_order_truth_prewarm_async()
+            logger.warning(
+                "edli_command_recovery: authenticated adapter unavailable; "
+                "prewarm=%s; leaving screen cancel debt for the next cadence",
+                prewarm_status,
+            )
+            return
         try:
             recovery_client = PolymarketClient()
             recovery_adapter = _venue_heartbeat_adapter
-            if recovery_adapter is None:
-                raise RuntimeError(
-                    "authenticated venue adapter was not prewarmed by the live runtime"
-                )
-            if getattr(recovery_adapter, "_client", None) is None:
-                raise RuntimeError(
-                    "authenticated venue client was not prewarmed by the live runtime"
-                )
+            if recovery_adapter is None or getattr(recovery_adapter, "_client", None) is None:
+                raise RuntimeError("authenticated venue adapter readiness regressed")
             recovery_client._v2_adapter = recovery_adapter
         except Exception as exc:  # noqa: BLE001 - auth loss keeps debt for retry
             logger.warning(
