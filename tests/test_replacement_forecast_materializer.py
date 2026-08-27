@@ -133,6 +133,33 @@ def _ensure_source_run_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_source_run_coverage_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL,
+            completeness_status TEXT NOT NULL,
+            readiness_status TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalDayAnchor:
     local_tz = timezone(timedelta(hours=8))
     contributing_local_times = tuple(datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in range(24))
@@ -2995,13 +3022,27 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE source_run (
             source_run_id TEXT PRIMARY KEY,
-            source_id TEXT, track TEXT, source_cycle_time TEXT,
+            source_id TEXT, track TEXT, release_calendar_key TEXT,
+            source_cycle_time TEXT,
             source_available_at TEXT, fetch_finished_at TEXT, captured_at TEXT,
             imported_at TEXT,
             expected_count INTEGER, observed_count INTEGER,
             completeness_status TEXT, partial_run INTEGER, raw_payload_hash TEXT,
             manifest_hash TEXT, status TEXT, reason_code TEXT
         );
+        CREATE TABLE source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT, source_id TEXT, release_calendar_key TEXT,
+            track TEXT, city TEXT, target_local_date TEXT,
+            temperature_metric TEXT, expected_members INTEGER,
+            observed_members INTEGER, expected_steps_json TEXT,
+            observed_steps_json TEXT, snapshot_ids_json TEXT,
+            completeness_status TEXT, readiness_status TEXT,
+            computed_at TEXT, expires_at TEXT, recorded_at TEXT
+        );
+        CREATE INDEX idx_source_run_coverage_test_run
+            ON source_run_coverage(source_run_id, city, target_local_date,
+                                   temperature_metric);
         CREATE TABLE raw_forecast_artifacts (
             artifact_id INTEGER PRIMARY KEY,
             source_id TEXT, product_id TEXT, data_version TEXT,
@@ -3029,6 +3070,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE unrelated_writer (value INTEGER);
         INSERT INTO source_run VALUES (
             'b0-run', 'ecmwf_open_data', 'mx2t6_high',
+            'ecmwf_open_data:mx2t6_high:short',
             '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
             '2026-06-06T02:00:00+00:00', '2026-06-06T02:00:00+00:00',
             '2026-06-06T02:00:00+00:00',
@@ -3037,6 +3079,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         );
         INSERT INTO source_run VALUES (
             'om9-run', 'openmeteo', 'ifs9_high',
+            'openmeteo:ifs9_high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
             '2026-06-06T03:00:00+00:00',
@@ -3380,7 +3423,7 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     assert snapshot_id == snapshot.snapshot_id == 101
 
 
-def test_current_ensemble_requires_complete_source_run_before_probability_authority() -> None:
+def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial_run() -> None:
     from src.data.replacement_forecast_materializer import (
         read_current_evidence_snapshot_identity,
     )
@@ -3388,6 +3431,7 @@ def test_current_ensemble_requires_complete_source_run_before_probability_author
 
     conn = _conn()
     _ensure_source_run_table(conn)
+    _ensure_source_run_coverage_table(conn)
     request = _request()
 
     def write_run(
@@ -3452,6 +3496,54 @@ def test_current_ensemble_requires_complete_source_run_before_probability_author
         )
 
     assert selected() == (None, None)
+
+    conn.execute(
+        """
+        INSERT INTO source_run_coverage VALUES (
+            'coverage-1', 'ens-run', 'ecmwf_open_data',
+            'ecmwf_open_data:mx2t6_high:short',
+            'mx2t6_high_short_horizon', 'Shanghai', '2026-06-07', 'high',
+            51, 51, '[0,3,6]', '[0,3,6]', '[101]',
+            'COMPLETE', 'LIVE_ELIGIBLE',
+            '2026-06-06T03:10:00+00:00',
+            '2026-06-06T06:00:00+00:00',
+            '2026-06-06T03:10:00+00:00'
+        )
+        """
+    )
+    identity, cycle = selected()
+    assert identity is not None
+    assert identity.snapshot_id == 101
+    assert cycle == _dt(0)
+
+    conn.execute(
+        "UPDATE source_run_coverage SET observed_steps_json = '[0,3]'"
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        "UPDATE source_run_coverage SET observed_steps_json = 'not-json'"
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        "UPDATE source_run_coverage SET observed_steps_json = '[0,3,6]', "
+        "expected_steps_json = '[]'"
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        "UPDATE source_run_coverage SET expected_steps_json = '[0,3,6]', "
+        "snapshot_ids_json = '[999]'"
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        "UPDATE source_run_coverage SET snapshot_ids_json = '[101]'"
+    )
+    conn.execute(
+        "UPDATE source_run_coverage SET recorded_at = '2026-06-06T05:00:00+00:00'"
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        "UPDATE source_run_coverage SET recorded_at = '2026-06-06T03:10:00+00:00'"
+    )
 
     write_run(
         status="SUCCESS",
@@ -3986,6 +4078,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
 
     conn = _conn()
     _ensure_source_run_table(conn)
+    _ensure_source_run_coverage_table(conn)
     write_source_run(
         conn,
         source_run_id="ens-run",
