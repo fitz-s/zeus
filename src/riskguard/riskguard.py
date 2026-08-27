@@ -4565,18 +4565,17 @@ def _revision_probation_gate_reason(
 
     if semantics_binding.get("status") != "ok":
         return None, ()
-    revision = str(semantics_binding.get("current_revision") or "").strip()
-    if not revision:
-        return None, ()
-    if revision not in _market_relative_alpha_unproven_revisions(
-        semantics_binding,
-        causal_alpha_evidence,
-    ):
-        return None, ()
-
     curve_revision = str(
         capital_curve.get("probability_semantics_revision") or ""
     ).strip()
+    unproven_revisions = _market_relative_alpha_unproven_revisions(
+        semantics_binding,
+        causal_alpha_evidence,
+    )
+    if not curve_revision or curve_revision not in unproven_revisions:
+        return None, ()
+    revision = curve_revision
+
     status = str(capital_curve.get("status") or "").strip()
     try:
         open_positions = int(capital_curve.get("open_position_count") or 0)
@@ -6626,7 +6625,7 @@ def _tick_once() -> RiskLevel:
                     qkernel_revision_probation_gate_reason
                 ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_or_probation_gate"
+                    "revision_scoped_rejection_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
