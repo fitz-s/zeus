@@ -37410,3 +37410,48 @@ def test_economics_sized_on_the_raw_q_cannot_even_be_constructed():
             win_probability_mean=0.70,
             loss_probability_mean=0.30,
         )
+
+
+def test_venue_metadata_stale_exclusion_is_constructible_inside_live_epoch():
+    """Live regression 2026-08-27: 'STALE' is reserved for an expired epoch.
+
+    A held token whose venue metadata is stale inside a LIVE book epoch used
+    to be classified book_state="STALE", which the coverage invariant rejects
+    (STALE requires decision_at_utc > book_deadline_at_utc). Every auction
+    batch carrying such a holding failed wholesale with
+    GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID and was requeued forever. The
+    venue-level detail lives in the reason; the state is current
+    non-executability.
+    """
+
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    excluded = GlobalHoldingAuctionCoverage(
+        position_id="position-venue-stale",
+        family_key="family-1",
+        bin_id="20C",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="NO",
+        token_id="token-no-1",
+        held_shares=Decimal("8"),
+        ledger_snapshot_id="ledger-1",
+        probability_witness_identity=None,
+        probability_content_identity=None,
+        wealth_economic_identity="wealth-1",
+        selection_epoch_identity="epoch-1",
+        book_epoch_identity="book-1",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+        book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+        status="EXCLUDED",
+        reason="SELL_VENUE_METADATA_STALE",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    assert excluded.book_state == "NO_EXECUTABLE_BOOK"
+    assert excluded.decision_at_utc <= excluded.book_deadline_at_utc
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID",
+    ):
+        replace(excluded, book_state="STALE")
