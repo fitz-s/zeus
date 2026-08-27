@@ -926,6 +926,16 @@ def load_replacement_belief(
                     decision_time=now_dt,
                     posterior_source_cycle_time=row["source_cycle_time"],
                     posterior_computed_at=row["computed_at"],
+                    # This loader serves HELD bins only (every caller is the
+                    # held-position monitor). The held-continuity exemption
+                    # (97db58d8a) permits last-complete-bundle serving while
+                    # the eligible ENS frontier is unchanged; without it, a
+                    # merely-REGISTERED newer anchor artifact (downloaded, not
+                    # yet materialized into a model run) blinded the exit
+                    # organ on live positions for tens of minutes
+                    # (BELIEF_AUTHORITY_FAULT, 2026-08-27). ENTRY paths never
+                    # read through here and stay strict.
+                    held_redecision=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
