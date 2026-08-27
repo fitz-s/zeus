@@ -2601,9 +2601,9 @@ def _entry_duplicate_same_token_component(
             )
             if (
                 direction not in {"buy_yes", "buy_no"}
-                or not yes_token
-                or not no_token
-                or yes_token == no_token
+                or (direction == "buy_yes" and not yes_token)
+                or (direction == "buy_no" and not no_token)
+                or (yes_token and no_token and yes_token == no_token)
             ):
                 return {
                     "component": "entry_duplicate_same_token",
