@@ -2378,3 +2378,39 @@ class TestLiveEnumDirectionIntegration:
         )
         assert is_fresh is True, refresh_pos.applied_validations
         assert prob == pytest.approx(1.0 - 0.242)
+
+
+def test_monitor_loader_requests_held_continuity_exemption(forecasts_db, monkeypatch):
+    """Live regression 2026-08-27: the monitor's belief loader is a HELD-only
+    reader, so it must request the held-continuity exemption (97db58d8a).
+
+    Without held_redecision=True, a newer anchor artifact that is merely
+    REGISTERED as downloaded (not yet materialized into a model run) marked
+    every held belief stale -> BELIEF_AUTHORITY_FAULT -> the exit organ went
+    blind on live positions for tens of minutes. ENTRY paths never read
+    through this loader and keep full strictness.
+    """
+    import src.data.replacement_input_hwm as hwm
+
+    _insert(
+        forecasts_db,
+        posterior_id="held-exemption-wiring",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+    )
+
+    seen: dict[str, object] = {}
+    real = hwm.replacement_live_input_lag_reason
+
+    def spy(conn, **kwargs):
+        seen.update(kwargs)
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr(hwm, "replacement_live_input_lag_reason", spy)
+
+    belief = _load(forecasts_db)
+
+    assert belief is not None
+    assert seen, "loader must consult the raw-input HWM check"
+    assert seen.get("held_redecision") is True
