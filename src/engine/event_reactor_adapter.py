@@ -7520,14 +7520,6 @@ def event_bound_live_adapter_from_trade_conn(
     # payload, zero extra queries; consumed only by _current_entry_candidate_policy
     # below when tier0_research_mode is on.
     _global_entry_cluster_by_family: dict[str, tuple[str, str]] = {}
-    # Same-cycle "pending" cluster occupancy. Tier-0 forbids MAKER_REST
-    # (taker-only), so there is no multi-cycle resting order to track — held
-    # positions (runtime-open) already cover every prior-cycle Tier-0 fill.
-    # This set closes the one remaining race: two candidates for the SAME
-    # (city, target_date) both evaluated within this one batch. Populated
-    # only on a real (non-proof-only) admit inside
-    # _current_entry_candidate_policy below.
-    _tier0_admitted_clusters_this_cycle: set[tuple[str, str]] = set()
     # reversal_plan_tier0_2026-08-24 item 6 follow-up: once-per-cycle (here,
     # NOT per candidate) start-equity seed + drawdown-kill check. See
     # src/engine/tier0_drawdown_hook.py for the full implementation and
@@ -11064,15 +11056,21 @@ def event_bound_live_adapter_from_trade_conn(
                         for held_city, held_target_date, _held_metric in (
                             _current_held_weather_families(trade_conn)
                         )
-                    ) | _tier0_admitted_clusters_this_cycle
+                    )
                     tier0_reason = tier0_cluster_occupied_rejection_reason(
                         cluster_key=_tier0_cluster_key,
                         occupied_clusters=_tier0_occupied_clusters,
                     )
                 if tier0_reason is not None:
                     return tier0_reason
-                if not proof_only:
-                    _tier0_admitted_clusters_this_cycle.add(_tier0_cluster_key)
+                # A candidate-policy admission is only permission to enter the
+                # complete global comparison; it is not an entry reservation.
+                # Reserving here makes the first arbitrary bin inspected in an
+                # otherwise empty city-date suppress every sibling before
+                # economics, even when that first bin later loses or is
+                # rejected. The global single-order auction can select at most
+                # one action from the cut, while actual held positions remain
+                # the durable Tier-0 cluster occupancy above.
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
