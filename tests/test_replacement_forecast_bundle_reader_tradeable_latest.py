@@ -363,6 +363,24 @@ def test_held_provenance_binds_configured_station_and_source_pair() -> None:
         decision_time=_dt(6, 12),
     ) is None
 
+    wu_icao = json.loads(json.dumps(provenance))
+    likelihood = wu_icao["day0_preliminary_report_survival_likelihood"]
+    likelihood["station_id"] = "ZSJN"
+    likelihood["source_channel_pair"] = {
+        "awc": "aviationweather_metar",
+        "ogimet": "ogimet_metar_zsjn",
+    }
+    likelihood.pop("identity_hash")
+    likelihood["identity_hash"] = hashlib.sha256(
+        json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert reader._held_pinned_provenance_reason(
+        wu_icao,
+        city="Jinan",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) is None
+
     wrong_station = json.loads(json.dumps(provenance))
     wrong_station["day0_preliminary_report_survival_likelihood"]["station_id"] = "LTFM"
     assert reader._held_pinned_provenance_reason(

@@ -433,7 +433,7 @@ files:
   src/data/replacement_forecast_bundle_reader.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_reader
-    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers). ENTRY fails closed on any newer raw input. HELD_REDECISION preserves only the last complete, still-age-valid bundle while deterministic inputs are ahead of the latest eligible same-cycle ENS frontier; a newer eligible ENS cycle, same-cycle late row, identity fault, or HWM read loss still blocks.
+    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers). ENTRY fails closed on any newer raw input. HELD_REDECISION preserves only the last complete, still-age-valid bundle while deterministic inputs are ahead of the latest eligible same-cycle ENS frontier; a newer eligible ENS cycle, same-cycle late row, identity fault, or HWM read loss still blocks. A complete same-station METAR provisional carrier may remain pinned for both NOAA and WU-ICAO configured cities; the exact station, AWC/Ogimet pair, likelihood identity, carrier, and vector witness still have to match.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
