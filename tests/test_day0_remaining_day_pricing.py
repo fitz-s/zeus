@@ -123,6 +123,28 @@ def test_shared_remaining_carrier_rejects_invalid_settlement_topology(identity, 
         )
 
 
+def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_alignment():
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=[29.0, 29.0, 34.0],
+        boundary_scenarios=((None, 1.0),),
+        metric="high",
+        path_error_sigma_c=0.0,
+        instrument_sigma_c=0.0,
+        # Candidate order is venue truth and need not be thermal order. The
+        # returned q columns must retain this exact candidate alignment.
+        bin_bounds_c=[(33, None), (None, 30), (31, 32)],
+        n_point=10,
+        n_samples=5,
+        identity_inputs={"city": "Tel Aviv", "unit": "C"},
+    )
+
+    assert carrier["q"] == pytest.approx([1.0 / 3.0, 2.0 / 3.0, 0.0])
+    assert all(
+        row == pytest.approx([1.0 / 3.0, 2.0 / 3.0, 0.0])
+        for row in carrier["samples"]
+    )
+
+
 def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
     """The monitor-side replay must consume the materializer's exact carrier."""
     import src.engine.event_reactor_adapter as era

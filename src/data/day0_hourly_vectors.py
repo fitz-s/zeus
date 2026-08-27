@@ -224,7 +224,7 @@ def build_day0_remaining_probability_carrier(
     if any(low is None and high is None for low, high in bounds):
         raise ValueError("DAY0_REMAINING_CARRIER_OPEN_OPEN_BIN_INVALID")
     ordered = sorted(bounds, key=lambda item: float("-inf") if item[0] is None else item[0])
-    if ordered != list(bounds) or (ordered and ordered[0][0] is not None) or (
+    if (ordered and ordered[0][0] is not None) or (
         ordered and ordered[-1][1] is not None
     ):
         raise ValueError("DAY0_REMAINING_CARRIER_SHOULDER_TOPOLOGY_INVALID")
