@@ -24,6 +24,7 @@ from src.strategy.tier0_policy import (
     parse_tier0_seed,
     tier0_admission_reason,
     tier0_drawdown_kill_breached,
+    tier0_flat_stake_notional_cap_usd,
     tier0_flat_stake_shares,
     tier0_realized_pnl_usd,
     tier0_start_equity_override_id,
@@ -455,3 +456,42 @@ def test_decision_price_never_reads_limit_price_attribute():
             raise AssertionError("gate must not read candidate.limit_price")
 
     assert tier0_decision_price(_Trap(_Curve((0.2,)))) == 0.2
+
+
+# Flat-stake capital envelope: the solver-side seam that makes W3 itself size
+# the flat micro order (live 2026-08-26/27: the downstream _robust_stake_usd
+# override never reached global_decision.shares — 28-share and 12-share
+# Kelly-sized fills burned the 2% aggregate ceiling in two orders).
+class _SizedCurve(_Curve):
+    def __init__(self, prices, min_order_size):
+        super().__init__(prices)
+        self.min_order_size = min_order_size
+
+
+def test_flat_stake_notional_cap_is_min_order_cost_with_headroom():
+    cand = _Candidate(_SizedCurve((0.11, 0.15), min_order_size=5.0))
+    cap = tier0_flat_stake_notional_cap_usd(cand)
+    # 5 shares x $0.11 = $0.55, plus 1e-6 relative headroom.
+    assert cap == pytest.approx(0.55 * (1.0 + 1e-6), rel=1e-12)
+    # Envelope always affords the venue-min order the solver must express.
+    assert cap >= 5.0 * 0.11
+
+
+def test_flat_stake_notional_cap_none_for_sell_action():
+    cand = _Candidate(_SizedCurve((0.11,), min_order_size=5.0))
+    cand.action = "SELL"
+    assert tier0_flat_stake_notional_cap_usd(cand) is None
+
+
+def test_flat_stake_notional_cap_none_without_usable_curve():
+    assert tier0_flat_stake_notional_cap_usd(_Candidate(None)) is None
+    assert tier0_flat_stake_notional_cap_usd(_Candidate(_Curve(()))) is None
+    # Curve with levels but no min_order_size attribute (defensive duck-typing).
+    assert tier0_flat_stake_notional_cap_usd(_Candidate(_Curve((0.11,)))) is None
+
+
+def test_flat_stake_notional_cap_is_price_and_edge_independent():
+    import inspect
+
+    params = set(inspect.signature(tier0_flat_stake_notional_cap_usd).parameters)
+    assert not params & {"q", "q_posterior", "edge", "q_lcb", "kelly_size_usd"}
