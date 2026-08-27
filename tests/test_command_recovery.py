@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-27
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -11426,6 +11426,117 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         event_types = [event["event_type"] for event in _get_events(conn, "cmd-001")]
         assert event_types[-1] == "CANCEL_REQUESTED"
+
+    def test_cancel_pending_terminal_full_match_projects_fill_atomically(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_matched_order_facts
+
+        _insert(conn, size=15.0, price=0.29)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-cancel-fill-race")
+        _seed_pending_entry_projection(conn, order_id="ord-cancel-fill-race")
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES ('cmd-001', 'PUSD_BUY', NULL, 4350000, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-cancel-fill-race",
+            state="MATCHED",
+            matched_size="15",
+            remaining_size="0",
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-cancel-fill-race",
+            "status": "MATCHED",
+            "original_size": "15",
+            "size_matched": "15",
+            "price": "0.29",
+            "trades": ["trade-cancel-fill-race"],
+        }
+
+        summary = reconcile_matched_order_facts(
+            conn,
+            mock_client,
+            command_id="cmd-001",
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert [event["event_type"] for event in events][-2:] == [
+            "REVIEW_REQUIRED",
+            "FILL_CONFIRMED",
+        ]
+        fill_payload = json.loads(events[-1]["payload_json"])
+        assert fill_payload["reason"] == "review_cleared_confirmed_fill"
+        assert fill_payload["proof_class"] == (
+            "review_required_matched_order_fact_with_positive_trade_fact"
+        )
+        position = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 15.0,
+            "cost_basis_usd": 4.35,
+            "entry_price": 0.29,
+            "order_status": "filled",
+        }
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 4350000
+
+    def test_cancel_pending_partial_match_keeps_cancel_debt(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_matched_order_facts
+
+        _insert(conn, size=15.0, price=0.29)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-cancel-partial-race")
+        _seed_pending_entry_projection(conn, order_id="ord-cancel-partial-race")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancel-partial-race",
+            state="PARTIALLY_MATCHED",
+            matched_size="5",
+            remaining_size="10",
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-cancel-partial-race",
+            "status": "LIVE",
+            "original_size": "15",
+            "size_matched": "5",
+            "price": "0.29",
+            "trades": ["trade-cancel-partial-race"],
+        }
+
+        summary = reconcile_matched_order_facts(
+            conn,
+            mock_client,
+            command_id="cmd-001",
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == 0
 
     def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
         self,
