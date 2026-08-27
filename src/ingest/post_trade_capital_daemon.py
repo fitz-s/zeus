@@ -412,7 +412,7 @@ def _current_regime_capital_evidence_isolated() -> dict[str, object]:
 def _tier0_candidate_settlement_fold_cycle() -> dict[str, int]:
     """Refresh prospective selection labels without touching order authority."""
 
-    from src.cron.settlement_attribution import (
+    from src.execution.post_trade_capital import (
         run_tier0_candidate_settlement_fold,
     )
 

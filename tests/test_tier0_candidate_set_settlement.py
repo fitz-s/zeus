@@ -10,7 +10,7 @@ import ast
 import sqlite3
 from pathlib import Path
 
-from src.cron.settlement_attribution import (
+from src.execution.post_trade_capital import (
     _apply_tier0_candidate_settlement_labels,
     _tier0_candidate_settlement_labels,
 )
