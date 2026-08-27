@@ -472,6 +472,8 @@ def test_pending_reconcile_scan_uses_state_index_and_preserves_global_age() -> N
         );
         CREATE INDEX idx_edli_live_order_projection_state
             ON edli_live_order_projection(current_state, updated_at);
+        CREATE INDEX idx_edli_live_order_projection_reconcile
+            ON edli_live_order_projection(pending_reconcile, updated_at);
         """
     )
     for state in ("PENDING_RECONCILE", "USER_TRADE_OBSERVED", "RECONCILED"):
@@ -506,9 +508,24 @@ def test_pending_reconcile_scan_uses_state_index_and_preserves_global_age() -> N
     ]
     assert projection_reads
     assert all(
-        "INDEXED BY idx_edli_live_order_projection_state" in sql
+        "INDEXED BY idx_edli_live_order_projection_reconcile" in sql
         for sql in projection_reads
     )
+
+
+def test_live_order_projection_schema_owns_pending_reconcile_index() -> None:
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    conn = sqlite3.connect(":memory:")
+    ensure_tables(conn)
+
+    columns = [
+        row[2]
+        for row in conn.execute(
+            "PRAGMA index_info('idx_edli_live_order_projection_reconcile')"
+        ).fetchall()
+    ]
+    assert columns == ["pending_reconcile", "updated_at"]
 
 
 def test_quote_refresh_no_coverage_is_business_failure() -> None:
