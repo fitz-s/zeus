@@ -3856,7 +3856,11 @@ def _inline_expire_execution_feasibility_evidence(
                 SELECT evidence_id FROM {table}
                 WHERE quote_seen_at < ?
                 {exclude_clause}
-                ORDER BY evidence_id
+                -- The live table can be hundreds of GiB.  Ordering by the PK
+                -- makes SQLite scan the whole table before this LIMIT even
+                -- though the cutoff index exists.  Lead with the cutoff index
+                -- so one quote flush visits only the oldest bounded prefix.
+                ORDER BY quote_seen_at
                 LIMIT ?
             )
             """,

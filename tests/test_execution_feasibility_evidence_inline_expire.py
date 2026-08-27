@@ -7,7 +7,8 @@
 #   insert_execution_feasibility_evidence_batch.
 """Antibodies for the execution_feasibility_evidence inline retention: old
 rows deleted, recent rows survive, the LIMIT bound, the prerequisite index is
-created idempotently, and it never raises even on a malformed table name."""
+created idempotently, the bounded delete follows that cutoff index rather than
+scanning the primary key, and it never raises even on a malformed table name."""
 from __future__ import annotations
 
 import sqlite3
@@ -72,6 +73,37 @@ def test_is_limit_bounded() -> None:
 
     remaining = conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
     assert remaining == 10
+
+
+def test_bounded_delete_orders_by_cutoff_index_not_primary_key() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(TABLE_DDL)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    for i in range(_FEASIBILITY_INLINE_EXPIRE_LIMIT + 10):
+        # Reverse the evidence-id order so PK order cannot accidentally match
+        # the temporal retention order protected by this antibody.
+        _seed(conn, f"ev-{999 - i:04d}", _iso(100 - i))
+
+    _inline_expire_execution_feasibility_evidence(
+        conn,
+        "execution_feasibility_evidence",
+    )
+
+    delete_sql = next(
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("DELETE FROM")
+    )
+    assert "ORDER BY quote_seen_at" in delete_sql
+    assert "ORDER BY evidence_id" not in delete_sql
+    remaining = {
+        row[0]
+        for row in conn.execute(
+            "SELECT quote_seen_at FROM execution_feasibility_evidence"
+        )
+    }
+    assert remaining == {_iso(100 - i) for i in range(50, 60)}
 
 
 def test_creates_prerequisite_index_idempotently() -> None:
