@@ -10921,13 +10921,15 @@ def event_bound_live_adapter_from_trade_conn(
                 work_context or global_work_context,
             )
 
+        _tier0_remaining_open_cost_usd: Decimal | None = None
+
         def _current_entry_capital_limit(
             candidate,
             gamma_market_id,
             market_event_id,
             _owner_event_id,
         ):
-            nonlocal auction_capital_authority
+            nonlocal auction_capital_authority, _tier0_remaining_open_cost_usd
             # Capital authority constrains risk-increasing BUYs only.  The
             # solver evaluates SELL before this resolver and policy-rejected
             # BUYs never call it, so resolve lazily: entry containment must not
@@ -10942,32 +10944,80 @@ def event_bound_live_adapter_from_trade_conn(
                 auction_capital_authority = (
                     snapshot_global_auction_capital_authority()
                 )
-            _allocator_capacity = auction_capital_authority.capacity_usd(
-                market_id=str(gamma_market_id),
-                event_id=str(market_event_id),
-                resolution_window="default",
-                correlation_key=_global_candidate_correlation_key(candidate),
+            allocator_limit = Decimal(
+                auction_capital_authority.capacity_usd(
+                    market_id=str(gamma_market_id),
+                    event_id=str(market_event_id),
+                    resolution_window="default",
+                    correlation_key=_global_candidate_correlation_key(candidate),
+                )
             )
-            # reversal_plan_tier0 item 6 sizing seam (2026-08-27): the W3 solver
-            # owns the final executable size (exact_taker_shares binds
-            # global_decision.shares through cert build and depth re-sweep), so
-            # the flat micro stake MUST be expressed as this capital envelope —
-            # the downstream _robust_stake_usd override at the flat-stake
-            # chokepoint rewrites only the receipt/reservation, never the
-            # solver-certified share count (live 2026-08-26/27: 28-share $3.08
-            # and 12-share $1.02 Kelly-sized fills burned through the 2%
-            # aggregate ceiling in two orders and re-froze entries).
-            if tier0_research_mode_enabled():
-                from src.strategy.tier0_policy import (
-                    tier0_flat_stake_notional_cap_usd,
+            if not tier0_research_mode_enabled():
+                return allocator_limit
+
+            # Tier-0 actuates one venue-minimum BUY, independent of cardinal q.
+            # Put that exact fixed proposal into the global comparison instead
+            # of ranking a Kelly-sized order and shrinking it only after the
+            # winner is chosen.  The latter lets an aggregate-infeasible winner
+            # suppress a smaller executable runner-up.
+            # SCOPE: this candidate's BUY proposal in the current global batch.
+            # DRAIN: every candidate is compared against the same unreserved
+            # headroom; a winner is reserved by the existing batch ledger.
+            # RESET: the next adapter/batch rebuilds portfolio and bankroll truth.
+            from src.state.portfolio import (
+                load_runtime_open_portfolio,
+                total_exposure_usd,
+            )
+            from src.strategy.tier0_policy import (
+                load_tier0_risk_ceilings,
+                tier0_flat_stake_notional_cap_usd,
+            )
+
+            flat_cost = tier0_flat_stake_notional_cap_usd(candidate)
+            if flat_cost is None:
+                raise ValueError("TIER0_FLAT_PROPOSAL_UNEXECUTABLE")
+            flat_cost_usd = Decimal(str(flat_cost))
+            if not flat_cost_usd.is_finite() or flat_cost_usd <= 0:
+                raise ValueError("TIER0_FLAT_PROPOSAL_COST_INVALID")
+
+            if _tier0_remaining_open_cost_usd is None:
+                current_state = load_runtime_open_portfolio(trade_conn)
+                current_open_cost = Decimal(str(total_exposure_usd(current_state)))
+                current_open_cost += sum(
+                    (Decimal(str(usd)) for _, usd in (portfolio_reservation or ())),
+                    Decimal("0"),
+                )
+                bankroll = Decimal(
+                    str(
+                        _bankroll_usd_from_provider(bankroll_usd_provider)
+                        if bankroll_usd_provider is not None
+                        else _runtime_bankroll_usd(cached_only=True)
+                    )
+                )
+                ceiling_pct = Decimal(
+                    str(
+                        load_tier0_risk_ceilings()[
+                            "aggregate_open_loss_pct_ceiling"
+                        ]
+                    )
+                )
+                if (
+                    not current_open_cost.is_finite()
+                    or current_open_cost < 0
+                    or not bankroll.is_finite()
+                    or bankroll <= 0
+                    or not ceiling_pct.is_finite()
+                    or ceiling_pct <= 0
+                ):
+                    raise ValueError("TIER0_SELECTION_CAPITAL_AUTHORITY_INVALID")
+                _tier0_remaining_open_cost_usd = max(
+                    Decimal("0"),
+                    ceiling_pct * bankroll - current_open_cost,
                 )
 
-                _tier0_cap = tier0_flat_stake_notional_cap_usd(candidate)
-                if _tier0_cap is not None:
-                    _allocator_capacity = min(
-                        _allocator_capacity, Decimal(str(_tier0_cap))
-                    )
-            return _allocator_capacity
+            if flat_cost_usd > _tier0_remaining_open_cost_usd:
+                return Decimal("0")
+            return min(allocator_limit, flat_cost_usd)
 
         strategy_policy_cache: dict[tuple[str, str], str | None] = {}
 
@@ -19053,8 +19103,9 @@ def _build_event_bound_no_submit_receipt_core(
         # this candidate's executable_market_snapshots row, whose
         # ``min_order_size`` is in SHARES (the plan's corrected venue floor;
         # sizing.min_order_usd is a $ soft floor and is NOT this value); (2) the
-        # aggregate open-loss ceiling needs the freshest portfolio/reservation
-        # state, only available here, not at the earlier candidate-policy gate.
+        # aggregate open-loss ceiling is rechecked here against the same current
+        # portfolio/reservation authority used by global selection.  This final
+        # check protects submit-time drift; it must not resize the sealed winner.
         if _recapture.may_submit and tier0_research_mode_enabled():
             from src.strategy.tier0_policy import (
                 TIER0_REJECT_AGGREGATE_CEILING,
@@ -19063,15 +19114,26 @@ def _build_event_bound_no_submit_receipt_core(
                 tier0_flat_stake_shares,
             )
 
-            _tier0_min_order_shares = (
-                _float_or_default(row.get("min_order_size"), 1.0)
-                if isinstance(row, Mapping) else 1.0
-            )
-            _tier0_flat_shares = tier0_flat_stake_shares(
-                min_order_size_shares=_tier0_min_order_shares,
-            )
-            _tier0_stake_price = float(getattr(_chosen_stake_price, "value", 0.0) or 0.0)
-            _tier0_flat_stake_usd = _tier0_flat_shares * _tier0_stake_price
+            if global_actuation is not None:
+                # Selection already priced the exact minimum marketable taker
+                # proposal, including the separate venue notional floor.  Keep
+                # that sealed proposal intact through aggregate admission.
+                _tier0_flat_shares = float(global_decision.shares)
+                _tier0_flat_stake_usd = float(global_decision.max_spend_usd)
+            else:
+                _tier0_min_order_shares = (
+                    _float_or_default(row.get("min_order_size"), 1.0)
+                    if isinstance(row, Mapping) else 1.0
+                )
+                _tier0_flat_shares = tier0_flat_stake_shares(
+                    min_order_size_shares=_tier0_min_order_shares,
+                )
+                _tier0_stake_price = float(
+                    getattr(_chosen_stake_price, "value", 0.0) or 0.0
+                )
+                _tier0_flat_stake_usd = (
+                    _tier0_flat_shares * _tier0_stake_price
+                )
             if portfolio_state_provider is not None:
                 from src.state.portfolio import total_exposure_usd
 

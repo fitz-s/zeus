@@ -5,6 +5,9 @@
 on stake, one entry per (city, target_date) cluster, taker-only, price < 0.25."""
 from __future__ import annotations
 
+from decimal import Decimal
+from types import SimpleNamespace
+
 import pytest
 
 from src.strategy.tier0_policy import (
@@ -463,18 +466,39 @@ def test_decision_price_never_reads_limit_price_attribute():
 # override never reached global_decision.shares — 28-share and 12-share
 # Kelly-sized fills burned the 2% aggregate ceiling in two orders).
 class _SizedCurve(_Curve):
-    def __init__(self, prices, min_order_size):
-        super().__init__(prices)
-        self.min_order_size = min_order_size
+    def __init__(self, prices, min_order_size, *, sizes=None):
+        sizes = sizes or tuple(Decimal("100") for _ in prices)
+        self.levels = tuple(
+            SimpleNamespace(price=Decimal(str(price)), size=Decimal(str(size)))
+            for price, size in zip(prices, sizes, strict=True)
+        )
+        self.min_order_size = Decimal(str(min_order_size))
+        self.fee_model = SimpleNamespace(all_in_price=lambda price: price)
 
 
-def test_flat_stake_notional_cap_is_min_order_cost_with_headroom():
+def test_flat_stake_notional_cap_is_true_minimum_marketable_cost():
     cand = _Candidate(_SizedCurve((0.11, 0.15), min_order_size=5.0))
     cap = tier0_flat_stake_notional_cap_usd(cand)
-    # 5 shares x $0.11 = $0.55, plus 1e-6 relative headroom.
-    assert cap == pytest.approx(0.55 * (1.0 + 1e-6), rel=1e-12)
-    # Envelope always affords the venue-min order the solver must express.
-    assert cap >= 5.0 * 0.11
+    # The independent $1 marketable-BUY floor dominates 5 shares x $0.11.
+    assert cap == Decimal("1.001")
+
+
+def test_flat_stake_notional_cap_uses_share_floor_when_it_dominates():
+    cand = _Candidate(_SizedCurve((0.35,), min_order_size=5.0))
+    assert tier0_flat_stake_notional_cap_usd(cand) == Decimal("1.75")
+
+
+def test_flat_stake_notional_cap_covers_cross_level_worst_fill():
+    cand = _Candidate(
+        _SizedCurve(
+            (0.08, 0.09),
+            min_order_size=5,
+            sizes=(5, 100),
+        )
+    )
+    # The $1 raw-notional floor requires 11.12 shares at the deepest 9c
+    # limit, and FOK collateral must cover every share at that limit.
+    assert tier0_flat_stake_notional_cap_usd(cand) == Decimal("1.0008")
 
 
 def test_flat_stake_notional_cap_none_for_sell_action():

@@ -22,6 +22,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 # Decision-time executable side price must be strictly below this to be
@@ -121,37 +122,38 @@ def tier0_price_rejection_reason(
     return None
 
 
-def tier0_flat_stake_notional_cap_usd(candidate) -> float | None:
+def tier0_flat_stake_notional_cap_usd(candidate) -> Decimal | None:
     """USD capital envelope that makes the global solver ITSELF size the flat stake.
 
     The W3 selector owns the final executable size (``exact_taker_shares`` binds
     ``global_decision.shares`` end-to-end), so a downstream USD override cannot
     shrink a submitted order — only the solver's own capital envelope can. This
-    returns flat_shares x cheapest fee-adjusted ask off the candidate's scored
-    curve: the exact cost of the smallest venue-legal taker order. The solver's
-    concave objective saturates a binding cap, so a positive-edge candidate
-    sizes to exactly the flat stake. None (caller keeps its unclamped limit)
-    for SELL proposals (risk-reducing, never capped) and for candidates whose
-    curve/price is unusable — the price gate rejects those anyway.
+    returns the worst-fill collateral of the smallest venue-legal taker order.
+    Both the venue share minimum and the independent marketable-BUY notional
+    minimum apply. The solver's concave objective saturates a binding cap, so a
+    positive-edge candidate sizes to exactly this fixed proposal. ``None``
+    means the BUY proposal is not executable; SELL is risk-reducing and never
+    reaches this BUY-only capital resolver.
     """
 
     if str(getattr(candidate, "action", "BUY") or "BUY").strip().upper() != "BUY":
         return None
-    curve = getattr(candidate, "economic_cost_curve", None)
-    price = tier0_decision_price(candidate)
     try:
-        min_shares = float(getattr(curve, "min_order_size", None))
-        px = float(price)
-    except (TypeError, ValueError):
+        from src.solve.solver import (
+            _single_order_execution_boundary,
+            _single_order_min_marketable_shares,
+        )
+
+        curve = candidate.economic_cost_curve
+        flat_shares = _single_order_min_marketable_shares(curve)
+        if flat_shares is None:
+            return None
+        _, _, flat_cost = _single_order_execution_boundary(candidate, flat_shares)
+    except (AttributeError, ArithmeticError, TypeError, ValueError):
         return None
-    if not (math.isfinite(min_shares) and min_shares > 0.0 and math.isfinite(px) and 0.0 < px < 1.0):
+    if not flat_cost.is_finite() or flat_cost <= 0:
         return None
-    # 1e-6 relative headroom: the solver costs in Decimal while this cap is a
-    # float product — without headroom a 1-ULP excess makes the min-order
-    # infeasible and silently zeroes the candidate (the artificial-lock class).
-    # Venue share quantization is at-most, so the headroom can never grow the
-    # submitted order past the flat share count's own granularity step.
-    return tier0_flat_stake_shares(min_order_size_shares=min_shares) * px * (1.0 + 1e-6)
+    return flat_cost
 
 
 def tier0_execution_mode_rejection_reason(
