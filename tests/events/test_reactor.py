@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-08-27
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -6843,21 +6843,24 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_late_monitor_successor_preempts_generic_completion_but_not_exact():
-    """A claimed monitor successor wins at the current global safe checkpoint."""
+def test_late_periodic_successor_waits_for_fresh_reserved_completion():
+    """A fresh reserved cut completes instead of phase-locking every 30 seconds."""
     from src.events import reactor
 
     monitor_claimed = [False]
+    monitor_debt = [False]
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
         _, generic_cancelled = reactor._global_auction_monitor_cancellation_probe(
             lambda: monitor_claimed[0],
+            monitor_debt_pending=lambda: monitor_debt[0],
             completion_due=True,
         )
         assert generic_cancelled() is False
         monitor_claimed[0] = True
-        assert generic_cancelled() is True
+        monitor_debt[0] = True
+        assert generic_cancelled() is False
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
 
         _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
