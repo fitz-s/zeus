@@ -10942,12 +10942,32 @@ def event_bound_live_adapter_from_trade_conn(
                 auction_capital_authority = (
                     snapshot_global_auction_capital_authority()
                 )
-            return auction_capital_authority.capacity_usd(
+            _allocator_capacity = auction_capital_authority.capacity_usd(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
                 resolution_window="default",
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
+            # reversal_plan_tier0 item 6 sizing seam (2026-08-27): the W3 solver
+            # owns the final executable size (exact_taker_shares binds
+            # global_decision.shares through cert build and depth re-sweep), so
+            # the flat micro stake MUST be expressed as this capital envelope —
+            # the downstream _robust_stake_usd override at the flat-stake
+            # chokepoint rewrites only the receipt/reservation, never the
+            # solver-certified share count (live 2026-08-26/27: 28-share $3.08
+            # and 12-share $1.02 Kelly-sized fills burned through the 2%
+            # aggregate ceiling in two orders and re-froze entries).
+            if tier0_research_mode_enabled():
+                from src.strategy.tier0_policy import (
+                    tier0_flat_stake_notional_cap_usd,
+                )
+
+                _tier0_cap = tier0_flat_stake_notional_cap_usd(candidate)
+                if _tier0_cap is not None:
+                    _allocator_capacity = min(
+                        _allocator_capacity, Decimal(str(_tier0_cap))
+                    )
+            return _allocator_capacity
 
         strategy_policy_cache: dict[tuple[str, str], str | None] = {}
 

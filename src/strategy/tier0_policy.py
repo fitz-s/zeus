@@ -121,6 +121,39 @@ def tier0_price_rejection_reason(
     return None
 
 
+def tier0_flat_stake_notional_cap_usd(candidate) -> float | None:
+    """USD capital envelope that makes the global solver ITSELF size the flat stake.
+
+    The W3 selector owns the final executable size (``exact_taker_shares`` binds
+    ``global_decision.shares`` end-to-end), so a downstream USD override cannot
+    shrink a submitted order — only the solver's own capital envelope can. This
+    returns flat_shares x cheapest fee-adjusted ask off the candidate's scored
+    curve: the exact cost of the smallest venue-legal taker order. The solver's
+    concave objective saturates a binding cap, so a positive-edge candidate
+    sizes to exactly the flat stake. None (caller keeps its unclamped limit)
+    for SELL proposals (risk-reducing, never capped) and for candidates whose
+    curve/price is unusable — the price gate rejects those anyway.
+    """
+
+    if str(getattr(candidate, "action", "BUY") or "BUY").strip().upper() != "BUY":
+        return None
+    curve = getattr(candidate, "economic_cost_curve", None)
+    price = tier0_decision_price(candidate)
+    try:
+        min_shares = float(getattr(curve, "min_order_size", None))
+        px = float(price)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(min_shares) and min_shares > 0.0 and math.isfinite(px) and 0.0 < px < 1.0):
+        return None
+    # 1e-6 relative headroom: the solver costs in Decimal while this cap is a
+    # float product — without headroom a 1-ULP excess makes the min-order
+    # infeasible and silently zeroes the candidate (the artificial-lock class).
+    # Venue share quantization is at-most, so the headroom can never grow the
+    # submitted order past the flat share count's own granularity step.
+    return tier0_flat_stake_shares(min_order_size_shares=min_shares) * px * (1.0 + 1e-6)
+
+
 def tier0_execution_mode_rejection_reason(
     *,
     execution_mode: str | None,
