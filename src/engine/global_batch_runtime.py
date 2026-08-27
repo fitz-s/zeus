@@ -905,6 +905,11 @@ def _complete_holding_coverage(
                 reason=reason,
                 bin_label=obligation.bin_label,
                 canonical_bin_identity=f"condition:{obligation.condition_id}",
+                book_state=(
+                    "STALE"
+                    if decision_at_utc > book_deadline_at_utc
+                    else "UNKNOWN"
+                ),
             )
         else:
             row = replace(

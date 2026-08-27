@@ -26310,7 +26310,7 @@ def test_complete_holding_coverage_isolates_missing_held_book_state():
         selection_epoch_identity="selection",
         book_epoch_identity="book",
         selection_cut_at_utc=at,
-        decision_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=31),
         book_deadline_at_utc=at + _dt.timedelta(seconds=30),
     )
 
@@ -26319,6 +26319,24 @@ def test_complete_holding_coverage_isolates_missing_held_book_state():
     assert selection_unavailable[0].reason == (
         "GLOBAL_SELECTION_UNAVAILABLE:GLOBAL_BOOK_EPOCH_EXPIRED"
     )
+    assert selection_unavailable[0].book_state == "STALE"
+    assert (
+        selection_unavailable[0].decision_at_utc
+        > selection_unavailable[0].book_deadline_at_utc
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID",
+    ):
+        replace(selection_unavailable[0], book_state="UNKNOWN")
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID",
+    ):
+        replace(
+            selection_unavailable[0],
+            decision_at_utc=selection_unavailable[0].book_deadline_at_utc,
+        )
 
     with pytest.raises(
         ValueError,
