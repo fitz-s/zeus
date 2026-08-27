@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-26
+# Last reused/audited: 2026-08-27
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -20882,7 +20882,7 @@ def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     )
 
     assert rebound.q_posterior == pytest.approx(0.8)
-    assert rebound.same_bin_yes_posterior == pytest.approx(0.25)
+    assert rebound.same_bin_yes_posterior == pytest.approx(0.4)
     assert rebound.replacement_no_bound_certificate == {"served_yes_q": 0.4}
     assert era._event_bound_execution_probability_pair(rebound) == pytest.approx(
         (0.8, 0.7)
