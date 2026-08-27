@@ -22377,6 +22377,110 @@ class TestRecoveryResolutionTable:
             "decision_snapshot_id": "forecast-snap-edli",
         }
 
+    def test_edli_entry_posterior_repair_prefers_position_order_over_newer_cancelled_fillup(
+        self,
+        conn,
+    ):
+        filled_decision = "edli_exec_cmd:evt-filled:intent:tok-001:tok-001:buy_yes"
+        _insert(
+            conn,
+            command_id="cmd-filled-authority",
+            decision_id=filled_decision,
+            created_at="2026-08-27T14:39:44Z",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   venue_order_id = 'ord-filled-authority',
+                   updated_at = '2026-08-27T14:39:47Z'
+             WHERE command_id = 'cmd-filled-authority'
+            """
+        )
+        cancelled_decision = "edli_exec_cmd:evt-fillup:intent:tok-001:tok-001:buy_yes"
+        _insert(
+            conn,
+            command_id="cmd-cancelled-fillup",
+            decision_id=cancelled_decision,
+            created_at="2026-08-27T14:47:43Z",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'CANCELLED',
+                   venue_order_id = 'ord-cancelled-fillup',
+                   updated_at = '2026-08-27T15:14:05Z'
+             WHERE command_id = 'cmd-cancelled-fillup'
+            """
+        )
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            """
+            CREATE TABLE world.decision_certificates (
+                certificate_id TEXT PRIMARY KEY,
+                certificate_type TEXT NOT NULL,
+                semantic_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction, unit,
+                size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'Hong Kong', '2026-08-28', '29C',
+                'buy_yes', 'C', 2.85, 5.0, 2.85, 0.57, 0.0,
+                'qkernel_spine', 'forecast_qkernel_entry',
+                'forecast_qkernel_entry', 'update_reaction', 'synced',
+                'tok-001', 'tok-001-no', 'condition-test',
+                'ord-filled-authority', 'filled', '2026-08-27T15:26:03Z', 'low'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            _edli_entry_posterior_repair_candidates,
+        )
+
+        candidates = _edli_entry_posterior_repair_candidates(conn)
+
+        assert len(candidates) == 1
+        assert candidates[0]["command_id"] == "cmd-filled-authority"
+        assert candidates[0]["decision_id"] == filled_decision
+
+    def test_edli_entry_posterior_repair_propagates_budget_interrupt(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_edli_entry_posterior_repair_candidates",
+            lambda _conn: [{"position_id": "pos-budget"}],
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_hydrate_command_execution_identity",
+            lambda _conn, candidate: candidate,
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_decision_log_trade_case_for_command",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.OperationalError("interrupted")
+            ),
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            command_recovery.reconcile_edli_entry_posterior_projection_repairs(conn)
+
     def test_edli_entry_posterior_projection_repair_ignores_revoked_local_ghost(
         self,
         conn,

@@ -7880,7 +7880,15 @@ def _edli_entry_posterior_repair_candidates(conn: sqlite3.Connection) -> list[di
                OR CAST(pc.p_posterior AS REAL) <= 0
                OR COALESCE(pc.entry_method, '') != 'qkernel_spine'
            )
-         ORDER BY pc.updated_at DESC, cmd.created_at DESC
+         ORDER BY pc.updated_at DESC,
+                  CASE
+                      WHEN COALESCE(pc.order_id, '') != ''
+                       AND COALESCE(cmd.venue_order_id, '') != ''
+                       AND lower(pc.order_id) = lower(cmd.venue_order_id)
+                      THEN 0 ELSE 1
+                  END,
+                  CASE WHEN cmd.state = 'FILLED' THEN 0 ELSE 1 END,
+                  cmd.created_at DESC
         """,
         tuple(_EDLI_ENTRY_POSTERIOR_REPAIR_PHASES),
     ).fetchall()
@@ -7990,6 +7998,11 @@ def reconcile_edli_entry_posterior_projection_repairs(
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
             conn.execute("RELEASE SAVEPOINT " + sp_name)
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in str(exc).lower()
+            ):
+                raise
             logger.error(
                 "recovery: EDLI entry posterior projection repair failed for position %s: %s",
                 position_id,
