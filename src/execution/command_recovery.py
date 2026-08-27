@@ -24886,7 +24886,7 @@ def _authenticated_entry_trade_fact_candidates(
                   FROM canonical_trade_fact fact
                  WHERE fact.command_id = cmd.command_id
                    AND fact.venue_order_id = cmd.venue_order_id
-                   AND fact.state = 'CONFIRMED'
+                   AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                    AND fact.source IN ('REST', 'WS_USER')
                    AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                    AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -24971,7 +24971,7 @@ def _confirmed_entry_trade_fact_summary(
             ON envelope.envelope_id = cmd.envelope_id
          WHERE fact.command_id = ?
            AND fact.venue_order_id = ?
-           AND fact.state = 'CONFIRMED'
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND fact.source IN ('REST', 'WS_USER')
          ORDER BY fact.trade_id
         """,
@@ -27952,9 +27952,32 @@ def capital_blocking_command_scope(
                 (CommandState.SUBMITTING.value,),
             ).fetchall()
         )
+    authenticated_entry_projection_count = 0
+    for candidate in _authenticated_entry_trade_fact_candidates(conn):
+        if str(candidate.get("state") or "") == CommandState.FILLED.value:
+            continue
+        facts = _confirmed_entry_trade_fact_summary(
+            conn,
+            command_id=str(candidate.get("command_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+        )
+        filled_size = _positive_decimal_or_none(facts.get("filled_size"))
+        fill_price = _positive_decimal_or_none(facts.get("fill_price"))
+        if filled_size is None or fill_price is None:
+            continue
+        if not _authenticated_entry_fill_projection_complete(
+            conn,
+            command_id=str(candidate.get("command_id") or ""),
+            position_id=str(candidate.get("position_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+            filled_size=filled_size,
+            fill_price=fill_price,
+        ):
+            authenticated_entry_projection_count += 1
     projection_count = (
         _terminal_filled_entry_projection_blocker_count(conn)
         + _terminal_filled_exit_projection_blocker_count(conn)
+        + authenticated_entry_projection_count
     )
     scoped_markets = tuple(
         sorted(
