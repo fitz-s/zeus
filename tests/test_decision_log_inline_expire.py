@@ -1,5 +1,5 @@
 # Created: 2026-08-25
-# Last reused or audited: 2026-08-25
+# Last reused or audited: 2026-08-27
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 13 (bounded-by-construction storage redesign) -- coverage for
 #   src/state/decision_chain.py::_inline_expire_decision_log, piggybacked in
@@ -45,6 +45,13 @@ def _iso(days_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _decision_log_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(DECISION_LOG_DDL)
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    return conn
+
+
 def _seed(conn: sqlite3.Connection, *, mode: str, ts: str, summary: dict | None = None) -> None:
     conn.execute(
         "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp) "
@@ -58,8 +65,7 @@ def _count(conn: sqlite3.Connection, mode: str) -> int:
 
 
 def test_expires_old_rows_of_the_same_mode_only() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     old, recent = _iso(10), _iso(1)
     _seed(conn, mode="exit_monitor", ts=old)          # older than 7d floor -> deletable
     _seed(conn, mode="exit_monitor", ts=recent)        # recent -> survives
@@ -72,8 +78,7 @@ def test_expires_old_rows_of_the_same_mode_only() -> None:
 
 
 def test_per_mode_window_full_auction_gets_30_days_not_7() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     ten_days_ago = _iso(10)
     _seed(conn, mode="global_single_order_auction", ts=ten_days_ago)
 
@@ -84,8 +89,7 @@ def test_per_mode_window_full_auction_gets_30_days_not_7() -> None:
 
 
 def test_tier0_anchored_row_survives_even_when_old() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     conn.execute(TIER0_DDL)
     old = _iso(40)
     _seed(
@@ -109,8 +113,7 @@ def test_tier0_anchored_row_survives_even_when_old() -> None:
 
 
 def test_expire_is_limit_bounded() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     old = _iso(10)
     for _ in range(_INLINE_EXPIRE_LIMIT + 20):
         _seed(conn, mode="exit_monitor", ts=old)
@@ -122,9 +125,23 @@ def test_expire_is_limit_bounded() -> None:
     assert _count(conn, "exit_monitor") == 20
 
 
+def test_expire_forces_timestamp_index_in_money_path_transaction() -> None:
+    conn = _decision_log_conn()
+    old = _iso(10)
+    _seed(conn, mode="exit_monitor", ts=old)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    _inline_expire_decision_log(conn, "exit_monitor")
+
+    assert any(
+        "FROM decision_log INDEXED BY idx_decision_log_ts" in statement
+        for statement in statements
+    )
+
+
 def test_store_artifact_piggybacks_expiry() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     old = _iso(10)
     _seed(conn, mode="exit_monitor", ts=old)
 
@@ -142,8 +159,7 @@ def test_store_artifact_piggybacks_expiry() -> None:
 
 
 def test_store_settlement_records_piggybacks_expiry() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(DECISION_LOG_DDL)
+    conn = _decision_log_conn()
     old = _iso(40)
     _seed(conn, mode="settlement", ts=old)
 
