@@ -224,7 +224,7 @@ def _held_pinned_provenance_reason(
     if (
         city_obj is None
         or str(getattr(city_obj, "settlement_source_type", "") or "").strip().lower()
-        != "noaa"
+        not in {"noaa", "wu_icao"}
         or not day0_is_noaa_preliminary_source(source)
         or not expected_station
         or source not in expected_source_pair.values()
