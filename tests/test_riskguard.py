@@ -6220,6 +6220,33 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert fragment in reason
         assert revisions == (revision,)
 
+    def test_qkernel_probation_binds_unique_licensed_revision_without_current_field(
+        self,
+    ):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        reason, revisions = riskguard_module._qkernel_revision_probation_gate_reason(
+            {
+                "status": "ok",
+                "licensed_revisions": [revision],
+                "current_count": 27,
+            },
+            {"cohorts": []},
+            {
+                "status": "nonpositive",
+                "probability_semantics_revision": revision,
+                "open_position_count": 12,
+                "realized_position_count": 15,
+                "blocked_position_count": 0,
+                "net_realized_pnl_usd": -31.278889,
+            },
+        )
+
+        assert reason == (
+            "qkernel_revision_probation_in_flight("
+            f"open=12,realized=15,revision={revision})"
+        )
+        assert revisions == (revision,)
+
     def test_unproven_day0_revision_allows_one_probe_then_positive_sequential_probe(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
