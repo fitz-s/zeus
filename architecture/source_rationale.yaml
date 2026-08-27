@@ -606,6 +606,15 @@ files:
     zone: K0_frozen_kernel
     authority_role: uncertainty_contract
     why: Carries uncertainty context so raw confidence is not treated as certainty.
+  src/contracts/payoff_q_correction.py:
+    zone: K0_frozen_kernel
+    authority_role: acting_probability_correction_contract
+    why: "Carries the market-anchored calibrator's per-candidate result from the solve that sized on it to the certificate that actuates it, so one acting probability reaches sizing, the sealed cut probability, the certificate, and the receipt. Holds raw_q beside corrected_q specifically so the actuation seam's supersession check still compares the RAW witness projection — a refit between solve and actuation cannot silently move the acting scalar. Pure contract: no math, no DB, so src/solve and src/engine share the shape without depending on src/calibration."
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/global_batch_runtime.py
+    - src/engine/global_single_order_auction.py
+    - src/solve/solver.py
   src/contracts/ensemble_snapshot_provenance.py:
     zone: K0_frozen_kernel
     authority_role: ensemble_snapshot_rejection_contract
@@ -2370,6 +2379,14 @@ files:
     zone: K3_extension
     authority_role: calibration_drift_detection
     why: Detects calibration degradation over time.
+  src/calibration/market_anchored_live_fit.py:
+    zone: K3_extension
+    authority_role: market_anchored_live_fit_provider
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    why: "In-process TTL-cached fit of src/calibration/market_anchored_residual.py from settled settlement_attribution rows, for the live acting path. Deliberately writes NO artifact file: an artifact plus a separate refitter is a known local failure class (the refitter stops, the file goes stale, and every freshness check still passes) — an in-process cache cannot outlive its process, so staleness is TTL-bounded by construction. Trains only on rows settled strictly before the fit instant, so a live decision is never informed by an outcome unresolved when it was made. Every failure (too few rows, unreachable DB, unmodeled lead, non-finite input) returns None and the caller keeps its raw q."
+    downstream:
+    - src/engine/global_batch_runtime.py
   src/calibration/drift_detector.py:
     zone: K3_extension
     authority_role: calibration_retrain_drift_evidence

@@ -77,6 +77,7 @@ from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
+from src.contracts.payoff_q_correction import PayoffQCorrection
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -3897,6 +3898,11 @@ class GlobalSingleOrderDecision:
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
+    # The market-anchored correction this BUY was SIZED with, sealed here so the
+    # actuation certificate acts on the same scalar rather than re-deriving it
+    # from a fit that may have refitted since. None means the candidate kept its
+    # raw witness probability (every fail-open case).
+    payoff_q_correction: PayoffQCorrection | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -6793,6 +6799,11 @@ def select_global_single_order(
         [GlobalSingleOrderAnyCandidate], str | None
     ]
     | None = None,
+    payoff_q_correction_resolver: Callable[
+        [GlobalSingleOrderCandidate, float, float, datetime],
+        PayoffQCorrection | None,
+    ]
+    | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
@@ -6983,6 +6994,61 @@ def select_global_single_order(
         ):
             raise ValueError("candidate endowment ledger mismatch")
         return resolved
+
+    def resolve_payoff_q_correction(
+        candidate: GlobalSingleOrderAnyCandidate,
+        *,
+        raw_q: float,
+        witness: FamilyPayoffWitness,
+    ) -> PayoffQCorrection | None:
+        """Market-anchored correction for one BUY leg, or None to keep raw q.
+
+        Excluded by construction: SELL legs (the calibrator is fitted on entry
+        decisions only) and any candidate whose payoff is a PROVED 0/1 Day0
+        fact — shrinking a settled truth toward the market price would corrupt
+        a certainty into a guess. Every other failure path (no resolver, no
+        fit, unmodeled lead, unusable price) also returns None, so the raw
+        witness probability stays in force.
+        """
+
+        if (
+            payoff_q_correction_resolver is None
+            or not isinstance(candidate, GlobalSingleOrderCandidate)
+            or isinstance(witness, DeterministicBinPayoffWitness)
+            or candidate.settlement_locked_exact_payoff
+        ):
+            return None
+        # p0 is the decision-time all-in unit cost of THIS token: what the
+        # market charges for the claim, i.e. its implied probability the claim
+        # pays. It shares the held-token space with raw_q, so the two are
+        # directly comparable in the calibrator's logit residual.
+        curve = candidate.economic_cost_curve
+        if not curve.levels:
+            return None
+        p0 = float(curve.fee_model.all_in_price(curve.levels[0].price))
+        if not math.isfinite(p0) or not 0.0 < p0 < 1.0:
+            return None
+        try:
+            correction = payoff_q_correction_resolver(
+                candidate, float(raw_q), p0, decision_at_utc
+            )
+        except Exception:  # noqa: BLE001 - an unavailable correction keeps raw q
+            return None
+        if correction is None:
+            return None
+        if not correction.matches(
+            family_key=candidate.family_key,
+            bin_id=candidate.bin_id,
+            side=candidate.side,
+            token_id=candidate.token_id,
+        ) or not math.isclose(
+            correction.raw_q, float(raw_q), rel_tol=0.0, abs_tol=1e-12
+        ):
+            # A record sealed against a different leg or a superseded raw q
+            # cannot describe this sizing; acting on it would break the
+            # certificate's raw-q supersession check.
+            return None
+        return correction
 
     def bind_capital_horizon(
         score: GlobalSingleOrderDecision,
@@ -7406,6 +7472,13 @@ def select_global_single_order(
         if payoff_probability_mean is None:
             rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
             continue
+        correction = resolve_payoff_q_correction(
+            candidate,
+            raw_q=payoff_probability_mean,
+            witness=probability_witness,
+        )
+        if correction is not None:
+            payoff_probability_mean = correction.corrected_q
         score = _score_global_single_order_buy_expected(
             candidate,
             payoff_probability_mean=payoff_probability_mean,
@@ -7426,6 +7499,8 @@ def select_global_single_order(
                 and payoff_probability_mean == 1.0
             ),
         )
+        if correction is not None and score.candidate is not None:
+            score = replace(score, payoff_q_correction=correction)
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
             rejected_buy = score.buy_rejection_economics
@@ -7598,6 +7673,13 @@ def select_global_single_order(
                 if q_samples is None or payoff_probability_mean is None:
                     rejections[candidate_id] = "FAMILY_JOINT_TARGET_PROBABILITY_MISSING"
                     continue
+                joint_correction = resolve_payoff_q_correction(
+                    candidate,
+                    raw_q=payoff_probability_mean,
+                    witness=witness,
+                )
+                if joint_correction is not None:
+                    payoff_probability_mean = joint_correction.corrected_q
                 target_cost = _single_order_cost(
                     candidate.economic_cost_curve,
                     target.shares,
@@ -7651,6 +7733,7 @@ def select_global_single_order(
                             target.fractional_kelly_target_shares
                         ),
                         buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
+                        payoff_q_correction=joint_correction,
                     )
                 )
 
@@ -7737,6 +7820,7 @@ def select_global_single_order(
         terminal_wealth=winner.terminal_wealth,
         expected_terminal_wealth=winner.expected_terminal_wealth,
         expected_growth=winner.expected_growth,
+        payoff_q_correction=winner.payoff_q_correction,
         buy_minimum_marketable_repair=(
             winner.buy_minimum_marketable_repair
         ),

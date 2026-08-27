@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 import hashlib
@@ -6038,6 +6038,93 @@ def _selection_epoch_identity_with_preflight_exclusions(
     return digest.hexdigest()
 
 
+def _target_date_by_family(
+    event_by_family: Mapping[str, object],
+    *,
+    payload_reader: Callable[[object], Mapping[str, object]],
+) -> dict[str, date]:
+    """Map family_key to its weather target date.
+
+    ``family_key`` is a hash of (city, target_date, metric), so the target date
+    cannot be read back out of it — it has to come from the event payload that
+    produced the family. A family whose payload lacks a parseable target_date is
+    omitted, which costs it the calibrator correction and nothing else.
+    """
+
+    by_family: dict[str, date] = {}
+    for family_key, event in event_by_family.items():
+        try:
+            payload = payload_reader(event)
+            target_date = date.fromisoformat(
+                str(payload.get("target_date") or "")[:10]
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        by_family[str(family_key)] = target_date
+    return by_family
+
+
+def _market_anchored_correction_resolver(
+    world_conn,
+    *,
+    target_date_by_family: Mapping[str, date],
+):
+    """Build the per-candidate market-anchored correction resolver, or None.
+
+    The fit rides ``world_conn`` — the batch's already-open world connection —
+    rather than dialing its own: opening a second handle mid-decision is exactly
+    what the entry path forbids. The provider caches behind a TTL, so the table
+    is read once per TTL for the whole batch, not once per candidate.
+
+    Returns None when no family in this batch has a usable target date; the
+    solver then keeps every raw q, which is the pre-calibrator behavior.
+    """
+
+    if not target_date_by_family:
+        return None
+    from src.calibration.market_anchored_live_fit import (
+        MarketAnchoredFitProvider,
+        corrected_probability,
+    )
+    from src.contracts.payoff_q_correction import PayoffQCorrection
+
+    provider = MarketAnchoredFitProvider(lambda: world_conn)
+
+    def resolve(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+        target_date = target_date_by_family.get(str(candidate.family_key))
+        if target_date is None:
+            return None
+        artifact = provider.artifact(now=decision_at_utc)
+        applied = corrected_probability(
+            artifact,
+            p0=p0,
+            q_raw=raw_q,
+            decision_date=decision_at_utc.astimezone(timezone.utc).date(),
+            target_date=target_date,
+        )
+        if applied is None:
+            return None
+        corrected_q, lead_bucket, alpha_lead = applied
+        return PayoffQCorrection(
+            family_key=str(candidate.family_key),
+            bin_id=str(candidate.bin_id),
+            side=str(candidate.side),
+            token_id=str(candidate.token_id),
+            raw_q=raw_q,
+            corrected_q=corrected_q,
+            p0=p0,
+            lead_bucket=lead_bucket,
+            alpha_lead=alpha_lead,
+            beta=float(artifact.beta),
+            lambda_=float(artifact.lambda_),
+            training_cutoff=artifact.training_cutoff,
+            n_train=int(artifact.n_train),
+            param_hash=artifact.param_hash,
+        )
+
+    return resolve
+
+
 def _prepared_candidate_payoff_q_lcb_caps(
     prepared_by_event: Mapping[str, object],
 ) -> dict[tuple[str, str, str, str], float]:
@@ -7778,6 +7865,13 @@ def process_current_global_batch(
             )
         except (TypeError, ValueError) as exc:
             return reject(f"GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAPS_INVALID:{exc}")
+        payoff_q_correction_resolver = _market_anchored_correction_resolver(
+            world_conn,
+            target_date_by_family=_target_date_by_family(
+                full_scope_event_by_family,
+                payload_reader=payload_reader,
+            ),
+        )
         selection_epoch_identity = (
             _selection_epoch_identity_with_preflight_exclusions(
                 selection_epoch_base_identity,
@@ -8067,6 +8161,7 @@ def process_current_global_batch(
                     held_only_family_keys.intersection(attempt_probabilities)
                 ),
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                payoff_q_correction_resolver=payoff_q_correction_resolver,
                 cancelled=selection_cancelled,
             )
             proof_selected = None
@@ -8113,6 +8208,7 @@ def process_current_global_batch(
                         )
                     ),
                     payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                    payoff_q_correction_resolver=payoff_q_correction_resolver,
                     cancelled=selection_cancelled,
                 )
                 proof_submit_count_after = venue_submit_count()
