@@ -65,3 +65,9 @@ Goal: durable positive capital growth via evidence-gated amplification. Derived 
 ## Rollback
 
 Global entry pause is the universal rollback. No path from Tier 0 back to q-Kelly. Tier-0 drawdown >10% → auto-pause (live-wired). Any cap/certificate/reconciliation breach → full pause.
+
+## Item 17 (2026-08-27): auction coverage classification fix + AMBER artifact refit
+
+- **Fix 37c4e38fc** (pushed origin/live): live-epoch VENUE_METADATA_STALE holdings were classified `book_state="STALE"`, colliding with 7b008793e's coverage invariant (STALE ⇒ epoch expired) → whole-batch `GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID` requeue loop (575 log occurrences), lengthened reactor cycles, starved exit_monitor (3283 skips, 9 positions >520s monitor debt vs 150s threshold). Now `NO_EXECUTABLE_BOOK` with venue detail in reason. Regression test appended to test_w3_solve_seam_g3.py. Baseline parity verified (16F/248P engine, identical pre/post).
+- **posterior_age_inflation refit**: artifact was 41 days stale (2026-07-17); refit 2026-08-27 (targets 1481→3435). AMBER 18h band v: high 0.367→0.558 degC², low 0.244→0.289. Loader is lru_cached per process — daemon picks it up on next restart.
+- **Audit verdicts on file** (5 agents): exec latency decision→fill median 5.6s (9-min figure lives upstream: posterior computed_at→decision gaps measured 86s/88s/1072s, n=3, mean ≈6.9min); exit path real (387 filled SELLs) but reactor-lock starved + single-slot EV contention; EMOS receipt stamps SHRUNK_EMOS while strength is structurally 0.0 (never moves center); sigma discards same-day ensemble spread (tail-overconfidence mechanism candidate); price enters only at coherence gate + solver beta-pull.
