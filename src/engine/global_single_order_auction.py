@@ -1139,11 +1139,14 @@ def select_prepared_global_auction(
                             probability,
                             status="EXCLUDED",
                             reason=reason,
-                            book_state=(
-                                "STALE"
-                                if book_status == "VENUE_METADATA_STALE"
-                                else "NO_EXECUTABLE_BOOK"
-                            ),
+                            # "STALE" is reserved for an expired book epoch
+                            # (coverage invariant ties it to decision_at_utc >
+                            # book_deadline_at_utc). A venue-metadata-stale
+                            # token inside a live epoch is current
+                            # non-executability, so it classifies as
+                            # NO_EXECUTABLE_BOOK; the reason keeps the
+                            # venue-level detail.
+                            book_state="NO_EXECUTABLE_BOOK",
                             sell_book_witness_identity=(
                                 global_sell_book_unavailability_witness_identity(
                                     asset_state=book_state_row,
