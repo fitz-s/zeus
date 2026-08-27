@@ -147,6 +147,11 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_order_projection_state
     ON edli_live_order_projection(current_state, updated_at)
 """
 
+CREATE_PROJECTION_RECONCILE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_order_projection_reconcile
+    ON edli_live_order_projection(pending_reconcile, updated_at)
+"""
+
 CREATE_NO_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER IF NOT EXISTS trg_edli_live_order_events_no_update
 BEFORE UPDATE ON edli_live_order_events
@@ -188,5 +193,6 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_USER_CHANNEL_INBOX_STATUS_INDEX_SQL)
     conn.execute(CREATE_USER_CHANNEL_INBOX_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_PROJECTION_STATE_INDEX_SQL)
+    conn.execute(CREATE_PROJECTION_RECONCILE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
