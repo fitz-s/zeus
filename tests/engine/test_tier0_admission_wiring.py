@@ -8,20 +8,25 @@
 #   test_current_statistical_maker_reaches_capital_policy (same monkeypatch
 #   shape: fake process_current_global_batch calls the adapter's
 #   candidate_policy_rejection_resolver directly and captures the reason).
-"""Tier-0 research mode: the live candidate-policy gate rejects price>=0.25,
-MAKER_REST, and occupied-cluster BUY candidates only when the flag is on;
-flag off is a byte-identical NOOP (pre-Tier-0 behavior)."""
+"""Tier-0 research mode admission and fixed-proposal selection wiring."""
 from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import src.engine.event_reactor_adapter as era
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.engine import global_batch_runtime
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent
+from src.solve.solver import (
+    GlobalSingleOrderCandidate,
+    _score_global_single_order_buy_expected,
+    executable_curve_identity,
+)
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 FAMILY_DALLAS_HIGH = weather_family_id(city="Dallas", target_date="2026-08-25", metric="high")
@@ -103,6 +108,18 @@ def _drive_candidate_policy(monkeypatch, candidate, *, held_families=()):
     )[0]
 
 
+class _Curve:
+    def __init__(self, price: float, min_order_size: str = "5") -> None:
+        self.levels = (
+            SimpleNamespace(price=Decimal(str(price)), size=Decimal("100")),
+        )
+        self.min_order_size = Decimal(min_order_size)
+        self.fee_model = SimpleNamespace(all_in_price=lambda value: value)
+
+    def avg_cost_for_shares(self, _shares: Decimal):
+        return SimpleNamespace(value=float(self.levels[0].price))
+
+
 def _candidate(*, execution_mode="TAKER_LIMIT", limit_price=0.15):
     # Mirrors GlobalSingleOrderCandidate's real surface: the decision price
     # lives on economic_cost_curve.levels[0].price and there is NO limit_price
@@ -115,9 +132,7 @@ def _candidate(*, execution_mode="TAKER_LIMIT", limit_price=0.15):
         family_key=FAMILY_DALLAS_HIGH,
         bin_id="bin-a",
         side="YES",
-        economic_cost_curve=SimpleNamespace(
-            levels=(SimpleNamespace(price=limit_price),)
-        ),
+        economic_cost_curve=_Curve(limit_price),
     )
 
 
@@ -209,6 +224,151 @@ def test_same_cluster_candidates_all_reach_global_capital_comparison(monkeypatch
         held_families=(),
     )
     assert reasons == [None, None]
+
+
+def _drive_selection_sizing_contract(
+    monkeypatch,
+    candidates,
+    *,
+    tier0_enabled: bool,
+    current_open_cost_usd: float = 4.10,
+    bankroll_usd: float = 265.21,
+):
+    captured = {}
+
+    def fake_prepare(_event, **_kwargs):
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=FAMILY_DALLAS_HIGH,
+                witness_identity="current-statistical-q",
+            ),
+            day0_payoff_truth_by_bin_side=(),
+            candidate_seeds=(),
+        )
+
+    def fake_process(events, **kwargs):
+        receipt = kwargs["prepare_event"](events[0], NOW)
+        assert receipt.prepared_global_family is not None
+        resolve = kwargs["current_capital_limit_resolver"]
+        captured["limits"] = [
+            resolve(candidate, "market-1", "event-1", events[0].event_id)
+            for candidate in candidates
+        ]
+        captured["multiplier"] = kwargs["fractional_kelly_multiplier"]
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    monkeypatch.setattr(era, "tier0_research_mode_enabled", lambda: tier0_enabled)
+    monkeypatch.setattr(era, "_runtime_kelly_multiplier", lambda: 0.125)
+    monkeypatch.setattr(era, "_runtime_bankroll_usd", lambda **_kwargs: bankroll_usd)
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(era, "_entry_global_submit_suppression_reason", lambda: None)
+    monkeypatch.setattr(era, "_edli_forecast_lane_phase_evidence", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(era, "_forecast_lane_phase_admits", lambda _evidence: True)
+    monkeypatch.setattr(era, "_event_bound_strategy_key", lambda **_kwargs: "test")
+    monkeypatch.setattr(era, "_global_current_entry_feasibility_rejection_reason", lambda *_a, **_kw: None)
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio",
+        lambda _conn: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.total_exposure_usd",
+        lambda _state: current_open_cost_usd,
+    )
+
+    authority = SimpleNamespace(
+        capacity_usd=lambda **_kwargs: Decimal("100"),
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=authority,
+    )
+    adapter.process_global_batch((_make_event(),), NOW)
+    return captured
+
+
+def test_tier0_selection_compares_actual_flat_proposals_inside_open_loss_ceiling(
+    monkeypatch,
+):
+    result = _drive_selection_sizing_contract(
+        monkeypatch,
+        (
+            _candidate(limit_price=0.35),  # 5 shares cost $1.75 > $1.2042 headroom
+            # At 0.08 the separate $1 marketable-notional floor requires
+            # 12.5 shares; that exact fixed proposal still fits the headroom.
+            _candidate(limit_price=0.08),
+        ),
+        tier0_enabled=True,
+    )
+
+    assert result["limits"] == [Decimal("0"), Decimal("1.000")]
+    assert result["multiplier"] == Decimal("0.125")
+
+
+def test_flat_cap_becomes_the_exact_positive_fixed_proposal_without_kelly_change():
+    curve = ExecutableCostCurve(
+        token_id="token-cheap",
+        side="YES",
+        snapshot_id="book-now",
+        book_hash="book-hash",
+        levels=(BookLevel(price=Decimal("0.08"), size=Decimal("100")),),
+        fee_model=FeeModel(Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="cheap-positive",
+        family_key=FAMILY_DALLAS_HIGH,
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="YES",
+        token_id=curve.token_id,
+        probability_witness_identity="q-now",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=NOW,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-now",
+        executable_cost_curve=curve,
+        resolution_identity="resolution-a",
+        neg_risk=False,
+    )
+
+    score = _score_global_single_order_buy_expected(
+        candidate,
+        payoff_probability_mean=0.18,
+        sample_count=51,
+        band_alpha=0.05,
+        wealth_floor_usd=Decimal("265.21"),
+        wealth_ceiling_usd=Decimal("265.21"),
+        spendable_cash_usd=Decimal("265.21"),
+        capital_limit_usd=Decimal("1.00"),
+        fractional_kelly_multiplier=Decimal("0.125"),
+        current_token_shares=Decimal("0"),
+    )
+
+    assert score.candidate is candidate
+    assert score.shares == Decimal("12.5")
+    assert score.cost_usd == Decimal("1.000")
+    assert score.max_spend_usd == Decimal("1.000")
+    assert score.expected_terminal_wealth is not None
+    assert score.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert score.expected_terminal_wealth.expected_ev_usd > 0
+
+
+def test_tier0_off_preserves_allocator_capacity_and_runtime_kelly(monkeypatch):
+    result = _drive_selection_sizing_contract(
+        monkeypatch,
+        (_candidate(limit_price=0.35),),
+        tier0_enabled=False,
+    )
+
+    assert result["limits"] == [Decimal("100")]
+    assert result["multiplier"] == Decimal("0.125")
 
 
 # Once-per-cycle start-equity seed / drawdown-kill hook (reversal_plan_tier0
