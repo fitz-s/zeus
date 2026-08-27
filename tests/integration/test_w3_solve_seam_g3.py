@@ -72,6 +72,7 @@ from src.events.day0_authority import (
     assert_live_day0_probability_authority,
     assert_live_day0_qkernel_guard_authority,
 )
+from src.contracts.payoff_q_correction import PayoffQCorrection
 from src.events.reactor import EventSubmissionReceipt
 from src.solve.solver import (
     BinaryTerminalWealthCertificate,
@@ -37188,4 +37189,224 @@ def test_aviationweather_metar_without_revision_model_is_typed_unavailable():
                 2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
             ),
             entry_authority=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Market-anchored correction at the actuation certificate (item 9 live wiring).
+#
+# The solver seals the correction onto the decision; this seam must ACT on that
+# sealed value rather than the raw witness projection, so the certificate, the
+# cut probability, and the receipt all name one probability.
+# ---------------------------------------------------------------------------
+
+
+def _market_anchored_cert_fixture(*, corrected_q, raw_q=0.70):
+    """A mean-action BUY whose economics are coherent with ``corrected_q``."""
+
+    at = _dt.datetime(2026, 7, 26, 12, 0, tzinfo=_dt.timezone.utc)
+    family = "Seoul|2026-07-27|high"
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="30C",
+            condition_id="condition-30",
+            yes_token_id="yes-30",
+            no_token_id="no-30",
+        ),
+        OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-other",
+            yes_token_id="yes-other",
+            no_token_id="no-other",
+        ),
+    )
+    samples = np.tile(np.asarray(((0.50, 0.50),)), (400, 1))
+    witness_fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "q_version": "q-current",
+        "resolution_identity": "resolution-current",
+        "topology_identity": "topology-current",
+        "posterior_identity_hash": "posterior-current",
+        "source_truth_identity": "source-current",
+        "authority_certificate_hash": "authority-current",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((raw_q, 1.0 - raw_q)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    witness = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=family,
+        probability_witness_identity=witness.witness_identity,
+        book_identity="current",
+        price="0.40",
+        captured_at=at,
+        bin_id="30C",
+        condition_id="condition-30",
+        side="YES",
+        token_id="yes-30",
+    )
+    # Economics are built from corrected_q, exactly as the solver would have
+    # sized them: decision_ev == cut_win_probability * shares - cost.
+    shares = Decimal("5")
+    cost = Decimal("2")
+    terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=corrected_q,
+        loss_probability_mean=1.0 - corrected_q,
+        loss_payoff_usd=-cost,
+        win_payoff_usd=shares - cost,
+        wealth_after_loss_usd=Decimal("98"),
+        wealth_after_win_usd=Decimal("103"),
+        expected_delta_log_wealth=(
+            (1.0 - corrected_q) * math.log(0.98) + corrected_q * math.log(1.03)
+        ),
+        expected_ev_usd=float(Decimal(str(corrected_q)) * shares - cost),
+    )
+    correction = PayoffQCorrection(
+        family_key=family,
+        bin_id="30C",
+        side="YES",
+        token_id="yes-30",
+        raw_q=raw_q,
+        corrected_q=corrected_q,
+        p0=0.40,
+        lead_bucket="day1",
+        alpha_lead=0.558,
+        beta=0.094,
+        lambda_=10.0,
+        training_cutoff="2026-07-25T00:00:00Z",
+        n_train=543,
+        param_hash="param-hash-live",
+    )
+    decision = SimpleNamespace(
+        candidate=candidate,
+        shares=shares,
+        cost_usd=cost,
+        terminal_wealth=None,
+        expected_terminal_wealth=terminal,
+        payoff_q_correction=correction,
+    )
+    seed = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-current",
+        "receipt_hash": "receipt-current",
+        "payoff_q_point": raw_q,
+        "payoff_q_lcb": 0.35,
+        "global_execution_mode": candidate.execution_mode,
+        "global_target_shares": float(shares),
+        "global_expected_cost_usd": float(cost),
+        "global_max_spend_usd": float(cost),
+    }
+    return seed, decision, witness, correction
+
+
+def test_global_current_state_cert_acts_on_the_sealed_corrected_probability():
+    corrected_q = 0.52
+    seed, decision, witness, correction = _market_anchored_cert_fixture(
+        corrected_q=corrected_q
+    )
+
+    current = era._global_current_state_execution_economics(
+        seed, decision=decision, witness=witness, payoff_q_lcb_cap=0.35
+    )
+
+    # One value: every acting field names the corrected probability, and the
+    # mean-action identity point_q == cut_win_probability holds on it.
+    assert current["payoff_q_action"] == pytest.approx(corrected_q)
+    assert current["payoff_q_point"] == pytest.approx(corrected_q)
+    assert current["q_dot_payoff"] == pytest.approx(corrected_q)
+    assert current["selection_guard_q_safe"] == pytest.approx(corrected_q)
+    assert current["edge_expected"] == pytest.approx(corrected_q - 0.40)
+    assert current["global_expected_ev_usd"] == pytest.approx(
+        float(Decimal(str(corrected_q)) * decision.shares - decision.cost_usd)
+    )
+    assert current["global_probability_functional"] == "POSTERIOR_PREDICTIVE_MEAN"
+
+    stamp = current["market_anchored_correction"]
+    assert stamp["applied"] is True
+    assert stamp["q_raw"] == pytest.approx(0.70)
+    assert stamp["q_corrected"] == pytest.approx(corrected_q)
+    assert stamp["beta"] == pytest.approx(correction.beta)
+    assert stamp["training_cutoff"] == "2026-07-25T00:00:00Z"
+    assert stamp["param_hash"] == "param-hash-live"
+
+
+def test_global_current_state_cert_without_a_correction_is_unchanged():
+    seed, decision, witness, _ = _market_anchored_cert_fixture(corrected_q=0.70)
+    uncorrected = SimpleNamespace(
+        candidate=decision.candidate,
+        shares=decision.shares,
+        cost_usd=decision.cost_usd,
+        terminal_wealth=None,
+        expected_terminal_wealth=decision.expected_terminal_wealth,
+        payoff_q_correction=None,
+    )
+
+    current = era._global_current_state_execution_economics(
+        seed, decision=uncorrected, witness=witness, payoff_q_lcb_cap=0.35
+    )
+
+    assert current["payoff_q_action"] == pytest.approx(0.70)
+    assert current["payoff_q_point"] == pytest.approx(0.70)
+    assert current["market_anchored_correction"] == {"applied": False}
+
+
+def test_global_current_state_cert_rejects_a_correction_naming_a_stale_raw_q():
+    """A witness that moved since the solve must still fail supersession.
+
+    The correction carries the raw q it was computed from; if the current
+    witness no longer projects that value, the decision was sized against a
+    superseded probability and must not actuate.
+    """
+
+    seed, decision, witness, correction = _market_anchored_cert_fixture(
+        corrected_q=0.52
+    )
+    stale = SimpleNamespace(
+        candidate=decision.candidate,
+        shares=decision.shares,
+        cost_usd=decision.cost_usd,
+        terminal_wealth=None,
+        expected_terminal_wealth=decision.expected_terminal_wealth,
+        payoff_q_correction=replace(correction, raw_q=0.61),
+    )
+
+    with pytest.raises(
+        ValueError, match="GLOBAL_CURRENT_STATE_PREDICTIVE_MEAN_SUPERSEDED"
+    ):
+        era._global_current_state_execution_economics(
+            seed, decision=stale, witness=witness, payoff_q_lcb_cap=0.35
+        )
+
+
+def test_economics_sized_on_the_raw_q_cannot_even_be_constructed():
+    """The coherence trap the upstream insertion point exists to avoid.
+
+    Had the correction been applied only downstream of the solve, the sealed
+    terminal certificate would still carry the RAW win probability while its
+    payoffs and EV came from a corrected sizing. That object is not merely
+    rejected at the actuation seam — it cannot be built at all, because
+    ExpectedBuyTerminalWealthCertificate re-derives EV and delta-log-wealth
+    from its own win probability and demands agreement to 1e-12. Correcting at
+    the source is what keeps this certificate constructible.
+    """
+
+    _seed, decision, _witness, _correction = _market_anchored_cert_fixture(
+        corrected_q=0.52
+    )
+
+    with pytest.raises(
+        ValueError, match="expected BUY terminal-wealth objective disagrees"
+    ):
+        replace(
+            decision.expected_terminal_wealth,
+            win_probability_mean=0.70,
+            loss_probability_mean=0.30,
         )

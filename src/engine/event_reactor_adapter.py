@@ -15645,6 +15645,22 @@ def _global_current_state_execution_economics(
     )
     if payoff_samples is None or current_point_q is None:
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
+    # The witness projection above is the RAW probability. When the solver sized
+    # this order on a market-anchored correction, it sealed that correction onto
+    # the decision; re-deriving it here instead would let a refit between solve
+    # and actuation silently change the acting scalar. The seal names the raw q
+    # it was computed from, so a superseded witness still fails the equality
+    # check below on the raw value — the correction cannot mask a stale q.
+    q_correction = getattr(decision, "payoff_q_correction", None)
+    if q_correction is not None:
+        if not math.isclose(
+            float(q_correction.raw_q),
+            float(current_point_q),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("GLOBAL_CURRENT_STATE_PREDICTIVE_MEAN_SUPERSEDED")
+        current_point_q = float(q_correction.corrected_q)
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
     try:
         n_draws = int(payoff_samples.shape[0])
@@ -15927,6 +15943,15 @@ def _global_current_state_execution_economics(
             "global_current_band_n": n_draws,
             "global_current_band_alpha": alpha,
         }
+    )
+    # payoff_q_point / payoff_q_action carry the CORRECTED value: they are the
+    # acting scalar, and the verifier ties receipt q_live to them. The raw
+    # witness probability stays visible here and in pre_qkernel_q_posterior, so
+    # settlement attribution can grade corrected-versus-raw after the fact.
+    current["market_anchored_correction"] = (
+        q_correction.as_cert_fields()
+        if q_correction is not None
+        else {"applied": False}
     )
     if mean_action:
         current.update(

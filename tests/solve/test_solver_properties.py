@@ -1491,6 +1491,7 @@ def _global_select(
     family_portfolio_endowment_resolver=None,
     candidate_payoff_q_lcb_resolver=None,
     candidate_policy_rejection_resolver=None,
+    payoff_q_correction_resolver=None,
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
     cancelled=None,
@@ -1559,6 +1560,7 @@ def _global_select(
         family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
         candidate_payoff_q_lcb_resolver=candidate_payoff_q_lcb_resolver,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
+        payoff_q_correction_resolver=payoff_q_correction_resolver,
         cancelled=cancelled,
     )
 
@@ -6054,3 +6056,221 @@ def test_var_nonconcave_where_cvar_stays_concave():
 
     assert viol(var) >= 2, "expected the VaR/quantile objective to be non-concave"
     assert viol(cvar) == 0, "the CVaR objective must stay concave (the solver relies on it)"
+
+
+# ---------------------------------------------------------------------------
+# Market-anchored acting-probability correction (item 9 live wiring).
+#
+# The correction must reach the SOLVER, not just the receipt: the same scalar
+# has to size the order, seal the cut probability, and travel to the
+# certificate. These tests pin that single-value property and the fail-open
+# behavior that keeps the pre-calibrator path byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def _correction_for(candidate, *, raw_q, corrected_q, p0=0.35):
+    from src.contracts.payoff_q_correction import PayoffQCorrection
+
+    return PayoffQCorrection(
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+        raw_q=raw_q,
+        corrected_q=corrected_q,
+        p0=p0,
+        lead_bucket="day1",
+        alpha_lead=0.558,
+        beta=0.094,
+        lambda_=10.0,
+        training_cutoff="2026-07-09T00:00:00Z",
+        n_train=543,
+        param_hash="param-hash-test",
+    )
+
+
+def test_global_buy_sizes_on_the_corrected_probability_not_the_raw_q():
+    """The corrected value is the one the solver sizes and seals."""
+
+    candidate = _global_candidate(
+        candidate_id="corrected-buy",
+        family="corrected-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+    correction = _correction_for(candidate, raw_q=0.90, corrected_q=0.52)
+
+    # A cap large enough that Kelly, not the capital limit, sizes the order —
+    # otherwise both runs clamp to the same cap and the difference is invisible.
+    corrected = _global_select(
+        (candidate,),
+        cap="60",
+        payoff_q_correction_resolver=lambda c, raw_q, p0, at: correction,
+    )
+    raw = _global_select((candidate,), cap="60")
+
+    assert corrected.candidate is not None
+    assert raw.candidate is not None
+    # One value everywhere: the sealed cut probability IS the corrected q.
+    assert corrected.expected_terminal_wealth.win_probability_mean == 0.52
+    assert corrected.expected_terminal_wealth.loss_probability_mean == pytest.approx(
+        1.0 - 0.52
+    )
+    assert corrected.payoff_q_correction is correction
+    # An honest, lower q must buy strictly less than the overconfident one.
+    assert corrected.shares < raw.shares
+    assert raw.expected_terminal_wealth.win_probability_mean == pytest.approx(0.90)
+
+
+def test_corrected_decision_ev_stays_coherent_with_the_sealed_cut_probability():
+    """decision_ev == cut_win_probability * shares - cost, on the corrected q.
+
+    This is the adapter's abs_tol=1e-12 economics identity
+    (GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID). It holds only because
+    the correction lands upstream of sizing, so shares, cost, and the cut
+    probability were all produced from the same scalar.
+    """
+
+    candidate = _global_candidate(
+        candidate_id="coherent-buy",
+        family="coherent-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+    correction = _correction_for(candidate, raw_q=0.90, corrected_q=0.55)
+
+    decision = _global_select(
+        (candidate,),
+        payoff_q_correction_resolver=lambda c, raw_q, p0, at: correction,
+    )
+
+    assert decision.candidate is not None
+    terminal = decision.expected_terminal_wealth
+    cut_win_probability = Decimal(str(terminal.win_probability_mean))
+    assert math.isclose(
+        float(Decimal(str(terminal.expected_ev_usd))),
+        float(cut_win_probability * decision.shares - decision.cost_usd),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        float(cut_win_probability + Decimal(str(terminal.loss_probability_mean))),
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
+    assert Decimal(str(terminal.loss_payoff_usd)) == -decision.cost_usd
+    assert Decimal(str(terminal.win_payoff_usd)) == decision.shares - decision.cost_usd
+
+
+def test_no_correction_resolver_is_byte_identical_to_the_pre_calibrator_path():
+    candidate = _global_candidate(
+        candidate_id="failopen-buy",
+        family="failopen-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+
+    baseline = _global_select((candidate,))
+    absent = _global_select((candidate,), payoff_q_correction_resolver=None)
+    returns_none = _global_select(
+        (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: None
+    )
+
+    assert absent == baseline
+    assert returns_none == baseline
+    assert baseline.payoff_q_correction is None
+
+
+def test_a_raising_correction_resolver_keeps_the_raw_q():
+    candidate = _global_candidate(
+        candidate_id="raising-buy",
+        family="raising-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+
+    def explode(candidate, raw_q, p0, at):
+        raise RuntimeError("fit unavailable")
+
+    baseline = _global_select((candidate,))
+    decision = _global_select((candidate,), payoff_q_correction_resolver=explode)
+
+    assert decision == baseline
+
+
+def test_correction_sealed_against_a_different_leg_is_refused():
+    """A record that does not name this exact leg cannot describe its sizing."""
+
+    candidate = _global_candidate(
+        candidate_id="mismatched-buy",
+        family="mismatched-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+    foreign = replace(
+        _correction_for(candidate, raw_q=0.90, corrected_q=0.52),
+        token_id="token-somewhere-else",
+    )
+
+    baseline = _global_select((candidate,))
+    decision = _global_select(
+        (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: foreign
+    )
+
+    assert decision == baseline
+
+
+def test_correction_naming_a_superseded_raw_q_is_refused():
+    """raw_q must match the witness projection this sizing actually used."""
+
+    candidate = _global_candidate(
+        candidate_id="stale-raw-buy",
+        family="stale-raw-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+    )
+    stale = _correction_for(candidate, raw_q=0.61, corrected_q=0.52)
+
+    baseline = _global_select((candidate,))
+    decision = _global_select(
+        (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: stale
+    )
+
+    assert decision == baseline
+
+
+def test_correction_resolver_receives_the_raw_q_and_the_all_in_market_price():
+    """p0 is the fee-inclusive unit cost of this token, in the same space as q."""
+
+    seen = []
+    candidate = _global_candidate(
+        candidate_id="args-buy",
+        family="args-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.35", "100"),),
+        fee="0.02",
+    )
+
+    def record(candidate, raw_q, p0, at):
+        seen.append((raw_q, p0, at))
+        return None
+
+    _global_select((candidate,), payoff_q_correction_resolver=record)
+
+    assert seen
+    raw_q, p0, at = seen[0]
+    assert raw_q == pytest.approx(0.90)
+    curve = candidate.economic_cost_curve
+    assert p0 == pytest.approx(
+        float(curve.fee_model.all_in_price(curve.levels[0].price))
+    )
+    assert p0 > 0.35  # fee-inclusive, strictly above the raw level price
+    assert at == _DECISION_AT

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.payoff_q_correction import PayoffQCorrection
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
     CurrentGlobalAuctionScope,
@@ -29,6 +30,7 @@ from src.solve.solver import (
     DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
     GlobalSingleOrderAnyCandidate,
+    GlobalSingleOrderCandidate,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
     PortfolioWealthWitness,
@@ -803,6 +805,11 @@ def select_prepared_global_auction(
     buy_disabled_family_keys: frozenset[str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
+    payoff_q_correction_resolver: Callable[
+        [GlobalSingleOrderCandidate, float, float, datetime],
+        PayoffQCorrection | None,
+    ]
+    | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> PreparedGlobalAuctionResult:
     """Compare every prepared family and return at most one current winner.
@@ -1398,6 +1405,7 @@ def select_prepared_global_auction(
         ),
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
+        payoff_q_correction_resolver=payoff_q_correction_resolver,
         cancelled=cancelled,
     )
     if (
