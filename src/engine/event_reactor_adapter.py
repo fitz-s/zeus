@@ -1,3 +1,8 @@
+# Last reused/audited: 2026-08-27
+#   Global predictive-mean NO redecision preserves the immutable replacement
+#   certificate's same-bin YES parent while carrying its distinct action q in
+#   qkernel_execution_economics; otherwise every valid point/action divergence
+#   fails JIT with REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q.
 # Last reused/audited: 2026-08-19
 #   Conditional Day0 remaining-path uncertainty no longer reuses the
 #   unconditional full-day source-clock predictive width as temperature noise.
@@ -16260,12 +16265,16 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
-    if str(cert.get("side") or "").strip().upper() == "NO":
-        # ``same_bin_yes_posterior`` travels beside receipt.q_live, whose global
-        # authority is cert.payoff_q_point. Keep that pair on one current
-        # witness even when the optimizer acts on a predictive mean. The
-        # immutable served YES parent remains separately preserved inside the
-        # replacement certificate and pre-qkernel provenance.
+    if (
+        str(cert.get("side") or "").strip().upper() == "NO"
+        and not isinstance(proof.replacement_no_bound_certificate, Mapping)
+    ):
+        # An un-certified current witness owns both sides of this pair.  A
+        # replacement certificate is different: same_bin_yes_posterior is its
+        # immutable source-clock parent, while the re-decided action q travels in
+        # qkernel_execution_economics and q_posterior.  Replacing the parent with
+        # the optimizer point makes an otherwise valid predictive-mean redecision
+        # fail its own submit certificate.
         replacement["same_bin_yes_posterior"] = 1.0 - q_point
     if _global_current_taker_action(proof, cert):
         replacement.update(
