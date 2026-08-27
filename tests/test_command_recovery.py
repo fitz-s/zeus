@@ -5843,6 +5843,7 @@ class TestAuthenticatedEntryTradeFactProjection:
 
     def test_partial_then_full_rebuilds_cumulative_fill_once(self, conn):
         from src.execution.command_recovery import (
+            capital_blocking_command_count,
             reconcile_authenticated_entry_trade_facts,
         )
 
@@ -5866,14 +5867,18 @@ class TestAuthenticatedEntryTradeFactProjection:
             order_id=order_id,
             token_id="tok-authenticated-partial",
         )
-        _append_confirmed_trade_fact(
+        _append_trade_fact(
             conn,
             command_id=command_id,
             order_id=order_id,
             trade_id="trade-authenticated-partial-1",
+            state="MATCHED",
             filled_size="4",
             fill_price="0.40",
+            source="WS_USER",
         )
+
+        assert capital_blocking_command_count(conn) == 1
 
         first = reconcile_authenticated_entry_trade_facts(
             conn, command_id=command_id
@@ -5891,6 +5896,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             "entry_price": 0.4,
             "order_status": "partial",
         }
+        assert capital_blocking_command_count(conn) == 0
 
         _append_confirmed_trade_fact(
             conn,
