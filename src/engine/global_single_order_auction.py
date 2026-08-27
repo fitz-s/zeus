@@ -75,6 +75,7 @@ class GlobalHoldingAuctionCoverage:
         evaluated = self.status == "EVALUATED"
         excluded = self.status == "EXCLUDED"
         book_state = str(self.book_state or "").strip().upper()
+        book_expired = self.decision_at_utc > self.book_deadline_at_utc
         canonical_bin_identity = str(
             self.canonical_bin_identity or f"condition:{self.condition_id}"
         ).strip()
@@ -139,7 +140,8 @@ class GlobalHoldingAuctionCoverage:
                 )
             )
             or self.selection_cut_at_utc > self.decision_at_utc
-            or self.decision_at_utc > self.book_deadline_at_utc
+            or (book_expired and not (excluded and book_state == "STALE"))
+            or (book_state == "STALE" and not (excluded and book_expired))
             or evaluated
             != bool(
                 candidate_ids
