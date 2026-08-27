@@ -3544,7 +3544,7 @@ def _live_realized_capital_curve(
         "FROM position_events "
         "WHERE event_type IN ('EXIT_ORDER_FILLED','SETTLED') "
         f"AND position_id IN ({placeholders}) "
-        "ORDER BY position_id,sequence_no DESC",
+        "ORDER BY position_id,occurred_at DESC,sequence_no DESC",
         tuple(position_ids),
     ).fetchall()
     latest_event: dict[str, tuple[object, ...]] = {}

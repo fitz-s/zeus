@@ -5448,6 +5448,35 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["net_realized_pnl_usd"] == pytest.approx(4.621188)
         conn.close()
 
+    def test_terminal_event_uses_economic_time_not_append_sequence(self):
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=0.92,
+            exit_price=0.40,
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                "current-trial",
+                3,
+                "EXIT_ORDER_FILLED",
+                "2026-08-11T16:00:00+00:00",
+                json.dumps({"pnl": 1.52}),
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["blocked_position_count"] == 0
+        assert curve["realized_position_count"] == 1
+        assert curve["gross_realized_pnl_usd"] == pytest.approx(0.92)
+        conn.close()
+
     def test_partial_entry_fill_contributes_exact_realized_capital(self):
         from src.events.day0_authority import bind_day0_probability_semantics
 
