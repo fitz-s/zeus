@@ -24,6 +24,8 @@ used to bundle with exit monitoring:
     cascade-liveness required poller, not on the settlement-grading path)
   - current-regime capital evidence (5-min; canonical DB read-only evaluator,
     atomic observational artifact refresh, never order authority)
+  - Tier-0 candidate-set settlement fold (5-min; VERIFIED settlement labels for
+    prospective ordinal-selection evidence, never order authority)
   - realized-fee evidence refit (24h; scripts.reconcile_realized_fees.refit -- keeps
     state/fee_reconciliation.json inside fee_authority.MAX_EVIDENCE_AGE_DAYS=30 so the
     taker-fee EV authority never silently reverts to the phantom schedule fee again)
@@ -407,6 +409,18 @@ def _current_regime_capital_evidence_isolated() -> dict[str, object]:
     return artifact
 
 
+def _tier0_candidate_settlement_fold_cycle() -> dict[str, int]:
+    """Refresh prospective selection labels without touching order authority."""
+
+    from src.cron.settlement_attribution import (
+        run_tier0_candidate_settlement_fold,
+    )
+
+    stats = run_tier0_candidate_settlement_fold()
+    logger.info("tier0 candidate-set settlement fold: %s", stats)
+    return stats
+
+
 def _realized_fee_evidence_refit_cycle() -> None:
     """Daily refit of state/fee_reconciliation.json (the taker-fee EV authority evidence).
 
@@ -636,6 +650,17 @@ def main() -> None:
             datetime.now(timezone.utc)
             + timedelta(seconds=_CAPITAL_EVIDENCE_START_DELAY_SECONDS)
         ),
+    )
+    _scheduler.add_job(
+        _scheduler_job("tier0_candidate_settlement_fold")(
+            _tier0_candidate_settlement_fold_cycle
+        ),
+        # SCOPE: derived labels for exact Tier-0 candidate rows only.
+        # DRAIN: every five-minute tick scans all rows after harvester truth.
+        # RESET: canonical settlement corrections are refolded on the next tick.
+        "interval", minutes=5, id="tier0_candidate_settlement_fold",
+        max_instances=1, coalesce=True,
+        next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=45)),
     )
     # Daily realized-fee evidence refit (fee_authority.py incident 2026-06-12,
     # recurrence 2026-07-12 -> 2026-08-24: the artifact went stale and nobody reran the
