@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-08-27
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
 #   W4 row (C3 staleness path, same packet: DELETE maker_rest_escalation).
@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.execution.staleness_cancel as staleness_cancel_module
 from src.execution.staleness_cancel import (
     _merge_cancel_proposals,
     classify_cancel_set,
@@ -638,9 +639,8 @@ class TestRunC3StalenessCancelCycle:
         _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
         client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
 
-        # q-version staleness only fires within a claimed source event's
-        # affected_cities (TestTtlEventClockSplit covers the TTL-vs-event split
-        # itself); this test is about the q-stale classification+confirm path.
+        # q-version staleness is recurring and independent of source-event
+        # delivery; this test covers the classify+confirm path.
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW,
             affected_cities=frozenset({FAMILY[0]}),
@@ -650,7 +650,7 @@ class TestRunC3StalenessCancelCycle:
         assert result["confirmed_families"] == {FAMILY}
         assert conn_state(trade_conn, "c1") == "CANCELLED"
 
-    def test_hwm_blocked_family_cancels_legacy_null_q_forecast_rest(self):
+    def test_hwm_blocked_family_cancels_without_source_event(self):
         trade_conn = _trade_db()
         forecasts_conn = _forecasts_db()
         q_version = "a" * 64
@@ -697,7 +697,7 @@ class TestRunC3StalenessCancelCycle:
             forecasts_conn,
             client,
             now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
-            affected_cities=frozenset({FAMILY[0]}),
+            affected_cities=None,
         )
 
         assert result["cancel_set_size"] == 1
@@ -884,7 +884,7 @@ class TestRunC3StalenessCancelCycle:
         assert client.cancel_calls == []
         assert conn_state(trade_conn, "c1") == "ACKED"
 
-    def test_affected_cities_filter_scopes_the_scan(self):
+    def test_affected_cities_hint_does_not_scope_stale_q_safety(self):
         trade_conn = _trade_db()
         forecasts_conn = _forecasts_db()
         other_family = ("Toronto", "2026-07-04", "high")
@@ -900,18 +900,22 @@ class TestRunC3StalenessCancelCycle:
         _seed_market_event(forecasts_conn, token_id="tok2", city=other_family[0], target_date=other_family[1], metric=other_family[2])
         _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new-1", source_cycle_time=NOW.isoformat())
         _seed_posterior(forecasts_conn, family=other_family, posterior_identity_hash="q-new-2", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
+        client = _FakeGatewayClient(cancel_responses=[[
+            {"canceled": True, "orderID": "v1"},
+            {"canceled": True, "orderID": "v2"},
+        ]])
 
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, forecasts_conn, client, now=NOW,
             affected_cities=frozenset({FAMILY[0]}),
         )
 
-        # scanned reflects the FULL global scan (both cities) -- affected_cities
-        # only scopes the q-version staleness pass, never the TTL pass's scan.
+        # The event names only Miami, but both stale q versions are cancelled.
+        # Event delivery is a wake hint, not stale-q fill authority.
         assert result["scanned"] == 2
-        assert result["confirmed_families"] == {FAMILY}
-        assert conn_state(trade_conn, "c2") == "ACKED"  # out-of-scope city, fresh q, not past TTL -> untouched
+        assert result["confirmed_families"] == {FAMILY, other_family}
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+        assert conn_state(trade_conn, "c2") == "CANCELLED"
 
 
 class TestFamilyLevelRedecisionGating:
@@ -988,15 +992,65 @@ class TestFamilyLevelRedecisionGating:
         assert result["confirmed_families"] == {other_family}  # FAMILY (ambiguous) excluded, other_family confirmed
 
 
-class TestTtlEventClockSplit:
-    """The composition fix: TTL (rest_deadline_exceeded) is a GLOBAL,
-    UNCONDITIONAL pass over every open rest on every call, independent of
-    whether any SOURCE_RUN_ARRIVED event fired or which cities it named.
-    q-version staleness is the only pass scoped to affected_cities. Regression
-    coverage for the orphaned-GTC scheduler-composition bug: gating the TTL
-    scan behind claimed events, or filtering entries by affected_cities BEFORE
-    classification, stranded expired rests during quiet periods / in
-    non-event cities."""
+class TestRecurringCancelClockIndependence:
+    """TTL and q/HWM staleness are global recurring safety passes.
+
+    A missing ``SOURCE_RUN_ARRIVED`` event cannot strand an expired rest or
+    license a forecast rest whose frozen q is no longer current.
+    """
+
+    def test_source_event_hint_does_not_scope_q_hwm_scan(self, monkeypatch):
+        """Every open family reaches the q/HWM reader on a no-event tick."""
+        entries = [
+            _entry("c1", q_version="q-miami", age_minutes=1.0),
+            _entry("c2", q_version="q-toronto", age_minutes=1.0),
+        ]
+        other_family = ("Toronto", "2026-07-04", "high")
+        families = {"c1": FAMILY, "c2": other_family}
+        read_families = []
+        classified_q_maps = []
+
+        monkeypatch.setattr(staleness_cancel_module, "find_open_entry_rests", lambda _conn: entries)
+        monkeypatch.setattr(
+            staleness_cancel_module,
+            "resolve_order_families",
+            lambda _entries, _trade, _forecasts: families,
+        )
+
+        def _read(_conn, requested, *, now):
+            requested_set = set(requested)
+            read_families.append(requested_set)
+            return {family: f"q-{family[0].lower()}" for family in requested_set}
+
+        def _classify(_entries, _families, q_by_family, *, now, deadline_minutes):
+            classified_q_maps.append(dict(q_by_family))
+            return []
+
+        monkeypatch.setattr(staleness_cancel_module, "read_current_family_q_versions", _read)
+        monkeypatch.setattr(staleness_cancel_module, "classify_cancel_set", _classify)
+
+        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+        monkeypatch.setattr(
+            day0_hard_fact_exit,
+            "classify_day0_dead_bin_entry_cancels",
+            lambda *_args, **_kwargs: [],
+        )
+
+        result = staleness_cancel_module.run_c3_staleness_cancel_cycle(
+            object(),
+            object(),
+            object(),
+            object(),
+            now=NOW,
+            affected_cities=None,
+        )
+
+        assert result["scanned"] == 2
+        assert result["cancel_set_size"] == 0
+        assert read_families == [{FAMILY, other_family}]
+        assert classified_q_maps[0] == {}  # TTL-only pass.
+        assert set(classified_q_maps[1]) == {FAMILY, other_family}
 
     def test_no_source_event_still_cancels_expired_rest(self):
         """affected_cities=None (no SOURCE_RUN_ARRIVED claimed this tick) must

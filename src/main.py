@@ -8413,11 +8413,10 @@ def _c3_staleness_cancel_cycle() -> None:
       the exact behavior the retired maker_rest_escalation job had; gating it
       behind an event claim would strand expired rests during quiet forecast
       periods (the orphaned-GTC bug this composition must not reintroduce).
-    - q-version staleness (``is_stale_pending_cancel``) is SCOPED to the
-      ``affected_cities`` of ``SOURCE_RUN_ARRIVED`` events claimed through their
-      own dedicated lane (``_C3_STALENESS_CANCEL_CONSUMER``, isolated from the
-      main reactor's ``edli_reactor_v1`` queue) — it only runs when such events
-      exist, and only against the cities they name.
+    - q-version/HWM staleness (``is_stale_pending_cancel``) scans every open
+      forecast-authority rest on every tick. ``SOURCE_RUN_ARRIVED`` events are
+      retained as wake/provenance hints, but cannot be the safety scope: raw HWM
+      may supersede an order's q before an event is emitted or claimed.
 
     Cancels go out through the W2.1 batch cancel gateway (cutover_guard-gated;
     W2.3 rate budget consulted at CANCEL priority), then a reconciled
@@ -8498,9 +8497,8 @@ def _c3_staleness_cancel_cycle() -> None:
         affected_cities = set()
 
     # UNCONDITIONAL: the TTL pass inside run_c3_staleness_cancel_cycle must run
-    # every tick regardless of claimed_ids — an empty claim this tick means "no
-    # q-version staleness pass," never "skip the GTC deadline scan." Zero
-    # claimed_ids still exercises the TTL pass over every open rest.
+    # every tick regardless of claimed_ids. Zero claimed_ids still exercises
+    # both TTL and q-version/HWM checks over every open rest.
     from src.data.polymarket_client import PolymarketClient
     from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
     from src.state.db import get_forecasts_connection_read_only, get_trade_connection, get_trade_connection_read_only
