@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-07-23
-# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused/audited: 2026-08-27
+# Lifecycle: created=2026-05-17; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -855,6 +855,38 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     assert allowed["allowed"] is True
     assert allowed["reason"] == "allowed_reconciled_position_increment"
     assert allowed["increment_position_id"] == "active-position"
+
+    mem_db.execute(
+        "UPDATE position_current SET token_id='' WHERE position_id='active-position'"
+    )
+    selected_no_only = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert selected_no_only["allowed"] is True
+    assert selected_no_only["increment_position_id"] == "active-position"
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction='buy_yes', token_id=?, no_token_id=''
+            WHERE position_id='active-position'""",
+        (TOKEN_X,),
+    )
+    selected_yes_only = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert selected_yes_only["allowed"] is True
+    assert selected_yes_only["increment_position_id"] == "active-position"
+    mem_db.execute(
+        """UPDATE position_current
+              SET direction='buy_no', token_id=?, no_token_id=?
+            WHERE position_id='active-position'""",
+        (TOKEN_X_NO, TOKEN_X),
+    )
 
     mem_db.execute(
         """INSERT INTO venue_commands
