@@ -100,11 +100,12 @@ def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = N
         if exclude_id is not None:
             params += (exclude_id,)
         params += (_INLINE_EXPIRE_LIMIT,)
-        # The canonical table is hundreds of GB. Ordering by id made SQLite
-        # choose a full table scan while this caller already owned the write
-        # transaction, starving exit/cancel journals. The timestamp predicate
-        # and order are deliberately index-compatible and fail closed if the
-        # canonical schema index is unavailable.
+        # The canonical table is hundreds of GB. Walk the timestamp index
+        # backward from the cutoff: walking forward from its oldest entry can
+        # traverse years of other-mode rows before finding this mode, while the
+        # caller already owns the write transaction and exit/cancel journals
+        # wait behind it. The reverse order is still a bounded, exact expiry;
+        # it only changes which 50 already-expired rows drain first.
         conn.execute(
             f"""
             DELETE FROM decision_log WHERE id IN (
@@ -112,7 +113,7 @@ def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = N
                 WHERE timestamp < ? AND mode = ?
                 {exclude_clause}
                 {except_clause}
-                ORDER BY timestamp, id LIMIT ?
+                ORDER BY timestamp DESC, id DESC LIMIT ?
             )
             """,
             params,
