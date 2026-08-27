@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-08-23 (Day0 observation reseed binds the latest
-#   same-metric ENS-complete carrier; same-cycle late ENS baseline reseed)
+# Last reused or audited: 2026-08-27 (Day0 same-cycle input revisions must
+#   invalidate an older matching-conditioning completion witness)
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
 #   docs/authority/regime_unification_2026-06-12.md §U2 + docs/evidence/freshness/
 #   2026-06-12_forecast_freshness_truth.md §Q4(b)). The U2 root fix's first half: re-materialize a
@@ -423,8 +423,9 @@ def _latest_posterior_matches_day0_conditioning(
     identity: str,
     target_cycle_iso: str,
     as_of: datetime | None,
+    minimum_computed_at: datetime | None = None,
 ) -> bool:
-    """Whether the current live posterior consumed this Day0 evidence at this cycle."""
+    """Whether a sufficiently new live posterior consumed this Day0 evidence."""
     if as_of is None:
         return False
     target_cycle = _parse_cycle(target_cycle_iso)
@@ -434,7 +435,7 @@ def _latest_posterior_matches_day0_conditioning(
     try:
         row = conn.execute(
             """
-            SELECT provenance_json, source_cycle_time
+            SELECT provenance_json, source_cycle_time, computed_at
             FROM forecast_posteriors
             WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
               AND runtime_layer = 'live'
@@ -457,10 +458,20 @@ def _latest_posterior_matches_day0_conditioning(
         consumed_cycle = _parse_cycle(
             row["source_cycle_time"] if hasattr(row, "keys") else row[1]
         )
+        computed_at = _parse_cycle(
+            row["computed_at"] if hasattr(row, "keys") else row[2]
+        )
         return (
             anchor_artifact_id > 0
             and consumed_cycle is not None
             and consumed_cycle >= target_cycle
+            and (
+                minimum_computed_at is None
+                or (
+                    computed_at is not None
+                    and computed_at >= minimum_computed_at.astimezone(UTC)
+                )
+            )
             and _day0_conditioning_identity(
                 source=conditioning.get("source"),
                 observation_time=conditioning.get("observation_time"),
@@ -1081,6 +1092,7 @@ def _enqueue_decision(
             identity=incoming_identity,
             target_cycle_iso=target_cycle_iso,
             as_of=decision_as_of,
+            minimum_computed_at=minimum_posterior_computed_at,
         ):
             return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if visible_seed_file is not None:
@@ -2311,6 +2323,9 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_c=day0_observed_extreme_c,
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                         as_of=now,
+                        minimum_posterior_computed_at=(
+                            minimum_posterior_computed_at
+                        ),
                     )
                     if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
                         report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"

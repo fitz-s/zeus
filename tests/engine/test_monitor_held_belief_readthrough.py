@@ -1,6 +1,6 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-08-12
-# Lifecycle: created=2026-06-21; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused or audited: 2026-08-27
+# Lifecycle: created=2026-06-21; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -553,6 +553,76 @@ def test_reseed_falls_through_to_cycle_advance_without_input_revision(
     expected_age = timedelta(hours=monitor_belief_max_age_hours())
     assert expected_age - timedelta(seconds=2) <= datetime.now(timezone.utc) - cutoff
     assert datetime.now(timezone.utc) - cutoff <= expected_age + timedelta(seconds=2)
+
+
+def test_day0_reseed_requires_posterior_newer_than_current_inputs(
+    monkeypatch,
+    tmp_path,
+):
+    """A Day0 held repair must not accept a posterior computed before current inputs."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        fusion,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+            "already_enqueued": 0,
+        },
+    )
+    captured = {}
+
+    def enqueue_cycle(**kwargs):
+        captured.update(kwargs)
+        return {"status": "DAY0_OBSERVATION_ADVANCE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(
+        cycle,
+        "enqueue_single_family_cycle_advance_reseed",
+        enqueue_cycle,
+    )
+    monkeypatch.setattr(
+        mr,
+        "_day0_observed_extreme_reseed_payload",
+        lambda **_kw: {
+            "day0_observed_extreme_c": 27.0,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-08-27T10:00:00+00:00",
+            "day0_observed_extreme_sample_count": 12,
+            "day0_observed_extreme_unit": "C",
+        },
+    )
+    before = datetime.now(timezone.utc)
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="Jinan",
+        target_date="2026-08-27",
+        metric="high",
+    )
+
+    after = datetime.now(timezone.utc)
+    assert report is not None
+    assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+    cutoff = captured["minimum_posterior_computed_at"]
+    assert before <= cutoff <= after
+    assert captured["held_position"] is True
+    assert captured["day0_observed_extreme_c"] == 27.0
 
 
 def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
