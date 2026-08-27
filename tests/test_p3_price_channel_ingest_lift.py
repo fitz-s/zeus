@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-24 (held quote absolute SQL deadline)
+# Last reused or audited: 2026-08-27 (bounded M5 reconcile projection scan)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
@@ -434,6 +434,63 @@ def test_user_channel_reconcile_gets_bounded_writer_handoff_budget() -> None:
     assert reconcile._deadline_ms == inbox._deadline_ms
     assert 200 <= inbox._deadline_ms <= 500
     assert coalescible_tick._deadline_ms <= 25
+
+
+def test_pending_reconcile_scan_uses_state_index_and_preserves_global_age() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            final_intent_id TEXT,
+            current_state TEXT NOT NULL,
+            pending_reconcile INTEGER NOT NULL,
+            venue_order_id TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_edli_live_order_projection_state
+            ON edli_live_order_projection(current_state, updated_at);
+        """
+    )
+    for state in ("PENDING_RECONCILE", "USER_TRADE_OBSERVED", "RECONCILED"):
+        conn.executemany(
+            """
+            INSERT INTO edli_live_order_projection VALUES (?, ?, NULL, ?, 0, NULL, ?)
+            """,
+            [
+                (f"{state}-{i}", f"event-{state}-{i}", state, f"2026-08-27T01:{i:02d}:00+00:00")
+                for i in range(40)
+            ],
+        )
+    conn.executemany(
+        """
+        INSERT INTO edli_live_order_projection VALUES (?, ?, NULL, ?, 1, NULL, ?)
+        """,
+        [
+            ("newer-a", "event-a", "PENDING_RECONCILE", "2026-08-27T03:00:00+00:00"),
+            ("oldest", "event-b", "USER_TRADE_OBSERVED", "2026-08-27T00:01:00+00:00"),
+            ("newer-b", "event-c", "RECONCILED", "2026-08-27T04:00:00+00:00"),
+            ("second", "event-d", "PENDING_RECONCILE", "2026-08-27T00:02:00+00:00"),
+        ],
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    rows = pci._edli_pending_reconcile_aggregates(conn, limit=3)
+
+    assert [row["aggregate_id"] for row in rows] == ["oldest", "second", "newer-a"]
+    projection_reads = [
+        sql for sql in traced if "FROM edli_live_order_projection" in sql
+    ]
+    assert projection_reads
+    assert all(
+        "INDEXED BY idx_edli_live_order_projection_state" in sql
+        for sql in projection_reads
+    )
 
 
 def test_quote_refresh_no_coverage_is_business_failure() -> None:

@@ -2238,18 +2238,44 @@ def _edli_user_channel_message_not_stale(conn, *, aggregate_id: str, occurred_at
 
 
 def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
-    return list(
-        conn.execute(
-            """
-            SELECT aggregate_id, event_id, final_intent_id, venue_order_id
-            FROM edli_live_order_projection
-            WHERE pending_reconcile = 1
-            ORDER BY updated_at ASC
-            LIMIT ?
-            """,
-            (max(0, limit),),
-        ).fetchall()
+    bounded_limit = max(0, limit)
+    if bounded_limit == 0:
+        return []
+
+    # The projection-state index is the only bounded route on large WORLD DBs.
+    # Discover its finite state partitions, take each partition's oldest prefix,
+    # then merge those prefixes to preserve the global updated_at ordering.
+    states = conn.execute(
+        """
+        SELECT DISTINCT current_state
+        FROM edli_live_order_projection
+             INDEXED BY idx_edli_live_order_projection_state
+        """
+    ).fetchall()
+    candidates = []
+    for state_row in states:
+        state = _row_get(state_row, "current_state")
+        candidates.extend(
+            conn.execute(
+                """
+                SELECT aggregate_id, event_id, final_intent_id, venue_order_id,
+                       updated_at
+                FROM edli_live_order_projection
+                     INDEXED BY idx_edli_live_order_projection_state
+                WHERE current_state = ? AND pending_reconcile = 1
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (state, bounded_limit),
+            ).fetchall()
+        )
+    candidates.sort(
+        key=lambda row: (
+            str(_row_get(row, "updated_at")),
+            str(_row_get(row, "aggregate_id")),
+        )
     )
+    return candidates[:bounded_limit]
 
 
 def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, ...]:
