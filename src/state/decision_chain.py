@@ -96,18 +96,23 @@ def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = N
             if has_tier0:
                 except_clause = TIER0_EXCEPT_CLAUSE
         exclude_clause = "AND id != ?" if exclude_id is not None else ""
-        params: tuple = (mode, cutoff)
+        params: tuple = (cutoff, mode)
         if exclude_id is not None:
             params += (exclude_id,)
         params += (_INLINE_EXPIRE_LIMIT,)
+        # The canonical table is hundreds of GB. Ordering by id made SQLite
+        # choose a full table scan while this caller already owned the write
+        # transaction, starving exit/cancel journals. The timestamp predicate
+        # and order are deliberately index-compatible and fail closed if the
+        # canonical schema index is unavailable.
         conn.execute(
             f"""
             DELETE FROM decision_log WHERE id IN (
-                SELECT id FROM decision_log
-                WHERE mode = ? AND timestamp < ?
+                SELECT id FROM decision_log INDEXED BY idx_decision_log_ts
+                WHERE timestamp < ? AND mode = ?
                 {exclude_clause}
                 {except_clause}
-                ORDER BY id LIMIT ?
+                ORDER BY timestamp, id LIMIT ?
             )
             """,
             params,
