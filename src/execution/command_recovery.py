@@ -5558,15 +5558,20 @@ def _edli_trade_case_for_command(
     actionable = actionable_payload or _verified_edli_actionable_payload(
         conn, event_id=event_id, token_id=selected_token_id
     )
-    event_context = {} if forbid_event_context else _edli_live_order_event_context(
-        conn, event_id=event_id, token_id=selected_token_id, decision_id=decision_id
-    )
     final_intent = _edli_certificate_payload(
         conn,
         certificate_type="FinalIntentCertificate",
         event_id=event_id,
         token_id=selected_token_id,
     )
+    event_context = {}
+    if not forbid_event_context and (not actionable or not final_intent):
+        event_context = _edli_live_order_event_context(
+            conn,
+            event_id=event_id,
+            token_id=selected_token_id,
+            decision_id=decision_id,
+        )
     if not actionable and not forbid_event_context:
         actionable = dict(event_context)
     if not final_intent and event_context:
