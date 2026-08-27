@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-08-11
+# Last reused or audited: 2026-08-27
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) §"C3 mark orders stale" (NO-WRITE; cancel-set goes out through the
 #   existing CANCEL intent) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
@@ -7,12 +7,16 @@
 """C3 staleness classification -> cancel-set -> reconciled re-solve (W4.2).
 
 This module is the TTL/staleness successor to the deleted ``maker_rest_escalation``:
-it consumes ``SOURCE_RUN_ARRIVED`` (a q_version-advance signal) and continuous-redecision
-ticks, classifies every open ENTRY rest with the W1.2 DERIVED predicates
+every recurring tick classifies every open ENTRY rest with the W1.2 DERIVED predicates
 (``src.state.order_state_predicates``), and cancels the resulting set through the W2.1
 batch cancel gateway (``src.execution.batch_order_submission.cancel_commands_batch``),
 which already enforces ``cutover_guard.gate_for_intent(CANCEL)`` and the W2.3
 cancel-priority rate budget.
+
+``SOURCE_RUN_ARRIVED`` remains a wake/provenance hint, never the sole authority to
+inspect open rests. Raw-input HWM can supersede an order's posterior before a source
+event is emitted or claimed; event-scoped inspection would leave that stale-q order
+live until TTL and permit new fills without current probability authority.
 
 NO-WRITE staleness (Option B, schema packet law): nothing here stores a
 "stale_pending_cancel" classification. Every call recomputes it fresh from
@@ -498,10 +502,12 @@ def run_c3_staleness_cancel_cycle(
     caller has any claimed events at all, or expired rests strand during quiet
     periods (the orphaned-GTC composition bug this split fixes).
 
-    q-version staleness pass (scoped, only when ``affected_cities``): restricts
-    to entries whose resolved family's city is in ``affected_cities`` and reads
-    live q only for those families — a source-run event is what makes staleness
-    classification meaningful; families outside it never had their q move.
+    q-version/HWM staleness pass (UNCONDITIONAL, every call): reads current
+    probability authority for every resolved open-rest family. This catches both a
+    materialized q-version advance and the interval where newer raw input has already
+    blocked the old posterior but its replacement q is not materialized yet.
+    ``affected_cities`` is retained as an event-lane compatibility hint, not as a
+    safety scope; a missed/delayed event cannot license stale-q fills.
 
     Day0 dead-bin/anomaly classification is unconditional and reads the same
     canonical open ENTRY commands. It is pure: venue action remains below.
@@ -555,26 +561,25 @@ def run_c3_staleness_cancel_cycle(
         entries, families_by_command, {}, now=now, deadline_minutes=deadline_minutes
     )
 
-    q_cancel_set: list[dict[str, Any]] = []
-    if affected_cities:
-        scoped_entries = [
-            e
-            for e in entries
-            if (families_by_command.get(str(e.get("command_id") or "")) or (None,))[0]
-            in affected_cities
-        ]
-        q_by_family = read_current_family_q_versions(
-            forecasts_conn_ro,
-            (
-                f
-                for f in families_by_command.values()
-                if f and f[0] in affected_cities
-            ),
-            now=now,
-        )
-        q_cancel_set = classify_cancel_set(
-            scoped_entries, families_by_command, q_by_family, now=now, deadline_minutes=deadline_minutes
-        )
+    # SCOPE: every canonically open forecast-authority ENTRY rest. DRAIN: this
+    # recurring pass compares each order's frozen q_version with the latest
+    # family posterior/HWM state and journals a batch cancel. RESET: a fresh
+    # matching q_version, terminal order fact, or unresolved family removes the
+    # order from this cancel-set; Day0 observation authority is excluded below.
+    # ``affected_cities`` is deliberately not a filter: source-event delivery is
+    # not current-probability authority.
+    q_by_family = read_current_family_q_versions(
+        forecasts_conn_ro,
+        (family for family in families_by_command.values() if family),
+        now=now,
+    )
+    q_cancel_set = classify_cancel_set(
+        entries,
+        families_by_command,
+        q_by_family,
+        now=now,
+        deadline_minutes=deadline_minutes,
+    )
 
     # SCOPE: one canonically open ENTRY command whose typed local-Day0 bin is
     # dead or anomaly-paused. DRAIN: this unconditional C3 pass recomputes every

@@ -2714,7 +2714,7 @@ files:
   src/execution/staleness_cancel.py:
     zone: K2_runtime
     authority_role: c3_staleness_cancel_path
-    why: W4.2 (docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md §"C3 mark orders stale"). Consumes SOURCE_RUN_ARRIVED to classify every open ENTRY rest via order_state_predicates (is_stale_pending_cancel + rest_deadline_exceeded), builds the cancel-set, and cancels it through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate budget at CANCEL priority). NO-WRITE staleness (Option B) — nothing here stores a classification. TTL/GTC-deadline successor to the deleted maker_rest_escalation.py; rest_deadline_exceeded is now the sole GTC TTL owner, behavior-continuous via bootstrap_rest_deadline_minutes().
+    why: W4.2 (docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md §"C3 mark orders stale"). Every recurring tick classifies every open ENTRY rest via order_state_predicates (is_stale_pending_cancel + rest_deadline_exceeded) against current posterior/HWM authority; SOURCE_RUN_ARRIVED is a wake/provenance hint, never the sole safety scope. This prevents a missed event from leaving a stale-q maker remainder fillable after newer raw input blocks its posterior. The path builds the cancel-set and cancels it through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate budget at CANCEL priority). NO-WRITE staleness (Option B) — nothing here stores a classification. TTL/GTC-deadline successor to the deleted maker_rest_escalation.py; rest_deadline_exceeded is now the sole GTC TTL owner, behavior-continuous via bootstrap_rest_deadline_minutes().
     downstream:
     - src/main.py  # _c3_staleness_cancel_cycle scheduler job
   src/execution/venue_cancel_journal.py:
