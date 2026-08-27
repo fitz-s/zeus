@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-24
+# Last reused/audited: 2026-08-27
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
@@ -10,7 +10,8 @@
 # telemetry and only direct revision-scoped capital rejection gated BUY.
 # 2026-08-24 supersedes that admission shape: an unproven Day0 revision is
 # limited to one sequential in-flight capital probe; nonpositive/degraded
-# capital truth gates only that revision. Qkernel retains its pretrade proof gate.
+# capital truth gates only that revision. The same exact-revision probation
+# binds qkernel capital while its current law remains unvalidated.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -5827,6 +5828,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert '"qkernel_live_realized_capital_curve":' in tick_source
         assert '"day0_live_realized_capital_curve":' in tick_source
         assert "qkernel_market_relative_alpha_gate_reason" in tick_source
+        assert "qkernel_revision_probation_gate_required" in tick_source
+        assert "_qkernel_revision_probation_gate_reason(" in tick_source
         assert "day0_market_relative_alpha_gate_required" in tick_source
         assert "day0_revision_probation_gate_required" in tick_source
         assert "_day0_revision_probation_gate_reason(" in tick_source
@@ -6173,6 +6176,49 @@ class TestQkernelMarketRelativeAlphaEvidence:
 
         assert fragment in reason
         assert revisions == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
+
+    @pytest.mark.parametrize(
+        ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
+        [
+            (
+                "probation_in_flight", 1, 0, 0, 0.0,
+                "qkernel_revision_probation_in_flight(open=1,realized=0",
+            ),
+            (
+                "nonpositive", 0, 1, 0, -0.25,
+                "qkernel_revision_probation_nonpositive(realized=1,net_pnl_usd=-0.250000",
+            ),
+            (
+                "capital_truth_degraded", 0, 0, 1, 0.0,
+                "qkernel_revision_probation_truth_degraded(",
+            ),
+        ],
+    )
+    def test_unproven_qkernel_revision_bounds_live_capital_probation(
+        self,
+        status,
+        open_count,
+        realized_count,
+        blocked_count,
+        pnl,
+        fragment,
+    ):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        reason, revisions = riskguard_module._qkernel_revision_probation_gate_reason(
+            {"status": "ok", "current_revision": revision},
+            {"cohorts": []},
+            {
+                "status": status,
+                "probability_semantics_revision": revision,
+                "open_position_count": open_count,
+                "realized_position_count": realized_count,
+                "blocked_position_count": blocked_count,
+                "net_realized_pnl_usd": pnl,
+            },
+        )
+
+        assert fragment in reason
+        assert revisions == (revision,)
 
     def test_unproven_day0_revision_allows_one_probe_then_positive_sequential_probe(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -7289,6 +7335,34 @@ class TestStrategyPolicyResolver:
                 "forecast_qkernel_entry": {revision}
             },
             issued_at="2026-08-16T19:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert status["emitted_count"] == 1
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": [revision],
+        }
+        conn.close()
+
+    def test_riskguard_emits_revision_scoped_qkernel_probation_gate(self):
+        conn = _policy_conn()
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        status = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "qkernel_revision_probation_in_flight("
+                    f"open=1,realized=0,revision={revision})"
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            issued_at="2026-08-27T23:00:00+00:00",
         )
         row = conn.execute(
             "SELECT value FROM risk_actions WHERE action_id = ?",
