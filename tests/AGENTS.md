@@ -78,6 +78,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_station_migration_probe.py` | Antibody for Invariant F: station-migration drift detection when Polymarket gamma URL differs from cities.json station (created 2026-05-01) |
 | `test_tigge_daily_ingest.py` | Antibody: TIGGE retrieval inside ingest daemon — MARS-credential-missing auto-pause, idempotent re-run, control_plane pause (created 2026-05-01) |
 | `test_tigge_schema_contract.py` | Antibody #16: TIGGE extractor<->ingester schema drift structural tests (created 2026-04-29) |
+| `test_tier0_candidate_set_settlement.py` | Tier-0 candidate-set VERIFIED settlement fold, YES/NO shoulder grading, correction reconciliation, and five-minute post-trade cadence (created 2026-08-27) |
 | `test_trading_isolation.py` | Antibody #3: trading-lane isolation — src.engine/execution/strategy/signal must not import ingest modules (created 2026-04-30) |
 | `test_truth_authority_enum.py` | Antibody for INV-23: DEGRADED_PROJECTION must be a distinct TruthAuthority enum value; ultrareview P1-3 (created 2026-05-01) |
 | `test_world_schema_ready_check.py` | Antibody for A-2: _startup_world_schema_ready_check() must exist in src/main.py (two-system independence; created 2026-05-01) |
