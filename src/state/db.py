@@ -1226,7 +1226,10 @@ def forecasts_connection_with_trades_flocked(
 
 
 def get_world_connection_with_trades_required(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """World connection (zeus-world.db MAIN) with zeus_trades.db ATTACHed as 'trades'.
 
@@ -1252,7 +1255,12 @@ def get_world_connection_with_trades_required(
     Authority basis: PR #415 review B5 (INV-37); K1 DB split.
     """
     resolved = _resolve_write_class(write_class)
-    conn = get_world_connection(write_class=resolved)
+    conn = _connect(
+        ZEUS_WORLD_DB_PATH,
+        write_class=resolved,
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
     try:
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "trades" not in attached:

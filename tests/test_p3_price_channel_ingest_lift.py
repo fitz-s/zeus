@@ -435,6 +435,24 @@ def test_user_channel_reconcile_gets_bounded_writer_handoff_budget() -> None:
     assert 200 <= inbox._deadline_ms <= 500
     assert coalescible_tick._deadline_ms <= 25
 
+    m5 = next(
+        node
+        for node in ast.walk(ast.parse(_PRICE_CHANNEL_MODULE.read_text()))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_edli_user_channel_reconcile_cycle"
+    )
+    opener = next(
+        node
+        for node in ast.walk(m5)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "get_world_connection_with_trades_required"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in opener.keywords}
+    assert isinstance(keywords["deadline_monotonic"], ast.Name)
+    assert keywords["deadline_monotonic"].id == "deadline_monotonic"
+    assert "busy_timeout_ms" in keywords
+
 
 def test_pending_reconcile_scan_uses_state_index_and_preserves_global_age() -> None:
     from src.ingest import price_channel_ingest as pci

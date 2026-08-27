@@ -2979,7 +2979,11 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                 # otherwise wait on the SQLite writer before the 25 ms
                 # coordinator deadline is active.
                 conn = get_world_connection_with_trades_required(
-                    write_class="live"
+                    write_class="live",
+                    busy_timeout_ms=(
+                        PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS
+                    ),
+                    deadline_monotonic=deadline_monotonic,
                 )
                 _bound_price_channel_sqlite_wait(
                     conn,

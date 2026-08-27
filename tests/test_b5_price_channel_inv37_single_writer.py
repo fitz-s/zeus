@@ -1,6 +1,6 @@
 # Created: 2026-06-20
 # Last audited: 2026-07-30
-# Last reused/audited: 2026-08-24
+# Last reused/audited: 2026-08-27
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -1450,6 +1450,36 @@ def test_get_world_connection_with_trades_required_attaches_trades_world_main():
         schemas = {r[1]: r[2] for r in conn.execute("PRAGMA database_list").fetchall()}
         assert schemas.get("main", "").endswith("zeus-world.db")
         assert "trades" in schemas and schemas["trades"].endswith("zeus_trades.db")
+    finally:
+        conn.close()
+
+
+def test_get_world_connection_with_trades_required_forwards_deadline(
+    monkeypatch, tmp_path
+):
+    from src.state import db as state_db
+
+    captured = {}
+
+    def fake_connect(path, **kwargs):
+        captured.update({"path": path, **kwargs})
+        return sqlite3.connect(":memory:")
+
+    monkeypatch.setattr(state_db, "_connect", fake_connect)
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: tmp_path / "trade.db")
+
+    conn = state_db.get_world_connection_with_trades_required(
+        write_class="live",
+        busy_timeout_ms=250,
+        deadline_monotonic=123.5,
+    )
+    try:
+        assert captured["write_class"].value == "live"
+        assert captured["busy_timeout_ms"] == 250
+        assert captured["deadline_monotonic"] == 123.5
+        assert "trades" in {
+            row[1] for row in conn.execute("PRAGMA database_list").fetchall()
+        }
     finally:
         conn.close()
 
