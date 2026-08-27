@@ -7642,17 +7642,22 @@ def _edli_command_recovery_cycle() -> None:
                 "retaining global reactor handoff: %r",
                 exc,
             )
-    # SCOPE: only non-systemic recovery may yield to monitor bootstrap/handoff;
-    # an authenticated fill missing from canonical position truth is already
-    # real exposure and retains global recovery priority. DRAIN: the bounded
-    # live_tick projects that exact fill before general maintenance. RESET: the
-    # resulting FILLED command plus position/event/execution facts clear the
-    # projection blocker on the next scope read.
-    if not global_capital_handoff and _defer_for_held_position_monitor(
-        "edli_command_recovery"
+    # SCOPE: only non-systemic recovery without an exact persisted screen-cancel
+    # obligation may yield to monitor bootstrap/handoff. A live resting order
+    # already marked CANCEL_PENDING is current capital at risk: the bounded
+    # screen dispatcher must run even when its blocker is scoped to one market.
+    # DRAIN: live_tick dispatches that exact obligation before general recovery.
+    # RESET: CANCEL_ACKED/terminal venue truth removes the obligation; other
+    # scoped recovery resumes yielding to current held-capital monitoring.
+    if (
+        not global_capital_handoff
+        and not screen_cancel_due
+        and _defer_for_held_position_monitor(
+            "edli_command_recovery"
+        )
     ):
         return
-    if not global_capital_handoff and (
+    if not global_capital_handoff and not screen_cancel_due and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
     ):
