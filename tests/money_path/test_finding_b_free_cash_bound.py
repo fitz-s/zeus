@@ -17,6 +17,7 @@ relationship (provider in -> bounded stake / typed fault out), not a unit shim.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,6 @@ from src.events.reactor import _is_transient_money_path_reason
 # Reuse the proven receipt-sizing harness + fixtures.
 from tests.engine.test_event_reactor_no_bypass import (  # noqa: E402
     _bound_forecast_event,
-    _insert_replacement_forecast_fixture,
     _receipt,
     _trade_conn_with_snapshot,
 )
@@ -35,7 +35,20 @@ from tests.engine.test_event_reactor_no_bypass import (  # noqa: E402
 
 def _current_trade_conn():
     conn = _trade_conn_with_snapshot()
-    _insert_replacement_forecast_fixture(conn)
+    row = conn.execute(
+        "SELECT posterior_id, provenance_json FROM forecast_posteriors "
+        "WHERE runtime_layer = 'live' ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    provenance = json.loads(str(row[1]))
+    shape = provenance.setdefault("bayes_precision_fusion", {}).setdefault(
+        "current_evidence_shape", {}
+    )
+    shape["source_cycle_time"] = "2026-05-24T00:00:00+00:00"
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance, separators=(",", ":")), row[0]),
+    )
     return conn
 
 
@@ -53,6 +66,7 @@ def _isolate_edli_settings(monkeypatch):
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
     from src.engine import event_reactor_adapter as adapter
