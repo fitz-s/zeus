@@ -40,6 +40,7 @@ import pytest
 
 from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
+    build_day0_causal_evidence_bundle,
     Day0HourlyVector,
     align_day0_hourly_vectors_on_common_causal_grid,
     build_day0_remaining_probability_carrier,
@@ -50,6 +51,7 @@ from src.data.day0_hourly_vectors import (
     read_freshest_day0_hourly_vectors,
     remaining_day_extremes_c,
     select_ready_day0_hourly_vectors,
+    validate_day0_causal_evidence_bundle,
 )
 from src.types.market import Bin
 
@@ -65,6 +67,54 @@ UTC = timezone.utc
 # retention test still pins a target-day `now` so its 9-day-old "ancient" row is
 # correctly pruned and the fresh row is kept.
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+def test_day0_causal_bundle_binds_vector_and_observation_context() -> None:
+    witness = {
+        "vector_ids_by_model": {"ecmwf_ifs": "vector-1"},
+        "capture_times_by_model_utc": {"ecmwf_ifs": "2026-06-10T13:00:00+00:00"},
+        "request_hash_by_model": {"ecmwf_ifs": "request-1"},
+        "source_run_id_by_model": {"ecmwf_ifs": "day0_hourly:request-1"},
+    }
+    common = {
+        "city": "Paris",
+        "target_date": "2026-06-10",
+        "metric": "high",
+        "observation_context": {
+            "source": "aviationweather_metar",
+            "observation_time": "2026-06-10T12:00:00+00:00",
+            "observed_extreme_c": 25.0,
+            "unit": "C",
+        },
+        "cutoff_utc": "2026-06-10T13:00:00+00:00",
+    }
+    expected = build_day0_causal_evidence_bundle(
+        **common, vector_witness=witness
+    )
+    assert validate_day0_causal_evidence_bundle(
+        expected=expected, actual=expected
+    ).ok
+
+    actual = build_day0_causal_evidence_bundle(
+        **{
+            **common,
+            "observation_context": {
+                **common["observation_context"],
+                "observation_time": "2026-06-10T12:15:00+00:00",
+            },
+        },
+        vector_witness=witness,
+    )
+    validation = validate_day0_causal_evidence_bundle(
+        expected=expected, actual=actual
+    )
+
+    assert not validation.ok
+    assert validation.reason == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+    assert validation.receipt()["expected_carrier_vector_identity"] == (
+        expected["carrier_vector_identity"]
+    )
+    assert validation.receipt()["actual_bundle_identity"] == actual["bundle_identity"]
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])
@@ -1051,6 +1101,7 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
     decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
     witness = {
         "vector_id": "same-vector",
+        "vector_ids_by_model": {"ecmwf_ifs": "same-vector"},
         "expected_models": ["ecmwf_ifs"],
         "actual_models": ["ecmwf_ifs"],
         "capture_times_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
@@ -1092,6 +1143,21 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
             "probability_base_identity": "posterior-77",
         },
     }
+    from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+    payload["_edli_day0_causal_evidence_bundle"] = (
+        build_day0_causal_evidence_bundle(
+            city="Tel Aviv",
+            target_date="2026-08-24",
+            metric="high",
+            observation_context={
+                "source": "aviationweather_metar",
+                "observation_time": "2026-08-24T12:00:00+00:00",
+            },
+            cutoff_utc=decision_time.isoformat(),
+            vector_witness=witness,
+        )
+    )
     vector = Day0HourlyVector(
         model="ecmwf_ifs",
         city="Tel Aviv",
@@ -1127,6 +1193,10 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
         era,
         "_forecast_snapshot_row_for_event",
         lambda *_args, **_kwargs: {"settlement_unit": "C"},
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *_args, **_kwargs: True,
     )
 
     class _EntrySeamReached(Exception):
@@ -3083,14 +3153,37 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(
             era,
             "_day0_current_vector_witness",
-            lambda **_kwargs: {"vector_id": "current-vector"},
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            },
         )
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        source_witness = {
+            "vector_id": "source-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "source-vector"},
+        }
         payload = {
             "metric": "high",
             "rounded_value": 20.0,
             "observation_time": "2026-06-10T13:00:00+00:00",
-            "_edli_day0_remaining_vector_witness": {"vector_id": "source-vector"},
+            "_edli_day0_remaining_vector_witness": source_witness,
+            "_edli_day0_causal_evidence_bundle": build_day0_causal_evidence_bundle(
+                city="Paris",
+                target_date="2026-06-10",
+                metric="high",
+                observation_context={
+                    "observation_time": "2026-06-10T13:00:00+00:00"
+                },
+                cutoff_utc="2026-06-10T15:00:00+00:00",
+                vector_witness=source_witness,
+            ),
         }
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: False,
+        )
 
         members = era._day0_remaining_day_members(
             payload=payload,
@@ -3101,12 +3194,12 @@ class TestRemainingDayMembers:
         )
 
         assert members is None
-        assert "DAY0_CURRENT_VECTOR_WITNESS_MISMATCH" in caplog.text
+        assert "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH" in caplog.text
 
-    def test_held_current_vector_witness_rebind_preserves_source_clock_provenance(
+    def test_held_current_vector_witness_waits_for_materialized_successor(
         self, monkeypatch
     ):
-        """Held q may move to current vectors without rewriting its source carrier."""
+        """A newer vector cannot be rebound onto the held posterior in-place."""
         import src.engine.event_reactor_adapter as era
 
         vector = _vector(model="ecmwf_ifs", temps=[25.0] * 24)
@@ -3118,8 +3211,17 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(
             era,
             "_day0_current_vector_witness",
-            lambda **_kwargs: {"vector_id": "current-vector"},
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            },
         )
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        source_witness = {
+            "vector_id": "source-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "source-vector"},
+        }
         payload = {
             "metric": "high",
             "rounded_value": 20.0,
@@ -3127,10 +3229,22 @@ class TestRemainingDayMembers:
             "_edli_day0_redecision_authority_scope": (
                 "held_exposure_current_bundle_day0_only_v1"
             ),
-            "_edli_day0_remaining_vector_witness": {
-                "vector_id": "source-vector"
-            },
+            "_edli_day0_remaining_vector_witness": source_witness,
+            "_edli_day0_causal_evidence_bundle": build_day0_causal_evidence_bundle(
+                city="Paris",
+                target_date="2026-06-10",
+                metric="high",
+                observation_context={
+                    "observation_time": "2026-06-10T13:00:00+00:00"
+                },
+                cutoff_utc="2026-06-10T15:00:00+00:00",
+                vector_witness=source_witness,
+            ),
         }
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: True,
+        )
 
         members = era._day0_remaining_day_members(
             payload=payload,
@@ -3140,14 +3254,13 @@ class TestRemainingDayMembers:
             forecast_conn=object(),
         )
 
-        assert members is not None
-        assert payload["_edli_day0_remaining_vector_witness"] == {
-            "vector_id": "current-vector"
-        }
-        assert payload["_edli_day0_current_vector_witness_rebound"] is True
-        assert payload["_edli_day0_source_clock_carrier_provenance"][
-            "remaining_vector_witness"
-        ] == {"vector_id": "source-vector"}
+        assert members is None
+        receipt = payload["_edli_day0_causal_evidence_bundle_validation"]
+        assert receipt["reason"] == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_successor_materialized"
+        ] is True
+        assert payload["_edli_day0_remaining_vector_witness"] == source_witness
 
     def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era

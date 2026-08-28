@@ -150,6 +150,92 @@ class ReplacementForecastBundleReadResult:
         return self.status == READY_STATUS and self.bundle is not None
 
 
+def day0_causal_bundle_successor_materialized(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: date | str,
+    temperature_metric: str,
+    bundle_identity: str,
+    decision_time: datetime | str,
+) -> bool:
+    """Whether a live posterior has committed this exact Day0 causal bundle.
+
+    This is deliberately a confirmation predicate, not an older-posterior
+    fallback: a new vector bundle remains non-authoritative until its matching
+    successor row is materialized.  It uses provenance JSON only, so no schema
+    migration is needed.
+    """
+
+    target_date_text = _date_text(target_date)
+    metric = _metric(temperature_metric)
+    identity = str(bundle_identity or "").strip()
+    if not identity:
+        return False
+    decision_utc = _parse_utc(
+        decision_time.isoformat()
+        if isinstance(decision_time, datetime)
+        else str(decision_time),
+        field_name="decision_time",
+    )
+    data_version = _data_version_for_metric(metric)
+    try:
+        row = conn.execute(
+            """
+            SELECT posterior_identity_hash, provenance_json
+              FROM forecast_posteriors
+             WHERE city = ?
+               AND target_date = ?
+               AND temperature_metric = ?
+               AND source_id = ?
+               AND product_id = ?
+               AND data_version = ?
+               AND training_allowed = 0
+               AND runtime_layer = ?
+               AND source_available_at <= ?
+               AND computed_at <= ?
+               AND json_extract(
+                     provenance_json,
+                     '$.day0_causal_evidence_bundle.bundle_identity'
+                   ) = ?
+             ORDER BY computed_at DESC, posterior_id DESC
+             LIMIT 1
+            """,
+            (
+                city,
+                target_date_text,
+                metric,
+                SOURCE_ID,
+                PRODUCT_ID,
+                data_version,
+                LIVE_RUNTIME_LAYER,
+                decision_utc.isoformat(),
+                decision_utc.isoformat(),
+                identity,
+            ),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        provenance = _json_mapping(row[1], field_name="provenance_json")
+        bundle = provenance.get("day0_causal_evidence_bundle")
+        if not isinstance(bundle, Mapping):
+            return False
+        from src.data.day0_hourly_vectors import (
+            validate_day0_causal_evidence_bundle,
+        )
+
+        validation = validate_day0_causal_evidence_bundle(
+            expected=bundle,
+            actual=bundle,
+        )
+        return bool(validation.ok and str(row[0] or "").strip())
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return False
+
+
 def _date_text(value: date | str) -> str:
     if isinstance(value, date):
         return value.isoformat()

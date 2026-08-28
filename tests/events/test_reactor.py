@@ -61,6 +61,89 @@ from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
+def _day0_causal_bundle_test_witness(vector_id: str) -> dict[str, object]:
+    return {
+        "vector_ids_by_model": {"ecmwf_ifs": vector_id},
+        "expected_models": ["ecmwf_ifs"],
+        "actual_models": ["ecmwf_ifs"],
+        "capture_times_utc": ["2026-08-28T10:00:00+00:00"],
+        "capture_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-28T10:00:00+00:00"
+        },
+    }
+
+
+def test_day0_causal_bundle_consumer_waits_for_successor(monkeypatch):
+    import src.data.day0_hourly_vectors as vectors
+    import src.engine.event_reactor_adapter as era
+
+    witness = _day0_causal_bundle_test_witness("vector-old")
+    expected = vectors.build_day0_causal_evidence_bundle(
+        city="Karachi",
+        target_date="2026-08-28",
+        metric="high",
+        observation_context={"observation_time": "2026-08-28T09:00:00+00:00"},
+        cutoff_utc="2026-08-28T10:05:00+00:00",
+        vector_witness=witness,
+    )
+    payload = {"_edli_day0_causal_evidence_bundle": expected}
+    family = SimpleNamespace(city="Karachi", target_date="2026-08-28", metric="high")
+    current = _day0_causal_bundle_test_witness("vector-new")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *args, **kwargs: False,
+    )
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=sqlite3.connect(":memory:"),
+            payload=payload,
+            family=family,
+            decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+            vector_witness=current,
+        )
+    receipt = payload["_edli_day0_causal_evidence_bundle_validation"]
+    assert receipt["reason"] == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+    assert receipt["expected_bundle_identity"] != receipt["actual_bundle_identity"]
+    assert payload[
+        "_edli_day0_causal_evidence_bundle_successor_materialized"
+    ] is False
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *args, **kwargs: True,
+    )
+    # The old certificate still cannot be switched in-place.  A later prepare
+    # must read the successor bundle and then pass validation with its witness.
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=sqlite3.connect(":memory:"),
+            payload=payload,
+            family=family,
+            decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+            vector_witness=current,
+        )
+    successor_bundle = vectors.build_day0_causal_evidence_bundle(
+        city="Karachi",
+        target_date="2026-08-28",
+        metric="high",
+        observation_context={"observation_time": "2026-08-28T09:00:00+00:00"},
+        cutoff_utc="2026-08-28T10:05:00+00:00",
+        vector_witness=current,
+    )
+    payload["_edli_day0_causal_evidence_bundle"] = successor_bundle
+    actual = era._validate_day0_causal_bundle_successor(
+        conn=sqlite3.connect(":memory:"),
+        payload=payload,
+        family=family,
+        decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+        vector_witness=current,
+    )
+    assert actual["bundle_identity"] == successor_bundle["bundle_identity"]
+    assert payload["_edli_day0_causal_evidence_bundle_validation"]["reason"] is None
+    assert payload[
+        "_edli_day0_causal_evidence_bundle_successor_materialized"
+    ] is True
+
 @pytest.mark.parametrize("post_only,expected_order_type", [(False, "FOK"), (True, "GTC")])
 def test_global_sealed_provider_recaptures_selected_book_after_slow_gates(
     monkeypatch, post_only, expected_order_type

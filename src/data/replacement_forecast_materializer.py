@@ -6882,6 +6882,34 @@ def _compute_posterior_payload(
             provenance_payload["day0_remaining_vector_witness"] = (
                 _day0_remaining_witness
             )
+    if _day0_remaining_witness is not None:
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        provenance_payload["day0_causal_evidence_bundle"] = (
+            build_day0_causal_evidence_bundle(
+                city=request.city,
+                target_date=_date_text(request.target_date),
+                metric=metric,
+                observation_context={
+                    "source": request.day0_observed_extreme_source,
+                    "observation_time": (
+                        None
+                        if request.day0_observed_extreme_observation_time is None
+                        else _to_utc(
+                            request.day0_observed_extreme_observation_time,
+                            field_name="day0_observed_extreme_observation_time",
+                        ).isoformat()
+                    ),
+                    "observed_extreme_c": _day0_observed_extreme_c(request),
+                    "sample_count": request.day0_observed_extreme_sample_count,
+                    "unit": request.day0_observed_extreme_unit,
+                },
+                cutoff_utc=_to_utc(
+                    request.computed_at, field_name="computed_at"
+                ).isoformat(),
+                vector_witness=_day0_remaining_witness,
+            )
+        )
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.
@@ -7016,6 +7044,15 @@ def _write_posterior_row(
             "dependency_hash": dependency_hash,
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,
+            "day0_causal_evidence_bundle_identity": (
+                (provenance_payload.get("day0_causal_evidence_bundle") or {}).get(
+                    "bundle_identity"
+                )
+                if isinstance(
+                    provenance_payload.get("day0_causal_evidence_bundle"), Mapping
+                )
+                else None
+            ),
             "anchor_id": anchor_id,
             "anchor_artifact_id": request.anchor_artifact_id,
         }

@@ -137,6 +137,50 @@ def _stale_belief():
     )
 
 
+def test_monitor_causal_bundle_mismatch_is_stale_and_auditable(monkeypatch):
+    import src.engine.monitor_refresh as mr
+
+    position = _pos()
+    receipt = {
+        "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH",
+        "expected_bundle_identity": "bundle-old",
+        "actual_bundle_identity": "bundle-new",
+        "expected_carrier_vector_identity": "vector-old",
+        "actual_carrier_vector_identity": "vector-new",
+        "expected_carrier_vector_hash": "hash-old",
+        "actual_carrier_vector_hash": "hash-new",
+    }
+    error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH")
+    setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+    monkeypatch.setattr(
+        mr, "_day0_absorbing_hard_fact_overlay", lambda **_: None
+    )
+    monkeypatch.setattr(mr, "_would_use_day0_monitor_lane", lambda *_: True)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _: "0x" + "1" * 64)
+    monkeypatch.setattr(
+        mr,
+        "_refresh_current_global_day0_probability",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    refreshed_prob, refreshed, fresh = mr.monitor_probability_refresh(
+        position,
+        conn=sqlite3.connect(":memory:"),
+        city=SimpleNamespace(
+            name="Karachi",
+            timezone="Asia/Karachi",
+            settlement_source_type="noaa",
+        ),
+        target_d="2026-06-12",
+    )
+
+    assert refreshed_prob == position.p_posterior
+    assert fresh is False
+    monitor_receipt = getattr(refreshed, "_day0_monitor_probability_receipt")
+    assert monitor_receipt["causal_evidence_bundle_validation"] == receipt
+    assert refreshed.last_monitor_prob_is_fresh is False
+
+
 def test_readthrough_fresh_recompute_restores_probability_authority(monkeypatch):
     """Stale cached belief + a successful read-through recompute → is_fresh True.
 

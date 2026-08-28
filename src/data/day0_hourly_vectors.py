@@ -151,6 +151,218 @@ class Day0HourlyVector:
     source_run_meta_json: str | None = None
 
 
+@dataclass(frozen=True)
+class Day0CausalBundleValidation:
+    """Comparison result for one immutable Day0 vector/posterior bundle."""
+
+    ok: bool
+    reason: str | None
+    expected_bundle_identity: str
+    actual_bundle_identity: str
+    expected_carrier_vector_identity: str
+    actual_carrier_vector_identity: str
+    expected_carrier_vector_hash: str
+    actual_carrier_vector_hash: str
+
+    def receipt(self) -> dict[str, object]:
+        """Return the exact mismatch evidence suitable for a decision receipt."""
+
+        return {
+            "reason": self.reason,
+            "expected_bundle_identity": self.expected_bundle_identity,
+            "actual_bundle_identity": self.actual_bundle_identity,
+            "expected_carrier_vector_identity": self.expected_carrier_vector_identity,
+            "actual_carrier_vector_identity": self.actual_carrier_vector_identity,
+            "expected_carrier_vector_hash": self.expected_carrier_vector_hash,
+            "actual_carrier_vector_hash": self.actual_carrier_vector_hash,
+        }
+
+
+def _day0_canonical_json(value: object) -> object:
+    """Normalize only deterministic JSON values used in causal identity keys."""
+
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _day0_canonical_json(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_day0_canonical_json(item) for item in value]
+    raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+
+
+def _day0_json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _day0_canonical_json(value), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def build_day0_causal_evidence_bundle(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    observation_context: Mapping[str, object],
+    cutoff_utc: str,
+    vector_witness: Mapping[str, object],
+) -> dict[str, object]:
+    """Build one immutable Day0 causal bundle for a posterior and its vectors.
+
+    The vector identity names the exact per-model persisted rows; the vector
+    hash binds their complete provenance.  The bundle identity additionally
+    commits to the Day0 observation context and causal cutoff.  Consumers must
+    compare two bundles rather than rebind a posterior to a newer vector row.
+    """
+
+    normalized_city = str(city or "").strip()
+    normalized_target_date = str(target_date or "").strip()
+    normalized_metric = str(metric or "").strip().lower()
+    normalized_cutoff = str(cutoff_utc or "").strip()
+    if (
+        not normalized_city
+        or not normalized_target_date
+        or normalized_metric not in {"high", "low"}
+        or not normalized_cutoff
+        or not isinstance(observation_context, Mapping)
+        or not observation_context
+        or not isinstance(vector_witness, Mapping)
+    ):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    try:
+        date.fromisoformat(normalized_target_date[:10])
+        parsed_cutoff = datetime.fromisoformat(
+            normalized_cutoff.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID") from exc
+    if parsed_cutoff.tzinfo is None or parsed_cutoff.utcoffset() is None:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    vector_ids = vector_witness.get("vector_ids_by_model")
+    if not isinstance(vector_ids, Mapping) or not vector_ids:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    normalized_vector_ids = {
+        str(model).strip(): str(vector_id).strip()
+        for model, vector_id in vector_ids.items()
+    }
+    if any(
+        not model or not vector_id
+        for model, vector_id in normalized_vector_ids.items()
+    ):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    canonical_observation = _day0_canonical_json(observation_context)
+    canonical_witness = _day0_canonical_json(vector_witness)
+    vector_hash_fields = (
+        "vector_ids_by_model",
+        "capture_times_by_model_utc",
+        "request_hash_by_model",
+        "source_run_id_by_model",
+        "provider_run_id_by_model",
+        "provider_source_cycle_time_by_model_utc",
+        "provider_source_available_at_by_model_utc",
+        "provider_source_modified_at_by_model_utc",
+    )
+    canonical_vector_provenance = {
+        field: canonical_witness[field]
+        for field in vector_hash_fields
+        if field in canonical_witness
+    }
+    carrier_vector_identity = _day0_json_hash(
+        {"vector_ids_by_model": normalized_vector_ids}
+    )
+    carrier_vector_hash = _day0_json_hash(canonical_vector_provenance)
+    core = {
+        "schema": "day0_causal_evidence_bundle_v1",
+        "city": normalized_city,
+        "target_date": normalized_target_date,
+        "metric": normalized_metric,
+        "observation_context": canonical_observation,
+        "cutoff_utc": parsed_cutoff.astimezone(UTC).isoformat(),
+        "carrier_vector_identity": carrier_vector_identity,
+        "carrier_vector_hash": carrier_vector_hash,
+    }
+    return {
+        **core,
+        "carrier_vector_ids_by_model": normalized_vector_ids,
+        "carrier_vector_witness": canonical_witness,
+        "bundle_identity": _day0_json_hash(core),
+    }
+
+
+def validate_day0_causal_evidence_bundle(
+    *,
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+) -> Day0CausalBundleValidation:
+    """Compare immutable Day0 evidence bundles without authorizing a rebind."""
+
+    try:
+        fields = (
+            "city",
+            "target_date",
+            "metric",
+            "observation_context",
+            "cutoff_utc",
+        )
+        expected_core = {key: expected[key] for key in fields}
+        actual_core = {key: actual[key] for key in fields}
+        expected_rebuilt = build_day0_causal_evidence_bundle(
+            **expected_core,
+            vector_witness=expected["carrier_vector_witness"],
+        )
+        actual_rebuilt = build_day0_causal_evidence_bundle(
+            **actual_core,
+            vector_witness=actual["carrier_vector_witness"],
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID") from None
+    # A persisted bundle carries a full vector hash while a consumer's actual
+    # bundle normally comes from the same full witness.  Require both supplied
+    # values to agree with their own reconstructed identities before comparison.
+    expected_identity = str(expected.get("bundle_identity") or "").strip()
+    actual_identity = str(actual.get("bundle_identity") or "").strip()
+    expected_vector_identity = str(expected.get("carrier_vector_identity") or "").strip()
+    actual_vector_identity = str(actual.get("carrier_vector_identity") or "").strip()
+    expected_vector_hash = str(expected.get("carrier_vector_hash") or "").strip()
+    actual_vector_hash = str(actual.get("carrier_vector_hash") or "").strip()
+    complete = all((
+        expected_identity, actual_identity, expected_vector_identity,
+        actual_vector_identity, expected_vector_hash, actual_vector_hash,
+    ))
+    self_consistent = (
+        expected_identity == expected_rebuilt["bundle_identity"]
+        and actual_identity == actual_rebuilt["bundle_identity"]
+        and expected_vector_identity == expected_rebuilt["carrier_vector_identity"]
+        and actual_vector_identity == actual_rebuilt["carrier_vector_identity"]
+        and expected_vector_hash == expected_rebuilt["carrier_vector_hash"]
+        and actual_vector_hash == actual_rebuilt["carrier_vector_hash"]
+    )
+    ok = bool(
+        complete
+        and self_consistent
+        and expected_identity == actual_identity
+        and expected_vector_identity == actual_vector_identity
+        and expected_vector_hash == actual_vector_hash
+    )
+    return Day0CausalBundleValidation(
+        ok=ok,
+        reason=None if ok else "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH",
+        expected_bundle_identity=expected_identity,
+        actual_bundle_identity=actual_identity,
+        expected_carrier_vector_identity=expected_vector_identity,
+        actual_carrier_vector_identity=actual_vector_identity,
+        expected_carrier_vector_hash=expected_vector_hash,
+        actual_carrier_vector_hash=actual_vector_hash,
+    )
+
+
 def day0_remaining_carrier_identity_inputs(
     *,
     city: str,

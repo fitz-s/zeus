@@ -9325,6 +9325,9 @@ def run_edli_event_reactor_cycle(
             vector_revision_reseeder=(
                 _edli_day0_hourly_vector_revision_reseeder()
             ),
+            vector_successor_checker=(
+                _edli_day0_hourly_vector_successor_checker()
+            ),
         )
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
@@ -11607,8 +11610,50 @@ def _edli_day0_hourly_vector_revision_reseeder():
     return _enqueue
 
 
+def _edli_day0_hourly_vector_successor_checker():
+    """Return an exact-family confirmation predicate for vector successors.
+
+    A reseed request is not a posterior.  This predicate remains false until
+    the materializer has committed a posterior that consumes the latest vector
+    revision, so callers can record a pending state without treating fresh raw
+    vectors as a consumer-authority switch.
+    """
+
+    def _confirmed(*, city: str, target_date: str, metric: str) -> bool:
+        try:
+            from src.data.replacement_fusion_upgrade_trigger import (
+                _DAY0_HOURLY_VECTOR_SOURCE,
+                scope_capture_offers_larger_provider_set,
+            )
+            from src.state.db import get_forecasts_connection_read_only
+
+            conn = get_forecasts_connection_read_only()
+            try:
+                verdict = scope_capture_offers_larger_provider_set(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    changed_sources=(_DAY0_HOURLY_VECTOR_SOURCE,),
+                    decision_time=datetime.now(timezone.utc),
+                )
+            finally:
+                conn.close()
+            return bool(
+                verdict.get("source_cycle_time")
+                and not verdict.get("input_revision_changed")
+            )
+        except Exception:  # noqa: BLE001 -- confirmation failure is fail-closed.
+            return False
+
+    return _confirmed
+
+
 def _edli_reactor_day0_hourly_refresher(
-    *, held_family_provider=None, vector_revision_reseeder=None
+    *,
+    held_family_provider=None,
+    vector_revision_reseeder=None,
+    vector_successor_checker=None,
 ):
     """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
     import logging as _logging
@@ -11685,10 +11730,20 @@ def _edli_reactor_day0_hourly_refresher(
             revisions_pending = int(
                 (revision_report or {}).get("already_enqueued", 0) or 0
             )
+            successor_confirmed = (
+                bool(
+                    vector_successor_checker(
+                        city=family[0], target_date=family[1], metric=family[2]
+                    )
+                )
+                if vector_successor_checker is not None
+                else False
+            )
             _log.info(
                 "reactor day0-hourly refresh attempted for %s/%s/%s: vectors_written=%d "
                 "cities_attempted=%d incomplete_expected_bundles=%d "
-                "vector_revision_seeds_enqueued=%d vector_revision_seeds_pending=%d",
+                "vector_revision_seeds_enqueued=%d vector_revision_seeds_pending=%d "
+                "successor_posterior_confirmed=%s",
                 family[0],
                 family[1],
                 family[2],
@@ -11697,6 +11752,7 @@ def _edli_reactor_day0_hourly_refresher(
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
                 revisions_enqueued,
                 revisions_pending,
+                successor_confirmed,
             )
             return bool(
                 vectors_written or revisions_enqueued or revisions_pending

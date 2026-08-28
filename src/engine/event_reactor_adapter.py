@@ -34504,6 +34504,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_carrier_probability_cutoff_utc",
                 "day0_remaining_vector_witness",
+                "day0_causal_evidence_bundle",
             )
             if key in provenance
         },
@@ -35628,6 +35629,13 @@ def _global_day0_execution_payload(
     )
     if isinstance(remaining_witness, Mapping):
         binding["day0_remaining_vector_witness"] = dict(remaining_witness)
+    causal_bundle = (
+        conditioning.get("day0_causal_evidence_bundle")
+        if isinstance(conditioning, Mapping)
+        else None
+    )
+    if isinstance(causal_bundle, Mapping):
+        binding["day0_causal_evidence_bundle"] = dict(causal_bundle)
     physical_clock: dict[str, object] | None = None
     physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
@@ -35752,6 +35760,8 @@ def _global_day0_execution_payload(
         payload["_edli_day0_remaining_model_names"] = list(
             remaining_witness.get("actual_models") or ()
         )
+    if isinstance(causal_bundle, Mapping):
+        payload["_edli_day0_causal_evidence_bundle"] = dict(causal_bundle)
     if isinstance(conditioning, Mapping):
         carrier_fields = {
             "day0_remaining_carrier_content_identity": "_edli_day0_remaining_content_identity",
@@ -37072,6 +37082,19 @@ def _prepare_current_global_probability_family(
     final_daily_observation = None
     source_available_at = ""
     bundle = pinned_complete_bundle
+    if pinned_complete_bundle is not None:
+        pinned_provenance = getattr(
+            pinned_complete_bundle, "provenance_json", None
+        ) or {}
+        pinned_causal_bundle = (
+            pinned_provenance.get("day0_causal_evidence_bundle")
+            if isinstance(pinned_provenance, Mapping)
+            else None
+        )
+        if isinstance(pinned_causal_bundle, Mapping):
+            payload["_edli_day0_causal_evidence_bundle"] = dict(
+                pinned_causal_bundle
+            )
     posterior_identity_hash = ""
     dependency_hash = ""
     posterior_config_hash = ""
@@ -38429,7 +38452,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_carrier_path_error_sigma_c",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "_edli_day0_remaining_vector_witness",
-            "_edli_day0_current_vector_witness_rebound",
+            "_edli_day0_causal_evidence_bundle",
+            "_edli_day0_causal_evidence_bundle_validation",
+            "_edli_day0_causal_evidence_bundle_successor_materialized",
             "_edli_day0_source_clock_carrier_provenance",
             "_edli_day0_decision_carrier_rebuild_basis",
             "_edli_day0_held_carrier_rebuild_basis",
@@ -43813,6 +43838,185 @@ def _day0_current_vector_witness(
         return None
 
 
+def _validate_day0_causal_bundle_successor(
+    *,
+    conn: sqlite3.Connection | None,
+    payload: dict[str, object],
+    family: object,
+    decision_time: datetime,
+    vector_witness: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Require the current vectors and posterior to name one committed bundle.
+
+    A newer vector row is not a license to rebind an older posterior.  The
+    materializer writes a successor posterior carrying the same bundle
+    identity; until that row exists both event-bound inference and held
+    monitoring remain fail-closed.  The validation receipt is deliberately
+    kept on the threaded payload before raising so rejection evidence survives
+    the caller's no-trade path.
+    """
+
+    receipt_key = "_edli_day0_causal_evidence_bundle_validation"
+    successor_key = "_edli_day0_causal_evidence_bundle_successor_materialized"
+    expected = payload.get("_edli_day0_causal_evidence_bundle")
+    if not isinstance(expected, Mapping):
+        receipt = {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID",
+            "expected_bundle_identity": "",
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": "",
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": "",
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        payload[successor_key] = False
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+
+    try:
+        from src.data.day0_hourly_vectors import (
+            build_day0_causal_evidence_bundle,
+            validate_day0_causal_evidence_bundle,
+        )
+
+        expected_witness = expected["carrier_vector_witness"]
+        expected_context = expected["observation_context"]
+        expected_cutoff = expected["cutoff_utc"]
+        if not isinstance(expected_witness, Mapping):
+            raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        # Older readers expose the stable vector-id/provenance subset while
+        # the materializer persists additional possession clocks.  Retain
+        # those immutable fields from the expected certificate and overlay the
+        # freshly selected vector witness; vector-id/hash changes still remain
+        # visible to the validator.
+        actual_witness = dict(expected_witness)
+        actual_witness.update(dict(vector_witness))
+        # The producer's causal-as-of clock is the materialization clock, not
+        # the later decision clock.  Preserve that immutable field while the
+        # complete current vector witness supplies the identity-bearing rows.
+        if expected_witness.get("causal_as_of_utc") not in (None, ""):
+            actual_witness["causal_as_of_utc"] = expected_witness[
+                "causal_as_of_utc"
+            ]
+        if expected_witness.get("vector_id") not in (None, ""):
+            actual_witness["vector_id"] = expected_witness["vector_id"]
+        actual = build_day0_causal_evidence_bundle(
+            city=str(expected["city"]),
+            target_date=str(expected["target_date"]),
+            metric=str(expected["metric"]),
+            observation_context=expected_context,
+            cutoff_utc=str(expected_cutoff),
+            vector_witness=actual_witness,
+        )
+        validation = validate_day0_causal_evidence_bundle(
+            expected=expected,
+            actual=actual,
+        )
+        receipt = validation.receipt()
+    except ValueError as exc:
+        reason = str(exc) or "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID"
+        receipt = {
+            "reason": reason,
+            "expected_bundle_identity": str(
+                expected.get("bundle_identity") or ""
+            ),
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": str(
+                expected.get("carrier_vector_identity") or ""
+            ),
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": str(
+                expected.get("carrier_vector_hash") or ""
+            ),
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        payload[successor_key] = False
+        error = ValueError(reason)
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error from None
+    except (KeyError, TypeError) as exc:
+        receipt = {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID",
+            "expected_bundle_identity": str(
+                expected.get("bundle_identity") or ""
+            ),
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": str(
+                expected.get("carrier_vector_identity") or ""
+            ),
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": str(
+                expected.get("carrier_vector_hash") or ""
+            ),
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error from exc
+
+    payload[receipt_key] = receipt
+    if not validation.ok:
+        # Probe only the current successor identity.  A positive probe cannot
+        # legalize this invocation's old q: the caller must re-read the
+        # successor bundle on the next bounded cycle.
+        successor = False
+        try:
+            from src.data.replacement_forecast_bundle_reader import (
+                day0_causal_bundle_successor_materialized,
+            )
+
+            successor = bool(
+                conn is not None
+                and day0_causal_bundle_successor_materialized(
+                    conn,
+                    city=str(family.city),
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    bundle_identity=str(actual["bundle_identity"]),
+                    decision_time=decision_time,
+                )
+            )
+        except (TypeError, ValueError, sqlite3.Error):
+            successor = False
+        payload[successor_key] = successor
+        error = ValueError(str(validation.reason))
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+
+    # A matching identity is still not consumable until the materializer's
+    # self-validating successor row is visible on the canonical DB.
+    successor = False
+    try:
+        from src.data.replacement_forecast_bundle_reader import (
+            day0_causal_bundle_successor_materialized,
+        )
+
+        successor = bool(
+            conn is not None
+            and day0_causal_bundle_successor_materialized(
+                conn,
+                city=str(family.city),
+                target_date=str(family.target_date),
+                temperature_metric=str(family.metric),
+                bundle_identity=str(actual["bundle_identity"]),
+                decision_time=decision_time,
+            )
+        )
+    except (TypeError, ValueError, sqlite3.Error):
+        successor = False
+    payload[successor_key] = successor
+    if not successor:
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+    payload["_edli_day0_causal_evidence_bundle"] = dict(actual)
+    return actual
+
+
 def _day0_remaining_day_members(
     *,
     payload: dict[str, object],
@@ -43921,41 +44125,21 @@ def _day0_remaining_day_members(
                 "current_vector_witness_unavailable"
             )
             return None
-        persisted_vector_witness = payload.get(
-            "_edli_day0_remaining_vector_witness"
+        # The posterior's immutable Day0 causal bundle is the only authority
+        # that may sponsor these vectors.  In particular, a held position may
+        # not rebind its old q to a newly captured member set.  The producer
+        # must first materialize a self-validating successor row; until then
+        # this seam fails closed and leaves the prior witness untouched.
+        validated_bundle = _validate_day0_causal_bundle_successor(
+            conn=forecast_conn,
+            payload=payload,
+            family=family,
+            decision_time=decision_time,
+            vector_witness=current_vector_witness,
         )
-        if isinstance(persisted_vector_witness, Mapping):
-            compare_fields = (
-                "vector_id",
-                "vector_ids_by_model",
-                "capture_times_utc",
-                "capture_times_by_model_utc",
-                "provider_by_model",
-                "endpoint_by_model",
-                "request_hash_by_model",
-                "source_run_id_by_model",
-                "provider_run_id_by_model",
-                "provider_source_cycle_time_by_model_utc",
-                "provider_source_available_at_by_model_utc",
-            )
-            witness_changed = any(
-                persisted_vector_witness.get(field) != current_vector_witness.get(field)
-                for field in compare_fields
-            )
-            if witness_changed:
-                held_scope = payload.get("_edli_day0_redecision_authority_scope")
-                if held_scope not in {
-                    "held_exposure_current_day0_only_v1",
-                    "held_exposure_current_bundle_day0_only_v1",
-                }:
-                    raise ValueError("DAY0_CURRENT_VECTOR_WITNESS_MISMATCH")
-                _snapshot_day0_source_clock_carrier_provenance(payload)
-                payload["_edli_day0_remaining_vector_witness"] = (
-                    current_vector_witness
-                )
-                payload["_edli_day0_current_vector_witness_rebound"] = True
-        else:
-            payload["_edli_day0_remaining_vector_witness"] = current_vector_witness
+        payload["_edli_day0_remaining_vector_witness"] = dict(
+            validated_bundle["carrier_vector_witness"]
+        )
         from src.strategy.live_inference.source_clock_vnext import (
             provider_family_for_source,
         )

@@ -22,6 +22,7 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -176,6 +177,9 @@ class _CurrentGlobalDay0FamilyCache:
     ] = field(default_factory=dict)
     failures: dict[
         tuple[str, str, str], tuple[type[Exception], str]
+    ] = field(default_factory=dict)
+    failure_receipts: dict[
+        tuple[str, str, str], Mapping[str, object]
     ] = field(default_factory=dict)
 
 
@@ -5508,6 +5512,9 @@ def _materialize_current_global_day0_probability(
     setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
 
     observation = snapshot.day0_payload.get("_edli_global_day0_binding")
+    causal_bundle_validation = snapshot.day0_payload.get(
+        "_edli_day0_causal_evidence_bundle_validation"
+    )
     setattr(
         refreshed,
         "_day0_monitor_probability_receipt",
@@ -5543,6 +5550,11 @@ def _materialize_current_global_day0_probability(
                 "held_side_summary": _monitor_receipt_quantiles(held_samples),
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
+            "causal_evidence_bundle_validation": (
+                dict(causal_bundle_validation)
+                if isinstance(causal_bundle_validation, Mapping)
+                else None
+            ),
             "remaining_window": {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
@@ -5938,7 +5950,15 @@ def _refresh_current_global_day0_probability(
                     raise _Day0UnobservedPrefixUnavailable(reason)
             else:
                 _cnt_inc("monitor_day0_family_failure_cache_hit_total")
-                raise _CachedCurrentGlobalDay0FamilyError(reason)
+                cached_error = _CachedCurrentGlobalDay0FamilyError(reason)
+                cached_receipt = family_cache.failure_receipts.get(family_key)
+                if isinstance(cached_receipt, Mapping):
+                    setattr(
+                        cached_error,
+                        "day0_causal_bundle_validation_receipt",
+                        dict(cached_receipt),
+                    )
+                raise cached_error
 
     primary_deadline = _day0_primary_snapshot_read_deadline(
         deadline_monotonic
@@ -6000,6 +6020,11 @@ def _refresh_current_global_day0_probability(
             and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
         ):
             family_cache.failures[family_key] = (type(exc), str(exc))
+            receipt = getattr(
+                exc, "day0_causal_bundle_validation_receipt", None
+            )
+            if isinstance(receipt, Mapping):
+                family_cache.failure_receipts[family_key] = dict(receipt)
             _cnt_inc("monitor_day0_family_builder_failure_total")
         raise
     if family_cache is not None:
@@ -6295,6 +6320,36 @@ def monitor_probability_refresh(
                         return unobserved_prefix
                 stale = _clone_for_probability_refresh(pos)
                 _set_monitor_probability_fresh(stale, False)
+                bundle_receipt = getattr(
+                    exc, "day0_causal_bundle_validation_receipt", None
+                )
+                if isinstance(bundle_receipt, Mapping):
+                    bundle_monitor_receipt = {
+                        "schema_version": 1,
+                        "probability_authority": "day0_causal_bundle_successor_gate",
+                        "causal_evidence_bundle_validation": dict(
+                            bundle_receipt
+                        ),
+                    }
+                    setattr(
+                        stale,
+                        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+                        bundle_monitor_receipt,
+                    )
+                    setattr(
+                        stale,
+                        "_day0_monitor_probability_receipt",
+                        bundle_monitor_receipt,
+                    )
+                    _append_monitor_validation(
+                        stale,
+                        "day0_causal_evidence_bundle_validation:"
+                        + json.dumps(
+                            dict(bundle_receipt),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
                 post_day_final_missing = (
                     "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in str(exc)
                 )

@@ -55,6 +55,7 @@ _RESERVATION_PREFIX = "__fusion_upgrade_reservation__:"
 _PUBLISH_PENDING_PREFIX = "__fusion_upgrade_publish_pending__:"
 _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
+_DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
 
 
 @dataclass(frozen=True)
@@ -329,8 +330,9 @@ def _latest_posterior_inputs(
     frozenset[str],
     str | None,
     tuple[str, ...],
+    bool,
 ]:
-    """Return cycle, provider inputs, and the consumed Day0 vector revision."""
+    """Return cycle, provider inputs, and committed Day0 successor state."""
     try:
         row = conn.execute(
             """
@@ -343,14 +345,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), None, ()
+        return None, frozenset(), {}, frozenset(), None, (), False
     if row is None:
-        return None, frozenset(), {}, frozenset(), None, ()
+        return None, frozenset(), {}, frozenset(), None, (), False
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), None, ()
+        return source_cycle_iso, frozenset(), {}, frozenset(), None, (), False
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -376,6 +378,22 @@ def _latest_posterior_inputs(
     day0_revision, day0_expected_models = _canonical_day0_vector_revision(
         prov.get("day0_remaining_vector_witness")
     )
+    day0_bundle_valid = False
+    bundle = prov.get("day0_causal_evidence_bundle")
+    if isinstance(bundle, Mapping):
+        try:
+            from src.data.day0_hourly_vectors import (
+                validate_day0_causal_evidence_bundle,
+            )
+
+            day0_bundle_valid = bool(
+                validate_day0_causal_evidence_bundle(
+                    expected=bundle,
+                    actual=bundle,
+                ).ok
+            )
+        except (KeyError, TypeError, ValueError):
+            day0_bundle_valid = False
     return (
         source_cycle_iso,
         decorrelated_provider_families_of(set(str(m) for m in used)),
@@ -383,6 +401,7 @@ def _latest_posterior_inputs(
         frozenset(str(source) for source in configured if str(source).strip()),
         day0_revision,
         day0_expected_models,
+        day0_bundle_valid,
     )
 
 
@@ -450,6 +469,7 @@ def scope_capture_offers_larger_provider_set(
         configured_sources,
         consumed_day0_vector_revision,
         day0_expected_models,
+        day0_causal_bundle_valid,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
@@ -532,6 +552,17 @@ def scope_capture_offers_larger_provider_set(
             changed_inputs.append(_DAY0_HOURLY_VECTOR_SOURCE)
             changed_inputs.sort()
             changed_revisions[_DAY0_HOURLY_VECTOR_SOURCE] = (
+                current_day0_vector_revision
+            )
+        if current_day0_vector_revision is not None and not day0_causal_bundle_valid:
+            # SCOPE: this exact city/date/metric posterior. DRAIN: the existing
+            # single-flight fusion seed materializes the unchanged vector rows
+            # with a causal bundle. RESET: the newest self-validating posterior
+            # makes this predicate false. Missing bundle is therefore a real
+            # input revision even when the vector IDs themselves did not move.
+            changed_inputs.append(_DAY0_CAUSAL_BUNDLE_SOURCE)
+            changed_inputs.sort()
+            changed_revisions[_DAY0_CAUSAL_BUNDLE_SOURCE] = (
                 current_day0_vector_revision
             )
     input_revision_changed = bool(changed_inputs)
