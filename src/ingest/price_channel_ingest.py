@@ -2266,10 +2266,10 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     from src.events.edli_position_bridge import (
         DISPOSITION_SETTLED_MARKET,
         DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+        _dispositions_table,
         _edli_events_table,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
-        get_fill_bridge_disposition,
     )
 
     table = _edli_events_table(conn)
@@ -2279,17 +2279,41 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     if bounded_limit == 0:
         return ()
 
-    # The aggregate index streams one group at a time.  Do not materialize all
-    # confirmed fills, all positions, or the global command join merely to
-    # answer a limit=1 boot probe on append-only canonical databases.
+    # The former aggregate-index query walked the append-only WORLD stream before
+    # Python could apply ``limit``. Filter by event type and resolve deterministic
+    # position identities in SQL so LIMIT bounds the returned orphan tranche.
+    conn.create_function(
+        "edli_bridge_position_id_v1",
+        1,
+        edli_bridge_position_id,
+        deterministic=True,
+    )
+    conn.create_function(
+        "edli_bridge_position_id_legacy_v1",
+        1,
+        edli_bridge_position_id_legacy,
+        deterministic=True,
+    )
+    dispositions_table = _dispositions_table(conn)
     aggregate_rows = conn.execute(
         f"""
         SELECT observed.aggregate_id
           FROM {table} AS observed
-               INDEXED BY idx_edli_live_order_events_aggregate
+               INDEXED BY idx_edli_live_order_events_type
+          LEFT JOIN position_current AS canonical_position
+            ON canonical_position.position_id =
+               edli_bridge_position_id_v1(observed.aggregate_id)
+          LEFT JOIN position_current AS legacy_position
+            ON legacy_position.position_id =
+               edli_bridge_position_id_legacy_v1(observed.aggregate_id)
+          LEFT JOIN {dispositions_table} AS disposition
+            ON disposition.aggregate_id = observed.aggregate_id
          WHERE observed.event_type = 'UserTradeObserved'
            AND json_extract(observed.payload_json, '$.fill_authority_state')
                = 'FILL_CONFIRMED'
+           AND canonical_position.position_id IS NULL
+           AND legacy_position.position_id IS NULL
+           AND COALESCE(disposition.disposition, '') NOT IN (?, ?)
            AND NOT EXISTS (
                SELECT 1
                  FROM {table} AS command_event
@@ -2312,36 +2336,19 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
            )
          GROUP BY observed.aggregate_id
          ORDER BY observed.aggregate_id ASC
-        """
-    )
-    orphan_ids: list[str] = []
-    for row in aggregate_rows:
-        aggregate_id = str(_row_get(row, "aggregate_id") or "")
-        if not aggregate_id:
-            continue
-        if get_fill_bridge_disposition(conn, aggregate_id) in {
+         LIMIT ?
+        """,
+        (
             DISPOSITION_SETTLED_MARKET,
             DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
-        }:
-            continue
-        canonical_position = conn.execute(
-            """
-            SELECT 1
-              FROM position_current
-             WHERE position_id IN (?, ?)
-             LIMIT 1
-            """,
-            (
-                edli_bridge_position_id(aggregate_id),
-                edli_bridge_position_id_legacy(aggregate_id),
-            ),
-        ).fetchone()
-        if canonical_position is not None:
-            continue
-        orphan_ids.append(aggregate_id)
-        if len(orphan_ids) >= bounded_limit:
-            break
-    return tuple(orphan_ids)
+            bounded_limit,
+        ),
+    ).fetchall()
+    return tuple(
+        aggregate_id
+        for row in aggregate_rows
+        if (aggregate_id := str(_row_get(row, "aggregate_id") or ""))
+    )
 
 
 def _edli_durable_fill_bridge_work_exists(conn) -> bool:

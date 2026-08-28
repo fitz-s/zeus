@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-27 (bounded M5 reconcile projection scan)
+# Last reused or audited: 2026-08-28 (bounded fill-bridge event discovery)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
@@ -1305,6 +1305,8 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
     from src.events.edli_position_bridge import (
         DISPOSITION_SETTLED_MARKET,
         DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+        edli_bridge_position_id,
+        edli_bridge_position_id_legacy,
     )
     from src.ingest.price_channel_ingest import (
         _edli_durable_fill_bridge_candidate_ids,
@@ -1323,6 +1325,8 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         );
         CREATE INDEX idx_edli_live_order_events_aggregate
             ON edli_live_order_events(aggregate_id, event_sequence);
+        CREATE INDEX idx_edli_live_order_events_type
+            ON edli_live_order_events(event_type, occurred_at);
         CREATE TABLE position_current (position_id TEXT PRIMARY KEY);
         CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY,
@@ -1345,8 +1349,25 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         (
             ("settled", confirmed),
             ("manual-review", confirmed),
+            ("canonical-position", confirmed),
+            ("legacy-position", confirmed),
             ("live-orphan", confirmed),
         ),
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?)",
+        (
+            (edli_bridge_position_id("canonical-position"),),
+            (edli_bridge_position_id_legacy("legacy-position"),),
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, payload_json, occurred_at
+        ) VALUES (?, 1, 'DecisionProofAccepted', '{}', '2026-08-22T00:00:00+00:00')
+        """,
+        ((f"irrelevant-{index:05d}",) for index in range(25_000)),
     )
     conn.executemany(
         "INSERT INTO edli_fill_bridge_dispositions VALUES (?, ?)",
@@ -1356,9 +1377,20 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         ),
     )
 
-    assert _edli_durable_fill_bridge_candidate_ids(conn, limit=8) == (
-        "live-orphan",
-    )
+    progress_calls = 0
+
+    def _fail_if_irrelevant_history_is_scanned():
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 200)
+
+    conn.set_progress_handler(_fail_if_irrelevant_history_is_scanned, 100)
+    try:
+        assert _edli_durable_fill_bridge_candidate_ids(conn, limit=8) == (
+            "live-orphan",
+        )
+    finally:
+        conn.set_progress_handler(None, 0)
     conn.close()
 
 
