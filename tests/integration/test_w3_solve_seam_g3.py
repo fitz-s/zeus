@@ -30224,6 +30224,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         "preflight": [],
         "excluded": [],
         "epoch": [],
+        "q_correction_resolvers": [],
         "venue": 0,
     }
 
@@ -30252,6 +30253,9 @@ def test_global_batch_falls_through_family_local_preflight_block(
     def select(_prepared, **kwargs):
         calls["excluded"].append(kwargs["preflight_excluded_by_family"])
         calls["epoch"].append(kwargs["selection_epoch_identity"])
+        calls["q_correction_resolvers"].append(
+            kwargs["payoff_q_correction_resolver"]
+        )
         return next(selections)
 
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
@@ -30322,6 +30326,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         {scope.family_keys[0]: blocked_reason},
     ]
     assert calls["epoch"][1] != calls["epoch"][0]
+    assert calls["q_correction_resolvers"] == [None, None]
     assert calls["venue"] == 1
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
