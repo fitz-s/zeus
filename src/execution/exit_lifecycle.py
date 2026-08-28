@@ -74,6 +74,9 @@ HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
 _MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS = 250
 _MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS = 500
 _MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS = 5_000
+_MARKET_CLOSED_HOLD_WRITE_LEASE_DEADLINE_MS = 250
+_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS = 500
+_MARKET_CLOSED_HOLD_WRITE_RETRY_DEADLINE_MS = 5_000
 
 # Status is derived observability, never monitor-claim work. One daemon-owned
 # drain coalesces completed monitor summaries so an unhealthy status read model
@@ -3849,76 +3852,190 @@ def _dual_write_market_closed_hold_if_available(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
-    try:
-        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-        from src.state.db import append_many_and_project
 
-        if _has_equivalent_market_closed_hold(
-            conn,
-            trade_id,
-            reason=reason,
-            error=error,
-        ):
-            return True
-        monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
-        idempotency_key = _market_closed_hold_idempotency_key(
-            trade_id=trade_id,
-            reason=reason,
-            error=error,
-            monitor_basis_sequence_no=monitor_basis_sequence_no,
-        )
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = datetime.now(timezone.utc).isoformat()
-        position.last_monitor_at = occurred_at
-        phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
-        events, projection = build_monitor_refreshed_canonical_write(
-            position,
-            sequence_no=sequence_no,
-            phase_after=phase_after,
-            source_module="src.execution.exit_lifecycle",
-            decision_unavailable_reason=reason,
-            decision_unavailable_trigger=reason,
-        )
-        event = dict(events[0])
-        payload = json.loads(str(event.get("payload_json") or "{}"))
-        payload.update(
-            {
-                "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
-                "hold_reason": reason,
-                "market_closed_error": error,
-                "exit_order_submitted": False,
-                "exit_failure": False,
-            }
-        )
-        event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
-        event["caused_by"] = "market_closed_hold_to_settlement"
-        event["idempotency_key"] = idempotency_key
-        event["occurred_at"] = occurred_at
-        event["venue_status"] = None
-        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
-        projection["updated_at"] = occurred_at
-        projection["phase"] = phase_after
-        projection["order_status"] = getattr(position, "order_status", "") or "filled"
-        projection["exit_reason"] = (
-            getattr(position, "exit_reason", "") or ""
-            if preserve_exit_reason
-            else reason
-        )
-        projection["exit_retry_count"] = 0
-        projection["next_exit_retry_at"] = ""
+    # This helper is reached from the long-lived held-monitor connection.  Do
+    # not wait for the canonical writer lease while retaining an earlier
+    # transaction: a competing writer can own the lease while waiting for this
+    # connection's SQLite write lock.  The closed-hold event itself is then
+    # appended and committed in its own short MONITOR lease.
+    if conn.in_transaction:
+        previous_busy_timeout = 0
+        cleanup_error: Exception | None = None
         try:
-            append_many_and_project(conn, [event], projection)
-        except sqlite3.IntegrityError as exc:
-            if _is_position_event_idempotency_collision(exc):
-                return _has_equivalent_market_closed_hold(
+            busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+            previous_busy_timeout = int(busy_row[0] if busy_row else 0)
+            conn.execute("PRAGMA busy_timeout = 0")
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - closed hold remains retryable.
+            cleanup_error = exc
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve the original failure.
+                pass
+        finally:
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout}")
+            except Exception as exc:  # noqa: BLE001 - do not enter the lease uncertain.
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            logger.warning(
+                "market closed hold pre-lease cleanup failed for %s: %s",
+                trade_id,
+                cleanup_error,
+            )
+            return False
+
+    from src.execution.executor import _canonical_trade_write_lease
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.write_coordinator import (
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    def persist_once(*, owner: str, deadline_ms: int) -> bool:
+        with _canonical_trade_write_lease(
+            conn,
+            owner=owner,
+            deadline_ms=deadline_ms,
+            max_hold_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
+        ) as lease:
+            def append_and_commit() -> bool:
+                if _has_equivalent_market_closed_hold(
                     conn,
                     trade_id,
                     reason=reason,
                     error=error,
+                ):
+                    return True
+                monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
+                idempotency_key = _market_closed_hold_idempotency_key(
+                    trade_id=trade_id,
+                    reason=reason,
+                    error=error,
+                    monitor_basis_sequence_no=monitor_basis_sequence_no,
                 )
-            raise
-        return True
+                sequence_no = _next_canonical_sequence_no(conn, trade_id)
+                occurred_at = datetime.now(timezone.utc).isoformat()
+                previous_monitor_at = getattr(position, "last_monitor_at", None)
+                position.last_monitor_at = occurred_at
+                phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
+                events, projection = build_monitor_refreshed_canonical_write(
+                    position,
+                    sequence_no=sequence_no,
+                    phase_after=phase_after,
+                    source_module="src.execution.exit_lifecycle",
+                    decision_unavailable_reason=reason,
+                    decision_unavailable_trigger=reason,
+                )
+                event = dict(events[0])
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+                payload.update(
+                    {
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": reason,
+                        "market_closed_error": error,
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                    }
+                )
+                event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
+                event["caused_by"] = "market_closed_hold_to_settlement"
+                event["idempotency_key"] = idempotency_key
+                event["occurred_at"] = occurred_at
+                event["venue_status"] = None
+                event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+                projection["updated_at"] = occurred_at
+                projection["phase"] = phase_after
+                projection["order_status"] = getattr(position, "order_status", "") or "filled"
+                projection["exit_reason"] = (
+                    getattr(position, "exit_reason", "") or ""
+                    if preserve_exit_reason
+                    else reason
+                )
+                projection["exit_retry_count"] = 0
+                projection["next_exit_retry_at"] = ""
+                try:
+                    append_many_and_project(conn, [event], projection)
+                    conn.commit()
+                except sqlite3.IntegrityError as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - preserve collision handling.
+                        pass
+                    position.last_monitor_at = previous_monitor_at
+                    if _is_position_event_idempotency_collision(exc):
+                        return _has_equivalent_market_closed_hold(
+                            conn,
+                            trade_id,
+                            reason=reason,
+                            error=error,
+                        )
+                    raise
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - preserve the write failure.
+                        pass
+                    position.last_monitor_at = previous_monitor_at
+                    raise
+                return True
+
+            if lease is None:
+                return append_and_commit()
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                return append_and_commit()
+
+    try:
+        return persist_once(
+            owner="market_closed_hold_canonical_append",
+            deadline_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_DEADLINE_MS,
+        )
+    except WriteLeaseTimeout as first_exc:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - retry remains fail closed.
+            pass
+        try:
+            return persist_once(
+                owner="market_closed_hold_canonical_append_retry",
+                deadline_ms=_MARKET_CLOSED_HOLD_WRITE_RETRY_DEADLINE_MS,
+            )
+        except WriteLeaseTimeout as retry_exc:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve retry failure.
+                pass
+            logger.warning(
+                "market closed hold projection deferred for %s: first=%s retry=%s",
+                trade_id,
+                first_exc,
+                retry_exc,
+            )
+            return False
+        except Exception as retry_exc:  # noqa: BLE001 - monitor can retry next cycle.
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve retry failure.
+                pass
+            logger.warning(
+                "market closed hold projection failed on retry for %s: %s",
+                trade_id,
+                retry_exc,
+            )
+            return False
     except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the write failure.
+            pass
         logger.warning(
             "market closed hold projection failed for %s: %s",
             trade_id,

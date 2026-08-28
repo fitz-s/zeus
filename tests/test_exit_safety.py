@@ -11853,6 +11853,181 @@ def test_market_closed_hold_write_failure_restores_position(conn, monkeypatch):
     assert vars(position) == before
 
 
+def test_market_closed_hold_prelease_cleanup_is_nonblocking_and_restores_timeout():
+    """An inherited transaction cannot spend the monitor lease budget on commit."""
+    from src.execution import exit_lifecycle
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.portfolio import Position
+
+    class BusyCommitConnection(sqlite3.Connection):
+        fail_commit = False
+        commit_busy_timeout = None
+        rollback_busy_timeout = None
+
+        def commit(self):
+            if self.fail_commit:
+                self.commit_busy_timeout = self.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0]
+                raise sqlite3.OperationalError("database is locked")
+            return super().commit()
+
+        def rollback(self):
+            self.rollback_busy_timeout = self.execute(
+                "PRAGMA busy_timeout"
+            ).fetchone()[0]
+            return super().rollback()
+
+    conn = sqlite3.connect(":memory:", factory=BusyCommitConnection)
+    conn.row_factory = sqlite3.Row
+    try:
+        init_schema(conn)
+        init_schema_trade_only(conn)
+        conn.commit()
+        conn.execute("PRAGMA busy_timeout = 731")
+        conn.execute("BEGIN")
+        conn.fail_commit = True
+        position = Position(
+            trade_id="pos-market-closed-prelease-cleanup",
+            market_id="condition-prelease-cleanup",
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-06-24",
+            bin_label="88F",
+            direction="buy_no",
+            token_id="yes-token",
+            no_token_id="no-token",
+            condition_id="condition-prelease-cleanup",
+            state="active",
+            chain_state="synced",
+            shares=12.0,
+            chain_shares=12.0,
+            cost_basis_usd=8.4,
+            chain_cost_basis_usd=8.4,
+            strategy_key="center_buy",
+            env="live",
+            entered_at="2026-06-24T10:00:00+00:00",
+            order_status="retry_pending",
+            exit_state="retry_pending",
+            exit_reason="EDGE_REVERSAL",
+        )
+        before = copy.deepcopy(vars(position))
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=conn,
+        ) is False
+        assert vars(position) == before
+        assert conn.commit_busy_timeout == 0
+        assert conn.rollback_busy_timeout == 0
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 731
+        assert conn.in_transaction is False
+        assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_market_closed_hold_canonical_write_retries_after_raw_sqlite_lock(
+    tmp_path,
+    monkeypatch,
+):
+    """A raw writer cannot leave a closed-market monitor decision half-persisted."""
+    from src.execution import executor, exit_lifecycle
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.write_coordinator import WriteLeaseTimeout
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "market_closed_hold.sqlite"
+    primary = sqlite3.connect(str(db_path), timeout=0)
+    primary.row_factory = sqlite3.Row
+    blocker = None
+    observer = None
+    try:
+        init_schema(primary)
+        init_schema_trade_only(primary)
+        primary.commit()
+        blocker = sqlite3.connect(str(db_path), timeout=0)
+        observer = sqlite3.connect(str(db_path), timeout=0)
+        observer.row_factory = sqlite3.Row
+        position = Position(
+            trade_id="pos-market-closed-raw-lock",
+            market_id="condition-raw-lock",
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-06-24",
+            bin_label="88F",
+            direction="buy_no",
+            token_id="yes-token",
+            no_token_id="no-token",
+            condition_id="condition-raw-lock",
+            state="active",
+            chain_state="synced",
+            shares=12.0,
+            chain_shares=12.0,
+            cost_basis_usd=8.4,
+            chain_cost_basis_usd=8.4,
+            strategy_key="center_buy",
+            env="live",
+            entered_at="2026-06-24T10:00:00+00:00",
+            order_status="retry_pending",
+            exit_state="retry_pending",
+            exit_reason="EDGE_REVERSAL",
+            last_monitor_prob=0.21,
+            last_monitor_prob_is_fresh=True,
+            last_monitor_edge=-0.33,
+            last_monitor_market_price=0.54,
+            last_monitor_market_price_is_fresh=True,
+            last_monitor_best_bid=0.53,
+        )
+        before = copy.deepcopy(vars(position))
+
+        @contextmanager
+        def monitored_lease(*_args, **_kwargs):
+            yield SimpleNamespace(
+                acquired_at=exit_lifecycle._time_module.monotonic(),
+            )
+
+        monkeypatch.setattr(executor, "_canonical_trade_write_lease", monitored_lease)
+        blocker.execute("BEGIN IMMEDIATE")
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is False
+        assert vars(position) == before
+        assert primary.in_transaction is False
+        assert primary.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 0
+
+        blocker.rollback()
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is True
+        assert primary.in_transaction is False
+        assert observer.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 1
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is True
+        assert observer.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 1
+    finally:
+        if blocker is not None:
+            blocker.close()
+        if observer is not None:
+            observer.close()
+        primary.close()
+
+
 def test_position_projection_round_trips_zero_monitor_bid(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import Position, _position_from_projection_row
