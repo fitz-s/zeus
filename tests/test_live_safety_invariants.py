@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-27
-# Authority basis: incident b32ad42ae26a0650 RED exit event/projection atomicity
+# Last reused/audited: 2026-08-28
+# Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -3440,6 +3440,8 @@ def test_monitor_timeout_retries_frozen_attempt_once_into_canonical_projection(
         return AcquiredLease()
 
     monkeypatch.setattr(cycle_runtime, "_canonical_trade_write_lease", monitor_lease)
+    traced_sql: list[str] = []
+    conn.set_trace_callback(traced_sql.append)
 
     attempt_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
     deps = type(
@@ -3495,7 +3497,21 @@ def test_monitor_timeout_retries_frozen_attempt_once_into_canonical_projection(
         assert current["updated_at"] == attempt_at.isoformat()
         assert position.last_monitor_at == attempt_at.isoformat()
     finally:
+        conn.set_trace_callback(None)
         conn.close()
+
+    monitor_idempotency_lookups = [
+        statement
+        for statement in traced_sql
+        if "event_type = 'MONITOR_REFRESHED'" in statement
+        and "SELECT occurred_at" in statement
+    ]
+    assert len(monitor_idempotency_lookups) == 2
+    assert all(
+        "ORDER BY sequence_no DESC" in statement
+        and "occurred_at =" not in statement
+        for statement in monitor_idempotency_lookups
+    )
 
     assert lease_calls == [
         {

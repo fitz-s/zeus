@@ -3413,18 +3413,30 @@ def _emit_monitor_refreshed_canonical_if_available(
                     position_id,
                 )
                 return False
-        existing = conn.execute(
+        # ``monitor_occurred_at`` is frozen before either lease attempt.  A
+        # successful replay can therefore only match the latest canonical
+        # MONITOR_REFRESHED row: any newer canonical position update is already
+        # rejected by the stale-attempt fence above.  Reading the latest row is
+        # O(1) within the existing position/type/sequence index.  Filtering on
+        # occurred_at instead scanned thousands of historical monitor rows for
+        # long-held positions and could retain the monitor claim far beyond the
+        # nominal writer-lease budget, starving both exits and the global
+        # auction.
+        latest_monitor = conn.execute(
             """
-            SELECT 1
+            SELECT occurred_at
               FROM position_events
              WHERE position_id = ?
                AND event_type = 'MONITOR_REFRESHED'
-               AND occurred_at = ?
+             ORDER BY sequence_no DESC
              LIMIT 1
             """,
-            (position_id, monitor_occurred_at),
+            (position_id,),
         ).fetchone()
-        if existing is not None:
+        if (
+            latest_monitor is not None
+            and str(latest_monitor[0] or "").strip() == monitor_occurred_at
+        ):
             pos.last_monitor_at = monitor_occurred_at
             return True
         row = conn.execute(
