@@ -1454,6 +1454,7 @@ class TestPersistedRestCancel:
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema
         from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+        from src.state.snapshot_repo import init_snapshot_schema
         from src.state.schema.entry_exposure_obligations_schema import (
             ensure_table as ensure_entry_exposure_obligations_table,
         )
@@ -1468,6 +1469,7 @@ class TestPersistedRestCancel:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_collateral_schema(conn)
+        init_snapshot_schema(conn)
         ensure_entry_exposure_obligations_table(conn)
         _insert(conn, size=13.45, price=0.68)
         _advance_to_acked(conn, venue_order_id="ord-live")
