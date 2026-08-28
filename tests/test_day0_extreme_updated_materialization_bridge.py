@@ -2668,6 +2668,69 @@ def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_
     assert "priority boom" in str(health[-1][2])
 
 
+def test_priority_job_claims_published_request_before_seed_bridge(
+    monkeypatch, tmp_path
+) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    calls: list[int] = []
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        calls.append(seed_limit)
+        assert lane == "priority"
+        return {"status": "PROCESSED", "seed_limit": seed_limit}
+
+    monkeypatch.setattr(
+        forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane
+    )
+
+    receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert calls == [0]
+    assert receipt == {"status": "PROCESSED", "seed_limit": 0}
+
+
+def test_priority_job_bridges_seed_only_after_request_queue_is_empty(
+    monkeypatch, tmp_path
+) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    calls: list[int] = []
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        calls.append(seed_limit)
+        assert lane == "priority"
+        return {
+            "status": "NO_REQUESTS" if seed_limit == 0 else "PROCESSED",
+            "seed_limit": seed_limit,
+        }
+
+    monkeypatch.setattr(
+        forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane
+    )
+
+    receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert calls == [0, 1]
+    assert receipt == {"status": "PROCESSED", "seed_limit": 1}
+
+
 def test_materialize_callbacks_return_lane_receipts_and_truthful_status_health(
     monkeypatch, tmp_path
 ) -> None:

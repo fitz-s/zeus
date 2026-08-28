@@ -3340,6 +3340,41 @@ def test_current_probability_debt_promotes_any_exact_day0_seed_trigger(
     assert ranked[0] == low
 
 
+def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
+    """One noisy held family cannot hide another held family's current seed."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-28", "low"),
+            ("Istanbul", "2026-08-29", "high"),
+            ("Tel Aviv", "2026-08-29", "low"),
+        }
+    )
+    names = (
+        "Hong_Kong.2026-08-28.low.20260828T120000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T130000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T140000Z.json",
+        "Istanbul.2026-08-29.high.20260828T120000Z.json",
+        "Istanbul.2026-08-29.high.20260828T150000Z.json",
+        "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
+        "Zurich.2026-08-29.high.20260828T170000Z.json",
+    )
+    paths = tuple(tmp_path / name for name in names)
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(
+        paths, families
+    )
+
+    assert [path.name for path in prioritized[:3]] == [
+        "Hong_Kong.2026-08-28.low.20260828T140000Z.json",
+        "Istanbul.2026-08-29.high.20260828T150000Z.json",
+        "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
+    ]
+    assert set(prioritized) == set(paths)
+    assert prioritized[-1].name == "Zurich.2026-08-29.high.20260828T170000Z.json"
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

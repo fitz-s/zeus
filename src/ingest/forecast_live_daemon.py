@@ -1319,12 +1319,19 @@ def _replacement_forecast_materialize_job(
 
 @_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)
 def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
-    """Run one independent bounded Day0/held priority claim."""
+    """Claim published current-money work before bridging one priority seed."""
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    request_report = _replacement_forecast_materialize_lane(
+        cfg,
+        lane="priority",
+        seed_limit=0,
+    )
+    if request_report.get("status") != "NO_REQUESTS":
+        return request_report
     return _replacement_forecast_materialize_lane(
         cfg,
         lane="priority",

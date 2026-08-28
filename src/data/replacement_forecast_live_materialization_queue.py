@@ -3085,16 +3085,41 @@ def _prioritize_current_money_risk_seed_files(
     paths: Sequence[Path],
     families: frozenset[tuple[str, str, str]],
 ) -> tuple[Path, ...]:
-    """Stable-partition seed names before the bounded JSON/DB inspection window."""
+    """Put each exposed family's newest seed inside the bounded inspection window."""
 
-    prefixes = _current_money_risk_seed_prefixes(families)
+    prefixes = tuple(sorted(_current_money_risk_seed_prefixes(families)))
     if not prefixes:
         return tuple(paths)
-    held: list[Path] = []
+    held_by_prefix: dict[str, list[Path]] = {prefix: [] for prefix in prefixes}
     other: list[Path] = []
     for path in paths:
-        (held if path.name.startswith(prefixes) else other).append(path)
-    return (*held, *other)
+        prefix = next(
+            (candidate for candidate in prefixes if path.name.startswith(candidate)),
+            None,
+        )
+        if prefix is None:
+            other.append(path)
+        else:
+            held_by_prefix[prefix].append(path)
+
+    # A burst of historical Day0/fusion seeds for one alphabetically early
+    # family must not consume the entire bounded inspection tranche.  Seed
+    # filenames carry their UTC creation stamp, so the lexicographically newest
+    # member is the current producer candidate for that exact family.  Put one
+    # such candidate per exposed family first; retain every older seed in its
+    # prior rotated order so durable cleanup and cursor fairness remain intact.
+    newest = tuple(
+        max(group, key=lambda path: path.name)
+        for prefix in prefixes
+        if (group := held_by_prefix[prefix])
+    )
+    newest_set = set(newest)
+    held_tail = tuple(
+        path
+        for path in paths
+        if path not in newest_set and path.name.startswith(prefixes)
+    )
+    return (*newest, *held_tail, *other)
 
 
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
@@ -3278,6 +3303,10 @@ def _prepare_seed_requests(
         rotated_raw_snapshot,
         current_money_risk,
     )
+    current_money_seed_family_count = sum(
+        any(path.name.startswith(prefix) for path in rotated_raw_snapshot)
+        for prefix in _current_money_risk_seed_prefixes(current_money_risk)
+    )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
     # make deterministic progress across passes without unbounded queue-lock I/O.
@@ -3285,6 +3314,7 @@ def _prepare_seed_requests(
     inspection_cap = max(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
+        current_money_seed_family_count,
     )
     raw_window = prioritized_raw_snapshot[:inspection_cap]
     (
