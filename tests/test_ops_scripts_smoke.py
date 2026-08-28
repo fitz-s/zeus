@@ -4217,6 +4217,368 @@ def _stuck_monitor_handoff(position_ids, **overrides):
     return handoff
 
 
+def _fresh_failed_monitor_handoff(position_ids, **overrides):
+    handoff = {
+        "green": False,
+        "open_position_count": len(position_ids),
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_shape_valid": True,
+        "reauction_handoff_position_count": 0,
+        "fresh_failed_monitor_no_action_position_count": len(position_ids),
+        "fresh_failed_monitor_no_action_position_ids": tuple(position_ids),
+        "fresh_failed_monitor_duplicate_position_ids": (),
+        "fresh_failed_monitor_other_classified_position_ids": (),
+        "fresh_failed_monitor_timestamp_stale_position_ids": (),
+        "missing_monitor_timestamp_position_ids": (),
+        "invalid_monitor_timestamp_position_ids": (),
+    }
+    handoff.update(overrides)
+    return handoff
+
+
+def test_deploy_live_loaded_restart_admits_fresh_failed_monitor_repair_handoff(
+    monkeypatch, tmp_path
+):
+    """A current all-no-action monitor partition may restart into pending repair only."""
+    dl = _load("deploy_live_restart_fresh_failed_monitor_admit", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-a", "pos-b")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: _fresh_failed_monitor_handoff(position_ids),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "restart_permission_only=true" in detail
+
+
+def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(
+    monkeypatch, tmp_path
+):
+    """Current probability+CLOB failures are a complete restart-only partition."""
+    dl = _load("deploy_live_restart_fresh_failed_monitor_evidence", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    position_ids = ("pos-a", "pos-b")
+    evidence = {
+        "open_position_count": 2,
+        "monitored_position_ids": list(position_ids),
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 2,
+        "stale_or_missing_positions": [
+            {
+                "position_id": position_id,
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+            for position_id in position_ids
+        ],
+        "blocking_stale_position_count": 2,
+        "blocking_stale_positions": [
+            {
+                "position_id": position_id,
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+            for position_id in position_ids
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 0,
+        "settlement_recoverable_positions": [],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is False
+    assert handoff["fresh_position_count"] == 0
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == position_ids
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+
+
+def test_deploy_live_pre_stop_handoff_classifies_current_closed_market_no_action(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_fresh_failed_closed_market", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-closed"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 0,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-closed",
+                "last_monitor_refreshed_at": occurred_at,
+                "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-closed",)
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+
+
+def test_deploy_live_fresh_failed_handoff_rejects_closed_market_restart_duplicate(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_fresh_failed_duplicate", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-duplicate"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {
+                "position_id": "pos-duplicate",
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-duplicate",
+                "last_monitor_refreshed_at": occurred_at,
+                "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl, "_held_quote_sidecar_current_evidence", lambda: {"current": True}
+    )
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-duplicate",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert handoff["fresh_failed_monitor_duplicate_position_ids"] == ("pos-duplicate",)
+    assert ok is False
+    assert detail == "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
+
+
+@pytest.mark.parametrize(
+    ("loaded_sha", "current_sha", "expected_pending"),
+    (
+        ("a" * 40, "a" * 40, False),
+        ("a" * 7, "a" * 40, False),
+        ("b" * 7, "a" * 40, True),
+    ),
+)
+def test_deploy_live_fresh_failed_repair_requires_loaded_sha_to_predate_head(
+    monkeypatch, tmp_path, loaded_sha, current_sha, expected_pending
+):
+    dl = _load("deploy_live_restart_fresh_failed_repair_sha", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "loaded_sha.json").write_text(
+        json.dumps(
+            {
+                "loaded_sha": loaded_sha,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: current_sha)
+
+    result = dl._loaded_live_runtime_repair_pending()
+
+    assert result["pending"] is expected_pending
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "bool_count",
+        "negative_count",
+        "nonsequence_ids",
+        "nonstring_id",
+        "nonmapping_handoff",
+    ),
+)
+def test_deploy_live_fresh_failed_handoff_rejects_malformed_internal_evidence(
+    monkeypatch, mutation
+):
+    dl = _load(f"deploy_live_restart_fresh_failed_shape_{mutation}", "deploy_live.py")
+    position_ids = ("pos-a", "pos-b")
+    obligations = {
+        "open_position_count": 2,
+        "all_open_position_ids": position_ids,
+        "nonterminal_command_count": 0,
+    }
+    handoff = _fresh_failed_monitor_handoff(position_ids)
+    if mutation == "bool_count":
+        handoff["fresh_position_count"] = False
+    elif mutation == "negative_count":
+        handoff["fresh_position_count"] = -1
+    elif mutation == "nonsequence_ids":
+        handoff["fresh_failed_monitor_no_action_position_ids"] = "pos-a"
+    elif mutation == "nonstring_id":
+        handoff["fresh_failed_monitor_no_action_position_ids"] = ("pos-a", 7)
+    elif mutation == "nonmapping_handoff":
+        handoff = []
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: pytest.fail("malformed evidence must refuse before sidecar read"),
+    )
+
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations=obligations,
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is False
+    assert detail == "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_invalid"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        ("fresh_actionable", "fresh_actionable_handoff"),
+        ("nonterminal_command", "nonterminal_commands"),
+        ("unpaused", "durable_entries_pause_false"),
+        ("missing_id", "open_no_action_partition_incomplete"),
+        ("future_monitor", "future_monitor_evidence"),
+        ("stale_timestamp", "monitor_timestamp_stale"),
+        ("sidecar_stale", "held_quote_sidecar_stale"),
+        ("partial_mix", "no_action_partition_not_disjoint"),
+        ("repair_not_pending", "repair_code_not_pending"),
+    ),
+)
+def test_deploy_live_fresh_failed_monitor_repair_handoff_refuses_boundaries(
+    monkeypatch, mutation, expected_reason
+):
+    dl = _load(f"deploy_live_restart_fresh_failed_monitor_refuse_{mutation}", "deploy_live.py")
+    position_ids = ("pos-a", "pos-b")
+    obligations = {
+        "open_position_count": 2,
+        "all_open_position_ids": position_ids,
+        "nonterminal_command_count": 0,
+    }
+    pause_state = {"entries_paused": True}
+    handoff = _fresh_failed_monitor_handoff(position_ids)
+    repair_pending = {"pending": True}
+    quote_sidecar = {"current": True, "age_seconds": 1.0}
+    if mutation == "fresh_actionable":
+        handoff["fresh_position_count"] = 1
+    elif mutation == "nonterminal_command":
+        obligations["nonterminal_command_count"] = 1
+    elif mutation == "unpaused":
+        pause_state["entries_paused"] = False
+    elif mutation == "missing_id":
+        handoff["fresh_failed_monitor_no_action_position_count"] = 1
+        handoff["fresh_failed_monitor_no_action_position_ids"] = (position_ids[0],)
+    elif mutation == "future_monitor":
+        handoff["future_monitor_event_count"] = 1
+    elif mutation == "stale_timestamp":
+        handoff["fresh_failed_monitor_timestamp_stale_position_ids"] = (
+            position_ids[0],
+        )
+    elif mutation == "sidecar_stale":
+        quote_sidecar = {"current": False, "reason": "held_quote_sidecar_stale"}
+    elif mutation == "partial_mix":
+        handoff["fresh_failed_monitor_other_classified_position_ids"] = (
+            position_ids[1],
+        )
+    elif mutation == "repair_not_pending":
+        repair_pending = {"pending": False}
+    monkeypatch.setattr(dl, "_held_quote_sidecar_current_evidence", lambda: quote_sidecar)
+
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations=obligations,
+        pause_state=pause_state,
+        handoff=handoff,
+        repair_pending=repair_pending,
+    )
+
+    assert ok is False
+    assert detail == f"FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:{expected_reason}"
+
+
 def test_deploy_live_loaded_restart_admits_exact_stuck_monitor_recovery(
     monkeypatch, tmp_path
 ):
@@ -4446,7 +4808,7 @@ def test_deploy_live_stuck_monitor_quote_only_partition_requires_stale_parseable
         "quote_only_stale_positions": [
             {
                 "position_id": "pos-quote",
-                    "issue": "monitor_clob_stale",
+                "issue": "monitor_clob_stale",
                 "last_monitor_refreshed_at": timestamp,
             }
         ],

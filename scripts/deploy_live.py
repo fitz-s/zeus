@@ -177,6 +177,14 @@ LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = (
 # monitor pass.  Only that total-stall shape may recover by stopping it.
 LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS = LIVE_MONITOR_CADENCE_CONTRACT_SECONDS
 LIVE_HELD_QUOTE_SIDECAR_MAX_AGE_SECONDS = 180.0
+FRESH_FAILED_MONITOR_NO_ACTION_ISSUES = frozenset(
+    {
+        # A current MONITOR_REFRESHED attempt explicitly found neither
+        # probability nor held-side CLOB authority. It is not actionable, and
+        # cannot stand in for a current price/probability handoff.
+        "monitor_probability_and_clob_stale",
+    }
+)
 LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS = 2 * 60
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get(
@@ -1160,6 +1168,25 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         and str(item.get("position_id") or "").strip()
         not in set(reauction_handoff_ids)
     ]
+    fresh_failed_restart_positions = [
+        item
+        for item in restart_blocking_positions
+        if str(item.get("issue") or "") in FRESH_FAILED_MONITOR_NO_ACTION_ISSUES
+    ]
+    # ``collect_monitor_cadence_evidence`` gives this category only to the
+    # canonical closed-market hold shape. It remains restart-only evidence;
+    # settlement/exit authority is unchanged.
+    fresh_failed_closed_market_positions = [
+        item
+        for item in list(cadence.get("settlement_recoverable_positions") or [])
+        if isinstance(item, dict)
+        and item.get("cadence_source")
+        == "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT"
+    ]
+    fresh_failed_positions = [
+        *fresh_failed_restart_positions,
+        *fresh_failed_closed_market_positions,
+    ]
     probability_ids = tuple(
         str(item.get("position_id") or "").strip()
         for item in probability_positions
@@ -1170,6 +1197,35 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         for item in restart_blocking_positions
     )
     quote_only_ids = tuple(quote_only_ids_list)
+    fresh_failed_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in fresh_failed_positions
+        if str(item.get("position_id") or "").strip()
+    )
+    fresh_failed_id_counts = {
+        position_id: fresh_failed_ids.count(position_id)
+        for position_id in set(fresh_failed_ids)
+    }
+    fresh_failed_duplicate_ids = tuple(
+        sorted(
+            position_id
+            for position_id, count in fresh_failed_id_counts.items()
+            if count > 1
+        )
+    )
+    fresh_failed_id_set = set(fresh_failed_ids)
+    fresh_failed_other_ids = tuple(
+        [
+            *probability_ids,
+            *quote_only_ids,
+            *(
+                position_id
+                for position_id in restart_blocking_ids
+                if position_id not in fresh_failed_id_set
+            ),
+            *reauction_handoff_ids,
+        ]
+    )
     classified_positions = [
         *probability_positions,
         *restart_blocking_positions,
@@ -1178,6 +1234,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     stale_classified_ids: list[str] = []
     missing_monitor_timestamp_ids: list[str] = []
     invalid_monitor_timestamp_ids: list[str] = []
+    stale_fresh_failed_timestamp_ids: list[str] = []
     for item in classified_positions:
         if not isinstance(item, dict):
             continue
@@ -1202,6 +1259,36 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             now - occurred_at
         ).total_seconds() > LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS:
             stale_classified_ids.append(position_id)
+            if position_id in fresh_failed_id_set:
+                stale_fresh_failed_timestamp_ids.append(position_id)
+    # Closed-market entries are deliberately not part of the ordinary stale
+    # partition. Validate their timestamp here too, so a historical closed
+    # hold cannot authorize a repair restart.
+    classified_id_set = {
+        str(item.get("position_id") or "").strip()
+        for item in classified_positions
+        if isinstance(item, dict)
+    }
+    for item in fresh_failed_positions:
+        position_id = str(item.get("position_id") or "").strip()
+        if not position_id or position_id in classified_id_set:
+            continue
+        timestamp_text = str(item.get("last_monitor_refreshed_at") or "").strip()
+        if not timestamp_text:
+            missing_monitor_timestamp_ids.append(position_id)
+            continue
+        try:
+            parsed = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if parsed.tzinfo is None:
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if (now - parsed.astimezone(timezone.utc)).total_seconds() > (
+            LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS
+        ):
+            stale_fresh_failed_timestamp_ids.append(position_id)
     identity_complete = (
         len(monitored_ids) == open_count
         and all(monitored_ids)
@@ -1235,6 +1322,13 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
         "restart_blocking_position_ids": restart_blocking_ids,
+        "fresh_failed_monitor_no_action_position_count": len(fresh_failed_ids),
+        "fresh_failed_monitor_no_action_position_ids": fresh_failed_ids,
+        "fresh_failed_monitor_duplicate_position_ids": fresh_failed_duplicate_ids,
+        "fresh_failed_monitor_other_classified_position_ids": fresh_failed_other_ids,
+        "fresh_failed_monitor_timestamp_stale_position_ids": tuple(
+            stale_fresh_failed_timestamp_ids
+        ),
         "stale_classified_position_ids": tuple(stale_classified_ids),
         "missing_monitor_timestamp_position_ids": tuple(missing_monitor_timestamp_ids),
         "invalid_monitor_timestamp_position_ids": tuple(invalid_monitor_timestamp_ids),
@@ -1389,6 +1483,193 @@ def _stuck_monitor_recovery_admission(
         f"quote_only_stale_positions={len(quote_only_ids)} "
         f"monitor_stale_bound_seconds={LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS} "
         "held_quote_sidecar_current=true",
+    )
+
+
+def _loaded_live_runtime_repair_pending() -> dict[str, object]:
+    """Prove the loaded process predates the currently checked-out repair."""
+
+    payload = _load_json(Path(_require_live_repo()) / "state" / "loaded_sha.json")
+    loaded_sha = str(
+        payload.get("loaded_sha") or payload.get("boot_sha") or ""
+    ).strip()
+    expected_sha = head_sha(short=False)
+    if not loaded_sha or not expected_sha or expected_sha == "?":
+        return {"pending": False, "reason": "loaded_or_current_sha_unreadable"}
+    if _git_head_matches(expected_sha, loaded_sha):
+        return {"pending": False, "reason": "loaded_sha_matches_current_head"}
+    return {
+        "pending": True,
+        "loaded_sha": loaded_sha,
+        "current_head": expected_sha,
+    }
+
+
+def _fresh_failed_monitor_handoff_shape_valid(
+    *,
+    obligations: object,
+    pause_state: object,
+    handoff: object,
+    repair_pending: object,
+) -> bool:
+    """Reject malformed in-memory evidence before restart admission reads it."""
+
+    if not all(
+        isinstance(value, dict)
+        for value in (obligations, pause_state, handoff, repair_pending)
+    ):
+        return False
+
+    def _nonnegative_int(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    def _position_ids(value: object) -> bool:
+        return isinstance(value, (list, tuple)) and all(
+            type(position_id) is str and bool(position_id.strip())
+            for position_id in value
+        )
+
+    obligation_counts = (
+        obligations.get("open_position_count"),
+        obligations.get("nonterminal_command_count"),
+    )
+    handoff_counts = tuple(
+        handoff.get(field)
+        for field in (
+            "open_position_count",
+            "fresh_position_count",
+            "future_monitor_event_count",
+            "non_monitor_chain_risk_position_count",
+            "quote_only_stale_position_count",
+            "reauction_handoff_position_count",
+            "fresh_failed_monitor_no_action_position_count",
+        )
+    )
+    handoff_id_fields = tuple(
+        handoff.get(field)
+        for field in (
+            "fresh_failed_monitor_no_action_position_ids",
+            "fresh_failed_monitor_duplicate_position_ids",
+            "fresh_failed_monitor_other_classified_position_ids",
+            "fresh_failed_monitor_timestamp_stale_position_ids",
+            "missing_monitor_timestamp_position_ids",
+            "invalid_monitor_timestamp_position_ids",
+        )
+    )
+    return bool(
+        all(_nonnegative_int(value) for value in (*obligation_counts, *handoff_counts))
+        and _position_ids(obligations.get("all_open_position_ids"))
+        and all(_position_ids(value) for value in handoff_id_fields)
+        and type(pause_state.get("entries_paused")) is bool
+        and type(handoff.get("quote_only_stale_shape_valid")) is bool
+        and type(repair_pending.get("pending")) is bool
+    )
+
+
+def _fresh_failed_monitor_repair_handoff_admission(
+    *,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+    repair_pending: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit a fully classified fresh no-action monitor failure for restart only.
+
+    SCOPE: stopping an already-loaded live-trading daemon while every canonical
+    open position has a current typed no-action monitor result. DRAIN: the
+    replacement daemon loads the pending repair and resumes normal monitor
+    coverage; this function never grants submit or exit authority. RESET: any
+    actionable/future/stale/missing classification, sidecar regression, command,
+    pause release, or loaded SHA catching up refuses on the next invocation.
+    """
+
+    if not _fresh_failed_monitor_handoff_shape_valid(
+        obligations=obligations,
+        pause_state=pause_state,
+        handoff=handoff,
+        repair_pending=repair_pending,
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_invalid"
+
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    required_handoff_fields = {
+        "open_position_count",
+        "fresh_position_count",
+        "future_monitor_event_count",
+        "non_monitor_chain_risk_position_count",
+        "quote_only_stale_position_count",
+        "quote_only_stale_shape_valid",
+        "reauction_handoff_position_count",
+        "fresh_failed_monitor_no_action_position_count",
+        "fresh_failed_monitor_no_action_position_ids",
+        "fresh_failed_monitor_duplicate_position_ids",
+        "fresh_failed_monitor_other_classified_position_ids",
+        "fresh_failed_monitor_timestamp_stale_position_ids",
+        "missing_monitor_timestamp_position_ids",
+        "invalid_monitor_timestamp_position_ids",
+    }
+    if pause_state.get("entries_paused") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:nonterminal_commands"
+    if open_count <= 0 or len(expected_ids) != open_count or len(expected_set) != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:canonical_open_identity_incomplete"
+    if not required_handoff_fields.issubset(handoff):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_incomplete"
+    if repair_pending.get("pending") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:repair_code_not_pending"
+    if int(handoff.get("open_position_count") or 0) != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_open_count_mismatch"
+    if int(handoff.get("fresh_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:fresh_actionable_handoff"
+    if int(handoff.get("future_monitor_event_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:future_monitor_evidence"
+    if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:non_monitor_chain_risk"
+    if int(handoff.get("quote_only_stale_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:held_quote_stale"
+    if handoff.get("quote_only_stale_shape_valid") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:quote_only_shape_invalid"
+    if int(handoff.get("reauction_handoff_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:reauction_handoff_present"
+    if handoff.get("missing_monitor_timestamp_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_missing"
+    if handoff.get("invalid_monitor_timestamp_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_invalid"
+    if handoff.get("fresh_failed_monitor_timestamp_stale_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_stale"
+    if handoff.get("fresh_failed_monitor_duplicate_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
+    if handoff.get("fresh_failed_monitor_other_classified_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_not_disjoint"
+
+    no_action_ids = tuple(handoff.get("fresh_failed_monitor_no_action_position_ids") or ())
+    no_action_set = {str(position_id).strip() for position_id in no_action_ids}
+    if (
+        len(no_action_ids)
+        != int(handoff.get("fresh_failed_monitor_no_action_position_count") or 0)
+        or len(no_action_ids) != open_count
+        or len(no_action_set) != open_count
+        or no_action_set != expected_set
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
+
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED: "
+        f"open_positions={open_count} fresh_actionable_positions=0 "
+        "typed_no_action_partition=complete held_quote_sidecar_current=true "
+        "restart_permission_only=true",
     )
 
 
@@ -1754,11 +2035,22 @@ def _loaded_live_restart_obligation_gate(
             )
             if stuck_ok:
                 return True, f"loaded live-trading {stuck_detail}"
+            fresh_failed_ok, fresh_failed_detail = (
+                _fresh_failed_monitor_repair_handoff_admission(
+                    obligations=obligations,
+                    pause_state=pause_state,
+                    handoff=handoff,
+                    repair_pending=_loaded_live_runtime_repair_pending(),
+                )
+            )
+            if fresh_failed_ok:
+                return True, f"loaded live-trading {fresh_failed_detail}"
             return (
                 False,
                 "loaded live-trading repair handoff is not current: "
                 f"open_positions={open_count} evidence={handoff} "
-                f"stuck_monitor_recovery={stuck_detail}",
+                f"stuck_monitor_recovery={stuck_detail} "
+                f"fresh_failed_monitor_repair_handoff={fresh_failed_detail}",
             )
         return (
             True,
