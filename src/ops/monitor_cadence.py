@@ -19,7 +19,10 @@ from src.contracts.position_truth import (
 )
 
 
-MONITOR_CADENCE_EXPOSURE_EPS = 0.01
+# Monitoring follows canonical capital, not venue order precision.  Any finite
+# positive residual remains an obligation until settlement or reconciliation
+# writes zero; the execution lane independently enforces its 0.01-share floor.
+MONITOR_CADENCE_EXPOSURE_FLOOR = 0.0
 MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS = 30.0
 MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
@@ -657,7 +660,7 @@ def count_current_monitor_obligations(
                 value = None
             exposures.append(value)
         if any(
-            value is not None and value > MONITOR_CADENCE_EXPOSURE_EPS
+            value is not None and value > MONITOR_CADENCE_EXPOSURE_FLOOR
             for value in exposures
         ):
             obligation_count += 1
@@ -709,28 +712,15 @@ def _monitor_cadence_position_rows(
         order_status = str(row["order_status"] or "").strip().lower()
         shares = _finite_nonnegative_float_or_none(row["shares"])
         chain_shares = _finite_nonnegative_float_or_none(row["chain_shares"])
+        # SCOPE: every positive canonical exposure in a monitored lifecycle
+        # phase. DRAIN: settlement/reconciliation writes zero or a terminal
+        # phase. RESET: any later positive residual restores the obligation.
         exposure_positive = (
-            shares is not None and shares > MONITOR_CADENCE_EXPOSURE_EPS
+            shares is not None and shares > MONITOR_CADENCE_EXPOSURE_FLOOR
         ) or (
             chain_shares is not None
-            and chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
+            and chain_shares > MONITOR_CADENCE_EXPOSURE_FLOOR
         )
-        # A canonical pending-exit dust hold remains real positive capital even
-        # below the venue's 0.01-share precision. The runtime continuously
-        # monitors it through settlement, so restart handoff must count it too.
-        # SCOPE: exact pending_exit/backoff_exhausted positive residual only.
-        # DRAIN: settlement or a chain-size correction removes the exposure.
-        # RESET: zero exposure or a terminal phase leaves this monitor set.
-        if (
-            not exposure_positive
-            and phase == "pending_exit"
-            and order_status == "backoff_exhausted"
-            and any(
-                value is not None and value > 0.0
-                for value in (shares, chain_shares)
-            )
-        ):
-            exposure_positive = True
         exposure_unknown = shares is None or chain_shares is None
         if _position_requires_monitor_cadence(
             phase=phase,
@@ -826,7 +816,7 @@ def _non_monitor_chain_risk_position_rows(
         chain_shares = _float_or_zero(row["chain_shares"])
         if phase not in NON_MONITOR_CHAIN_RISK_PHASES:
             continue
-        if chain_shares <= MONITOR_CADENCE_EXPOSURE_EPS:
+        if chain_shares <= MONITOR_CADENCE_EXPOSURE_FLOOR:
             continue
         if chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES:
             continue

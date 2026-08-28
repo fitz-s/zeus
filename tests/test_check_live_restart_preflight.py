@@ -8603,6 +8603,7 @@ def test_monitor_cadence_accepts_backoff_exhausted_min_order_dust_recovery(
         """,
         (target_date, now.isoformat()),
     )
+    _insert_monitor_events(conn, position_id="dust-pos", monitor_at=now)
     conn.commit()
     conn.close()
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
@@ -8619,10 +8620,19 @@ def test_monitor_cadence_accepts_backoff_exhausted_min_order_dust_recovery(
     assert recovered["closed_market_validation"] == "snapshot_min_order_dust"
 
 
-def test_monitor_handoff_counts_positive_backoff_dust_below_share_precision(
+@pytest.mark.parametrize(
+    ("phase", "order_status"),
+    (("pending_exit", "backoff_exhausted"), ("day0_window", "filled")),
+)
+def test_monitor_handoff_counts_positive_dust_below_share_precision(
     tmp_path,
+    phase,
+    order_status,
 ):
-    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        count_current_monitor_obligations,
+    )
 
     trade_db = tmp_path / "zeus_trades.db"
     conn = _init_trade_db(trade_db)
@@ -8637,15 +8647,15 @@ def test_monitor_handoff_counts_positive_backoff_dust_below_share_precision(
             last_monitor_market_price, last_monitor_market_price_is_fresh,
             updated_at
         ) VALUES (
-            'subprecision-dust', 'pending_exit', 'Hong Kong', ?, 'high',
+            'subprecision-dust', ?, 'Hong Kong', ?, 'high',
             'Will the highest temperature in Hong Kong be 31°C?',
-            'buy_no', 0.0075, 0.0075, 'backoff_exhausted',
+            'buy_no', 0.0075, 0.0075, ?,
             'SELL_REVERSAL [DUST: executable_snapshot_gate: size 0.0075 '
             || 'is below sell share precision 0.01]',
             0, NULL, 0.25, 1, 0.45, 1, ?
         )
         """,
-        (now.date().isoformat(), now.isoformat()),
+        (phase, now.date().isoformat(), order_status, now.isoformat()),
     )
     _insert_monitor_events(
         conn,
@@ -8674,6 +8684,7 @@ def test_monitor_handoff_counts_positive_backoff_dust_below_share_precision(
     assert evidence["monitored_position_ids"] == ["subprecision-dust"]
     assert evidence["fresh_position_count"] == 1
     assert evidence["stale_or_missing_position_count"] == 0
+    assert count_current_monitor_obligations(conn, now=now) == 1
     conn.close()
 
 
