@@ -17429,6 +17429,7 @@ def _rehydrate_held_pinned_bundle_for_actuation(
     from src.data.replacement_forecast_bundle_reader import (
         read_prior_complete_replacement_forecast_bundle,
     )
+    from src.solve.solver import DeterministicBinPayoffWitness
 
     result = read_prior_complete_replacement_forecast_bundle(
         forecast_conn,
@@ -17453,6 +17454,12 @@ def _rehydrate_held_pinned_bundle_for_actuation(
     bundle = result.bundle
     if not selected_identity or bundle is None:
         raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISSING")
+    if isinstance(selected, DeterministicBinPayoffWitness):
+        # The deterministic witness is a derived child: its posterior identity
+        # is intentionally different from the pinned source-clock carrier.
+        # Rehydrate the exact parent and let the current prepare seam rebuild
+        # and compare the child against current observation truth.
+        return bundle
     if selected_identity != str(bundle.posterior_identity_hash or "").strip():
         raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISMATCH")
     return bundle
@@ -35274,6 +35281,8 @@ def _global_probability_action_content_mismatches(
     topology, band, sample, binding, or point-q change still fails closed.
     """
 
+    from src.solve.solver import DeterministicBinPayoffWitness
+
     mismatches: tuple[str, ...] = ()
     if type(current) is not type(monitored):
         mismatches += ("witness_type",)
@@ -35292,14 +35301,27 @@ def _global_probability_action_content_mismatches(
     current_q_version = str(getattr(current, "q_version", "") or "")
     monitored_q_version = str(getattr(monitored, "q_version", "") or "")
     if current_q_version != monitored_q_version:
-        from src.events.day0_authority import day0_probability_semantics_revision
-
-        current_revision = day0_probability_semantics_revision(current_q_version)
-        monitored_revision = day0_probability_semantics_revision(
-            monitored_q_version
-        )
-        if current_revision is None or current_revision != monitored_revision:
+        if isinstance(current, DeterministicBinPayoffWitness) and isinstance(
+            monitored, DeterministicBinPayoffWitness
+        ):
             mismatches += ("q_version",)
+        else:
+            from src.events.day0_authority import day0_probability_semantics_revision
+
+            current_revision = day0_probability_semantics_revision(current_q_version)
+            monitored_revision = day0_probability_semantics_revision(
+                monitored_q_version
+            )
+            if current_revision is None or current_revision != monitored_revision:
+                mismatches += ("q_version",)
+    if isinstance(current, DeterministicBinPayoffWitness) and isinstance(
+        monitored, DeterministicBinPayoffWitness
+    ):
+        mismatches += tuple(
+            field
+            for field in ("posterior_identity_hash", "source_truth_identity")
+            if getattr(current, field, None) != getattr(monitored, field, None)
+        )
     if not _global_probability_point_q_matches(current, monitored):
         mismatches += ("yes_point_q",)
     return mismatches
@@ -36568,11 +36590,63 @@ def _held_pinned_day0_probability_components(
     masked_samples = np.asarray(samples, dtype=np.float64) * mask.reshape(1, -1)
     row_totals = masked_samples.sum(axis=1)
     if np.any(row_totals <= 0.0) or not np.isfinite(row_totals).all():
+        exact_yes_payoffs = _day0_deterministic_bin_payoffs(
+            omega=SimpleNamespace(bins=bindings),
+            family=family,
+            payload=payload,
+        )
+        if exact_yes_payoffs:
+            payload["_edli_day0_held_pinned_mask"] = [
+                float(value) for value in mask
+            ]
+            payload["_edli_day0_held_pinned_overlay"] = (
+                "authorized_monotone_day0_observation_v1"
+            )
+            payload["_edli_day0_held_pinned_zero_support_payoffs"] = (
+                exact_yes_payoffs
+            )
+            payload["_edli_day0_held_pinned_zero_support_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT"
+            )
+            payload["_edli_day0_deterministic_scope_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT"
+            )
+            return (
+                np.ascontiguousarray(masked_samples, dtype=np.float64),
+                np.ascontiguousarray(np.zeros_like(point_q), dtype=np.float64),
+                _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+            )
         raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT")
     masked_samples = masked_samples / row_totals.reshape(-1, 1)
     masked_point = np.asarray(point_q, dtype=np.float64) * mask
     point_total = float(masked_point.sum())
     if point_total <= 0.0 or not math.isfinite(point_total):
+        exact_yes_payoffs = _day0_deterministic_bin_payoffs(
+            omega=SimpleNamespace(bins=bindings),
+            family=family,
+            payload=payload,
+        )
+        if exact_yes_payoffs:
+            payload["_edli_day0_held_pinned_mask"] = [
+                float(value) for value in mask
+            ]
+            payload["_edli_day0_held_pinned_overlay"] = (
+                "authorized_monotone_day0_observation_v1"
+            )
+            payload["_edli_day0_held_pinned_zero_support_payoffs"] = (
+                exact_yes_payoffs
+            )
+            payload["_edli_day0_held_pinned_zero_support_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT"
+            )
+            payload["_edli_day0_deterministic_scope_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT"
+            )
+            return (
+                np.ascontiguousarray(masked_samples, dtype=np.float64),
+                np.ascontiguousarray(np.zeros_like(point_q), dtype=np.float64),
+                _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+            )
         raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT")
     masked_point = masked_point / point_total
     payload["_edli_day0_held_pinned_mask"] = [float(value) for value in mask]
@@ -36584,6 +36658,148 @@ def _held_pinned_day0_probability_components(
         np.ascontiguousarray(masked_point, dtype=np.float64),
         _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
+
+
+def _build_day0_deterministic_witness(
+    *,
+    event: OpportunityEvent,
+    family: object,
+    omega: object,
+    bindings: tuple[object, ...],
+    exact_yes_payoffs: tuple[tuple[str, int], ...],
+    payload: dict[str, object],
+    current_day0_payload: Mapping[str, object],
+    day0_base_identity: str,
+    source_cycle: datetime,
+    source_available_at: str,
+    resolution_identity: str,
+    max_age: timedelta,
+    decision_time: datetime,
+    day0_payload_out: dict[str, object] | None,
+) -> tuple[object, dict[str, object]]:
+    """Materialize exact Day0 payoff authority for a held pinned recovery."""
+
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    probability_authority = "day0_deterministic_bin_payoff_v1"
+    source_truth_identity = stable_hash(
+        {
+            "probability_base_identity": day0_base_identity,
+            "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
+            "source_available_at": source_available_at,
+            "day0_binding": current_day0_payload.get(
+                "_edli_global_day0_binding"
+            ),
+            "exact_yes_payoffs": exact_yes_payoffs,
+        }
+    )
+    posterior_identity_hash = stable_hash(
+        {
+            "probability_authority": probability_authority,
+            "source_truth_identity": source_truth_identity,
+            "exact_yes_payoffs": exact_yes_payoffs,
+        }
+    )
+    q_version = bind_day0_probability_semantics(
+        stable_hash(
+            {
+                "authority": probability_authority,
+                "posterior_identity_hash": posterior_identity_hash,
+                "topology_identity": omega.topology_hash,
+                "exact_yes_payoffs": exact_yes_payoffs,
+            }
+        )
+    )
+    authority_certificate_hash = stable_hash(
+        {
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "family_binding_hash": family.binding_hash,
+            "q_version": q_version,
+            "source_truth_identity": source_truth_identity,
+            "captured_at_utc": decision_time.isoformat(),
+        }
+    )
+    alpha = _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA
+    witness_identity = deterministic_bin_payoff_witness_identity(
+        family_key=family.family_id,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+        captured_at_utc=decision_time,
+    )
+    witness = DeterministicBinPayoffWitness(
+        family_key=family.family_id,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+        captured_at_utc=decision_time,
+        max_age=max_age,
+        witness_identity=witness_identity,
+    )
+    deterministic_payload: dict[str, object] = {
+        "probability_authority": probability_authority,
+        "q_source": "day0_deterministic_bin_payoff",
+        "_edli_q_source": "day0_deterministic_bin_payoff",
+        "_edli_day0_q_mode": "deterministic_bin_payoff",
+        "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+        "_edli_day0_condition_by_bin": {
+            binding.bin_id: binding.condition_id for binding in bindings
+        },
+        "_edli_day0_deterministic_witness_identity": witness_identity,
+        "_edli_day0_deterministic_q_version": q_version,
+        "_edli_day0_deterministic_sample_identity": witness.sample_matrix_identity,
+        "_edli_day0_deterministic_source_truth_identity": source_truth_identity,
+        "_edli_day0_deterministic_authority_certificate_hash": authority_certificate_hash,
+        "_edli_day0_deterministic_family_key": witness.family_key,
+        "_edli_day0_deterministic_bindings": [
+            {
+                "bin_id": binding.bin_id,
+                "condition_id": binding.condition_id,
+                "yes_token_id": binding.yes_token_id,
+                "no_token_id": binding.no_token_id,
+            }
+            for binding in witness.bindings
+        ],
+        "_edli_day0_deterministic_resolution_identity": witness.resolution_identity,
+        "_edli_day0_deterministic_topology_identity": witness.topology_identity,
+        "_edli_day0_deterministic_posterior_identity_hash": witness.posterior_identity_hash,
+        "_edli_day0_deterministic_band_alpha": witness.band_alpha,
+        "_edli_day0_deterministic_band_basis": witness.band_basis,
+        "_edli_day0_deterministic_captured_at_utc": witness.captured_at_utc.isoformat(),
+    }
+    for key in (
+        "_edli_day0_deterministic_scope_reason",
+        "_edli_day0_held_pinned_zero_support_reason",
+    ):
+        if key in payload:
+            deterministic_payload[key] = payload[key]
+    if "_edli_day0_held_pinned_zero_support_reason" in payload:
+        deterministic_payload["_edli_day0_deterministic_reason"] = (
+            "held_pinned_day0_observation_zero_support"
+        )
+    payload.update(deterministic_payload)
+    if day0_payload_out is not None:
+        day0_payload_out.update(deterministic_payload)
+    return witness, deterministic_payload
 
 
 def _day0_remaining_global_probability_components(
@@ -37930,6 +38146,59 @@ def _prepare_current_global_probability_family(
                         "_edli_day0_held_pinned_overlay"
                     ),
                 }
+            )
+        zero_support_payoffs = payload.get(
+            "_edli_day0_held_pinned_zero_support_payoffs"
+        )
+        if zero_support_payoffs:
+            exact_yes_payoffs = tuple(
+                (str(bin_id), int(payoff))
+                for bin_id, payoff in zero_support_payoffs
+            )
+            witness, _deterministic_payload = _build_day0_deterministic_witness(
+                event=event,
+                family=family,
+                omega=omega,
+                bindings=bindings,
+                exact_yes_payoffs=exact_yes_payoffs,
+                payload=payload,
+                current_day0_payload=current_day0_payload or {},
+                day0_base_identity=day0_base_identity,
+                source_cycle=source_cycle,
+                source_available_at=source_available_at,
+                resolution_identity=resolution_identity,
+                max_age=max_age,
+                decision_time=decision_time,
+                day0_payload_out=day0_payload_out,
+            )
+            reason = str(
+                payload.get("_edli_day0_deterministic_reason")
+                or "held_pinned_day0_observation_zero_support"
+            )
+            return PreparedGlobalFamily(
+                decision_id=stable_hash(
+                    {
+                        "authority_certificate_hash": witness.authority_certificate_hash,
+                        "witness_identity": witness.witness_identity,
+                    }
+                ),
+                probability_witness=witness,
+                candidate_seeds=(),
+                posterior_id=int(pinned_complete_bundle.posterior_id),
+                probability_authority="day0_deterministic_bin_payoff_v1",
+                day0_exit_authority_status="mature",
+                day0_exit_authority_reason=reason,
+                sell_action_authority_identity=sell_action_authority_identity(
+                    family_key=family.family_id,
+                    probability_witness_identity=witness.witness_identity,
+                    status="mature",
+                    reason=reason,
+                ),
+                day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+                    event_type=event.event_type,
+                    payload=payload,
+                    family=family,
+                ),
             )
     elif final_daily_observation is not None:
         components = _final_daily_exact_probability_components(

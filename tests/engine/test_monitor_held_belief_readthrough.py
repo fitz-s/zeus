@@ -1309,16 +1309,16 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
 
     candidates = (
         SimpleNamespace(
-            condition_id="condition-27",
-            yes_token_id="yes-27",
-            no_token_id="no-27",
-            bin=SimpleNamespace(low=27.0, high=27.0, unit="C", label="27°C"),
+            condition_id="condition-33",
+            yes_token_id="yes-33",
+            no_token_id="no-33",
+            bin=SimpleNamespace(low=33.0, high=None, unit="C", label="33°C+"),
         ),
         SimpleNamespace(
-            condition_id="condition-28",
-            yes_token_id="yes-28",
-            no_token_id="no-28",
-            bin=SimpleNamespace(low=28.0, high=28.0, unit="C", label="28°C"),
+            condition_id="condition-32",
+            yes_token_id="yes-32",
+            no_token_id="no-32",
+            bin=SimpleNamespace(low=32.0, high=32.0, unit="C", label="32°C"),
         ),
     )
     family = SimpleNamespace(
@@ -1334,7 +1334,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
         "observation_source": "aviationweather_metar",
         "observation_time": observation_time,
         "observation_available_at": observation_time,
-        "observed_extreme_native": 27.0,
+        "observed_extreme_native": 33.0,
         "unit": "C",
         "source": "aviationweather_metar",
         "station_id": "LLBG",
@@ -1351,7 +1351,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
                 "unit": "C",
                 "settlement_source": "aviationweather_metar",
                 "observation_time": observation_time,
-                "rounded_value": 27,
+                "rounded_value": 33,
                 "source_authorized_status": "AUTHORIZED",
                 "live_authority_status": "live",
             }
@@ -1384,8 +1384,8 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
         "day0_preliminary_report_survival_likelihood": likelihood,
         "day0_remaining_carrier_content_identity": "carrier-content-hash",
         "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
-        "day0_remaining_carrier_q": [0.2, 0.8],
-        "day0_remaining_carrier_probability_samples": [[0.2, 0.8]] * 500,
+        "day0_remaining_carrier_q": [0.0, 1.0],
+        "day0_remaining_carrier_probability_samples": [[0.0, 1.0]] * 500,
         "day0_remaining_carrier_sample_count": 500,
         "day0_remaining_carrier_future_extremes_c": [20.0, 21.0],
         "day0_remaining_carrier_path_error_sigma_c": 0.5,
@@ -1415,11 +1415,25 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
             },
         },
     }
+    pinned_provenance.update(
+        {
+            "q_bootstrap_samples_basis": "global_simplex_v1",
+            "q_bootstrap_samples_by_bin": {
+                "bin-33": [0.0] * 500,
+                "bin-32": [1.0] * 500,
+            },
+            "bin_topology": [
+                {"bin_id": "bin-33", "lower_c": 33.0, "upper_c": None},
+                {"bin_id": "bin-32", "lower_c": 32.0, "upper_c": 32.0},
+            ],
+        }
+    )
     pinned_bundle = SimpleNamespace(
         posterior_id=123,
         posterior_identity_hash="pinned-posterior-identity",
         dependency_hash="pinned-dependency",
         posterior_config_hash="pinned-config",
+        q={"bin-33": 0.0, "bin-32": 1.0},
         source_cycle_time="2026-06-09T00:00:00+00:00",
         source_available_at="2026-06-09T06:00:00+00:00",
         provenance_json=pinned_provenance,
@@ -1478,16 +1492,25 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
             "_edli_global_day0_binding": {"observation_time": observation_time},
             "settlement_source": "aviationweather_metar",
             "observation_time": observation_time,
-            "observed_extreme_native": 27.0,
+            "observed_extreme_native": 33.0,
+            "rounded_value": 33.0,
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
             "settlement_unit": "C",
+            "_edli_day0_remaining_vector_witness": pinned_provenance[
+                "day0_remaining_vector_witness"
+            ],
+            "_edli_day0_source_clock_carrier_provenance": {
+                "posterior_identity_hash": pinned_bundle.posterior_identity_hash,
+                "source_cycle_time": pinned_bundle.source_cycle_time,
+            },
         },
     )
     monkeypatch.setattr(
         era,
-        "_held_pinned_day0_probability_components",
+        "_replacement_global_probability_components",
         lambda *_args, **_kwargs: (
-            np.asarray([[0.2, 0.8], [0.3, 0.7]], dtype=float),
-            np.asarray([0.2, 0.8], dtype=float),
+            np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=float),
+            np.asarray([0.0, 1.0], dtype=float),
             "pinned-basis",
         ),
     )
@@ -1507,7 +1530,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
                     yes_token_id=f"yes-{value}",
                     no_token_id=f"no-{value}",
                 )
-                for value in (27, 28)
+                for value in (33, 32)
             ),
             topology_hash="topology-hash",
         ),
@@ -1549,12 +1572,26 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
 
     assert observed == {"hwm_callback": 0, "generic_reader": 0}
     assert prepared.posterior_id == pinned_bundle.posterior_id
-    assert prepared.probability_witness.posterior_identity_hash == (
+    assert isinstance(
+        prepared.probability_witness,
+        solver.DeterministicBinPayoffWitness,
+    )
+    assert prepared.probability_witness.exact_yes_payoffs == (
+        ("bin-32", 0),
+        ("bin-33", 1),
+    )
+    assert prepared.probability_witness.posterior_identity_hash != (
         pinned_bundle.posterior_identity_hash
     )
     assert payload_out["_edli_day0_held_pinned_posterior_identity"] == (
         pinned_bundle.posterior_identity_hash
     )
+    assert payload_out["_edli_day0_remaining_vector_witness"]["vector_id"] == (
+        "vector-id-1"
+    )
+    assert payload_out["_edli_day0_source_clock_carrier_provenance"][
+        "posterior_identity_hash"
+    ] == pinned_bundle.posterior_identity_hash
     assert pinned_bundle.provenance_json["day0_preliminary_report_survival_likelihood"][
         "station_id"
     ] == "LLBG"
@@ -1615,6 +1652,216 @@ def test_reduce_only_actuation_rehydrates_selected_pinned_identity(monkeypatch):
     )
 
     assert rehydrated is bundle
+
+
+@pytest.mark.parametrize(
+    (
+        "parent_identity",
+        "child_parent_identity",
+        "child_payoffs",
+        "expected_error",
+    ),
+    (
+        ("parent-a", "parent-b", (("bin-32", 0), ("bin-33", 1)), True),
+        ("parent-a", "parent-a", (("bin-32", 1), ("bin-33", 0)), True),
+        ("parent-a", "parent-a", (("bin-32", 0), ("bin-33", 1)), False),
+    ),
+)
+def test_reduce_only_deterministic_child_rehydrates_parent_then_revalidates(
+    monkeypatch,
+    parent_identity,
+    child_parent_identity,
+    child_payoffs,
+    expected_error,
+):
+    """Deterministic zero-support children use the parent carrier at JIT."""
+
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.solve.solver import OutcomeTokenBinding
+
+    bindings = (
+        OutcomeTokenBinding("bin-32", "condition-32", "yes-32", "no-32"),
+        OutcomeTokenBinding("bin-33", "condition-33", "yes-33", "no-33"),
+    )
+    family = SimpleNamespace(
+        family_id="Tel Aviv|2026-06-09|high",
+        binding_hash="family-binding",
+    )
+
+    def deterministic_child(base_identity, exact_yes_payoffs):
+        witness, _payload = era._build_day0_deterministic_witness(
+            event=SimpleNamespace(
+                event_id="event-zero-support-jit",
+                causal_snapshot_id="snapshot-zero-support-jit",
+            ),
+            family=family,
+            omega=SimpleNamespace(topology_hash="topology"),
+            bindings=bindings,
+            exact_yes_payoffs=exact_yes_payoffs,
+            payload={
+                "_edli_day0_held_pinned_zero_support_reason": "zero-support",
+            },
+            current_day0_payload={
+                "_edli_global_day0_binding": {
+                    "observation_time": "2026-08-28T12:00:00+00:00",
+                }
+            },
+            day0_base_identity=base_identity,
+            source_cycle=datetime(2026, 8, 28, 0, tzinfo=timezone.utc),
+            source_available_at="2026-08-28T06:00:00+00:00",
+            resolution_identity="resolution",
+            max_age=timedelta(minutes=15),
+            decision_time=datetime(2026, 8, 28, 12, tzinfo=timezone.utc),
+            day0_payload_out={},
+        )
+        return witness
+
+    selected = deterministic_child(
+        parent_identity,
+        (("bin-32", 0), ("bin-33", 1)),
+    )
+    parent_bundle = SimpleNamespace(
+        posterior_identity_hash=child_parent_identity,
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=parent_bundle
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_current_probability_use_for_global_candidate",
+        lambda _candidate: era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    )
+    monkeypatch.setattr(
+        era,
+        "_rebind_current_actuation_probability_tokens",
+        lambda witness, _selected: witness,
+    )
+    prepared_parent = {}
+
+    def prepare(*_args, **kwargs):
+        prepared_parent["bundle"] = kwargs["pinned_complete_bundle"]
+        return PreparedGlobalFamily(
+            decision_id="current-zero-support",
+            probability_witness=deterministic_child(
+                child_parent_identity,
+                child_payoffs,
+            ),
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="condition-33")),
+    )
+    event = SimpleNamespace(
+        event_type="DAY0_EXTREME_UPDATED",
+        payload_json=json.dumps(
+            {"city": "Tel Aviv", "target_date": "2026-08-28", "metric": "high"}
+        ),
+    )
+
+    def call():
+        return era._current_global_actuation_prepared_family(
+            event,
+            global_actuation=actuation,
+            forecast_conn=sqlite3.connect(":memory:"),
+            topology_conn=sqlite3.connect(":memory:"),
+            observation_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 8, 28, 12, tzinfo=timezone.utc),
+        )
+    if expected_error:
+        with pytest.raises(
+            ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+        ):
+            call()
+    else:
+        rebound, _payload = call()
+        assert rebound.probability_witness is selected
+    assert prepared_parent["bundle"] is parent_bundle
+
+
+def test_reduce_only_statistical_child_keeps_original_parent_identity_gate(
+    monkeypatch,
+):
+    """Normal-support statistical rehydrate retains its existing identity gate."""
+
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+
+    content = {
+        field: f"statistical-{field}"
+        for field in era._GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(
+        **content,
+        posterior_identity_hash="statistical-parent",
+        source_truth_identity="statistical-source",
+        q_version="statistical-q-v1",
+        bindings=(SimpleNamespace(condition_id="condition-33", bin_id="bin-33"),),
+        yes_point_q=np.asarray((0.2,), dtype=np.float64),
+        witness_identity="statistical-selected",
+    )
+    current = SimpleNamespace(**selected.__dict__)
+    parent_bundle = SimpleNamespace(posterior_identity_hash="statistical-parent")
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=parent_bundle
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_current_probability_use_for_global_candidate",
+        lambda _candidate: era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    )
+    monkeypatch.setattr(
+        era,
+        "_rebind_current_actuation_probability_tokens",
+        lambda witness, _selected: witness,
+    )
+    prepared_parent = {}
+
+    def prepare(*_args, **kwargs):
+        prepared_parent["bundle"] = kwargs["pinned_complete_bundle"]
+        return PreparedGlobalFamily(
+            decision_id="current-statistical",
+            probability_witness=current,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+    rebound, _payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(
+            event_type="DAY0_EXTREME_UPDATED",
+            payload_json=json.dumps(
+                {
+                    "city": "Tel Aviv",
+                    "target_date": "2026-08-28",
+                    "metric": "high",
+                }
+            ),
+        ),
+        global_actuation=SimpleNamespace(
+            probability_witness=selected,
+            decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="condition-33")),
+        ),
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        observation_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 8, 28, 12, tzinfo=timezone.utc),
+    )
+
+    assert rebound.probability_witness is selected
+    assert prepared_parent["bundle"] is parent_bundle
 
 
 def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
