@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-28
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -34611,6 +34611,155 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     try:
         assert _get_state(verified, "cmd-release") == "EXPIRED"
         assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+    finally:
+        verified.close()
+
+
+def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
+    tmp_path,
+    monkeypatch,
+):
+    """A zero-fill cancelled top-up cannot reserve cash behind an active lot."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "cancelled-increment-capital-release.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(
+        seed,
+        command_id="cmd-cancelled-increment",
+        position_id="pos-active",
+        size=9.25,
+        price=0.52,
+    )
+    _open_test_entry_obligation(seed, "cmd-cancelled-increment")
+    _advance_to_acked(
+        seed,
+        command_id="cmd-cancelled-increment",
+        venue_order_id="ord-cancelled-increment",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-active",
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               shares = 6.0,
+               cost_basis_usd = 3.18,
+               size_usd = 3.18,
+               entry_price = 0.53
+         WHERE position_id = 'pos-active'
+        """
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="9.25",
+        source="REST",
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-08-28T12:12:00Z",
+        payload={"venue_order_id": "ord-cancelled-increment"},
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-08-28T12:13:00Z",
+        payload={
+            "venue_order_id": "ord-cancelled-increment",
+            "venue_status": "CANCELED",
+        },
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "durable cancel proof must release capital before venue I/O"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["cancel_ack_terminal_no_fill_facts_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["terminal_entry_exposure_obligations_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        obligation = verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """,
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "remaining_size": "9.25",
+        }
+        position = verified.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-active'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 6.0,
+            "cost_basis_usd": 3.18,
+        }
     finally:
         verified.close()
 

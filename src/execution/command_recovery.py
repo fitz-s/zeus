@@ -29283,16 +29283,42 @@ def _reconcile_passes_short_conn(
             obligation_conn_factory = _capital_apply_conn_factory(
                 obligation_deadline,
             )
-            preexisting_obligation_result = _run_capital_pass(
+
+            def _materialize_and_release_terminal_entry_obligations(conn):
+                """Materialize terminal entry facts and release capital atomically."""
+
+                no_fill = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+                partial = reconcile_cancel_ack_terminal_partial_facts(conn)
+                obligations = reconcile_terminal_entry_exposure_obligations(conn)
+                return {
+                    "no_fill": no_fill,
+                    "partial": partial,
+                    "obligations": obligations,
+                }
+
+            terminal_obligation_bundle = _run_capital_pass(
                 "terminal_entry_exposure_obligations_fast",
                 lambda: run_db_only_pass(
-                    reconcile_terminal_entry_exposure_obligations,
+                    _materialize_and_release_terminal_entry_obligations,
                     conn_factory=obligation_conn_factory,
                     label="recovery.terminal_entry_exposure_obligations_fast",
                 ),
                 deadline_monotonic=obligation_deadline,
             )
-            if preexisting_obligation_result is not None:
+            if terminal_obligation_bundle is not None:
+                _accumulate(
+                    summary,
+                    "cancel_ack_terminal_no_fill_facts_fast",
+                    terminal_obligation_bundle["no_fill"],
+                )
+                _accumulate(
+                    summary,
+                    "cancel_ack_terminal_partial_facts_fast",
+                    terminal_obligation_bundle["partial"],
+                )
+                preexisting_obligation_result = terminal_obligation_bundle[
+                    "obligations"
+                ]
                 _accumulate(
                     summary,
                     "terminal_entry_exposure_obligations_fast",
