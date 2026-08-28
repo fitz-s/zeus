@@ -6203,6 +6203,73 @@ class TestRequestHashProvenance:
         assert probe.proved is False
         assert closed == ["world", "forecasts"]
 
+    def test_priority_probe_deadline_interrupts_db_reads_and_closes_both(
+        self, monkeypatch
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        clock = {"now": 0.0}
+        closed = []
+
+        class Connection:
+            def __init__(self, role):
+                self.role = role
+                self.progress = None
+
+            def set_progress_handler(self, callback, _steps):
+                self.progress = callback
+
+            def close(self):
+                closed.append(self.role)
+
+        world_conn = Connection("world")
+        forecast_conn = Connection("forecasts")
+        monkeypatch.setattr(reactor.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(
+            config_module, "runtime_cities_by_name", lambda: {"Paris": city}
+        )
+        monkeypatch.setattr(
+            db_module, "get_world_connection_read_only", lambda: world_conn
+        )
+        monkeypatch.setattr(
+            db_module,
+            "get_forecasts_connection_read_only",
+            lambda: forecast_conn,
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "day0_hourly_models_for_city",
+            lambda _city: ["ecmwf_ifs"],
+        )
+
+        def latest_fact(*_args, **_kwargs):
+            clock["now"] = 2.0
+            assert world_conn.progress is not None
+            assert world_conn.progress() == 1
+            raise sqlite3.OperationalError("interrupted")
+
+        monkeypatch.setattr(
+            target_plan,
+            "_latest_authorized_day0_fact",
+            latest_fact,
+        )
+
+        probe = reactor._edli_day0_hourly_refresh_due_families(
+            cities=[city],
+            decision_time=now,
+            deadline_monotonic=1.0,
+        )
+
+        assert probe.proved is False
+        assert forecast_conn.progress is not None
+        assert closed == ["world", "forecasts"]
+
     def test_scheduler_rotates_priority_segment_without_demoting_priority(self):
         # R4-b2: moved to src.events.reactor with the day0-hourly-refresh cluster.
         from src.events import reactor
@@ -6216,6 +6283,50 @@ class TestRequestHashProvenance:
         )
 
         assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
+
+    def test_scheduler_readiness_probe_owns_same_hard_cycle_budget(
+        self, monkeypatch
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.events import reactor
+
+        clock = {"now": 10.0}
+        captured = {}
+        monkeypatch.setattr(reactor.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [_paris()])
+        monkeypatch.setattr(
+            reactor,
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_day0_hourly_refresh_budget_seconds",
+            lambda: 6.0,
+        )
+
+        def probe(**kwargs):
+            captured["deadline_monotonic"] = kwargs["deadline_monotonic"]
+            clock["now"] = 16.0
+            return reactor._Day0HourlyPriorityProbe()
+
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_refresh_due_families",
+            probe,
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "maybe_refresh_day0_hourly_vectors",
+            lambda *_args, **_kwargs: pytest.fail(
+                "provider fetch must not start after readiness exhausts the cycle budget"
+            ),
+        )
+
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert captured["deadline_monotonic"] == 16.0
 
     def test_scheduler_rotates_held_cities_without_demoting_them(self):
         from src.events import reactor
