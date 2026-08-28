@@ -907,6 +907,29 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
         )
 
 
+def test_day0_redecision_scope_keeps_reduce_only_symmetric_with_monitor():
+    """Submit revalidation must retain the same current-vector scope as monitor."""
+    import src.engine.event_reactor_adapter as era
+
+    for probability_use in (
+        era._CurrentProbabilityUse.HELD_MONITOR,
+        era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    ):
+        assert era._day0_redecision_authority_scope(
+            probability_use,
+            current_day0_redecision_only=False,
+        ) == "held_exposure_current_bundle_day0_only_v1"
+
+    assert era._day0_redecision_authority_scope(
+        era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        current_day0_redecision_only=True,
+    ) == "held_exposure_current_day0_only_v1"
+    assert era._day0_redecision_authority_scope(
+        era._CurrentProbabilityUse.ENTRY,
+        current_day0_redecision_only=False,
+    ) is None
+
+
 def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_authority():
     """ENTRY rebuilds from A(now), while the source-clock carrier stays provenance."""
     import src.engine.event_reactor_adapter as era
