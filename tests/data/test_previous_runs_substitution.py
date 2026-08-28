@@ -3375,6 +3375,115 @@ def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
     assert prioritized[-1].name == "Zurich.2026-08-29.high.20260828T170000Z.json"
 
 
+def test_complete_global_receipt_scope_maps_exact_queued_families(tmp_path, monkeypatch):
+    """A schema-22 full cut maps family ids back to current queue identities."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    from src.events.candidate_binding import weather_family_id
+
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)"
+    )
+    families = {
+        ("Istanbul", "2026-08-29", "high"),
+        ("Tel Aviv", "2026-08-30", "low"),
+    }
+    family_ids = {
+        weather_family_id(city=city, target_date=target_date, metric=metric): family
+        for family in families
+        for city, target_date, metric in (family,)
+    }
+    eligible_id, ineligible_id = tuple(family_ids)
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1, ?, ?)",
+        (
+            "global_single_order_auction_delta",
+            json.dumps(
+                {
+                    "summary": {
+                        "schema_version": 22,
+                        "scope_family_coverage_complete": True,
+                        "full_scope_family_count": 2,
+                        "probability_ineligible_by_family": {
+                            ineligible_id: "CURRENT_Q_UNAVAILABLE"
+                        },
+                        "proof_counterfactual": {
+                            "probability_manifest": [[eligible_id, "witness"]]
+                        },
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(queue_mod, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    paths = (
+        tmp_path / "Istanbul.2026-08-29.high.current.json",
+        tmp_path / "Tel_Aviv.2026-08-30.low.current.json",
+        tmp_path / "Moscow.2026-08-30.high.background.json",
+    )
+
+    assert queue_mod._current_global_auction_scope_families(
+        paths, trade_db=trade_db
+    ) == frozenset(families)
+
+
+def test_global_scope_queue_identity_enters_priority_below_held(monkeypatch, tmp_path):
+    """The latest global cut cannot wait in background behind unrelated recovery."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_family = ("Istanbul", "2026-08-29", "high")
+    global_family = ("Tel Aviv", "2026-08-30", "low")
+    held = tmp_path / "Istanbul.2026-08-29.high.current.json"
+    global_path = tmp_path / "Tel_Aviv.2026-08-30.low.current.json"
+    background = tmp_path / "Moscow.2026-08-30.high.background.json"
+    common = {
+        "source_cycle_time": "2026-08-28T12:00:00+00:00",
+        "computed_at": "2026-08-28T20:00:00+00:00",
+    }
+    payloads = {
+        held: {
+            **common,
+            "city": held_family[0],
+            "target_date": held_family[1],
+            "temperature_metric": held_family[2],
+        },
+        global_path: {
+            **common,
+            "city": global_family[0],
+            "target_date": global_family[1],
+            "temperature_metric": global_family[2],
+        },
+        background: {
+            **common,
+            "city": "Moscow",
+            "target_date": "2026-08-30",
+            "temperature_metric": "high",
+        },
+    }
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset(),
+    )
+    priority_names: set[str] = set()
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        tuple(payloads),
+        payloads,
+        current_money_risk=frozenset({held_family}),
+        current_global_scope=frozenset({global_family}),
+        priority_names=priority_names,
+    )
+
+    assert priority_names == {held.name, global_path.name}
+    assert priority[held.name][0] < priority[global_path.name][0]
+    assert background.name not in priority_names
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

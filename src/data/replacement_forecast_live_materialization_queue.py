@@ -68,6 +68,7 @@ _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS = 3
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS = 75.0
 _MATERIALIZATION_STAGE_RECEIPT_SUFFIX = ".stage"
 _MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS = 1.0
+_GLOBAL_AUCTION_SCOPE_CACHE: tuple[str, int, frozenset[str]] | None = None
 _AWAITING_ENSEMBLE_HWM_REASON = (
     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
 )
@@ -1302,6 +1303,152 @@ def _current_money_risk_families(
         return frozenset()
 
 
+def _current_global_auction_family_ids(
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[str]:
+    """Return the latest complete global cut's full family-id scope."""
+
+    global _GLOBAL_AUCTION_SCOPE_CACHE
+
+    try:
+        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+
+        db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
+        if not db_path.exists():
+            return frozenset()
+        path_identity = str(db_path.resolve())
+        conn = _queue_read_only_connection(db_path)
+        try:
+            latest = conn.execute(
+                """
+                SELECT id
+                  FROM decision_log
+                 WHERE mode LIKE 'global_single_order_auction%'
+                 ORDER BY id DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            if latest is None:
+                return frozenset()
+            latest_id = int(latest[0])
+            cached = _GLOBAL_AUCTION_SCOPE_CACHE
+            if cached is not None and cached[:2] == (path_identity, latest_id):
+                return cached[2]
+            rows = conn.execute(
+                """
+                SELECT id, artifact_json
+                  FROM decision_log
+                 WHERE mode LIKE 'global_single_order_auction%'
+                 ORDER BY id DESC
+                 LIMIT 8
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
+    except Exception as exc:  # noqa: BLE001 - priority loss is loud; queue still drains
+        _LOG.error(
+            "replacement materialization global-scope priority read failed; "
+            "retaining held-only priority: %s",
+            exc,
+        )
+        return frozenset()
+
+    family_ids: frozenset[str] = frozenset()
+    for _row_id, artifact_raw in rows:
+        try:
+            artifact = json.loads(str(artifact_raw or ""))
+            summary = artifact["summary"]
+            proof = summary["proof_counterfactual"]
+            manifest = proof["probability_manifest"]
+            ineligible = summary["probability_ineligible_by_family"]
+            expected = int(summary["full_scope_family_count"])
+            if (
+                summary.get("schema_version") != 22
+                or summary.get("scope_family_coverage_complete") is not True
+                or not isinstance(manifest, list)
+                or not isinstance(ineligible, Mapping)
+            ):
+                continue
+            resolved = {
+                str(row[0] or "")
+                for row in manifest
+                if isinstance(row, list) and row
+            }
+            resolved.update(str(value or "") for value in ineligible)
+            resolved.discard("")
+            if expected > 0 and len(resolved) == expected:
+                family_ids = frozenset(resolved)
+                break
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    _GLOBAL_AUCTION_SCOPE_CACHE = (path_identity, latest_id, family_ids)
+    return family_ids
+
+
+def _current_global_auction_scope_families(
+    queue_files: Sequence[Path],
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Map queued seed/request names into the latest complete global cut."""
+
+    family_ids = _current_global_auction_family_ids(trade_db=trade_db)
+    if not family_ids or not queue_files:
+        return frozenset()
+    try:
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.events.candidate_binding import weather_family_id  # noqa: PLC0415
+
+        city_prefixes = tuple(
+            sorted(
+                {
+                    (
+                        str(getattr(city, "name", "") or ""),
+                        str(getattr(city, "name", "") or "")
+                        .replace("/", "_")
+                        .replace(" ", "_")
+                        + ".",
+                    )
+                    for city in cities_by_name.values()
+                    if str(getattr(city, "name", "") or "")
+                },
+                key=lambda value: len(value[1]),
+                reverse=True,
+            )
+        )
+        matched: set[tuple[str, str, str]] = set()
+        for path in queue_files:
+            for city, prefix in city_prefixes:
+                if not path.name.startswith(prefix):
+                    continue
+                fields = path.name[len(prefix) :].split(".", 2)
+                if len(fields) < 2:
+                    break
+                target_date, metric = fields[:2]
+                metric = metric.lower()
+                if metric not in {"high", "low"}:
+                    break
+                family = (city, target_date, metric)
+                if weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                ) in family_ids:
+                    matched.add(family)
+                break
+        return frozenset(matched)
+    except Exception as exc:  # noqa: BLE001 - priority loss is loud; queue still drains
+        _LOG.error(
+            "replacement materialization global-scope family mapping failed; "
+            "retaining held-only priority: %s",
+            exc,
+        )
+        return frozenset()
+
+
 def _current_probability_debt_families(
     *,
     trade_db: Path | str | None = None,
@@ -1414,6 +1561,7 @@ def _cycle_advance_seed_priority_map(
     trade_db: Path | str | None = None,
     now_utc: datetime | None = None,
     current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+    current_global_scope: frozenset[tuple[str, str, str]] | None = None,
     priority_names: set[str] | None = None,
 ) -> dict[str, tuple[float, str]]:
     """Return filename -> priority for queued materialization work.
@@ -1485,6 +1633,11 @@ def _cycle_advance_seed_priority_map(
         _current_money_risk_scopes(fam_scopes, trade_db=trade_db)
         if current_money_risk is None
         else current_money_risk & fam_scopes
+    )
+    current_global_scope = (
+        _current_global_auction_scope_families(queue_files, trade_db=trade_db)
+        if current_global_scope is None
+        else current_global_scope & fam_scopes
     )
     # This is intentionally a second, claim-time read.  Exposure gives every
     # held family ordinary priority; only a currently stale monitor q grants
@@ -1593,6 +1746,8 @@ def _cycle_advance_seed_priority_map(
         held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
         if fam_scope in current_money_risk:
             base_tier = -2
+        elif fam_scope in current_global_scope:
+            base_tier = -1.5
         elif fam_scope in never_priced_scopes:
             base_tier = -1
         elif held_marker:
@@ -1621,6 +1776,7 @@ def _cycle_advance_seed_priority_map(
             )
             if priority_names is not None and (
                 fam_scope in current_money_risk
+                or fam_scope in current_global_scope
                 or name in day0_identity_by_name
             ):
                 # The Day0 conditioning identity is part of the durable request
@@ -1704,6 +1860,7 @@ def _priority_map_with_names(
     payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
     *,
     current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+    current_global_scope: frozenset[tuple[str, str, str]] | None = None,
 ) -> tuple[dict[str, tuple[float, str]], set[str]]:
     """Call the classifier while keeping compatibility with narrow test doubles."""
     priority_names: set[str] = set()
@@ -1713,12 +1870,17 @@ def _priority_map_with_names(
             queue_files,
             payloads,
             current_money_risk=current_money_risk,
+            current_global_scope=current_global_scope,
             priority_names=priority_names,
         )
     except TypeError as exc:
         if not any(
             name in str(exc)
-            for name in ("priority_names", "current_money_risk")
+            for name in (
+                "priority_names",
+                "current_money_risk",
+                "current_global_scope",
+            )
         ):
             raise
         priority = _cycle_advance_seed_priority_map(
@@ -3299,13 +3461,17 @@ def _prepare_seed_requests(
         _read_day0_enqueue_ownership_cursor(cursor_path),
     )
     current_money_risk = _current_money_risk_families()
+    current_global_scope = _current_global_auction_scope_families(
+        rotated_raw_snapshot
+    )
+    current_priority_scope = current_money_risk | current_global_scope
     prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
         rotated_raw_snapshot,
-        current_money_risk,
+        current_priority_scope,
     )
-    current_money_seed_family_count = sum(
+    current_priority_seed_family_count = sum(
         any(path.name.startswith(prefix) for path in rotated_raw_snapshot)
-        for prefix in _current_money_risk_seed_prefixes(current_money_risk)
+        for prefix in _current_money_risk_seed_prefixes(current_priority_scope)
     )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
@@ -3314,7 +3480,7 @@ def _prepare_seed_requests(
     inspection_cap = max(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
-        current_money_seed_family_count,
+        current_priority_seed_family_count,
     )
     raw_window = prioritized_raw_snapshot[:inspection_cap]
     (
@@ -3337,6 +3503,7 @@ def _prepare_seed_requests(
         coalesced_window,
         seed_payloads,
         current_money_risk=current_money_risk,
+        current_global_scope=current_global_scope,
     )
     seeds = tuple(
         sorted(
