@@ -4735,3 +4735,35 @@ def test_live_adapter_wires_scope_aware_wake_supersession_probe():
     assert "_global_batch_wakes_supersede(" in source
     assert "producer_wake_ids=producer_wake_ids" in reactor_source
     assert "producer_wake_published_at=producer_wake_published_at" in reactor_source
+
+
+def test_reactor_outer_connection_disables_autocheckpoint_before_commit():
+    """The reactor's writer cannot run a checkpoint inside its commit."""
+    from src.events import reactor
+
+    class AutocheckpointSensitiveConnection:
+        def __init__(self) -> None:
+            self.wal_autocheckpoint = 1_000
+            self.implicit_checkpoints = 0
+            self.statements: list[str] = []
+
+        def execute(self, sql: str):
+            self.statements.append(sql)
+            if sql.replace(" ", "").lower() == "pragmawal_autocheckpoint=0":
+                self.wal_autocheckpoint = 0
+
+        def commit(self) -> None:
+            if self.wal_autocheckpoint:
+                self.implicit_checkpoints += 1
+
+    conn = AutocheckpointSensitiveConnection()
+    reactor._disable_reactor_wal_autocheckpoint(conn)
+    conn.commit()
+
+    assert conn.statements == ["PRAGMA wal_autocheckpoint=0"]
+    assert conn.implicit_checkpoints == 0
+
+    source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+    assert source.index("_disable_reactor_wal_autocheckpoint(conn)") < source.index(
+        'conn.execute("ATTACH DATABASE ? AS forecasts"'
+    )

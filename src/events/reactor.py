@@ -8317,6 +8317,17 @@ def _persist_exact_held_sell_completion_receipts(
     return receipts, persisted, bool(requests_completed(requests))
 
 
+def _disable_reactor_wal_autocheckpoint(conn: sqlite3.Connection) -> None:
+    """Keep reactor commits out of SQLite's implicit checkpoint path.
+
+    The main daemon owns recurring PASSIVE checkpoints on short-lived dedicated
+    connections.  This long-lived, writable reactor connection must therefore
+    not checkpoint while it owns a decision-cycle commit.
+    """
+
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+
+
 def run_edli_event_reactor_cycle(
     *,
     active_lock,
@@ -8682,6 +8693,7 @@ def run_edli_event_reactor_cycle(
         raise
     try:
         conn = get_world_connection()
+        _disable_reactor_wal_autocheckpoint(conn)
     except Exception:
         active_lock.release()
         raise
