@@ -6089,6 +6089,11 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(trade_path),
     )
     monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic=None: sqlite3.connect(trade_path),
+    )
+    monkeypatch.setattr(
         lane,
         "_edli_canonical_open_held_pairs",
         lambda conn: {("condition-held", "held-token")},

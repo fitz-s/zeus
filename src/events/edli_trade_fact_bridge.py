@@ -33,6 +33,22 @@ class TradeFactBridgeCandidate:
     trade_id: str
 
 
+@dataclass(frozen=True)
+class PreparedTradeFactBridgeEvidence:
+    """Immutable read-phase evidence for one exact bridge append.
+
+    Writer callers still perform a point CAS on ``trade_fact_id`` and its
+    fingerprint, but never repeat discovery/revalidation scans while holding a
+    canonical writer lease.
+    """
+
+    kind: str
+    candidate: TradeFactBridgeCandidate
+    row: dict[str, Any]
+    fingerprint: str
+    grace_minutes: float
+
+
 def discover_confirmed_trade_fact_candidates(
     conn: sqlite3.Connection,
     *,
@@ -308,6 +324,173 @@ def _revalidate_rest_filled_orphan_trade_fact_candidate(
     return row
 
 
+def prepare_trade_fact_bridge_evidence(
+    conn: sqlite3.Connection,
+    candidate: TradeFactBridgeCandidate,
+    *,
+    kind: str,
+    trade_schema: str,
+    event_schema: str,
+    grace_minutes: float = 15.0,
+) -> PreparedTradeFactBridgeEvidence | None:
+    """Perform full read-side revalidation before a short writer tranche."""
+
+    if kind == "confirmed":
+        row = _revalidate_confirmed_trade_fact_candidate(
+            conn, candidate, trade_schema=trade_schema, event_schema=event_schema
+        )
+    elif kind == "rest_orphan":
+        row = _revalidate_rest_filled_orphan_trade_fact_candidate(
+            conn, candidate, trade_schema=trade_schema, event_schema=event_schema
+        )
+    else:
+        raise ValueError(f"unsupported prepared trade-fact bridge kind {kind!r}")
+    if row is None:
+        return None
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "aggregate_id": row["aggregate_id"],
+                "execution_command_id": row["execution_command_id"],
+                "command_id": row["command_id"],
+                "trade_fact_id": row["trade_fact_id"],
+                "trade_id": row["trade_id"],
+                "raw_payload_hash": row["raw_payload_hash"],
+                "venue_order_id": row["venue_order_id"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return PreparedTradeFactBridgeEvidence(
+        kind=kind,
+        candidate=candidate,
+        row=dict(row),
+        fingerprint=fingerprint,
+        grace_minutes=max(0.0, float(grace_minutes)),
+    )
+
+
+def append_prepared_trade_fact_bridge_evidence(
+    conn: sqlite3.Connection,
+    evidence: PreparedTradeFactBridgeEvidence,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """CAS and append one prepared fact without re-running historical discovery."""
+
+    row = evidence.row
+    trade_schema = "trades" if _schema_with_table(conn, "venue_trade_facts", preferred="trades") else "main"
+    facts = _q(trade_schema, "venue_trade_facts")
+    current = conn.execute(
+        f"""
+        SELECT raw_payload_hash, trade_id, venue_order_id
+          FROM {facts}
+         WHERE trade_fact_id = ?
+           AND command_id = ?
+         LIMIT 1
+        """,
+        (evidence.candidate.trade_fact_id, row["command_id"]),
+    ).fetchone()
+    current_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "aggregate_id": row["aggregate_id"],
+                "execution_command_id": row["execution_command_id"],
+                "command_id": row["command_id"],
+                "trade_fact_id": row["trade_fact_id"],
+                "trade_id": _row_get(current, "trade_id") if current else None,
+                "raw_payload_hash": _row_get(current, "raw_payload_hash") if current else None,
+                "venue_order_id": _row_get(current, "venue_order_id") if current else None,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if current is None or current_fingerprint != evidence.fingerprint:
+        raise RuntimeError("TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE")
+    latest = conn.execute(
+        f"""
+        SELECT trade_fact_id
+          FROM {facts}
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND trade_id = ?
+           AND UPPER(COALESCE(state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+         ORDER BY CASE UPPER(COALESCE(state, ''))
+                    WHEN 'CONFIRMED' THEN 3 WHEN 'MINED' THEN 2 ELSE 1 END DESC,
+                  datetime(observed_at) DESC, trade_fact_id DESC
+         LIMIT 1
+        """,
+        (row["command_id"], row["venue_order_id"], row["trade_id"]),
+    ).fetchone()
+    if latest is None or int(_row_get(latest, "trade_fact_id")) != int(row["trade_fact_id"]):
+        raise RuntimeError("TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE")
+    event_schema = "main"
+    if evidence.kind == "rest_orphan":
+        ws_confirmed = conn.execute(
+            f"""SELECT 1 FROM {facts}
+                 WHERE trade_id = ? AND source = 'WS_USER'
+                   AND UPPER(COALESCE(state, '')) = 'CONFIRMED' LIMIT 1""",
+            (row["trade_id"],),
+        ).fetchone()
+        if ws_confirmed is not None:
+            raise RuntimeError("TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE")
+    if _has_user_trade_observed(
+        conn,
+        event_schema=event_schema,
+        aggregate_id=str(row["aggregate_id"]),
+        trade_id=str(row["trade_id"]),
+        require_confirmed_authority=(evidence.kind == "confirmed"),
+    ):
+        raise RuntimeError("TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE")
+    ledger = LiveOrderAggregateLedger(conn)
+    default_now = now or datetime.now(timezone.utc)
+    observed_at = _parse_dt(row["observed_at"], default=default_now)
+    command_occurred_at = _parse_dt(row["command_occurred_at"], default=default_now)
+    message_hash = _message_hash(row)
+    if evidence.kind == "confirmed":
+        append_user_trade_observed(
+            ledger,
+            aggregate_id=str(row["aggregate_id"]),
+            event_id=str(row["event_id"]),
+            final_intent_id=str(row["final_intent_id"]),
+            source="polymarket_user_channel",
+            trade_status="CONFIRMED",
+            venue_order_id=str(row["venue_order_id"]),
+            occurred_at=max(observed_at, command_occurred_at),
+            payload={
+                "raw_user_channel_message_hash": message_hash,
+                "trade_id": str(row["trade_id"]),
+                "filled_size": str(row["filled_size"]),
+                "fill_price": str(row["fill_price"]),
+                "avg_fill_price": str(row["fill_price"]),
+                "transaction_hash": row["tx_hash"],
+                "source_trade_observed_at": str(row["observed_at"]),
+                "source_trade_fact_id": int(row["trade_fact_id"]),
+                "source_trade_fact_authority": "venue_trade_facts:WS_USER:CONFIRMED",
+            },
+        )
+    else:
+        rest_confirmed = (
+            str(row["trade_source"] or "").upper() == "REST"
+            and str(row["state"] or "").upper() == "CONFIRMED"
+        )
+        if not rest_confirmed and observed_at.timestamp() > (
+            default_now.timestamp() - evidence.grace_minutes * 60.0
+        ):
+            return 0
+        _ensure_recovered_submit_binding(ledger, row, occurred_at=max(observed_at, command_occurred_at))
+        _append_one_recovered_fill(
+            ledger,
+            row,
+            max(observed_at, command_occurred_at),
+            message_hash,
+            evidence.grace_minutes,
+        )
+    return 1
+
+
 def _revalidate_trade_fact_candidate(
     conn: sqlite3.Connection,
     candidate: TradeFactBridgeCandidate,
@@ -446,6 +629,7 @@ def _revalidate_trade_fact_candidate(
         "event_id": _row_get(execution, "event_id"),
         "final_intent_id": _row_get(execution, "final_intent_id"),
         "execution_command_id": candidate.execution_command_id,
+        "command_id": _row_get(command, "command_id"),
         "command_occurred_at": _row_get(execution, "command_occurred_at"),
         "command_state": _row_get(command, "state"),
         "trade_fact_id": _row_get(trade, "trade_fact_id"),
