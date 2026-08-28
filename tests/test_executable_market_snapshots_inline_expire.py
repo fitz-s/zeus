@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.state.snapshot_repo import (
     _inline_expire_executable_market_snapshots,
+    _SNAPSHOT_CUTOFF_INDEX_NAME,
     _SNAPSHOT_INLINE_EXPIRE_LIMIT,
     _SNAPSHOT_INLINE_EXPIRE_THROTTLE,
 )
@@ -26,6 +27,8 @@ CREATE TABLE executable_market_snapshots (
     condition_id TEXT NOT NULL,
     captured_at TEXT NOT NULL
 );
+CREATE INDEX idx_executable_market_snapshots_captured_at_only
+ON executable_market_snapshots(captured_at);
 CREATE TRIGGER no_update_executable_market_snapshots
 BEFORE UPDATE ON executable_market_snapshots
 BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
@@ -81,6 +84,19 @@ def test_does_not_fire_below_the_throttle_count() -> None:
 
     count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
     assert count == _SNAPSHOT_INLINE_EXPIRE_THROTTLE - 1  # no-op: rowid % throttle != 0
+
+
+def test_skips_unbounded_expiry_when_cutoff_index_is_missing() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SNAPSHOTS_DDL)
+    conn.execute(f"DROP INDEX {_SNAPSHOT_CUTOFF_INDEX_NAME}")
+    _seed_old_row_at_rowid(conn, _SNAPSHOT_INLINE_EXPIRE_THROTTLE, with_anchors=False)
+
+    _inline_expire_executable_market_snapshots(conn)
+
+    count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
+    assert count == _SNAPSHOT_INLINE_EXPIRE_THROTTLE
+    assert _trigger_blocks_delete(conn)
 
 
 def test_fires_at_the_throttle_count_and_deletes_old_rows() -> None:
