@@ -4545,6 +4545,12 @@ def _market_relative_alpha_rejection_gate_reason(
     return reason, revisions
 
 
+# Minimum realized same-revision closes before a net-nonpositive cohort may
+# latch the entry gate. Below this, one bad close is noise, and — because the
+# latch blocks the very probes that would grow the sample — a permanent lock.
+_PROBATION_MIN_REALIZED_SAMPLE = 3
+
+
 def _revision_probation_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
@@ -4552,15 +4558,26 @@ def _revision_probation_gate_reason(
     *,
     reason_prefix: str,
 ) -> tuple[str | None, tuple[str, ...]]:
-    """Bound an unproven probability revision to one in-flight capital probe.
+    """Bound an unproven probability revision by realized capital truth.
 
     SCOPE: only the exact current strategy probability revision. DRAIN: existing
-    monitor/exit/settlement lanes close the in-flight position while the
-    no-money counterfactual lane keeps accumulating exact-selector evidence.
-    RESET: validated same-revision capital evidence removes the bound; before
-    validation, one positive realized probe permits the next sequential probe,
-    while nonpositive or degraded capital truth keeps entry gated. A new
-    probability revision starts its own empty probation cohort.
+    monitor/exit/settlement lanes close realized positions while the no-money
+    counterfactual lane keeps accumulating exact-selector evidence. RESET:
+    validated same-revision capital evidence removes the bound; before
+    validation, entry stays open unless realized truth is degraded or a
+    minimum-sample cohort (>= _PROBATION_MIN_REALIZED_SAMPLE realized closes)
+    is net-nonpositive. A new probability revision starts its own empty
+    probation cohort.
+
+    2026-08-28 operator directive (continuous decision throughput): the former
+    in-flight arm counted every pre-existing open position as "the one
+    sequential probe", so open>0 froze entry unconditionally — a fifth
+    concurrency throttle on top of the four pinned sizing levers and the
+    drawdown kill, and one that could never drain while the strategy kept any
+    book. It is removed: concurrency is bounded by risk_policy.yaml levers,
+    not by this gate. The nonpositive latch now needs a minimum realized
+    sample — a single losing close is not statistical evidence and, because
+    the latch itself blocks the next probe, n=1 was a permanent lock.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -4602,14 +4619,13 @@ def _revision_probation_gate_reason(
             f"revision={revision})"
         )
         return reason, (revision,)
-    if open_positions > 0:
-        reason = (
-            f"{reason_prefix}_revision_probation_in_flight("
-            f"open={open_positions},realized={realized_positions},"
-            f"revision={revision})"
-        )
-        return reason, (revision,)
-    if realized_positions > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
+    # open_positions intentionally does NOT gate: concurrency is owned by the
+    # pinned sizing levers (risk_policy.yaml) and the drawdown kill. This gate
+    # only answers "has this revision's realized capital truth disproven it?"
+    del open_positions
+    if realized_positions >= _PROBATION_MIN_REALIZED_SAMPLE and (
+        not math.isfinite(net_pnl) or net_pnl <= 0.0
+    ):
         reason = (
             f"{reason_prefix}_revision_probation_nonpositive("
             f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
