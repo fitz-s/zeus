@@ -7394,6 +7394,88 @@ class TestRecoveryResolutionTable:
                 payload=forged,
             )
 
+    def test_bound_entry_absence_preserves_certified_existing_increment_position(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """No-fill is command-specific; an older synced position stays active."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        order_id = "ord-bound-entry-increment"
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, order_id=order_id)
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        before = dict(
+            conn.execute(
+                "SELECT phase, shares, chain_shares, cost_basis_usd, "
+                "chain_cost_basis_usd, order_id FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class CompleteVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:05:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        after = dict(
+            conn.execute(
+                "SELECT phase, shares, chain_shares, cost_basis_usd, "
+                "chain_cost_basis_usd, order_id FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+        )
+        assert after == before
+        payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert payload["required_predicates"][
+            "no_positive_position_projection"
+        ] is False
+        assert payload["required_predicates"][
+            "persisted_reconciled_position_increment"
+        ] is True
+        assert payload["existing_position_increment_proof"][
+            "increment_position_id"
+        ] == "pos-001"
+
     def test_bound_entry_unverified_or_conflicting_absence_stays_review_required(
         self,
         conn,

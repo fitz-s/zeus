@@ -4546,8 +4546,9 @@ def _validate_review_submit_terminal_no_fill_payload(
         "no_trade_facts",
         "no_matching_open_orders",
         "no_matching_trades",
-        "no_positive_position_projection",
     )
+    if not bound_entry:
+        required_true += ("no_positive_position_projection",)
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"acked-submit no-fill predicates are not proven true: {missing}")
@@ -4640,14 +4641,38 @@ def _validate_review_submit_terminal_no_fill_payload(
         raise ValueError("acked-submit no-fill terminal order fact matched_size is invalid") from exc
     if _review_clearance_fact_count(conn, "venue_trade_facts", command_id) != 0:
         raise ValueError("acked-submit no-fill clearance found trade facts")
+    zero_exposure_projection = True
     if current is not None:
         try:
             shares = Decimal(str(current["shares"] or "0"))
             cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))
         except (InvalidOperation, TypeError) as exc:
             raise ValueError("acked-submit no-fill position exposure is invalid") from exc
-        if shares != Decimal("0") or cost_basis != Decimal("0"):
+        zero_exposure_projection = (
+            shares == Decimal("0") and cost_basis == Decimal("0")
+        )
+        if not bound_entry and not zero_exposure_projection:
             raise ValueError("acked-submit no-fill clearance requires no positive position projection")
+    if bound_entry:
+        increment_proof = payload.get("existing_position_increment_proof")
+        persisted_increment = reconciled_increment_no_fill_proof(conn, command_id)
+        increment_matches = (
+            isinstance(increment_proof, dict)
+            and persisted_increment is not None
+            and increment_proof == persisted_increment
+        )
+        if not zero_exposure_projection and not increment_matches:
+            raise ValueError(
+                "bound-entry no-fill requires zero exposure or a "
+                "submit-certified chain-synced increment"
+            )
+        if increment_matches and not (
+            required_predicates.get("persisted_reconciled_position_increment")
+            is True
+            and required_predicates.get("current_chain_synced_increment_exposure")
+            is True
+        ):
+            raise ValueError("bound-entry increment predicates are missing")
     venue_proof = payload.get("venue_absence_proof")
     if not isinstance(venue_proof, dict):
         raise ValueError("acked-submit no-fill clearance requires venue_absence_proof")

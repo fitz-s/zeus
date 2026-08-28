@@ -20912,10 +20912,12 @@ def _review_required_bound_entry_order_recovery(
             command_id=cmd.command_id,
             point_order=point_order,
         )
+    zero_exposure_projection = _no_positive_position_projection(conn, command)
+    increment_evidence = reconciled_increment_no_fill_proof(conn, cmd.command_id)
     if (
         not no_fill_proven
         or _trade_fact_count(conn, cmd.command_id) != 0
-        or not _no_positive_position_projection(conn, command)
+        or (not zero_exposure_projection and increment_evidence is None)
     ):
         return "stayed"
 
@@ -21017,8 +21019,15 @@ def _review_required_bound_entry_order_recovery(
                     "no_trade_facts": True,
                     "no_matching_open_orders": True,
                     "no_matching_trades": True,
-                    "no_positive_position_projection": True,
+                    "no_positive_position_projection": zero_exposure_projection,
+                    "persisted_reconciled_position_increment": (
+                        increment_evidence is not None
+                    ),
+                    "current_chain_synced_increment_exposure": (
+                        increment_evidence is not None
+                    ),
                 },
+                "existing_position_increment_proof": increment_evidence,
                 "terminal_order_fact_id": terminal_fact_id,
                 "terminal_order_fact": {
                     "venue_order_id": latest_fact.get("venue_order_id"),
