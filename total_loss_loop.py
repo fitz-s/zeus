@@ -393,6 +393,10 @@ CREATE TABLE IF NOT EXISTS controller_debt (
     retry_identity TEXT NOT NULL DEFAULT '',
     next_retry_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_evidence_recovery_hard
+    ON incidents(kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_recovery_debt
+    ON controller_debt(kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id);
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
@@ -542,6 +546,26 @@ def _startup_index_contract(
     )
 
 
+def _startup_expression_index_contract(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    name: str,
+    expression: str,
+) -> bool:
+    """Verify a non-unique expression index by its exact SQL contract."""
+    _startup_guard()
+    catalog = conn.execute(
+        "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
+        (name,),
+    ).fetchone()
+    if catalog is None or str(catalog[0]) != table or not catalog[1]:
+        return False
+    normalize = lambda value: re.sub(r"\s*,\s*", ",", re.sub(r"\s+", " ", value.strip())).lower()
+    expected = f"CREATE INDEX {name} ON {table}({expression})"
+    return normalize(str(catalog[1])) == normalize(expected)
+
+
 def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
     """Verify the existing schema with catalog-only reads before startup DDL."""
     _startup_guard()
@@ -594,6 +618,18 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             unique=False,
             columns=("kind", "status", "priority", "detected_at", "incident_id"),
             descending=(False, False, True, False, False),
+        )
+        and _startup_expression_index_contract(
+            conn,
+            table="incidents",
+            name="idx_evidence_recovery_hard",
+            expression="kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id",
+        )
+        and _startup_expression_index_contract(
+            conn,
+            table="controller_debt",
+            name="idx_evidence_recovery_debt",
+            expression="kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
         )
     )
 
@@ -755,6 +791,23 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
             "CREATE INDEX idx_incident_queue "
             "ON incidents(status,stage,kind,priority DESC,detected_at)"
         )
+    for table, name, expression in (
+        (
+            "incidents",
+            "idx_evidence_recovery_hard",
+            "kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id",
+        ),
+        (
+            "controller_debt",
+            "idx_evidence_recovery_debt",
+            "kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
+        ),
+    ):
+        if not _startup_expression_index_contract(
+            conn, table=table, name=name, expression=expression
+        ):
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
+            conn.execute(f"CREATE INDEX {name} ON {table}({expression})")
     return _ClosingConnection(conn)
 
 
@@ -3753,6 +3806,21 @@ def _record_emergency_evidence_debt(
         conn = sqlite3.connect(runtime_dir(cfg) / "memory.db", timeout=remaining)
         conn.execute(f"PRAGMA busy_timeout={max(1, int(remaining * 1000))}")
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        incident_row = conn.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,evidence_revision "
+            "FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        if incident_row is not None:
+            retry_identity = _memory_only_evidence_retry_identity(
+                cfg,
+                {
+                    "incident_id": incident_row[0],
+                    "position_id": incident_row[1],
+                    "crossing_evidence_id": incident_row[2],
+                    "evidence_revision": incident_row[3],
+                },
+            )
         prior = conn.execute(
             "SELECT retry_identity,next_retry_at,attempts FROM controller_debt "
             "WHERE debt_id=? AND kind='evidence_snapshot'",
@@ -4221,6 +4289,7 @@ def _capture_hard_evidence_inner(
 
 
 _EVIDENCE_CANDIDATE_RECOVERY_SECONDS = 0.25
+_EVIDENCE_RECOVERY_REMAINDER_RECEIPT = "evidence-recovery-remainder.json"
 
 
 def _recover_evidence_candidate_ids(
@@ -4259,6 +4328,78 @@ def _recover_evidence_candidate_ids(
             conn.close()
 
 
+def _record_evidence_recovery_remainder(
+    cfg: Mapping[str, Any],
+    incident_ids: Iterable[str],
+    *,
+    reason: str,
+) -> None:
+    """Persist one controller-level next-cycle receipt for a bounded remainder."""
+
+    remainder = list(dict.fromkeys(str(value) for value in incident_ids if str(value)))
+    if not remainder:
+        return
+    payload = {
+        "kind": "evidence_snapshot_recovery_remainder",
+        "status": "retry_pending",
+        "reason": reason[:1000],
+        "incident_ids": remainder,
+        "remainder_count": len(remainder),
+        "updated_at": iso(),
+    }
+    try:
+        atomic_json(runtime_dir(cfg) / _EVIDENCE_RECOVERY_REMAINDER_RECEIPT, payload)
+    except OSError as exc:
+        _publish_evidence_controller_degraded(
+            "EVIDENCE_RECOVERY_REMAINDER_RECEIPT_FAILED",
+            f"{type(exc).__name__}:{exc}",
+        )
+
+
+def _pid_command(pid: object) -> str:
+    try:
+        numeric_pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return ""
+    if numeric_pid <= 0:
+        return ""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(numeric_pid), "-o", "command="],
+            text=True,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def controller_status_health(
+    cfg: Mapping[str, Any], payload: Mapping[str, Any] | None = None, *, observed_at: datetime | None = None
+) -> dict[str, Any]:
+    """Return fail-closed controller liveness, not its last self-reported state."""
+    payload = payload if payload is not None else read_json(runtime_dir(cfg) / "status.json", {})
+    if not isinstance(payload, Mapping) or payload.get("alive") is not True:
+        return {"healthy": False, "reason": "controller_status_not_alive"}
+    at = parse_time(str(payload.get("at") or ""))
+    maximum_age = max(
+        1.0,
+        float(cfg["loop"].get("controller_status_max_age_seconds", 5.0)),
+    )
+    checked_at = observed_at or now()
+    if at is None or (age := (checked_at - at).total_seconds()) < 0 or age > maximum_age:
+        return {"healthy": False, "reason": "controller_status_stale", "at": payload.get("at")}
+    pid = payload.get("pid")
+    if not _pid_alive(pid):
+        return {"healthy": False, "reason": "controller_pid_dead", "pid": pid}
+    command = _pid_command(pid)
+    if "total_loss_loop.py" not in command or "daemon" not in command:
+        return {"healthy": False, "reason": "controller_command_mismatch", "pid": pid}
+    return {"healthy": True, "reason": "controller_healthy", "pid": int(pid), "at": at.isoformat()}
+
+
 def _publish_evidence_controller_degraded(reason_code: str, error: str) -> dict[str, Any]:
     payload = {"status": "controller_degraded", "reason_code": reason_code, "error": error}
     _LAST_EVIDENCE_CYCLE["controller_degraded"] = payload
@@ -4280,26 +4421,51 @@ def _capture_hard_evidence(
     incident_ids = tuple(dict.fromkeys(str(value) for value in incident_ids if str(value)))
     budget = budget or _new_evidence_budget(cfg)
     if time.monotonic() >= float(budget["deadline"]):
-        recovered, recovery_error = _recover_evidence_candidate_ids(cfg)
-        candidates = list(dict.fromkeys([*incident_ids, *recovered]))
-        if recovery_error:
-            _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
-        # Even an exhausted cycle must classify retry debt from memory before it
-        # records another backoff: a future memory identity is not executable
-        # work, while a revision change is the bounded wake signal.
-        eligible, deferred = _memory_only_evidence_due_filter(
-            cfg,
-            candidates,
-            created_order=incident_ids,
-            debt_order={},
-        )
-        retry_identities = {
-            incident_id: _memory_only_evidence_retry_identity_for_debt(cfg, incident_id)
-            for incident_id in eligible
-        }
         previous_context = _EVIDENCE_BUILD_CONTEXT
         _EVIDENCE_BUILD_CONTEXT = budget
         try:
+            queue_limit = max(1, int(cfg["loop"].get("evidence_queue_batch_size", 32)))
+            recovered, recovery_error = _recover_evidence_candidate_ids(
+                cfg, limit=queue_limit
+            )
+            # Caller-known candidates are the only IDs that survive a recovery
+            # read failure, and they outrank recovered scan rows.  Bound the
+            # entire tranche before any due filtering or emergency write.
+            candidates = list(dict.fromkeys([*incident_ids, *recovered]))
+            selected = candidates[:queue_limit]
+            remainder = candidates[queue_limit:]
+            if recovery_error:
+                _publish_evidence_controller_degraded(
+                    "EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error
+                )
+            if remainder:
+                _record_evidence_recovery_remainder(
+                    cfg,
+                    remainder,
+                    reason="evidence_snapshot_deferred:recovery_tranche_limit",
+                )
+            try:
+                # A future memory identity is not executable work, while a
+                # revision change is the bounded wake signal.  The expired
+                # budget stays installed so this access cannot open a default
+                # timeout connection.
+                eligible, deferred = _memory_only_evidence_due_filter(
+                    cfg,
+                    selected,
+                    created_order=incident_ids,
+                    debt_order={},
+                )
+            except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+                eligible, deferred = selected, []
+                _publish_evidence_controller_degraded(
+                    "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
+                )
+            retry_identities = {
+                incident_id: _memory_only_evidence_retry_identity_for_debt(
+                    cfg, incident_id
+                )
+                for incident_id in eligible
+            }
             for incident_id in eligible:
                 _record_evidence_debt(
                     cfg,
@@ -4309,7 +4475,7 @@ def _capture_hard_evidence(
                 )
         finally:
             _EVIDENCE_BUILD_CONTEXT = previous_context
-        all_deferred = list(dict.fromkeys([*deferred, *eligible]))
+        all_deferred = list(dict.fromkeys([*deferred, *eligible, *remainder]))
         summary = {"built": [], "deferred": all_deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
         if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
             summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
@@ -7740,6 +7906,7 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "capabilities": read_json(runtime_dir(cfg) / "capabilities.json", None),
         "provider_backoff": _provider_backoff(cfg),
         "halted": (runtime_dir(cfg) / "HALT").exists(),
+        "controller": controller_status_health(cfg),
     }
 
 
