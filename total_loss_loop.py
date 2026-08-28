@@ -3564,6 +3564,29 @@ def _memory_only_evidence_due_filter(
     created_order: Iterable[str],
     debt_order: Mapping[str, int],
 ) -> tuple[list[str], list[str]]:
+    """Run the durable due gate without inheriting canonical-build deadlines."""
+
+    global _EVIDENCE_BUILD_CONTEXT
+    previous_context = _EVIDENCE_BUILD_CONTEXT
+    _EVIDENCE_BUILD_CONTEXT = None
+    try:
+        return _memory_only_evidence_due_filter_inner(
+            cfg,
+            candidate_ids,
+            created_order=created_order,
+            debt_order=debt_order,
+        )
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous_context
+
+
+def _memory_only_evidence_due_filter_inner(
+    cfg: Mapping[str, Any],
+    candidate_ids: Iterable[str],
+    *,
+    created_order: Iterable[str],
+    debt_order: Mapping[str, int],
+) -> tuple[list[str], list[str]]:
     """Choose one new/due evidence lane before opening canonical databases.
 
     SCOPE: one controller evidence slice. DRAIN: the selected new or due lane
@@ -4075,12 +4098,28 @@ def _capture_hard_evidence_inner(
         candidate_order = list(
             dict.fromkeys([*created_order, *queued_ids, *debt_order])
         )
-        ordered, memory_deferred = _memory_only_evidence_due_filter(
-            cfg,
-            candidate_order,
-            created_order=created_order,
-            debt_order=debt_order,
-        )
+        try:
+            ordered, memory_deferred = _memory_only_evidence_due_filter(
+                cfg,
+                candidate_order,
+                created_order=created_order,
+                debt_order=debt_order,
+            )
+        except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+            # A failed memory-only gate did not classify these candidates.
+            # Preserve existing debt and leave one bounded controller receipt;
+            # per-incident debt would turn an unreadable gate into new work.
+            remainder = candidate_order[:queue_limit]
+            _record_evidence_recovery_remainder(
+                cfg,
+                remainder,
+                reason=f"evidence_snapshot_due_filter_failed:{type(exc).__name__}:{exc}",
+            )
+            _publish_evidence_controller_degraded(
+                "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
+            )
+            summary["deferred"].extend(remainder)
+            return finish()
         summary["deferred"].extend(memory_deferred)
         if not ordered:
             return finish()
@@ -4438,40 +4477,53 @@ def _capture_hard_evidence(
                 _publish_evidence_controller_degraded(
                     "EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error
                 )
-            if remainder:
+            gate_context = _EVIDENCE_BUILD_CONTEXT
+            _EVIDENCE_BUILD_CONTEXT = None
+            gate_failed = False
+            try:
+                try:
+                    # A future memory identity is not executable work, while a
+                    # revision change is the bounded wake signal.  The expired
+                    # build deadline must not govern this memory-only gate.
+                    eligible, deferred = _memory_only_evidence_due_filter(
+                        cfg,
+                        selected,
+                        created_order=incident_ids,
+                        debt_order={},
+                    )
+                except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+                    # These candidates were not classified.  Keep existing
+                    # debt untouched and emit one bounded controller receipt.
+                    gate_failed = True
+                    eligible, deferred = [], selected
+                    _record_evidence_recovery_remainder(
+                        cfg,
+                        selected[:queue_limit],
+                        reason=f"evidence_snapshot_due_filter_failed:{type(exc).__name__}:{exc}",
+                    )
+                    _publish_evidence_controller_degraded(
+                        "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
+                    )
+                retry_identities = {
+                    incident_id: _memory_only_evidence_retry_identity_for_debt(
+                        cfg, incident_id
+                    )
+                    for incident_id in eligible
+                }
+                for incident_id in eligible:
+                    _record_evidence_debt(
+                        cfg,
+                        incident_id,
+                        "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
+                        retry_identity=retry_identities[incident_id],
+                    )
+            finally:
+                _EVIDENCE_BUILD_CONTEXT = gate_context
+            if remainder and not gate_failed:
                 _record_evidence_recovery_remainder(
                     cfg,
-                    remainder,
+                    [*selected, *remainder][:queue_limit],
                     reason="evidence_snapshot_deferred:recovery_tranche_limit",
-                )
-            try:
-                # A future memory identity is not executable work, while a
-                # revision change is the bounded wake signal.  The expired
-                # budget stays installed so this access cannot open a default
-                # timeout connection.
-                eligible, deferred = _memory_only_evidence_due_filter(
-                    cfg,
-                    selected,
-                    created_order=incident_ids,
-                    debt_order={},
-                )
-            except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
-                eligible, deferred = selected, []
-                _publish_evidence_controller_degraded(
-                    "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
-                )
-            retry_identities = {
-                incident_id: _memory_only_evidence_retry_identity_for_debt(
-                    cfg, incident_id
-                )
-                for incident_id in eligible
-            }
-            for incident_id in eligible:
-                _record_evidence_debt(
-                    cfg,
-                    incident_id,
-                    "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
-                    retry_identity=retry_identities[incident_id],
                 )
         finally:
             _EVIDENCE_BUILD_CONTEXT = previous_context
