@@ -36912,6 +36912,30 @@ def _post_local_incomplete_day0_redecision_authority(
     )
 
 
+def _bind_day0_causal_evidence_bundle(
+    payload: dict[str, object],
+    replacement_bundle: object | None,
+) -> None:
+    """Bind only the selected posterior's causal Day0 certificate.
+
+    Event payloads are durable carriers and may predate the posterior selected
+    for this decision.  Clear any inherited certificate first so a bundle that
+    lacks the current revision cannot accidentally validate against stale
+    evidence.
+    """
+
+    key = "_edli_day0_causal_evidence_bundle"
+    payload.pop(key, None)
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    causal_bundle = (
+        provenance.get("day0_causal_evidence_bundle")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if isinstance(causal_bundle, Mapping):
+        payload[key] = dict(causal_bundle)
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -36947,6 +36971,7 @@ def _prepare_current_global_probability_family(
     from src.data.replacement_forecast_bundle_reader import (
         ReplacementForecastAuthorityPurpose,
         market_bin_topology_hash_from_rows,
+        read_pinned_replacement_forecast_bundle,
         read_replacement_forecast_bundle,
     )
     from src.engine.qkernel_spine_bridge import (
@@ -37069,19 +37094,8 @@ def _prepare_current_global_probability_family(
     final_daily_observation = None
     source_available_at = ""
     bundle = pinned_complete_bundle
-    if pinned_complete_bundle is not None:
-        pinned_provenance = getattr(
-            pinned_complete_bundle, "provenance_json", None
-        ) or {}
-        pinned_causal_bundle = (
-            pinned_provenance.get("day0_causal_evidence_bundle")
-            if isinstance(pinned_provenance, Mapping)
-            else None
-        )
-        if isinstance(pinned_causal_bundle, Mapping):
-            payload["_edli_day0_causal_evidence_bundle"] = dict(
-                pinned_causal_bundle
-            )
+    if is_day0:
+        _bind_day0_causal_evidence_bundle(payload, bundle)
     posterior_identity_hash = ""
     dependency_hash = ""
     posterior_config_hash = ""
@@ -37345,6 +37359,53 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
+            causal_readiness = latest_replacement_readiness(
+                forecast_conn,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+            )
+            if causal_readiness is None:
+                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
+            dependencies = getattr(
+                causal_readiness, "dependency_json", {}
+            ).get("dependencies", ())
+            causal_posterior_id = next(
+                (
+                    dependency.get("posterior_id")
+                    for dependency in dependencies
+                    if isinstance(dependency, Mapping)
+                    and dependency.get("role") == "soft_anchor_posterior"
+                ),
+                None,
+            )
+            if causal_posterior_id not in (None, ""):
+                causal_result = read_pinned_replacement_forecast_bundle(
+                    forecast_conn,
+                    posterior_id=int(causal_posterior_id),
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    current_bin_topology_hash=current_topology_hash,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=bundle_authority_purpose,
+                )
+                if not causal_result.ok or causal_result.bundle is None:
+                    raise ValueError(
+                        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+                        f"{causal_result.reason_code}"
+                    )
+                # Post-local held q comes from the remaining-vector tail.  The
+                # readiness-pinned posterior contributes only its immutable
+                # causal certificate; its persisted q is never substituted.
+                _bind_day0_causal_evidence_bundle(
+                    payload,
+                    causal_result.bundle,
+                )
         elif final_daily_observation is None and pinned_complete_bundle is None:
             # Current-day held q first reuses the same source-clock bundle as
             # ENTRY so an admitted BUY is immediately monitorable on identical
@@ -37387,6 +37448,7 @@ def _prepare_current_global_probability_family(
                     f"{result.reason_code}"
                 )
             bundle = result.bundle
+            _bind_day0_causal_evidence_bundle(payload, bundle)
             posterior_identity_hash = str(
                 bundle.posterior_identity_hash or ""
             ).strip()

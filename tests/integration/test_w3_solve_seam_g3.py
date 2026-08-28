@@ -7970,6 +7970,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         ("p2", (72.0 - 32.0) * 5.0 / 9.0, None),
     )
     source_clock_q = (0.1, 0.6, 0.3)
+    causal_bundle = {
+        "bundle_identity": "day0-causal-dallas-17",
+        "carrier_vector_identity": "vector-dallas-17",
+    }
     source_clock_bundle = SimpleNamespace(
         posterior_id=17,
         posterior_identity_hash="source-clock-posterior-17",
@@ -7983,6 +7987,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         },
         provenance_json={
             "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
+            "day0_causal_evidence_bundle": causal_bundle,
             "q_bootstrap_samples_basis": "global_simplex_v1",
             "q_bootstrap_samples_by_bin": {
                 key: [probability] * 400
@@ -8176,6 +8181,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert remaining_day_calls == 1
     assert day0_payload["q_source"] == "day0_remaining_day"
     assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert day0_payload["_edli_day0_causal_evidence_bundle"] == causal_bundle
     assert (
         day0_payload["probability_authority"]
         == "day0_remaining_day_global_probability_v1"
@@ -8427,6 +8433,21 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     missing_observations.close()
     observations.close()
     forecast.close()
+
+
+def test_day0_bundle_binding_clears_inherited_certificate_when_selected_missing():
+    payload = {
+        "_edli_day0_causal_evidence_bundle": {
+            "bundle_identity": "stale-event-certificate"
+        }
+    }
+
+    era._bind_day0_causal_evidence_bundle(
+        payload,
+        SimpleNamespace(provenance_json={}),
+    )
+
+    assert "_edli_day0_causal_evidence_bundle" not in payload
 
 
 def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(

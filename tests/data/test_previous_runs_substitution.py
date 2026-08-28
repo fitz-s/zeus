@@ -3252,6 +3252,72 @@ def test_priority_seed_bridge_drains_ready_day0_before_timeout_retry(
     assert ahead_seed.exists()
 
 
+def test_current_probability_debt_promotes_any_exact_day0_seed_trigger(
+    tmp_path, monkeypatch
+):
+    """A fresh-cycle held seed must not starve behind repeated sibling updates."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    low_family = ("Hong Kong", "2026-08-28", "low")
+    high_family = ("Hong Kong", "2026-08-29", "high")
+    day0 = {
+        "day0_observed_extreme_source": "hko_hourly_accumulator",
+        "day0_observed_extreme_observation_time": "2026-08-28T15:50:00+00:00",
+        "day0_observed_extreme_c": 28.6,
+        "day0_observed_extreme_unit": "C",
+    }
+    low = tmp_path / "Hong_Kong.2026-08-28.low.enqueue.json"
+    low.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": low_family[0],
+                "target_date": low_family[1],
+                "temperature_metric": low_family[2],
+                "upgrade_trigger": "newer_cycle_ingested",
+                "computed_at": "2026-08-28T16:04:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    high = tmp_path / "Hong_Kong.2026-08-29.high.enqueue.json"
+    high.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": high_family[0],
+                "target_date": high_family[1],
+                "temperature_metric": high_family[2],
+                "upgrade_trigger": "day0_observation_advanced",
+                "computed_at": "2026-08-28T17:20:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_scopes",
+        lambda families, **_kwargs: frozenset({low_family, high_family}) & families,
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset({low_family}),
+    )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(None, (high, low))
+    ranked = sorted(
+        (high, low),
+        key=lambda path: queue_mod._cycle_advance_file_sort_key(path, priority),
+    )
+
+    assert priority[low.name][0] == -11.0
+    assert priority[high.name][0] == -4.0
+    assert ranked[0] == low
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

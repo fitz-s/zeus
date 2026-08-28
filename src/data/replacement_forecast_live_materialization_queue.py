@@ -1612,8 +1612,6 @@ def _cycle_advance_seed_priority_map(
             current_debt_day0 = (
                 _TIMEOUT_RETRY_MARKER not in path_by_name[name].name
                 and fam_scope in current_probability_debt
-                and str(payload.get("upgrade_trigger") or "").strip()
-                == "day0_observation_advanced"
                 and name in day0_identity_by_name
             )
             capital_protection_retry = _is_capital_protection_timeout_retry(
