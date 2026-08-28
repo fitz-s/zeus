@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-27
 # Authority basis: incident b32ad42ae26a0650 RED exit event/projection atomicity
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -8403,24 +8403,30 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
     assert covered.outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED
     assert covered.coverage == coverage
     assert covered.decision_log_id == 42
-    assert global_batch_runtime.current_global_holding_coverage(
+    wealth_mismatch = global_batch_runtime.current_global_holding_coverage(
         **{**current, "current_wealth_economic_identity": "wealth-2"},
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
-    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
+    )
+    assert wealth_mismatch.outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
+    assert wealth_mismatch.coverage == coverage
+    assert wealth_mismatch.decision_log_id == 42
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "current_ledger_snapshot_id": "ledger-2"},
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-1"
         ),
     ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.WEALTH
-    assert global_batch_runtime.current_global_holding_coverage(
+    book_mismatch = global_batch_runtime.current_global_holding_coverage(
         **current,
         current_sell_book_witness_resolver=(
             lambda _row: "sell-book-content-price-wake"
         ),
-    ).outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.BOOK
+    )
+    assert book_mismatch.outcome is global_batch_runtime.GlobalHoldingCoverageOutcome.BOOK
+    assert book_mismatch.coverage == coverage
+    assert book_mismatch.decision_log_id == 42
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "held_shares": Decimal("9.99")},
         current_sell_book_witness_resolver=(

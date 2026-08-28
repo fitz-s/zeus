@@ -1097,13 +1097,27 @@ def current_global_holding_coverage(
         )
     row = lease.row
     checked = checked_at_utc.astimezone(UTC)
+
+    def lineage_result(
+        outcome: GlobalHoldingCoverageOutcome,
+        reason: str,
+    ) -> CurrentGlobalHoldingCoverage:
+        """Reject action authority while retaining the exact prior-cut lineage."""
+
+        return result(
+            outcome,
+            reason,
+            coverage=row,
+            decision_log_id=lease.decision_log_id,
+        )
+
     if row.status != "EVALUATED":
         return result(
             GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
             str(row.reason or "GLOBAL_HOLDING_COVERAGE_NOT_EVALUATED"),
         )
     if row.probability_content_identity != str(probability_content_identity or ""):
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
             "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
         )
@@ -1124,7 +1138,7 @@ def current_global_holding_coverage(
         or row.wealth_economic_identity != current_wealth_economic_identity
         or published_wealth_identity != current_wealth_economic_identity
     ):
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.WEALTH,
             "GLOBAL_HOLDING_COVERAGE_WEALTH_MISMATCH",
         )
@@ -1137,19 +1151,19 @@ def current_global_holding_coverage(
         checked < row.decision_at_utc.astimezone(UTC)
         or checked > row.book_deadline_at_utc.astimezone(UTC)
     ):
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.COVERAGE_EXPIRED,
             "GLOBAL_HOLDING_COVERAGE_WINDOW_EXPIRED",
         )
     try:
         current_sell_book_witness_identity = current_sell_book_witness_resolver(row)
     except Exception:  # noqa: BLE001 - a book read is its own authority plane.
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.BOOK,
             "GLOBAL_HOLDING_COVERAGE_BOOK_RESOLUTION_FAILED",
         )
     if current_sell_book_witness_identity != row.sell_book_witness_identity:
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.BOOK,
             "GLOBAL_HOLDING_COVERAGE_BOOK_WITNESS_MISMATCH",
         )
@@ -1158,12 +1172,12 @@ def current_global_holding_coverage(
             current_probability_content_identity_resolver(row)
         )
     except Exception:  # noqa: BLE001 - a q read is its own authority plane.
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
             "GLOBAL_HOLDING_COVERAGE_PROBABILITY_RESOLUTION_FAILED",
         )
     if current_probability_content_identity != row.probability_content_identity:
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
             "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
         )
@@ -1175,7 +1189,7 @@ def current_global_holding_coverage(
             else datetime.now(UTC)
         )
     except Exception:  # noqa: BLE001 - no current endowment is not a book fault.
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.WEALTH,
             "GLOBAL_HOLDING_COVERAGE_WEALTH_RESOLUTION_FAILED",
         )
@@ -1187,7 +1201,7 @@ def current_global_holding_coverage(
         != row.wealth_economic_identity
         or Decimal(current_holding_witness.held_shares) != Decimal(row.held_shares)
     ):
-        return result(
+        return lineage_result(
             GlobalHoldingCoverageOutcome.WEALTH,
             "GLOBAL_HOLDING_COVERAGE_WEALTH_WITNESS_MISMATCH",
         )
