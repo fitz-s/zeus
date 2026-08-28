@@ -1396,6 +1396,25 @@ def _reuse_global_book_token_bindings(
     return rebound
 
 
+def _rebind_current_actuation_probability_tokens(
+    current: object,
+    selected: object,
+) -> object:
+    """Complete current q bindings from the selected book epoch, fail closed."""
+
+    current_bindings = tuple(getattr(current, "bindings", ()) or ())
+    selected_bindings = tuple(getattr(selected, "bindings", ()) or ())
+    if not current_bindings or not selected_bindings:
+        return current
+    family_key = str(getattr(selected, "family_key", "") or "").strip()
+    if not family_key or str(getattr(current, "family_key", "") or "") != family_key:
+        raise ValueError("GLOBAL_ACTUATION_PROBABILITY_FAMILY_CHANGED")
+    return _reuse_global_book_token_bindings(
+        {family_key: current},
+        {family_key: selected},
+    )[family_key]
+
+
 def _reuse_global_book_token_bindings_for_batch(
     probabilities: Mapping[str, object],
     cached_probabilities: Mapping[str, object],
@@ -17549,6 +17568,11 @@ def _current_global_actuation_prepared_family(
         pinned_complete_bundle=pinned_complete_bundle,
     )
     current_witness = getattr(current, "probability_witness", None)
+    if current_witness is not None:
+        current_witness = _rebind_current_actuation_probability_tokens(
+            current_witness,
+            selected,
+        )
     probability_mismatches = (
         ("probability_witness",)
         if current_witness is None
@@ -17603,6 +17627,11 @@ def _current_global_actuation_prepared_family(
                 "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE"
             ) from exc
         held_witness = getattr(held_current, "probability_witness", None)
+        if held_witness is not None:
+            held_witness = _rebind_current_actuation_probability_tokens(
+                held_witness,
+                selected,
+            )
         held_mismatches = (
             ("probability_witness",)
             if held_witness is None
