@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -8617,6 +8617,64 @@ def test_monitor_cadence_accepts_backoff_exhausted_min_order_dust_recovery(
     recovered = result.evidence["settlement_recoverable_positions"][0]
     assert recovered["position_id"] == "dust-pos"
     assert recovered["closed_market_validation"] == "snapshot_min_order_dust"
+
+
+def test_monitor_handoff_counts_positive_backoff_dust_below_share_precision(
+    tmp_path,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'subprecision-dust', 'pending_exit', 'Hong Kong', ?, 'high',
+            'Will the highest temperature in Hong Kong be 31°C?',
+            'buy_no', 0.0075, 0.0075, 'backoff_exhausted',
+            'SELL_REVERSAL [DUST: executable_snapshot_gate: size 0.0075 '
+            || 'is below sell share precision 0.01]',
+            0, NULL, 0.25, 1, 0.45, 1, ?
+        )
+        """,
+        (now.date().isoformat(), now.isoformat()),
+    )
+    _insert_monitor_events(
+        conn,
+        position_id="subprecision-dust",
+        monitor_at=now,
+        payload={
+            "last_monitor_prob": 0.25,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price": 0.45,
+            "last_monitor_market_price_is_fresh": True,
+            "exit_decision_available": True,
+            "applied_validations": ["fresh_snapshot_sub_minimum_dust_hold"],
+        },
+    )
+    conn.row_factory = sqlite3.Row
+
+    evidence = collect_monitor_cadence_evidence(
+        conn,
+        now=now,
+        max_age_seconds=180.0,
+        monitor_refreshed_only=True,
+        require_fresh_inputs=True,
+    )
+
+    assert evidence["open_position_count"] == 1
+    assert evidence["monitored_position_ids"] == ["subprecision-dust"]
+    assert evidence["fresh_position_count"] == 1
+    assert evidence["stale_or_missing_position_count"] == 0
+    conn.close()
 
 
 def test_monitor_cadence_restart_evidence_reports_voided_chain_risk_as_reconciliation_risk(

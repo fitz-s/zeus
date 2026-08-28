@@ -706,6 +706,7 @@ def _monitor_cadence_position_rows(
         position_id = str(row["position_id"] or "")
         phase = str(row["phase"] or "").strip().lower()
         chain_state = str(row["chain_state"] or "").strip()
+        order_status = str(row["order_status"] or "").strip().lower()
         shares = _finite_nonnegative_float_or_none(row["shares"])
         chain_shares = _finite_nonnegative_float_or_none(row["chain_shares"])
         exposure_positive = (
@@ -714,6 +715,22 @@ def _monitor_cadence_position_rows(
             chain_shares is not None
             and chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
         )
+        # A canonical pending-exit dust hold remains real positive capital even
+        # below the venue's 0.01-share precision. The runtime continuously
+        # monitors it through settlement, so restart handoff must count it too.
+        # SCOPE: exact pending_exit/backoff_exhausted positive residual only.
+        # DRAIN: settlement or a chain-size correction removes the exposure.
+        # RESET: zero exposure or a terminal phase leaves this monitor set.
+        if (
+            not exposure_positive
+            and phase == "pending_exit"
+            and order_status == "backoff_exhausted"
+            and any(
+                value is not None and value > 0.0
+                for value in (shares, chain_shares)
+            )
+        ):
+            exposure_positive = True
         exposure_unknown = shares is None or chain_shares is None
         if _position_requires_monitor_cadence(
             phase=phase,
@@ -727,7 +744,7 @@ def _monitor_cadence_position_rows(
                     "position_id": position_id,
                     "phase": phase,
                     "chain_state": chain_state,
-                    "order_status": str(row["order_status"] or "").strip().lower(),
+                    "order_status": order_status,
                     "exit_reason": str(row["exit_reason"] or "").strip(),
                     "shares": shares,
                     "chain_shares": chain_shares,
