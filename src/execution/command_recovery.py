@@ -83,6 +83,7 @@ from src.venue.response_contracts import (
 )
 
 _SCREEN_CANCEL_DISPATCH_BOOT_ID = f"{uuid.uuid4()}:{os.getpid()}"
+_SCREEN_CANCEL_OPERATION_BUDGET_SECONDS = 8.0
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
@@ -26860,7 +26861,10 @@ def drain_screen_redecision_cancel_obligations(
     if not entries:
         return summary
     summary["scanned"] = len(entries)
-    obligation_deadline = min(time.monotonic() + 2.0, deadline_monotonic)
+    obligation_deadline = min(
+        time.monotonic() + _SCREEN_CANCEL_OPERATION_BUDGET_SECONDS,
+        deadline_monotonic,
+    )
 
     class _DeadlineClient:
         def __init__(self, wrapped):
