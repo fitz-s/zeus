@@ -4407,6 +4407,171 @@ def test_deploy_live_pre_stop_handoff_requires_exact_v4_reauction_debt(
     assert handoff["restart_blocking_position_count"] == int(not expected_green)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_green"),
+    (
+        ("valid", True),
+        ("missing_lineage", False),
+        ("wrong_token", False),
+        ("wrong_family", False),
+        ("stale_quote", False),
+        ("out_of_band_current_bid", False),
+        ("missing_current_lineage", False),
+    ),
+)
+def test_deploy_live_pre_stop_handoff_pairs_fresh_monitor_with_v4_lineage(
+    monkeypatch,
+    tmp_path,
+    mutation,
+    expected_green,
+):
+    from src.runtime import reactor_wake
+
+    dl = _load(
+        f"deploy_live_v4_lineage_reauction_handoff_{mutation}",
+        "deploy_live.py",
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    occurred_at = now.isoformat()
+    held_token_id = "held-no-token"
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?)",
+        ("pos-open", "buy_no", "yes-token", held_token_id),
+    )
+    current_lineage = {
+        "selection_epoch_identity": "selection-current",
+        "sell_book_witness_identity": "book-current",
+    }
+    if mutation == "missing_current_lineage":
+        current_lineage["sell_book_witness_identity"] = ""
+    latest_payload = {
+        "city": "Paris",
+        "target_date": "2026-08-28",
+        "metric": "low",
+        "last_monitor_prob": 0.64,
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_best_bid": (
+            0.99 if mutation == "out_of_band_current_bid" else 0.72
+        ),
+        "last_monitor_market_price_is_fresh": mutation != "stale_quote",
+        "held_sell_full_depth_action_authority": True,
+        "held_sell_reauction_monitor_lineage": current_lineage,
+        "monitor_probability_receipt": {
+            "probability_content_identity": "q-current"
+        },
+        "applied_validations": [
+            "sell_reversal",
+            "global_auction_completion_request_failed",
+            "global_auction_completion_debt:REQUEST_REJECTED",
+            "GLOBAL_REAUCTION_PENDING",
+        ],
+    }
+    conn.execute(
+        "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "pos-open:monitor_refreshed:2",
+            "pos-open",
+            2,
+            "MONITOR_REFRESHED",
+            occurred_at,
+            json.dumps(latest_payload, sort_keys=True),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    if mutation != "missing_lineage":
+        request = reactor_wake.make_held_sell_reauction_request(
+            position_id="pos-open",
+            family=(
+                "London" if mutation == "wrong_family" else "Paris",
+                "2026-08-28",
+                "low",
+            ),
+            probability_content_identity="q-prior-attempt",
+            held_token_id=(
+                "other-token" if mutation == "wrong_token" else held_token_id
+            ),
+            held_best_bid=0.71,
+            bid_observed_at=(now - timedelta(seconds=30)).isoformat(),
+            probability_observed_at=(now - timedelta(seconds=30)).isoformat(),
+            completion_deadline_at=(now - timedelta(seconds=1)).isoformat(),
+            selection_epoch_identity="selection-prior",
+            sell_book_witness_identity="book-prior",
+            debt_event_id="pos-open:monitor_refreshed:1",
+            monitor_event_id="pos-open:monitor_refreshed:1",
+            schema_version=4,
+        )
+        reactor_wake.publish_reactor_wake(
+            source="test",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=state / reactor_wake.REACTOR_WAKE_FILENAME,
+            held_sell_reauction_requests=(request,),
+        )
+
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-open"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [
+            {
+                "position_id": "pos-open",
+                "issue": "monitor_exit_completion_unavailable",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {
+                "position_id": "pos-open",
+                "issue": "monitor_exit_completion_unavailable",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is expected_green
+    assert handoff["reauction_handoff_position_count"] == int(expected_green)
+    assert handoff["restart_blocking_position_count"] == int(not expected_green)
+
+
 def test_deploy_live_loaded_restart_refuses_unpaused_monitor_handoff(
     monkeypatch, tmp_path
 ):
