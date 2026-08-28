@@ -655,6 +655,7 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
 
     trade_db = tmp_path / "trades.db"
     wake_path = tmp_path / "edli-reactor-wake.json"
+    CollateralLedger(db_path=trade_db, initialize_schema=True).close()
     payload = {
         "pusd_balance_micro": 17_000_000,
         "pusd_allowance_micro": 17_000_000,
