@@ -1,77 +1,35 @@
-"""Convex positions are exempt from auction SELL candidacy (reversal_plan_tier0 item 8).
+"""Low entry price is a sunk cost, never a categorical SELL veto."""
 
-A convex entry (avg entry price < CONVEX_HOLD_PRICE_THRESHOLD) may exit only on
-hard-fact zero-support direct sells, RED force exits, or operational emergency —
-never on the capital-velocity GLOBAL_CAPITAL_OPTIMAL_SELL reallocation objective
-(84% of historical convex early exits fired while the position's own belief law
-said HOLD; pooled recovery 0.987 = liquidation breakeven, tail surrendered).
-"""
+import inspect
 
-from dataclasses import dataclass
-
-from src.engine.global_batch_runtime import (
-    CONVEX_HOLD_PRICE_THRESHOLD,
-    _convex_hold_exempt_position_ids,
-)
+from src.engine import global_batch_runtime
+from tests.solve.test_solver_properties import _global_select, _global_sell_candidate
 
 
-@dataclass
-class _Exposure:
-    avg_price: float
-
-
-class _Position:
-    def __init__(self, position_id: str, avg_price: float):
-        self.position_id = position_id
-        self._avg_price = avg_price
-
-    def effective_exposure(self) -> _Exposure:
-        return _Exposure(avg_price=self._avg_price)
-
-
-class _State:
-    def __init__(self, positions):
-        self.positions = tuple(positions)
-
-
-def test_convex_position_is_exempt():
-    state = _State([_Position("pos-cheap", 0.15)])
-    assert _convex_hold_exempt_position_ids(state) == frozenset({"pos-cheap"})
-
-
-def test_rich_position_is_not_exempt():
-    state = _State([_Position("pos-rich", 0.40)])
-    assert _convex_hold_exempt_position_ids(state) == frozenset()
-
-
-def test_threshold_boundary_is_not_exempt():
-    state = _State([_Position("pos-at", float(CONVEX_HOLD_PRICE_THRESHOLD))])
-    assert _convex_hold_exempt_position_ids(state) == frozenset()
-
-
-def test_zero_or_missing_price_is_not_exempt():
-    # No positive avg entry price → nothing to classify as convex; stays on
-    # the ordinary capital-velocity objective (documented fail-open-to-normal).
-    state = _State([_Position("pos-zero", 0.0), _Position("pos-neg", -0.1)])
-    assert _convex_hold_exempt_position_ids(state) == frozenset()
-
-
-def test_position_without_exposure_method_is_skipped():
-    class _Bare:
-        position_id = "pos-bare"
-
-    state = _State([])
-    state.positions = (_Bare(),)
-    assert _convex_hold_exempt_position_ids(state) == frozenset()
-
-
-def test_mixed_book_partitions_correctly():
-    state = _State(
-        [
-            _Position("a", 0.05),
-            _Position("b", 0.249),
-            _Position("c", 0.25),
-            _Position("d", 0.70),
-        ]
+def test_low_entry_price_cannot_remove_a_positive_statistical_sell():
+    sell = _global_sell_candidate(
+        candidate_id="cheap-position-reversal",
+        family="Moscow|2026-08-28|high",
+        side="YES",
+        held_q=0.0274,
+        bids=(("0.10", "5"), ("0.07", "9.37"), ("0.06", "12"), ("0.05", "35.89")),
+        shares="28",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="immature",
+        exit_authority_reason="day0_high_extreme_not_mature",
     )
-    assert _convex_hold_exempt_position_ids(state) == frozenset({"a", "b"})
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.shares == sell.held_shares
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
+
+
+def test_runtime_sell_policy_does_not_read_entry_price():
+    source = inspect.getsource(global_batch_runtime.process_current_global_batch)
+
+    assert "GLOBAL_SELL_CONVEX_HOLD_EXEMPT" not in source
+    assert "convex_hold_exempt_position_ids" not in source
+    assert not hasattr(global_batch_runtime, "CONVEX_HOLD_PRICE_THRESHOLD")
