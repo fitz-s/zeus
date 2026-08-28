@@ -36817,6 +36817,23 @@ class _CurrentProbabilityUse(StrEnum):
     REDUCE_ONLY_EXIT = "reduce_only_exit"
 
 
+def _day0_redecision_authority_scope(
+    probability_use: _CurrentProbabilityUse,
+    *,
+    current_day0_redecision_only: bool,
+) -> str | None:
+    """Keep held monitoring and reduce-only submit rebinds symmetric."""
+
+    if current_day0_redecision_only:
+        return "held_exposure_current_day0_only_v1"
+    if probability_use in {
+        _CurrentProbabilityUse.HELD_MONITOR,
+        _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    }:
+        return "held_exposure_current_bundle_day0_only_v1"
+    return None
+
+
 def _current_probability_use_for_global_candidate(
     candidate: object,
 ) -> _CurrentProbabilityUse:
@@ -37574,14 +37591,17 @@ def _prepare_current_global_probability_family(
                     or remaining_path_supporting_conditioning
                 ),
             )
-            if current_day0_redecision_only or pinned_complete_bundle is not None:
+            redecision_scope = _day0_redecision_authority_scope(
+                probability_use,
+                current_day0_redecision_only=(
+                    current_day0_redecision_only
+                    or pinned_complete_bundle is not None
+                ),
+            )
+            if redecision_scope is not None:
                 current_day0_payload[
                     "_edli_day0_redecision_authority_scope"
-                ] = "held_exposure_current_day0_only_v1"
-            elif probability_use is _CurrentProbabilityUse.HELD_MONITOR:
-                current_day0_payload[
-                    "_edli_day0_redecision_authority_scope"
-                ] = "held_exposure_current_bundle_day0_only_v1"
+                ] = redecision_scope
             if provisional_day0_observation and bundle is None:
                 if not current_day0_redecision_only:
                     raise ValueError(
