@@ -3301,6 +3301,7 @@ def _validate_review_venue_order_live_payload(
     if proof_class not in {
         "cancel_unknown_venue_order_live",
         "acked_submit_venue_order_live",
+        "bound_entry_venue_order_live",
         "recovery_no_venue_order_id_live_order",
     }:
         raise ValueError("review live-order clearance proof_class is not supported")
@@ -3309,7 +3310,10 @@ def _validate_review_venue_order_live_payload(
             raise ValueError("review live-order clearance requires side_effect_boundary_crossed=unknown")
         if payload.get("sdk_cancel_attempted") != "unknown":
             raise ValueError("review live-order clearance requires sdk_cancel_attempted=unknown")
-    elif proof_class == "acked_submit_venue_order_live":
+    elif proof_class in {
+        "acked_submit_venue_order_live",
+        "bound_entry_venue_order_live",
+    }:
         if payload.get("side_effect_boundary_crossed") is not True:
             raise ValueError("post-ACK live-order clearance requires side_effect_boundary_crossed=true")
         if payload.get("sdk_submit_attempted") is not True:
@@ -3334,14 +3338,25 @@ def _validate_review_venue_order_live_payload(
             "no_trade_facts",
         )
     else:
-        if proof_class == "acked_submit_venue_order_live":
+        if proof_class in {
+            "acked_submit_venue_order_live",
+            "bound_entry_venue_order_live",
+        }:
             required_true = (
                 "latest_event_is_review_required",
-                "review_reason_post_ack_persistence_failure",
+                (
+                    "review_reason_order_not_found"
+                    if proof_class == "bound_entry_venue_order_live"
+                    else "review_reason_post_ack_persistence_failure"
+                ),
                 "venue_order_id_present",
                 "venue_order_id_matches_live_proof",
                 "authenticated_live_order_seen",
-                "latest_order_fact_live",
+                (
+                    "point_order_status_live"
+                    if proof_class == "bound_entry_venue_order_live"
+                    else "latest_order_fact_live"
+                ),
                 "point_order_matched_size_not_positive",
                 "no_trade_facts",
             )
@@ -3378,7 +3393,10 @@ def _validate_review_venue_order_live_payload(
         if proof_class == "cancel_unknown_venue_order_live"
         else (
             {"authenticated_clob_user_or_point_order_read"}
-            if proof_class == "acked_submit_venue_order_live"
+            if proof_class in {
+                "acked_submit_venue_order_live",
+                "bound_entry_venue_order_live",
+            }
             else {"authenticated_clob_user_open_orders_read"}
         )
     )
@@ -3387,14 +3405,29 @@ def _validate_review_venue_order_live_payload(
     source = payload.get("source_proof")
     if not isinstance(source, dict):
         raise ValueError("review live-order clearance requires source_proof")
-    if source.get("source_function") not in {"command_recovery._reconcile_row", "operator_review"}:
+    allowed_source_functions = {
+        "command_recovery._reconcile_row",
+        "operator_review",
+    }
+    if proof_class == "bound_entry_venue_order_live":
+        allowed_source_functions.add(
+            "command_recovery._review_required_bound_entry_order_recovery"
+        )
+    if source.get("source_function") not in allowed_source_functions:
         raise ValueError("review live-order clearance source_function is not supported")
     expected_source_reason = (
         "cancel_unknown_venue_order_live"
         if proof_class == "cancel_unknown_venue_order_live"
         else (
-            "acked_submit_venue_order_live"
-            if proof_class == "acked_submit_venue_order_live"
+            (
+                "bound_entry_venue_order_live"
+                if proof_class == "bound_entry_venue_order_live"
+                else "acked_submit_venue_order_live"
+            )
+            if proof_class in {
+                "acked_submit_venue_order_live",
+                "bound_entry_venue_order_live",
+            }
             else "recovery_no_venue_order_id_live_order"
         )
     )
@@ -3429,8 +3462,11 @@ def _validate_review_no_exposure_payload(
             command_id=command_id,
         )
         return
-    if proof_class == "acked_submit_terminal_no_fill":
-        _validate_review_acked_submit_terminal_no_fill_payload(
+    if proof_class in {
+        "acked_submit_terminal_no_fill",
+        "bound_entry_terminal_no_fill",
+    }:
+        _validate_review_submit_terminal_no_fill_payload(
             conn=conn,
             current_state=current_state,
             payload=payload,
@@ -4474,15 +4510,22 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 
 
-def _validate_review_acked_submit_terminal_no_fill_payload(
+def _validate_review_submit_terminal_no_fill_payload(
     *,
     conn: sqlite3.Connection,
     current_state: str,
     payload: dict,
     command_id: str,
 ) -> None:
+    proof_class = payload.get("proof_class")
+    bound_entry = proof_class == "bound_entry_terminal_no_fill"
+    if proof_class not in {
+        "acked_submit_terminal_no_fill",
+        "bound_entry_terminal_no_fill",
+    }:
+        raise ValueError("submit no-fill clearance proof_class is unsupported")
     if current_state != "REVIEW_REQUIRED":
-        raise ValueError("acked-submit no-fill clearance is only legal from REVIEW_REQUIRED")
+        raise ValueError("submit no-fill clearance is only legal from REVIEW_REQUIRED")
     if payload.get("side_effect_boundary_crossed") is not True:
         raise ValueError("acked-submit no-fill clearance requires side_effect_boundary_crossed=true")
     if payload.get("sdk_submit_attempted") is not True:
@@ -4492,7 +4535,11 @@ def _validate_review_acked_submit_terminal_no_fill_payload(
         raise ValueError("acked-submit no-fill clearance requires required_predicates")
     required_true = (
         "latest_event_is_review_required",
-        "review_reason_post_ack_persistence_failure",
+        (
+            "review_reason_order_not_found"
+            if bound_entry
+            else "review_reason_post_ack_persistence_failure"
+        ),
         "venue_order_id_present",
         "terminal_order_fact_latest",
         "terminal_order_fact_no_fill",
@@ -4507,7 +4554,8 @@ def _validate_review_acked_submit_terminal_no_fill_payload(
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT command_id, position_id, decision_id, market_id, token_id, side, price, size, created_at, venue_order_id
+            SELECT command_id, position_id, decision_id, market_id, token_id,
+                   intent_kind, side, price, size, created_at, venue_order_id
               FROM venue_commands
              WHERE command_id = ?
             """,
@@ -4562,12 +4610,21 @@ def _validate_review_acked_submit_terminal_no_fill_payload(
     if not isinstance(latest_payload, dict):
         raise ValueError("acked-submit no-fill latest payload is invalid")
     latest_reason = latest_payload.get("reason")
-    allowed_reasons = {
-        "entry_ack_persistence_failed_after_side_effect",
-        "exit_ack_persistence_failed_after_side_effect",
-    }
+    allowed_reasons = (
+        {"recovery_order_not_found_at_venue"}
+        if bound_entry
+        else {
+            "entry_ack_persistence_failed_after_side_effect",
+            "exit_ack_persistence_failed_after_side_effect",
+        }
+    )
     if latest_reason not in allowed_reasons:
-        raise ValueError("acked-submit no-fill clearance only supports post-ACK persistence failures")
+        raise ValueError("submit no-fill clearance review reason is unsupported")
+    if bound_entry and (
+        str(command["intent_kind"] or "").upper() != "ENTRY"
+        or str(command["side"] or "").upper() != "BUY"
+    ):
+        raise ValueError("bound-entry no-fill clearance requires ENTRY BUY")
     if fact is None:
         raise ValueError("acked-submit no-fill clearance requires terminal order fact")
     if latest_fact is None or int(fact["fact_id"]) != int(latest_fact["fact_id"]):
@@ -4599,6 +4656,47 @@ def _validate_review_acked_submit_terminal_no_fill_payload(
     for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
         if venue_proof.get(key) is not True:
             raise ValueError(f"acked-submit no-fill clearance requires {key}=true")
+    if bound_entry:
+        for key in ("point_order_checked", "point_order_query_complete"):
+            if venue_proof.get(key) is not True:
+                raise ValueError(
+                    f"bound-entry no-fill clearance requires {key}=true"
+                )
+        if str(venue_proof.get("point_order_id") or "") != str(
+            command["venue_order_id"] or ""
+        ):
+            raise ValueError("bound-entry no-fill point-order id mismatch")
+        point_source = str(venue_proof.get("point_order_source") or "")
+        point_absent = venue_proof.get("point_order_absent") is True
+        point_order = venue_proof.get("point_order")
+        point_order = point_order if isinstance(point_order, dict) else {}
+        point_status = str(
+            venue_proof.get("point_order_status")
+            or point_order.get("status")
+            or point_order.get("state")
+            or ""
+        ).upper()
+        authenticated_absence = (
+            point_absent
+            and venue_proof.get("point_order_absence_reason")
+            in {
+                "authenticated_order_404",
+                "declared_authenticated_order_absence",
+            }
+            and (
+                point_source.endswith(":authenticated_http_404")
+                or point_source.endswith(":declared_authenticated_absence")
+            )
+        )
+        authenticated_terminal = (
+            not point_absent
+            and point_source.endswith(":authenticated_point_order")
+            and point_status in {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"}
+        )
+        if not (authenticated_absence or authenticated_terminal):
+            raise ValueError(
+                "bound-entry no-fill lacks authenticated terminal point truth"
+            )
     if not str(venue_proof.get("pagination_scope") or "").strip():
         raise ValueError("acked-submit no-fill clearance requires pagination_scope")
     if int(venue_proof.get("matching_open_order_count", -1)) != 0:
@@ -4640,10 +4738,20 @@ def _validate_review_acked_submit_terminal_no_fill_payload(
     for key in ("source_commit", "source_function", "source_reason"):
         if not str(source.get(key) or "").strip():
             raise ValueError(f"acked-submit no-fill source_proof missing {key}")
-    if source.get("source_function") != "command_recovery._reconcile_row":
-        raise ValueError("acked-submit no-fill source_function is not supported")
-    if source.get("source_reason") != "acked_submit_terminal_no_fill":
-        raise ValueError("acked-submit no-fill source_reason is unsupported")
+    expected_source_function = (
+        "command_recovery._review_required_bound_entry_order_recovery"
+        if bound_entry
+        else "command_recovery._reconcile_row"
+    )
+    expected_source_reason = (
+        "bound_entry_terminal_no_fill"
+        if bound_entry
+        else "acked_submit_terminal_no_fill"
+    )
+    if source.get("source_function") != expected_source_function:
+        raise ValueError("submit no-fill source_function is not supported")
+    if source.get("source_reason") != expected_source_reason:
+        raise ValueError("submit no-fill source_reason is unsupported")
     review_proof = payload.get("review_required_proof")
     if not isinstance(review_proof, dict) or review_proof.get("reason") != latest_reason:
         raise ValueError("acked-submit no-fill review reason mismatch")
@@ -4666,6 +4774,7 @@ def _validate_review_confirmed_fill_payload(
         "prior_fill_confirmed_event_with_positive_trade_fact",
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
+        "recovery_order_not_found_at_venue_confirmed_trade",
         "matched_submit_missing_trade_id_confirmed_trade",
         "post_ack_persistence_failure_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
@@ -4699,6 +4808,16 @@ def _validate_review_confirmed_fill_payload(
         required_true = (
             "latest_event_is_review_required",
             "review_reason_matched_submit_missing_trade_id",
+            "positive_trade_fact",
+            "maker_order_token_matches_command",
+            "bound_venue_order_id_matches_trade",
+            "maker_order_not_open",
+            "venue_size_quantization_residual_lt_0_01",
+        )
+    elif proof_class == "recovery_order_not_found_at_venue_confirmed_trade":
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_order_not_found",
             "positive_trade_fact",
             "maker_order_token_matches_command",
             "bound_venue_order_id_matches_trade",
@@ -5414,6 +5533,9 @@ def _actual_review_confirmed_fill_predicates(
             "entry_ack_persistence_failed_after_side_effect",
             "exit_ack_persistence_failed_after_side_effect",
         },
+        "review_reason_order_not_found": (
+            review_reason == "recovery_order_not_found_at_venue"
+        ),
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
         "matched_order_fact_positive": matched_order_fact_positive,
@@ -5566,6 +5688,9 @@ def _actual_review_venue_order_live_predicates(
             "entry_ack_persistence_failed_after_side_effect",
             "exit_ack_persistence_failed_after_side_effect",
         },
+        "review_reason_order_not_found": (
+            latest_reason == "recovery_order_not_found_at_venue"
+        ),
         "review_reason_recovery_no_venue_order_id": latest_reason == "recovery_no_venue_order_id",
         "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
         "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),

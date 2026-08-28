@@ -7248,6 +7248,345 @@ class TestRecoveryResolutionTable:
             "venue_order_id": "vord-empty",
         }
 
+    def test_bound_entry_authenticated_absence_terminalizes_zero_exposure(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """Exact point/account absence must release a bound no-fill ENTRY."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        command_id = "cmd-bound-entry-absent"
+        position_id = "pos-bound-entry-absent"
+        order_id = "ord-bound-entry-absent"
+        token_id = "tok-bound-entry-absent"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+            size=12,
+            price=0.51,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class CompleteVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:05:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, command_id) == "EXPIRED"
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert {
+            "state": fact["state"],
+            "matched_size": fact["matched_size"],
+            "remaining_size": fact["remaining_size"],
+        } == {
+            "state": "VENUE_WIPED",
+            "matched_size": "0",
+            "remaining_size": "0",
+        }
+        terminal = json.loads(fact["raw_payload_json"])
+        assert terminal["venue_read_proof"]["point_order_query_complete"] is True
+        assert terminal["venue_read_proof"]["point_order_absent"] is True
+        event = _get_events(conn, command_id)[-1]
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        assert payload["proof_class"] == "bound_entry_terminal_no_fill"
+        assert payload["venue_absence_proof"]["point_order_absence_reason"] == (
+            "authenticated_order_404"
+        )
+        projection = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(projection) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+        }
+
+        # The final append boundary must independently reject forged remote
+        # completeness even after a real terminal fact exists locally.
+        forged = json.loads(event["payload_json"])
+        forged["venue_absence_proof"]["point_order_query_complete"] = False
+        conn.execute(
+            "DELETE FROM venue_command_events WHERE event_id = ?",
+            (event["event_id"],),
+        )
+        latest = conn.execute(
+            """
+            SELECT event_id, occurred_at
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        conn.execute(
+            "UPDATE venue_commands SET state = 'REVIEW_REQUIRED', "
+            "last_event_id = ?, updated_at = ? WHERE command_id = ?",
+            (latest["event_id"], latest["occurred_at"], command_id),
+        )
+        with pytest.raises(ValueError, match="point_order_query_complete"):
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type="REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+                occurred_at="2026-04-26T00:05:01+00:00",
+                payload=forged,
+            )
+
+    def test_bound_entry_unverified_or_conflicting_absence_stays_review_required(
+        self,
+        conn,
+    ):
+        """Neither an unverified None nor a contradictory open order is absence."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        command_id = "cmd-bound-entry-incomplete"
+        order_id = "ord-bound-entry-incomplete"
+        _insert(conn, command_id=command_id, position_id="pos-bound-entry-incomplete")
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class UnverifiedVenue:
+            @staticmethod
+            def get_order(_order_id):
+                return None
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        incomplete = command_recovery.reconcile_unresolved_commands(
+            conn,
+            UnverifiedVenue(),
+        )
+        assert incomplete["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+        class ConflictingVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return [{
+                    "id": order_id,
+                    "asset_id": "tok-001",
+                    "side": "BUY",
+                    "price": "0.5",
+                    "original_size": "10",
+                    "status": "LIVE",
+                }]
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        conflicting = command_recovery.reconcile_unresolved_commands(
+            conn,
+            ConflictingVenue(),
+        )
+        assert conflicting["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+
+    def test_bound_entry_live_order_or_confirmed_trade_restores_exact_truth(
+        self,
+        conn,
+        mock_client,
+    ):
+        """The symmetric positive branches must not be mistaken for absence."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+
+        live_command = "cmd-bound-entry-live"
+        live_order = "ord-bound-entry-live"
+        live_token = "tok-bound-entry-live"
+        _insert(
+            conn,
+            command_id=live_command,
+            position_id="pos-bound-entry-live",
+            token_id=live_token,
+            size=10,
+            price=0.52,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=live_command,
+            venue_order_id=live_order,
+        )
+        append_event(
+            conn,
+            command_id=live_command,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": live_order,
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": live_order,
+            "asset_id": live_token,
+            "side": "BUY",
+            "price": "0.52",
+            "original_size": "10",
+            "status": "LIVE",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        live_summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            mock_client,
+        )
+        assert live_summary["advanced"] == 1
+        assert _get_state(conn, live_command) == "ACKED"
+        live_payload = json.loads(_get_events(conn, live_command)[-1]["payload_json"])
+        assert live_payload["proof_class"] == "bound_entry_venue_order_live"
+
+        trade_command = "cmd-bound-entry-trade"
+        trade_order = "ord-bound-entry-trade"
+        trade_token = "tok-bound-entry-trade"
+        _insert(
+            conn,
+            command_id=trade_command,
+            position_id="pos-bound-entry-trade",
+            token_id=trade_token,
+            size=10,
+            price=0.53,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=trade_command,
+            venue_order_id=trade_order,
+        )
+        append_event(
+            conn,
+            command_id=trade_command,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": trade_order,
+            },
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [{
+            "id": "trade-bound-entry",
+            "status": "CONFIRMED",
+            "match_time": "2026-04-26T00:04:00Z",
+            "transaction_hash": "0xboundentry",
+            "maker_orders": [{
+                "asset_id": trade_token,
+                "order_id": trade_order,
+                "side": "BUY",
+                "price": "0.53",
+                "matched_amount": "10",
+            }],
+        }]
+
+        trade_summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            mock_client,
+        )
+        assert trade_summary["advanced"] >= 1
+        assert _get_state(conn, trade_command) == "FILLED"
+        trade_payload = json.loads(
+            _get_events(conn, trade_command)[-1]["payload_json"]
+        )
+        assert trade_payload["proof_class"] == (
+            "recovery_order_not_found_at_venue_confirmed_trade"
+        )
+
     def test_bound_fak_exit_absence_releases_to_fresh_redecision(
         self,
         conn,

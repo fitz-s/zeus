@@ -610,6 +610,7 @@ _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
 _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
+    "recovery_order_not_found_at_venue",
 }) | _POST_ACK_PERSISTENCE_REVIEW_REASONS
 _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
@@ -20757,6 +20758,325 @@ def _order_fact_is_terminal_no_fill(fact: dict | None, venue_order_id: str) -> b
     return _decimal_is_zero(fact.get("matched_size"))
 
 
+def _review_required_bound_entry_order_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    """Resolve one bound ENTRY order from complete exact venue truth.
+
+    SCOPE: only ``ENTRY BUY`` commands whose latest review reason is
+    ``recovery_order_not_found_at_venue`` and whose venue order id is already
+    bound. DRAIN: a complete authenticated point/open/trade cut restores a
+    live order, leaves any trade for confirmed-fill recovery, or terminalizes
+    proven zero exposure. RESET: the resulting ACKED/FILLED/EXPIRED command no
+    longer matches this review reason; incomplete or contradictory cuts stay
+    REVIEW_REQUIRED.
+    """
+
+    events = _command_events(conn, cmd.command_id)
+    if (
+        _latest_review_required_payload(events).get("reason")
+        != "recovery_order_not_found_at_venue"
+        or cmd.intent_kind != IntentKind.ENTRY
+        or str(cmd.side or "").upper() != "BUY"
+        or not str(cmd.venue_order_id or "").strip()
+    ):
+        return "stayed"
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ? LIMIT 1",
+        (cmd.command_id,),
+    ).fetchone()
+    if row is None:
+        return "stayed"
+    command = _dict_row(row)
+    venue_order_id = str(cmd.venue_order_id)
+    try:
+        point_read = _client_point_order_read(client, venue_order_id)
+        open_read = _client_read_items(client, "get_open_orders")
+        trade_read = _client_read_items(client, "get_trades")
+    except Exception as exc:  # noqa: BLE001 - incomplete venue truth retries.
+        logger.warning(
+            "recovery: bound ENTRY %s venue proof unavailable: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    if not (
+        point_read.query_complete
+        and open_read.query_complete
+        and trade_read.query_complete
+    ):
+        return "stayed"
+
+    point_order = point_read.point_order
+    open_orders = [_raw_payload(order) for order in open_read.items]
+    trades = [_raw_payload(trade) for trade in trade_read.items]
+    matching_open_orders = _matching_open_orders_for_command(
+        client,
+        command,
+        open_orders=open_orders,
+    )
+    matching_trades = _matching_trades_for_command(
+        client,
+        command,
+        trades=trades,
+    )
+    if matching_trades:
+        return "stayed"
+
+    observed_at = _now_iso()
+    point_status = "" if point_order is None else _order_status(point_order)
+    point_matched = (
+        "0"
+        if point_order is None
+        else _point_order_matched_size(
+            point_order,
+            side=command.get("side"),
+        )
+    )
+    if (
+        point_order is not None
+        and str(point_status or "").upper() in _LIVE_ORDER_STATUSES
+        and _decimal_is_zero(point_matched)
+        and _trade_fact_count(conn, cmd.command_id) == 0
+    ):
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+            occurred_at=observed_at,
+            payload={
+                "schema_version": 1,
+                "reason": "review_cleared_venue_order_live",
+                "command_id": cmd.command_id,
+                "venue_order_id": venue_order_id,
+                "proof_class": "bound_entry_venue_order_live",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_attempted": True,
+                "required_predicates": {
+                    "latest_event_is_review_required": True,
+                    "review_reason_order_not_found": True,
+                    "venue_order_id_present": True,
+                    "venue_order_id_matches_live_proof": True,
+                    "authenticated_live_order_seen": True,
+                    "point_order_status_live": True,
+                    "point_order_matched_size_not_positive": True,
+                    "no_trade_facts": True,
+                },
+                "venue_order_live_proof": {
+                    "source": "authenticated_clob_user_or_point_order_read",
+                    "observed_at": observed_at,
+                    "venue_order_id": venue_order_id,
+                    "latest_order_fact": _latest_order_fact_for_command(
+                        conn,
+                        cmd.command_id,
+                    ),
+                    "matching_open_order_count": len(matching_open_orders),
+                    "matching_open_orders": matching_open_orders,
+                    "point_order_status": point_status,
+                    "point_order_matched_size": point_matched,
+                    "point_order": point_order,
+                },
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": (
+                        "command_recovery."
+                        "_review_required_bound_entry_order_recovery"
+                    ),
+                    "source_reason": "bound_entry_venue_order_live",
+                },
+                "review_required_proof": {
+                    "reason": "recovery_order_not_found_at_venue",
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": observed_at,
+            },
+        )
+        return "advanced"
+    if matching_open_orders:
+        return "stayed"
+
+    point_absent = point_read.absent
+    if point_absent:
+        point_order = {
+            "orderID": venue_order_id,
+            "status": "NOT_FOUND",
+            "source_error": point_read.absence_reason,
+        }
+        point_status = "NOT_FOUND"
+        no_fill_proven = True
+    else:
+        no_fill_proven, _ = _terminal_point_order_zero_fill_proven(
+            conn,
+            command_id=cmd.command_id,
+            point_order=point_order,
+        )
+    if (
+        not no_fill_proven
+        or _trade_fact_count(conn, cmd.command_id) != 0
+        or not _no_positive_position_projection(conn, command)
+    ):
+        return "stayed"
+
+    venue_read_proof = {
+        "point_order_checked": True,
+        "point_order_query_complete": point_read.query_complete,
+        "point_order_source": point_read.source,
+        "point_order_id": point_read.order_id,
+        "point_order_absent": point_absent,
+        "point_order_absence_reason": point_read.absence_reason,
+        "open_orders_query_complete": open_read.query_complete,
+        "open_orders_pagination_scope": open_read.pagination_scope,
+        "trades_query_complete": trade_read.query_complete,
+        "trades_pagination_scope": trade_read.pagination_scope,
+    }
+    latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
+    safe_command_id = "".join(
+        ch if ch.isalnum() else "_" for ch in cmd.command_id
+    )
+    sp_name = f"sp_bound_entry_no_fill_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        if not _order_fact_is_terminal_no_fill(latest_fact, venue_order_id):
+            terminal_fact_id, terminal_payload = (
+                _append_point_order_terminal_no_fill_fact(
+                    conn,
+                    command=command,
+                    observed_at=observed_at,
+                    venue_status=point_status,
+                    point_order=point_order,
+                    matching_open_orders=matching_open_orders,
+                    matching_trades=matching_trades,
+                    source_reason="bound_entry_terminal_no_fill",
+                    venue_resp_present_for_terminal_state=(
+                        False if point_absent else None
+                    ),
+                    venue_read_proof=venue_read_proof,
+                )
+            )
+            latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
+        else:
+            terminal_fact_id = int(latest_fact["fact_id"])
+            terminal_payload = _json_dict(latest_fact.get("raw_payload_json"))
+        if latest_fact is None:
+            raise RuntimeError("bound ENTRY terminal fact was not persisted")
+
+        venue_absence_proof = {
+            "source": "authenticated_clob_user_read",
+            "owner_scope": "authenticated_funder",
+            "observed_at": observed_at,
+            "command_id": cmd.command_id,
+            "decision_id": str(command.get("decision_id") or ""),
+            "market_id": str(command.get("market_id") or ""),
+            "token_id": str(command.get("token_id") or ""),
+            "side": str(command.get("side") or ""),
+            "price": str(Decimal(str(command.get("price")))),
+            "size": str(Decimal(str(command.get("size")))),
+            "time_window_start": command.get("created_at"),
+            "time_window_end": observed_at,
+            "point_order_checked": True,
+            "point_order_query_complete": point_read.query_complete,
+            "point_order_source": point_read.source,
+            "point_order_id": point_read.order_id,
+            "point_order_absent": point_absent,
+            "point_order_absence_reason": point_read.absence_reason,
+            "point_order_status": point_status,
+            "point_order": point_order,
+            "open_orders_checked": True,
+            "trades_checked": True,
+            "open_orders_query_complete": open_read.query_complete,
+            "trades_query_complete": trade_read.query_complete,
+            "pagination_scope": (
+                f"{open_read.pagination_scope};{trade_read.pagination_scope}"
+            ),
+            "matching_open_order_count": 0,
+            "matching_trade_count": 0,
+            "matching_open_orders": [],
+            "matching_trades": [],
+        }
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+            occurred_at=observed_at,
+            payload={
+                **terminal_payload,
+                "reason": "review_cleared_no_venue_exposure",
+                "command_id": cmd.command_id,
+                "venue_order_id": venue_order_id,
+                "proof_class": "bound_entry_terminal_no_fill",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_attempted": True,
+                "required_predicates": {
+                    "latest_event_is_review_required": True,
+                    "review_reason_order_not_found": True,
+                    "venue_order_id_present": True,
+                    "terminal_order_fact_latest": True,
+                    "terminal_order_fact_no_fill": True,
+                    "no_trade_facts": True,
+                    "no_matching_open_orders": True,
+                    "no_matching_trades": True,
+                    "no_positive_position_projection": True,
+                },
+                "terminal_order_fact_id": terminal_fact_id,
+                "terminal_order_fact": {
+                    "venue_order_id": latest_fact.get("venue_order_id"),
+                    "state": latest_fact.get("state"),
+                    "matched_size": latest_fact.get("matched_size"),
+                    "remaining_size": latest_fact.get("remaining_size"),
+                    "source": latest_fact.get("source"),
+                    "observed_at": latest_fact.get("observed_at"),
+                    "local_sequence": latest_fact.get("local_sequence"),
+                },
+                "venue_absence_proof": venue_absence_proof,
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": (
+                        "command_recovery."
+                        "_review_required_bound_entry_order_recovery"
+                    ),
+                    "source_reason": "bound_entry_terminal_no_fill",
+                },
+                "review_required_proof": {
+                    "reason": "recovery_order_not_found_at_venue",
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": observed_at,
+            },
+        )
+        _append_entry_order_voided_projection(
+            conn,
+            command=command,
+            order_fact={
+                **command,
+                "order_fact_id": terminal_fact_id,
+                "order_fact_state": latest_fact.get("state"),
+                "order_fact_observed_at": latest_fact.get("observed_at")
+                or observed_at,
+                "order_fact_venue_order_id": venue_order_id,
+                "order_fact_remaining_size": latest_fact.get("remaining_size")
+                or "0",
+                "order_fact_matched_size": latest_fact.get("matched_size")
+                or "0",
+                "order_fact_source": latest_fact.get("source") or "REST",
+            },
+            occurred_at=observed_at,
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.info(
+        "recovery: bound ENTRY %s -> EXPIRED (venue_order_id=%s terminal_fact=%s)",
+        cmd.command_id,
+        venue_order_id,
+        terminal_fact_id,
+    )
+    return "advanced"
+
+
 def _bound_fak_exit_intent_baseline(
     conn: sqlite3.Connection,
     command: Mapping[str, object],
@@ -26036,6 +26356,9 @@ def _review_required_confirmed_trade_recovery(
             "review_reason_post_ack_persistence_failure": (
                 latest_reason in _POST_ACK_PERSISTENCE_REVIEW_REASONS
             ),
+            "review_reason_order_not_found": (
+                latest_reason == "recovery_order_not_found_at_venue"
+            ),
             "positive_trade_fact": True,
             "maker_order_token_matches_command": True,
             "bound_venue_order_id_matches_trade": (
@@ -26311,6 +26634,9 @@ def _reconcile_row(
 
         if state == CommandState.REVIEW_REQUIRED:
             outcome = _review_required_typed_pre_sdk_rejection_recovery(conn, cmd)
+            if outcome != "stayed":
+                return outcome
+            outcome = _review_required_bound_entry_order_recovery(conn, cmd, client)
             if outcome != "stayed":
                 return outcome
             outcome = _review_required_bound_fak_exit_recovery(conn, cmd, client)
