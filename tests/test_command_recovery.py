@@ -2109,8 +2109,8 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
         command_recovery,
-        "_authenticated_entry_trade_fact_candidates",
-        _candidates,
+        "_bounded_authenticated_entry_trade_fact_candidates",
+        lambda _conn, *, states: _candidates(_conn),
     )
     monkeypatch.setattr(
         command_recovery,
@@ -34340,6 +34340,43 @@ def test_single_market_capital_blocker_is_scoped_not_global(conn, monkeypatch):
     assert scope.unscopeable_count == 0
     assert scope.projection_count == 0
     assert scope.requires_global_handoff(systemic_market_count_limit=2) is False
+
+
+def test_capital_blocker_authenticated_scan_is_exact_command_bounded(
+    conn,
+    monkeypatch,
+):
+    """Current blocker discovery never launches the global fill projection scan."""
+    import src.execution.command_recovery as recovery
+
+    exact_calls = []
+    monkeypatch.setattr(
+        recovery,
+        "_authenticated_entry_trade_fact_command_ids",
+        lambda _conn, *, states: ("cmd-exact",),
+    )
+
+    def _exact_candidates(_conn, *, command_id=None):
+        exact_calls.append(command_id)
+        return []
+
+    monkeypatch.setattr(
+        recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        _exact_candidates,
+    )
+    monkeypatch.setattr(recovery, "_capital_blocking_cancel_commands", lambda _conn: [])
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_entry_projection_blocker_count", lambda _conn: 0
+    )
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_exit_projection_blocker_count", lambda _conn: 0
+    )
+
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 0
+    assert exact_calls == ["cmd-exact"]
 
 
 @pytest.mark.parametrize(

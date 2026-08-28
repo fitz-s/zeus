@@ -24999,6 +24999,68 @@ def _authenticated_entry_trade_fact_candidates(
     return [_dict_row(row) for row in rows]
 
 
+def _authenticated_entry_trade_fact_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    states: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return exact current commands that can have authenticated fill debt."""
+
+    if not states or not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_trade_facts")
+    ):
+        return ()
+    placeholders = ",".join("?" for _ in states)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT cmd.command_id
+          FROM venue_commands AS cmd
+               INDEXED BY idx_venue_commands_state
+          JOIN venue_trade_facts AS fact
+               INDEXED BY idx_trade_facts_command
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+         WHERE cmd.state IN ({placeholders})
+           AND cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND fact.source IN ('REST', 'WS_USER')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+         ORDER BY cmd.command_id
+        """,
+        states,
+    ).fetchall()
+    return tuple(
+        command_id
+        for row in rows
+        if (command_id := str(row[0] or "").strip())
+    )
+
+
+def _bounded_authenticated_entry_trade_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    states: tuple[str, ...],
+) -> list[dict]:
+    """Validate only indexed current command identities against the full law."""
+
+    candidates: list[dict] = []
+    for command_id in _authenticated_entry_trade_fact_command_ids(
+        conn,
+        states=states,
+    ):
+        candidates.extend(
+            _authenticated_entry_trade_fact_candidates(
+                conn,
+                command_id=command_id,
+            )
+        )
+    return candidates
+
+
 def _confirmed_entry_trade_fact_summary(
     conn: sqlite3.Connection,
     *,
@@ -28146,9 +28208,18 @@ def capital_blocking_command_scope(
             ).fetchall()
         )
     authenticated_entry_projection_count = 0
-    for candidate in _authenticated_entry_trade_fact_candidates(conn):
-        if str(candidate.get("state") or "") == CommandState.FILLED.value:
-            continue
+    authenticated_nonterminal_states = (
+        CommandState.SUBMITTING.value,
+        CommandState.POST_ACKED.value,
+        CommandState.ACKED.value,
+        CommandState.PARTIAL.value,
+        CommandState.CANCEL_PENDING.value,
+        CommandState.REVIEW_REQUIRED.value,
+    )
+    for candidate in _bounded_authenticated_entry_trade_fact_candidates(
+        conn,
+        states=authenticated_nonterminal_states,
+    ):
         facts = _confirmed_entry_trade_fact_summary(
             conn,
             command_id=str(candidate.get("command_id") or ""),
@@ -29183,7 +29254,10 @@ def _reconcile_passes_short_conn(
         ) as conn:
             terminal_fill_review_command_ids = {
                 str(row.get("command_id") or "")
-                for row in _authenticated_entry_trade_fact_candidates(conn)
+                for row in _bounded_authenticated_entry_trade_fact_candidates(
+                    conn,
+                    states=(CommandState.REVIEW_REQUIRED.value,),
+                )
                 if str(row.get("state") or "")
                 == CommandState.REVIEW_REQUIRED.value
             }
