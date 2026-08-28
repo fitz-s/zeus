@@ -4670,6 +4670,7 @@ def _validate_review_confirmed_fill_payload(
         "post_ack_persistence_failure_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
         "authenticated_trade_fact_full_fill",
+        "authenticated_trade_fact_terminal_fill",
         "authenticated_trade_fact_full_fill_with_held_projection",
         "review_required_matched_order_fact_with_positive_trade_fact",
         "review_required_terminal_order_fact_with_held_projection",
@@ -4727,6 +4728,15 @@ def _validate_review_confirmed_fill_payload(
             "command_state_review_required",
             "latest_event_is_review_boundary",
             "authenticated_confirmed_trade_facts",
+            "bound_venue_order_id_matches_trade",
+            "trade_facts_cover_command_or_leave_only_dust",
+            "source_fill_time_valid",
+        )
+    elif proof_class == "authenticated_trade_fact_terminal_fill":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "authenticated_trade_facts",
             "bound_venue_order_id_matches_trade",
             "trade_facts_cover_command_or_leave_only_dust",
             "source_fill_time_valid",
@@ -5176,7 +5186,7 @@ def _actual_review_confirmed_fill_predicates(
                               AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
                         )
             )
-            SELECT filled_size, source, state, observed_at, venue_timestamp
+            SELECT filled_size, fill_price, source, state, observed_at, venue_timestamp
               FROM economic_trade_fact
              WHERE command_id = ?
                AND venue_order_id = ?
@@ -5210,7 +5220,15 @@ def _actual_review_confirmed_fill_predicates(
             (command_id, venue_order_id),
         ).fetchone()
         command = conn.execute(
-            "SELECT position_id, state, venue_order_id, size FROM venue_commands WHERE command_id = ?",
+            """
+            SELECT command.position_id, command.state, command.venue_order_id,
+                   command.side, command.size, command.price,
+                   envelope.order_type
+              FROM venue_commands command
+              LEFT JOIN venue_submission_envelopes envelope
+                ON envelope.envelope_id = command.envelope_id
+             WHERE command.command_id = ?
+            """,
             (command_id,),
         ).fetchone()
         position_rows = conn.execute(
@@ -5249,6 +5267,10 @@ def _actual_review_confirmed_fill_predicates(
     )
     aggregate_filled = Decimal("0")
     aggregate_count = 0
+    aggregate_notional = Decimal("0")
+    aggregate_notional_complete = True
+    aggregate_prices: list[Decimal] = []
+    aggregate_authenticated = True
     aggregate_authenticated_confirmed = True
     aggregate_source_times: list[datetime.datetime] = []
     for row in aggregate_trade_rows:
@@ -5257,6 +5279,17 @@ def _actual_review_confirmed_fill_predicates(
             continue
         aggregate_filled += size
         aggregate_count += 1
+        price = _decimal_or_none(row["fill_price"])
+        if price is None or price <= 0:
+            aggregate_notional_complete = False
+        else:
+            aggregate_notional += size * price
+            aggregate_prices.append(price)
+        aggregate_authenticated = aggregate_authenticated and (
+            str(row["source"] or "").upper() in {"REST", "WS_USER"}
+            and str(row["state"] or "").upper()
+            in {"MATCHED", "MINED", "CONFIRMED"}
+        )
         aggregate_authenticated_confirmed = aggregate_authenticated_confirmed and (
             str(row["source"] or "").upper() in {"REST", "WS_USER"}
             and str(row["state"] or "").upper() == "CONFIRMED"
@@ -5309,10 +5342,36 @@ def _actual_review_confirmed_fill_predicates(
         and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
     )
     command_size = _decimal_or_none(command["size"]) if command is not None else None
+    command_price = _decimal_or_none(command["price"]) if command is not None else None
+    order_type = (
+        str(command["order_type"] or "").upper().removesuffix("_LIMIT")
+        if command is not None
+        else ""
+    )
+    price_improved_taker_notional_bounded = bool(
+        aggregate_count > 0
+        and aggregate_notional_complete
+        and command is not None
+        and str(command["side"] or "").upper() == "BUY"
+        and order_type in {"FAK", "FOK"}
+        and command_size is not None
+        and command_price is not None
+        and aggregate_filled > command_size
+        and len(aggregate_prices) == aggregate_count
+        and all(
+            price <= command_price + Decimal("0.000001")
+            for price in aggregate_prices
+        )
+        and aggregate_notional
+        <= command_size * command_price + Decimal("0.000001")
+    )
     trade_facts_cover_command_or_leave_only_dust = (
         aggregate_count > 0
         and command_size is not None
-        and abs(command_size - aggregate_filled) <= Decimal("0.011")
+        and (
+            abs(command_size - aggregate_filled) <= Decimal("0.011")
+            or price_improved_taker_notional_bounded
+        )
     )
     cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
     source_fill_time_valid = (
@@ -5361,6 +5420,9 @@ def _actual_review_confirmed_fill_predicates(
         "positive_trade_facts": aggregate_positive_trade_facts,
         "authenticated_confirmed_trade_facts": (
             aggregate_count > 0 and aggregate_authenticated_confirmed
+        ),
+        "authenticated_trade_facts": (
+            aggregate_count > 0 and aggregate_authenticated
         ),
         "trade_facts_cover_command_or_leave_only_dust": (
             trade_facts_cover_command_or_leave_only_dust

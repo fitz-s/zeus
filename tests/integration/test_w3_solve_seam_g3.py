@@ -30224,6 +30224,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         "preflight": [],
         "excluded": [],
         "epoch": [],
+        "q_correction_resolvers": [],
         "venue": 0,
     }
 
@@ -30252,6 +30253,9 @@ def test_global_batch_falls_through_family_local_preflight_block(
     def select(_prepared, **kwargs):
         calls["excluded"].append(kwargs["preflight_excluded_by_family"])
         calls["epoch"].append(kwargs["selection_epoch_identity"])
+        calls["q_correction_resolvers"].append(
+            kwargs["payoff_q_correction_resolver"]
+        )
         return next(selections)
 
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
@@ -30322,6 +30326,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         {scope.family_keys[0]: blocked_reason},
     ]
     assert calls["epoch"][1] != calls["epoch"][0]
+    assert calls["q_correction_resolvers"] == [None, None]
     assert calls["venue"] == 1
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
@@ -30402,6 +30407,13 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
             "token_id=token-a:best_bid=0.39:best_ask=0.39",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+            "token_id=token-a:required_shares=34.4:precliff_bid_shares=0",
             "BUY",
             "SELL",
         ),
@@ -30590,6 +30602,25 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         candidate = actuation.decision.candidate
         calls["preflight"].append(candidate.candidate_id)
         if candidate is candidate_a:
+            if reason.startswith(
+                "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            ):
+                receipt = EventSubmissionReceipt(
+                    False,
+                    _event.event_id,
+                    _event.causal_snapshot_id,
+                    reason=reason,
+                    proof_accepted=False,
+                )
+                supersession = era._global_curve_supersession_from_receipt(receipt)
+                assert supersession is not None
+                status, replacement_candidate, preflight_reason = supersession
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status=status,
+                    replacement_candidate=replacement_candidate,
+                    reason=preflight_reason,
+                    rejection_receipt=receipt,
+                )
             if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"):
                 proof_failure = reason.partition(":")[2]
 
