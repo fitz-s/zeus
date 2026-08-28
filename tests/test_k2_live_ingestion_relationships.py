@@ -232,6 +232,44 @@ def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
     forecasts_conn.close.assert_called_once()
 
 
+def test_R2_attached_catch_up_reads_canonical_world_coverage() -> None:
+    conn = _memdb()
+    main_schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='data_coverage'"
+    ).fetchone()[0]
+    conn.execute("ATTACH ':memory:' AS world")
+    conn.execute(
+        main_schema.replace(
+            "CREATE TABLE data_coverage",
+            "CREATE TABLE world.data_coverage",
+            1,
+        )
+    )
+    conn.execute(
+        """
+        INSERT INTO main.data_coverage (
+            data_table, city, data_source, target_date, sub_key,
+            status, reason, fetched_at
+        ) VALUES ('observations', 'Ghost', 'wu_icao_history', '2026-08-20', '',
+                  'MISSING', 'SCANNER_DETECTED', '2026-08-21T00:00:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO world.data_coverage (
+            data_table, city, data_source, target_date, sub_key,
+            status, reason, fetched_at
+        ) VALUES ('observations', 'Busan', 'wu_icao_history', '2026-08-21', '',
+                  'MISSING', 'SCANNER_DETECTED', '2026-08-22T00:00:00+00:00')
+        """
+    )
+
+    pending = find_pending_fills(conn, data_table=DataTable.OBSERVATIONS)
+
+    assert [row["city"] for row in pending] == ["Busan"]
+    assert count_by_status(conn, data_table=DataTable.OBSERVATIONS) == {"MISSING": 1}
+
+
 def test_R2_hourly_instants_source_match_registry() -> None:
     expected = SOURCES_BY_TABLE[ScannerDataTable.OBSERVATION_INSTANTS]
     assert hourly_instants_append.SOURCE in expected
