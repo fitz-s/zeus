@@ -1628,9 +1628,16 @@ def read_prior_complete_replacement_forecast_bundle(
             "REPLACEMENT_PINNED_COMPLETE_CARRIER_MISSING",
         )
     candidate = dict(candidate)
-    if not _decorrelated_providers_complete(
-        _json_mapping(candidate.get("provenance_json"), field_name="provenance_json")
-    ):
+    candidate_provenance = _json_mapping(
+        candidate.get("provenance_json"),
+        field_name="provenance_json",
+    )
+    if not _held_pinned_carrier_claimed(candidate_provenance):
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_COMPLETE_CARRIER_NOT_CLAIMED",
+        )
+    if not _decorrelated_providers_complete(candidate_provenance):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_PINNED_COMPLETE_CARRIER_INVALID",
@@ -1650,10 +1657,6 @@ def read_prior_complete_replacement_forecast_bundle(
             "NOT_APPLICABLE",
             "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
         )
-    candidate_provenance = _json_mapping(
-        candidate.get("provenance_json"),
-        field_name="provenance_json",
-    )
     candidate_reason = _held_pinned_provenance_reason(
         candidate_provenance,
         city=city,

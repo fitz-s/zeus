@@ -274,6 +274,7 @@ def _readiness(
     expires_at: datetime,
     decision_time: datetime,
     computed_at: datetime,
+    city: str = "Shanghai",
     baseline_run_id: str = "b0-run",
     aifs_run_id: str = "aifs-run",
     anchor_run_id: str = "om9-run",
@@ -316,7 +317,7 @@ def _readiness(
         ),
     )
     return build_replacement_forecast_readiness(
-        city="Shanghai",
+        city=city,
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=decision_time,
@@ -869,13 +870,14 @@ def _read(
     readiness,
     *,
     decision_time,
+    city="Shanghai",
     authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
 ):
     return read_replacement_forecast_bundle(
         conn,
         baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
         readiness=readiness,
-        city="Shanghai",
+        city=city,
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=decision_time,
@@ -1234,6 +1236,180 @@ def test_prior_complete_reader_defers_non_carrier_current_row_to_current_path(
     assert result.ok is False
     assert result.status == "NOT_APPLICABLE"
     assert result.reason_code == "REPLACEMENT_PINNED_CURRENT_CARRIER_NOT_CLAIMED"
+
+
+def test_partial_current_carrier_does_not_fallback_to_undeclared_old_carrier(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    old_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+        city="Tel Aviv",
+    )
+    current_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+        city="Tel Aviv",
+        strict_day0=True,
+    )
+    assert current_id > old_id
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 6), eligible=_dt(6, 6))
+
+    prior = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Tel Aviv",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
+    )
+
+    assert prior.ok is False
+    assert prior.status == "NOT_APPLICABLE"
+    assert prior.reason_code == "REPLACEMENT_PINNED_COMPLETE_CARRIER_NOT_CLAIMED"
+    assert prior.reason_code != "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
+
+    # The valid current PARTIAL_CURRENT row remains the authority on the ordinary
+    # current path; the old row is not allowed to clobber it via held fallback.
+    current = _read(
+        conn,
+        _readiness(
+            posterior_id=current_id,
+            computed_at=_dt(6, 11, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 11, 30),
+            city="Tel Aviv",
+        ),
+        decision_time=_dt(6, 12),
+        city="Tel Aviv",
+    )
+    assert current.ok is True
+    assert current.bundle is not None
+    assert current.bundle.posterior_id == current_id
+
+
+def test_partial_current_carrier_ignores_incomplete_old_non_candidate(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+        city="Tel Aviv",
+    )
+    current_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+        city="Tel Aviv",
+        strict_day0=True,
+    )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 6), eligible=_dt(6, 6))
+
+    prior = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Tel Aviv",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
+    )
+    assert prior.status == "NOT_APPLICABLE"
+    assert prior.reason_code == "REPLACEMENT_PINNED_COMPLETE_CARRIER_MISSING"
+
+    current = _read(
+        conn,
+        _readiness(
+            posterior_id=current_id,
+            computed_at=_dt(6, 11, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 11, 30),
+            city="Tel Aviv",
+        ),
+        decision_time=_dt(6, 12),
+        city="Tel Aviv",
+    )
+    assert current.ok is True
+    assert current.bundle is not None
+    assert current.bundle.posterior_id == current_id
+
+
+def test_prior_complete_reader_rejects_claimed_carrier_with_bad_provenance(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    candidate_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
+    )
+    current_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+        city="Tel Aviv",
+    )
+    assert current_id > candidate_id
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (candidate_id,),
+    ).fetchone()
+    provenance = json.loads(row[0])
+    provenance["day0_provisional_observation"]["active"] = False
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance, sort_keys=True), candidate_id),
+    )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 6), eligible=_dt(6, 0))
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Tel Aviv",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
+    )
+
+    assert result.ok is False
+    assert result.status == "BLOCKED"
+    assert result.reason_code == "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
 
 
 def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute(monkeypatch) -> None:
