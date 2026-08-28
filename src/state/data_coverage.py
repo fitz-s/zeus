@@ -174,14 +174,19 @@ WHERE
 """
 
 
-def _coverage_upsert_sql(conn: sqlite3.Connection) -> str:
-    """Bind writes to attached canonical world when MAIN has a ghost table."""
-
+def _coverage_table_ref(conn: sqlite3.Connection) -> str:
+    """Resolve the canonical coverage owner across plain and attached connections."""
     attached = {
         str(row[1])
         for row in conn.execute("PRAGMA database_list").fetchall()
     }
-    table_ref = "world.data_coverage" if "world" in attached else "data_coverage"
+    return "world.data_coverage" if "world" in attached else "data_coverage"
+
+
+def _coverage_upsert_sql(conn: sqlite3.Connection) -> str:
+    """Bind writes to attached canonical world when MAIN has a ghost table."""
+
+    table_ref = _coverage_table_ref(conn)
     return _UPSERT_SQL.replace(
         "INSERT INTO data_coverage",
         f"INSERT INTO {table_ref}",
@@ -368,8 +373,9 @@ def find_pending_fills(
     )
     params.append(now_iso)
 
+    table_ref = _coverage_table_ref(conn)
     sql = (
-        f"SELECT * FROM data_coverage WHERE {' AND '.join(clauses)} "
+        f"SELECT * FROM {table_ref} WHERE {' AND '.join(clauses)} "
         f"ORDER BY target_date ASC, city ASC, sub_key ASC LIMIT ?"
     )
     params.append(max_rows)
@@ -386,13 +392,15 @@ def count_by_status(
     Used by operator dashboard and startup health check to answer "is my DB
     in a healthy state?" in one query.
     """
+    table_ref = _coverage_table_ref(conn)
     if data_table is None:
         rows = conn.execute(
-            "SELECT status, COUNT(*) FROM data_coverage GROUP BY status"
+            f"SELECT status, COUNT(*) FROM {table_ref} GROUP BY status"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT status, COUNT(*) FROM data_coverage WHERE data_table = ? GROUP BY status",
+            f"SELECT status, COUNT(*) FROM {table_ref} "
+            "WHERE data_table = ? GROUP BY status",
             (data_table.value,),
         ).fetchall()
     return {r[0]: r[1] for r in rows}
@@ -410,14 +418,15 @@ def coverage_summary(
     operator dashboard to spot "which city on which source has the most
     holes right now".
     """
+    table_ref = _coverage_table_ref(conn)
     return conn.execute(
-        """
+        f"""
         SELECT city, data_source,
                SUM(CASE WHEN status='WRITTEN'        THEN 1 ELSE 0 END) AS n_written,
                SUM(CASE WHEN status='LEGITIMATE_GAP' THEN 1 ELSE 0 END) AS n_legit_gap,
                SUM(CASE WHEN status='FAILED'         THEN 1 ELSE 0 END) AS n_failed,
                SUM(CASE WHEN status='MISSING'        THEN 1 ELSE 0 END) AS n_missing
-        FROM data_coverage
+        FROM {table_ref}
         WHERE data_table = ?
         GROUP BY city, data_source
         ORDER BY city, data_source
