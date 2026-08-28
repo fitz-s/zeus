@@ -7498,3 +7498,51 @@ def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_c
     assert "price_channel_snapshot_invalidate" in lane_src
     assert "db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE)" not in lane_src
     assert "refresh_executable_market_substrate_snapshots(" in lane_src
+
+
+def test_market_channel_snapshot_refresh_disables_autocheckpoint_before_refresh():
+    """The refresh writer must configure its own connection before any snapshot commit."""
+
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    refresh_action = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_refresh_snapshot_action"
+    )
+    trade_open = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "get_trade_connection"
+        and any(
+            keyword.arg == "write_class"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "live"
+            for keyword in node.value.keywords
+        )
+    )
+    autocheckpoint = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_disable_background_quote_autocheckpoint"
+    )
+    refresh = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "refresh_executable_market_substrate_snapshots"
+    )
+
+    assert [target.id for target in trade_open.targets if isinstance(target, ast.Name)] == [
+        "trade_conn"
+    ]
+    assert len(autocheckpoint.args) == 1
+    assert isinstance(autocheckpoint.args[0], ast.Name)
+    assert autocheckpoint.args[0].id == "trade_conn"
+    assert trade_open.lineno < autocheckpoint.lineno < refresh.lineno

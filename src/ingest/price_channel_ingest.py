@@ -6191,6 +6191,7 @@ def _edli_market_channel_ingestor_cycle(
                     turnstile_ctx.__exit__(None, None, None)
                     turnstile_entered = False
                     trade_conn = get_trade_connection(write_class="live")
+                    _disable_background_quote_autocheckpoint(trade_conn)
                     with PolymarketClient(
                         public_request_priority=RequestPriority.SUBMIT_JIT
                     ) as exact_clob:
