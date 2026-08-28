@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-25
+# Last reused or audited: 2026-08-28
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -22,7 +22,8 @@ used to bundle with exit monitoring:
   - ``payout_observer_cycle``      (10-min; LX-T1 read-only ConditionalTokens
     payout observation, ``src.ingest.payout_observer`` — NOT a
     cascade-liveness required poller, not on the settlement-grading path)
-  - current-regime capital evidence (5-min; canonical DB read-only evaluator,
+  - current-regime capital evidence (5-min change poll; canonical DB read-only
+    evaluator runs only after settlement/realization facts change or process restart,
     atomic observational artifact refresh, never order authority)
   - Tier-0 candidate-set settlement fold (5-min; VERIFIED settlement labels for
     prospective ordinal-selection evidence, never order authority)
@@ -122,6 +123,8 @@ _CAPITAL_EVIDENCE_CHILD_CODE = (
 _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0
 _CAPITAL_EVIDENCE_START_DELAY_SECONDS = 75.0
 _CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS = 5_000
+_CAPITAL_EVIDENCE_FRONTIER_BUSY_TIMEOUT_MS = 200
+_CAPITAL_EVIDENCE_FRONTIER: tuple[int, ...] | None = None
 
 
 def _chain_sync_child_deadline_seconds() -> float:
@@ -409,6 +412,79 @@ def _current_regime_capital_evidence_isolated() -> dict[str, object]:
     return artifact
 
 
+def _capital_evidence_change_frontier() -> tuple[int, ...]:
+    """Return the append-only facts that can create new capital proof."""
+
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    queries_by_db = (
+        (
+            get_trade_connection_read_only,
+            (
+                "SELECT COALESCE(MAX(rowid),0) FROM position_events "
+                "WHERE event_type IN "
+                "('ENTRY_ORDER_FILLED','EXIT_ORDER_FILLED','SETTLED')",
+                "SELECT COALESCE(MAX(rowid),0) FROM venue_command_events "
+                "WHERE event_type IN ('FILL_CONFIRMED','PARTIAL_FILL_OBSERVED')",
+                "SELECT COALESCE(MAX(rowid),0) FROM execution_fact "
+                "WHERE filled_at IS NOT NULL",
+            ),
+        ),
+        (
+            get_forecasts_connection_read_only,
+            ("SELECT COALESCE(MAX(settlement_id),0) FROM settlement_outcomes",),
+        ),
+        (
+            get_world_connection_read_only,
+            (
+                "SELECT COALESCE(MAX(rowid),0) FROM edli_live_order_events "
+                "WHERE event_type='UserTradeObserved'",
+            ),
+        ),
+    )
+    values: list[int] = []
+    for connect, queries in queries_by_db:
+        conn = connect()
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute(
+                f"PRAGMA busy_timeout={_CAPITAL_EVIDENCE_FRONTIER_BUSY_TIMEOUT_MS}"
+            )
+            values.extend(int(conn.execute(query).fetchone()[0]) for query in queries)
+        finally:
+            conn.close()
+    return tuple(values)
+
+
+def _current_regime_capital_evidence_if_changed() -> dict[str, object]:
+    """Run the heavy evaluator only when a causal capital fact changed."""
+
+    global _CAPITAL_EVIDENCE_FRONTIER
+
+    frontier = _capital_evidence_change_frontier()
+    if _CAPITAL_EVIDENCE_FRONTIER == frontier:
+        logger.info(
+            "current-regime capital evidence skipped: no new settlement or "
+            "realization facts"
+        )
+        return {
+            "status": "SKIPPED_UNCHANGED_CAPITAL_FRONTIER",
+            "frontier": frontier,
+        }
+
+    # SCOPE: only the observational evaluator subprocess, never order authority.
+    # DRAIN: the next five-minute tick after an append-only settlement/execution fact,
+    # or the first tick after daemon restart, runs the exact evaluator. RESET: only a
+    # successful scan records the frontier; a failed scan retries without suppressing it.
+    artifact = _current_regime_capital_evidence_isolated()
+    _CAPITAL_EVIDENCE_FRONTIER = frontier
+    return artifact
+
+
 def _tier0_candidate_settlement_fold_cycle() -> dict[str, int]:
     """Refresh prospective selection labels without touching order authority."""
 
@@ -639,7 +715,7 @@ def main() -> None:
     )
     _scheduler.add_job(
         _scheduler_job("current_regime_capital_evidence")(
-            _current_regime_capital_evidence_isolated
+            _current_regime_capital_evidence_if_changed
         ),
         "interval", minutes=5, id="current_regime_capital_evidence",
         max_instances=1, coalesce=True,
