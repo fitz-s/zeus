@@ -16,6 +16,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 """
 
 import logging
+import math
 import sqlite3
 import copy
 import hashlib
@@ -138,6 +139,18 @@ _DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
     }
 )
+_PINNED_CARRIER_CURRENT_EVENT_DEFERABLE_BLOCK_REASONS = frozenset(
+    {
+        # These establish that the older held carrier cannot name the current
+        # authorized Day0 event.  They do not disprove a separately rebuilt
+        # current-event posterior.
+        "REPLACEMENT_PINNED_DAY0_METRIC_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_STATION_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH",
+    }
+)
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -198,6 +211,94 @@ class _Day0SnapshotReadDeadlineExceeded(TimeoutError):
 def _is_day0_materialization_visibility_gap(exc: Exception) -> bool:
     reason = str(exc)
     return any(code in reason for code in _DAY0_MATERIALIZATION_VISIBILITY_REASONS)
+
+
+def _pinned_complete_bundle_matches_current_day0_event(
+    bundle: object,
+    event: object,
+    *,
+    metric: str,
+    settlement_unit: str,
+) -> bool:
+    """Whether a prior-complete carrier names this event's exact provisional fact.
+
+    A prior carrier may bridge an incomplete forecast wave for a held family, but
+    it cannot bridge a newer Day0 observation.  Returning ``False`` deliberately
+    sends the caller through the current bundle/current-observation path, whose
+    missing-materialization handling remains fail-closed.
+    """
+
+    provenance = getattr(bundle, "provenance_json", None) or {}
+    provisional = (
+        provenance.get("day0_provisional_observation")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
+        return False
+    try:
+        payload = json.loads(str(getattr(event, "payload_json", "")))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+
+    expected_metric = str(payload.get("metric") or "").strip().lower()
+    expected_source = str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or payload.get("source")
+        or ""
+    ).strip().lower()
+    expected_time = str(payload.get("observation_time") or "").strip()
+    expected_unit = str(
+        payload.get("settlement_unit")
+        or payload.get("unit")
+        or settlement_unit
+        or ""
+    ).strip().upper()
+    raw_value = payload.get("high_so_far" if expected_metric == "high" else "low_so_far")
+    if raw_value in (None, ""):
+        raw_value = payload.get("raw_value")
+    if raw_value in (None, ""):
+        raw_value = payload.get("observed_extreme_native")
+    try:
+        expected_value_c = float(raw_value)
+        observed_value_c = float(provisional["observed_extreme_c"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if expected_unit == "F":
+        expected_value_c = (expected_value_c - 32.0) * 5.0 / 9.0
+
+    return bool(
+        expected_metric == str(metric).strip().lower()
+        and str(provisional.get("metric") or "").strip().lower() == expected_metric
+        and expected_source
+        and str(provisional.get("source") or "").strip().lower() == expected_source
+        and expected_time
+        and str(provisional.get("observation_time") or "").strip() == expected_time
+        and expected_unit
+        and str(provisional.get("unit") or "").strip().upper() == expected_unit
+        and math.isclose(
+            observed_value_c,
+            expected_value_c,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+
+
+def _pinned_carrier_block_defers_to_current_day0_event(reason_code: object) -> bool:
+    """Whether a rejected old carrier may defer to current-event authority.
+
+    This is intentionally a closed allow-list.  Carrier shape, clock, missing
+    witness, and likelihood-integrity failures remain fail-closed rather than
+    becoming a broad way to ignore reader ``BLOCKED`` results.
+    """
+
+    return str(reason_code or "").strip() in (
+        _PINNED_CARRIER_CURRENT_EVENT_DEFERABLE_BLOCK_REASONS
+    )
 
 
 def _day0_materialization_visibility_retry_deadline(
@@ -5723,8 +5824,13 @@ def _build_current_global_day0_family_snapshot(
                 temperature_metric=metric,
                 decision_time=now,
             )
-            if pinned_result.status == "BLOCKED" and pinned_result.reason_code != (
-                "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE"
+            if (
+                pinned_result.status == "BLOCKED"
+                and pinned_result.reason_code
+                != "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE"
+                and not _pinned_carrier_block_defers_to_current_day0_event(
+                    pinned_result.reason_code
+                )
             ):
                 raise ValueError(
                     "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
@@ -5749,7 +5855,12 @@ def _build_current_global_day0_family_snapshot(
                     raw_input_hwm_deadline_monotonic=float(hwm_deadline[0]),
                     raw_input_hwm_read_max_seconds=HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
                 )
-                if pinned_result.status == "BLOCKED":
+                if (
+                    pinned_result.status == "BLOCKED"
+                    and not _pinned_carrier_block_defers_to_current_day0_event(
+                        pinned_result.reason_code
+                    )
+                ):
                     raise ValueError(
                         "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
                         f"{pinned_result.reason_code}"
@@ -5757,6 +5868,22 @@ def _build_current_global_day0_family_snapshot(
             pinned_complete_bundle = (
                 pinned_result.bundle if pinned_result.ok else None
             )
+            if pinned_complete_bundle is not None and not (
+                _pinned_complete_bundle_matches_current_day0_event(
+                    pinned_complete_bundle,
+                    event,
+                    metric=metric,
+                    settlement_unit=str(
+                        getattr(city, "settlement_unit", "") or ""
+                    ),
+                )
+            ):
+                # The latest authorized Day0 event is the observation authority.
+                # SCOPE: this held city/date/metric family. DRAIN: a successor
+                # posterior materialized from this exact fact. RESET: the next
+                # read can pin that matching carrier.  Never pass an older q as
+                # a pinned source identity while the successor is absent.
+                pinned_complete_bundle = None
             if pinned_complete_bundle is None:
                 if hwm_forecasts is None:
                     hwm_deadline[0] = _held_monitor_stage_deadline(

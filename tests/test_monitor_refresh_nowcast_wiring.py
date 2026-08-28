@@ -18,9 +18,11 @@ Gate conditions tested:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
@@ -448,6 +450,8 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
             return self.row
 
         def fetchall(self):
+            if self.queries and "PRAGMA database_list" in self.queries[-1]:
+                return [(0, "main", "")]
             return [self.row] if self.row is not None else []
 
         def close(self):
@@ -462,11 +466,31 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
             "no_token_id": "paris-no-token",
         }
     )
-    monkeypatch.setattr(state_db, "get_world_connection_read_only", lambda: world)
+    @contextmanager
+    def forecast_world_reader():
+        try:
+            yield world
+        finally:
+            world.close()
+
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: forecast_world_reader(),
+    )
     monkeypatch.setattr(
         state_db,
         "get_forecasts_connection_read_only",
         lambda **_kwargs: forecasts,
+    )
+    from src.data import replacement_forecast_bundle_reader as bundle_reader
+
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="NOT_APPLICABLE", ok=False, bundle=None
+        ),
     )
 
     witness = SimpleNamespace(
@@ -488,8 +512,8 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
 
     def prepare(event, **kwargs):
         assert event.event_id == "event-paris-day0"
-        assert kwargs["forecast_conn"] is forecasts
-        assert kwargs["topology_conn"] is forecasts
+        assert kwargs["forecast_conn"] is world
+        assert kwargs["topology_conn"] is world
         assert kwargs["observation_conn"] is world
         assert kwargs["required_condition_id"] == condition_id
         assert kwargs["allow_provisional_day0_replacement"] is True
@@ -564,6 +588,57 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     assert "lower(json_extract(payload_json, '$.metric'))" not in day0_event_query
     assert world.closed is True
     assert forecasts.closed is True
+
+
+@pytest.mark.parametrize(
+    ("metric", "current_value", "prior_value"),
+    (("high", 34.0, 33.0), ("low", 12.0, 13.0)),
+)
+def test_day0_prior_complete_carrier_must_match_latest_authorized_event(
+    metric: str,
+    current_value: float,
+    prior_value: float,
+) -> None:
+    """A t1 carrier cannot pin a t2 Day0 observation for either metric."""
+
+    event = SimpleNamespace(
+        payload_json=json.dumps(
+            {
+                "metric": metric,
+                "settlement_source": "aviationweather_metar",
+                "observation_time": "2026-07-14T14:00:00+00:00",
+                "raw_value": current_value,
+                "settlement_unit": "C",
+            }
+        )
+    )
+
+    def carrier(value: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            provenance_json={
+                "day0_provisional_observation": {
+                    "active": True,
+                    "metric": metric,
+                    "source": "aviationweather_metar",
+                    "observation_time": "2026-07-14T14:00:00+00:00",
+                    "observed_extreme_c": value,
+                    "unit": "C",
+                }
+            }
+        )
+
+    assert not monitor_refresh_module._pinned_complete_bundle_matches_current_day0_event(
+        carrier(prior_value),
+        event,
+        metric=metric,
+        settlement_unit="C",
+    )
+    assert monitor_refresh_module._pinned_complete_bundle_matches_current_day0_event(
+        carrier(current_value),
+        event,
+        metric=metric,
+        settlement_unit="C",
+    )
 
 
 def test_day0_monitor_retries_one_posterior_visibility_gap(

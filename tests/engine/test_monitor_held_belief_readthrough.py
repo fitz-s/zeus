@@ -1260,7 +1260,35 @@ def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
 
     world = _day0_event_connection()
     forecasts = sqlite3.connect(":memory:")
-    pinned_bundle = SimpleNamespace(posterior_id="complete-00")
+    pinned_bundle = SimpleNamespace(
+        posterior_id="complete-00",
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "metric": "high",
+                "source": "aviationweather_metar",
+                "observation_time": "2026-06-12T12:00:00+00:00",
+                "observed_extreme_c": 34.0,
+                "unit": "C",
+            }
+        },
+    )
+    world.execute(
+        "UPDATE opportunity_events SET payload_json = ? WHERE event_id = 'event-1'",
+        (
+            json.dumps(
+                {
+                    "city": "Karachi",
+                    "target_date": "2026-06-12",
+                    "metric": "high",
+                    "settlement_source": "aviationweather_metar",
+                    "observation_time": "2026-06-12T12:00:00+00:00",
+                    "raw_value": 34.0,
+                    "settlement_unit": "C",
+                }
+            ),
+        ),
+    )
     observed = {"forecast_connections": 0, "hwm_connections": 0}
 
     class PinnedRoutePrepared(RuntimeError):
@@ -1307,6 +1335,265 @@ def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
         )
 
     assert observed == {"forecast_connections": 0, "hwm_connections": 0}
+
+
+def test_day0_newer_observation_reseeds_instead_of_pinning_prior_carrier(monkeypatch):
+    """A t1 carrier must not make a t2 Day0 event look fresh."""
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    hwm = sqlite3.connect(":memory:")
+    world.execute(
+        "UPDATE opportunity_events SET payload_json = ? WHERE event_id = 'event-1'",
+        (
+            json.dumps(
+                {
+                    "city": "Karachi",
+                    "target_date": "2026-06-12",
+                    "metric": "high",
+                    "settlement_source": "aviationweather_metar",
+                    "observation_time": "2026-06-12T12:00:00+00:00",
+                    "raw_value": 34.0,
+                    "settlement_unit": "C",
+                }
+            ),
+        ),
+    )
+    prior_bundle = SimpleNamespace(
+        posterior_id="t1",
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "metric": "high",
+                "source": "aviationweather_metar",
+                "observation_time": "2026-06-12T11:00:00+00:00",
+                "observed_extreme_c": 33.0,
+                "unit": "C",
+            }
+        },
+    )
+    observed = {}
+
+    class CurrentAuthorityPrepared(RuntimeError):
+        pass
+
+    def prepare(*_args, **kwargs):
+        observed["pinned"] = kwargs["pinned_complete_bundle"]
+        observed["hwm"] = kwargs["raw_input_hwm_conn"]
+        observed["hwm_callback"] = kwargs["before_raw_input_hwm_read"]
+        raise CurrentAuthorityPrepared
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda **_kwargs: hwm)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=prior_bundle
+        ),
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(CurrentAuthorityPrepared):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+    assert observed["pinned"] is None
+    assert observed["hwm"] is hwm
+    assert observed["hwm_callback"] is not None
+
+
+@pytest.mark.parametrize(
+    ("metric", "raw_value"),
+    (("high", 34.0), ("low", 12.0)),
+)
+def test_day0_blocked_prior_station_mismatch_defers_to_current_authority(
+    monkeypatch,
+    metric,
+    raw_value,
+):
+    """A rejected t1 station carrier cannot veto the t2 current-event route."""
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    hwm = sqlite3.connect(":memory:")
+    world.execute(
+        "UPDATE opportunity_events SET payload_json = ? WHERE event_id = 'event-1'",
+        (
+            json.dumps(
+                {
+                    "city": "Karachi",
+                    "target_date": "2026-06-12",
+                    "metric": metric,
+                    "settlement_source": "aviationweather_metar",
+                    "observation_time": "2026-06-12T12:00:00+00:00",
+                    "raw_value": raw_value,
+                    "settlement_unit": "C",
+                }
+            ),
+        ),
+    )
+    observed = {"reader_calls": 0}
+
+    class CurrentAuthorityPrepared(RuntimeError):
+        pass
+
+    def read_prior(*_args, **_kwargs):
+        observed["reader_calls"] += 1
+        return SimpleNamespace(
+            status="BLOCKED",
+            ok=False,
+            bundle=None,
+            reason_code="REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH",
+        )
+
+    def prepare(*_args, **kwargs):
+        observed["pinned"] = kwargs["pinned_complete_bundle"]
+        observed["hwm"] = kwargs["raw_input_hwm_conn"]
+        raise CurrentAuthorityPrepared
+
+    position = _pos()
+    position.temperature_metric = metric
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda **_kwargs: hwm)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        read_prior,
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(CurrentAuthorityPrepared):
+        mr._build_current_global_day0_family_snapshot(
+            position,
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+    assert observed == {
+        "reader_calls": 2,
+        "pinned": None,
+        "hwm": hwm,
+    }
+
+
+def test_day0_blocked_prior_station_mismatch_keeps_unmaterialized_t2_closed(
+    monkeypatch,
+):
+    """No t2 posterior means a fail-closed error, never the rejected t1 q."""
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    hwm = sqlite3.connect(":memory:")
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda **_kwargs: hwm)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="BLOCKED",
+            ok=False,
+            bundle=None,
+            reason_code="REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH",
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING")
+        ),
+    )
+
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
+    ):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+
+def test_day0_corrupt_pinned_carrier_block_remains_fail_closed(monkeypatch):
+    """Reader integrity failures must not be downgraded with station mismatch."""
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="BLOCKED",
+            ok=False,
+            bundle=None,
+            reason_code="REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID",
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
+            "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
+        ),
+    ):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
 
 
 @pytest.mark.parametrize("probability_use", ["HELD_MONITOR", "REDUCE_ONLY_EXIT"])
