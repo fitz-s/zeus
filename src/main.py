@@ -9884,7 +9884,7 @@ def _exit_monitor_cycle(
         # not proof that an urgent owner still exists.  A later periodic pass
         # must therefore yield only to a live attempt; otherwise it immediately
         # becomes the full-book successor instead of creating an ownerless gap.
-        if _periodic_exit_monitor_should_yield(
+        if not recovery_full_book and _periodic_exit_monitor_should_yield(
             _urgent_held_monitor_owner_pending()
         ):
             logger.info("periodic exit_monitor yielded to urgent held-family monitor")
@@ -10048,8 +10048,12 @@ def _exit_monitor_cycle(
                 "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
             return False
-        if not urgent_fact and _periodic_exit_monitor_should_yield(
-            _periodic_preemption_requested_since_claim()
+        if (
+            not urgent_fact
+            and not recovery_full_book
+            and _periodic_exit_monitor_should_yield(
+                _periodic_preemption_requested_since_claim()
+            )
         ):
             logger.info(
                 "periodic exit_monitor yielded after reactor handoff to urgent "
@@ -10081,6 +10085,14 @@ def _exit_monitor_cycle(
             should_preempt_for_urgent_day0 = (
                 _unabsorbed_canonical_monitor_debt_pending
             )
+        elif recovery_full_book:
+            # Recovery already owns every current held-position obligation.
+            # Yielding that full-book claim to a narrower urgent wake creates
+            # an ownerless cadence-debt loop: the urgent lane covers one
+            # family while the durable recovery worker never reaches the
+            # remaining book.  A newer family is already inside this pass's
+            # full-book scope, so it cannot require in-core preemption.
+            should_preempt_for_urgent_day0 = lambda: False
         else:
             # One urgent held-family attempt may preempt a periodic pass. The
             # next pass ignores the same continuous pressure and completes the

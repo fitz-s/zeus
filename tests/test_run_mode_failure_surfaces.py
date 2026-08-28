@@ -10768,6 +10768,89 @@ def test_recovery_full_book_handoff_returns_before_next_recovery_tick(
         main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
+def test_recovery_full_book_owns_urgent_pressure_until_canonical_coverage(
+    monkeypatch,
+) -> None:
+    """Durable full-book recovery cannot yield to a narrower urgent wake."""
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    entered: list[bool] = []
+    releases: list[bool] = []
+
+    class Claim:
+        def release(self) -> None:
+            releases.append(True)
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            assert timeout > 0.0
+            return True
+
+        def release(self) -> None:
+            return None
+
+    def run_recovery(**kwargs) -> bool:
+        entered.append(True)
+        assert kwargs["target_families"] is None
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", Claim())
+    monkeypatch.setattr(
+        main_module,
+        "_acquire_held_monitor_claim",
+        lambda **_kwargs: (True, 0),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_preemption_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_owner_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_monitor_preempt_generation_now",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_exit_monitor_should_yield",
+        lambda _pending: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_reserve_periodic_held_monitor_successor",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_consume_periodic_held_monitor_successor",
+        lambda _generation: None,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run_recovery)
+
+    assert main_module._exit_monitor_cycle(recovery_full_book=True) is True
+    assert entered == [True]
+    assert releases == [True]
+
+
 def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
     monkeypatch,
 ) -> None:
