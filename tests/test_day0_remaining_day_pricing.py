@@ -3196,6 +3196,163 @@ class TestRemainingDayMembers:
         assert members is None
         assert "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH" in caplog.text
 
+    def test_held_direct_current_redecision_binds_exact_vector_revision(
+        self, monkeypatch
+    ):
+        """Boundary-impossible source-clock LOW cannot strand held/JIT q."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 21, 0, tzinfo=UTC),
+            temps=[25.0] * 24,
+        )
+        witness = {
+            "vector_id": "current-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            "capture_times_by_model_utc": {
+                "ecmwf_ifs": "2026-06-10T21:00:00+00:00"
+            },
+            "request_hash_by_model": {"ecmwf_ifs": "request-current"},
+            "source_run_id_by_model": {"ecmwf_ifs": "day0:current"},
+        }
+        monkeypatch.setattr(
+            era, "runtime_cities_by_name", lambda: {"Paris": _paris()}
+        )
+        vector_reads = []
+
+        def read_vectors(**kwargs):
+            vector_reads.append(kwargs["now"])
+            return [vector]
+
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: witness,
+        )
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader."
+            "day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: pytest.fail(
+                "direct current redecision must not request an impossible "
+                "source-clock successor"
+            ),
+        )
+        payload = {
+            "metric": "low",
+            "rounded_value": 20.0,
+            "low_so_far": 20.4,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "observation_available_at": "2026-06-10T13:05:00+00:00",
+            "sample_count": 14,
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+            "station_id": "LFPG",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_redecision_authority_scope": (
+                "held_exposure_current_day0_only_v1"
+            ),
+            "_edli_day0_direct_current_redecision_authority": True,
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=SimpleNamespace(
+                city="Paris", target_date="2026-06-10", metric="low"
+            ),
+            unit="C",
+            decision_time=datetime(2026, 6, 11, 0, 30, tzinfo=UTC),
+            forecast_conn=object(),
+            entry_authority=False,
+        )
+
+        assert members is not None
+        assert vector_reads == [datetime(2026, 6, 10, 22, 0, tzinfo=UTC)]
+        assert payload[
+            "_edli_day0_remaining_vector_freshness_as_of_utc"
+        ] == "2026-06-10T22:00:00+00:00"
+        assert payload["_edli_day0_remaining_vector_witness"] == witness
+        bundle = payload["_edli_day0_causal_evidence_bundle"]
+        assert bundle["carrier_vector_ids_by_model"] == {
+            "ecmwf_ifs": "current-vector"
+        }
+        assert bundle["observation_context"]["observed_extreme_native"] == 20.4
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_validation"
+        ]["reason"] is None
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_successor_materialized"
+        ] is False
+        assert payload["_edli_day0_causal_evidence_bundle_authority"] == (
+            "held_current_redecision_direct_v1"
+        )
+
+    def test_current_vector_witness_is_complete_and_fresh_at_target_end(self):
+        """Post-local replay binds possession clocks without wall-clock decay."""
+        import src.engine.event_reactor_adapter as era
+
+        captured = "2026-06-10T21:00:00+00:00"
+        request_hash = "sha256:current-vector-request"
+        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+        meta = {
+            "provider_run_id": "openmeteo:ecmwf_ifs:2026-06-10T12:00:00+00:00",
+            "provider_source_cycle_time_utc": "2026-06-10T12:00:00+00:00",
+            "provider_source_available_at_utc": "2026-06-10T20:00:00+00:00",
+            "provider_source_modified_at_utc": "2026-06-10T20:00:00+00:00",
+            "fetch_started_at": "2026-06-10T21:01:00+00:00",
+            "fetch_finished_at": "2026-06-10T21:02:00+00:00",
+            "model_api_id": "ecmwf_ifs",
+            "source_run_authority": "run_pinned_single_runs",
+            "endpoint_mode": "single_runs",
+            "source_run_id": f"day0_hourly:{request_hash}",
+        }
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """CREATE TABLE day0_hourly_vectors (
+                model TEXT, city TEXT, target_date TEXT, captured_at TEXT,
+                vector_id TEXT, provider TEXT, endpoint TEXT,
+                request_hash TEXT, source_run_meta_json TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO day0_hourly_vectors VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "ecmwf_ifs", "Paris", "2026-06-10", captured,
+                "d0hv-current", "openmeteo", endpoint, request_hash,
+                json.dumps(meta, sort_keys=True),
+            ),
+        )
+        vector = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 21, 0, tzinfo=UTC),
+        )
+        decision_time = datetime(2026, 6, 11, 0, 30, tzinfo=UTC)
+
+        witness = era._day0_current_vector_witness(
+            conn=conn,
+            vectors=[vector],
+            family=self._family(),
+            expected_models=["ecmwf_ifs"],
+            decision_time=decision_time,
+        )
+
+        assert witness is not None
+        assert witness["fetch_finished_times_by_model_utc"] == {
+            "ecmwf_ifs": "2026-06-10T21:02:00+00:00"
+        }
+        assert witness["target_end_utc"] == "2026-06-10T22:00:00+00:00"
+        era._assert_day0_post_local_vector_witness(
+            witness,
+            family=self._family(),
+            decision_time=decision_time,
+            target_end=datetime(2026, 6, 10, 22, 0, tzinfo=UTC),
+        )
+        conn.close()
+
     def test_held_current_vector_witness_waits_for_materialized_successor(
         self, monkeypatch
     ):

@@ -34206,8 +34206,9 @@ def _assert_day0_post_local_vector_witness(
     try:
         from src.data.day0_hourly_vectors import DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
 
+        freshness_as_of = min(decision_utc, target_end_utc)
         if (
-            decision_utc - source_available
+            freshness_as_of - source_available
         ).total_seconds() > float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS) * 3600.0:
             raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE")
     except ImportError:
@@ -34248,6 +34249,7 @@ def _assert_day0_post_local_vector_witness(
             or fetch_started > fetch_finished
             or fetch_finished > causal_as_of
             or fetch_finished > decision_utc
+            or fetch_finished > target_end_utc
             or provider_cycle > provider_available
             or provider_available > fetch_finished
             or provider_modified > fetch_finished
@@ -37295,6 +37297,7 @@ def _prepare_current_global_probability_family(
                 and probability_use
                 in {
                     _CurrentProbabilityUse.HELD_MONITOR,
+                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
                 }
             )
             current_day0_redecision_only = bool(
@@ -37322,11 +37325,11 @@ def _prepare_current_global_probability_family(
                 raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
-            # post-local incomplete monitor observability. REDUCE_ONLY_EXIT
-            # must retain the comparable source-clock bundle used by ENTRY;
-            # this lower-variance fallback cannot authorize a statistical sale.
-            # Definitive current-day evidence uses the replacement bundle for
-            # the same probability authority as ENTRY.
+            # post-local incomplete observability.  It may refresh monitoring
+            # or JIT reduce-only q, but it can never add exposure.  Prefer a
+            # current replacement certificate when one exists; otherwise the
+            # direct current-evidence certificate below binds the observation
+            # and hourly vectors that actually produce this invocation's q.
             # DRAIN: the strict remaining-window builder below consumes a fresh,
             # complete expected-provider vector bundle on every redecision.
             # RESET: missing/stale vectors or the next local day fail closed;
@@ -37366,11 +37369,13 @@ def _prepare_current_global_probability_family(
                 temperature_metric=family.metric,
                 decision_time=decision_time,
             )
-            if causal_readiness is None:
-                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
-            dependencies = getattr(
-                causal_readiness, "dependency_json", {}
-            ).get("dependencies", ())
+            dependencies = (
+                getattr(causal_readiness, "dependency_json", {}).get(
+                    "dependencies", ()
+                )
+                if causal_readiness is not None
+                else ()
+            )
             causal_posterior_id = next(
                 (
                     dependency.get("posterior_id")
@@ -37394,18 +37399,28 @@ def _prepare_current_global_probability_family(
                     raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
                     authority_purpose=bundle_authority_purpose,
                 )
-                if not causal_result.ok or causal_result.bundle is None:
-                    raise ValueError(
-                        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-                        f"{causal_result.reason_code}"
+                if causal_result.ok and causal_result.bundle is not None:
+                    # Post-local held q comes from the remaining-vector tail.
+                    # A valid readiness-pinned posterior contributes only its
+                    # immutable certificate; persisted q is never substituted.
+                    _bind_day0_causal_evidence_bundle(
+                        payload,
+                        causal_result.bundle,
                     )
-                # Post-local held q comes from the remaining-vector tail.  The
-                # readiness-pinned posterior contributes only its immutable
-                # causal certificate; its persisted q is never substituted.
-                _bind_day0_causal_evidence_bundle(
-                    payload,
-                    causal_result.bundle,
-                )
+            if not isinstance(
+                payload.get("_edli_day0_causal_evidence_bundle"), Mapping
+            ):
+                # A Day0 LOW source-clock ENS slice can be permanently
+                # unidentifiable when its final 3h extrema bucket straddles
+                # local midnight.  The held action q below does not consume
+                # that posterior's persisted q: it is rebuilt from the exact
+                # current observation and persisted hourly-vector revision.
+                # Name that narrower authority explicitly so monitor and JIT
+                # reduce-only redecision do not wait forever for an impossible
+                # source-clock successor.  ENTRY never reaches this scope.
+                payload[
+                    "_edli_day0_direct_current_redecision_authority"
+                ] = True
         elif final_daily_observation is None and pinned_complete_bundle is None:
             # Current-day held q first reuses the same source-clock bundle as
             # ENTRY so an admitted BUY is immediately monitorable on identical
@@ -38492,6 +38507,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
+            "_edli_day0_remaining_vector_freshness_as_of_utc",
             "_edli_day0_remaining_content_identity",
             "_edli_day0_probability_operator",
             "_edli_day0_remaining_carrier_q",
@@ -38504,6 +38520,8 @@ def _prepare_current_global_probability_family(
             "_edli_day0_causal_evidence_bundle",
             "_edli_day0_causal_evidence_bundle_validation",
             "_edli_day0_causal_evidence_bundle_successor_materialized",
+            "_edli_day0_causal_evidence_bundle_authority",
+            "_edli_day0_direct_current_redecision_authority",
             "_edli_day0_source_clock_carrier_provenance",
             "_edli_day0_decision_carrier_rebuild_basis",
             "_edli_day0_held_carrier_rebuild_basis",
@@ -38563,11 +38581,20 @@ def _prepare_current_global_probability_family(
             "remaining_capture_times": payload.get(
                 "_edli_day0_remaining_capture_times_utc"
             ),
+            "remaining_vector_freshness_as_of_utc": payload.get(
+                "_edli_day0_remaining_vector_freshness_as_of_utc"
+            ),
             "remaining_content_identity": payload.get(
                 "_edli_day0_remaining_content_identity"
             ),
             "remaining_vector_witness": payload.get(
                 "_edli_day0_remaining_vector_witness"
+            ),
+            "causal_evidence_bundle_identity": (
+                payload.get("_edli_day0_causal_evidence_bundle") or {}
+            ).get("bundle_identity"),
+            "causal_evidence_bundle_authority": payload.get(
+                "_edli_day0_causal_evidence_bundle_authority"
             ),
             "decision_carrier_rebuild_basis": payload.get(
                 "_edli_day0_decision_carrier_rebuild_basis"
@@ -43809,9 +43836,14 @@ def _day0_current_vector_witness(
         request_hash_by_model: dict[str, str] = {}
         source_run_by_model: dict[str, str] = {}
         provider_run_by_model: dict[str, str] = {}
+        model_api_by_model: dict[str, str] = {}
         provider_cycle_by_model: dict[str, str] = {}
         provider_available_by_model: dict[str, str] = {}
         provider_modified_by_model: dict[str, str] = {}
+        fetch_started_by_model: dict[str, str] = {}
+        fetch_finished_by_model: dict[str, str] = {}
+        source_run_authority_by_model: dict[str, str] = {}
+        endpoint_mode_by_model: dict[str, str] = {}
         for vector in vectors:
             model = str(getattr(vector, "model", "") or "").strip()
             captured = str(getattr(vector, "captured_at", "") or "").strip()
@@ -43840,6 +43872,7 @@ def _day0_current_vector_witness(
             request_hash_by_model[model] = str(row[3] or "").strip()
             source_run_by_model[model] = str(meta.get("source_run_id") or "").strip()
             provider_run_by_model[model] = str(meta.get("provider_run_id") or "").strip()
+            model_api_by_model[model] = str(meta.get("model_api_id") or "").strip()
             provider_cycle_by_model[model] = str(
                 meta.get("provider_source_cycle_time_utc") or ""
             ).strip()
@@ -43849,6 +43882,18 @@ def _day0_current_vector_witness(
             provider_modified_by_model[model] = str(
                 meta.get("provider_source_modified_at_utc") or ""
             ).strip()
+            fetch_started_by_model[model] = str(
+                meta.get("fetch_started_at") or ""
+            ).strip()
+            fetch_finished_by_model[model] = str(
+                meta.get("fetch_finished_at") or ""
+            ).strip()
+            source_run_authority_by_model[model] = str(
+                meta.get("source_run_authority") or ""
+            ).strip()
+            endpoint_mode_by_model[model] = str(
+                meta.get("endpoint_mode") or ""
+            ).strip()
         if set(vector_ids) != set(models) or any(
             not value
             for mapping in (
@@ -43857,12 +43902,27 @@ def _day0_current_vector_witness(
                 request_hash_by_model,
                 source_run_by_model,
                 provider_run_by_model,
+                model_api_by_model,
                 provider_cycle_by_model,
                 provider_available_by_model,
+                provider_modified_by_model,
+                fetch_started_by_model,
+                fetch_finished_by_model,
+                source_run_authority_by_model,
+                endpoint_mode_by_model,
             )
             for value in mapping.values()
         ):
             return None
+        city_obj = runtime_cities_by_name().get(str(family.city))
+        if city_obj is None:
+            return None
+        local_target = date.fromisoformat(str(family.target_date)[:10])
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city_obj.timezone)),
+        ).astimezone(UTC)
         return {
             "vector_id": vector_ids[models[0]],
             "vector_ids_by_model": vector_ids,
@@ -43875,9 +43935,20 @@ def _day0_current_vector_witness(
             "request_hash_by_model": request_hash_by_model,
             "source_run_id_by_model": source_run_by_model,
             "provider_run_id_by_model": provider_run_by_model,
+            "model_api_id_by_model": model_api_by_model,
             "provider_source_cycle_time_by_model_utc": provider_cycle_by_model,
             "provider_source_available_at_by_model_utc": provider_available_by_model,
             "provider_source_modified_at_by_model_utc": provider_modified_by_model,
+            "fetch_started_times_by_model_utc": fetch_started_by_model,
+            "fetch_finished_times_by_model_utc": fetch_finished_by_model,
+            "source_run_authority_by_model": source_run_authority_by_model,
+            "endpoint_mode_by_model": endpoint_mode_by_model,
+            "provider_source_cycle_time_utc": provider_cycle_by_model.get(
+                "ecmwf_ifs", provider_cycle_by_model[models[0]]
+            ),
+            "local_capture_clock_utc": max(capture_by_model.values()),
+            "source_available_at_utc": max(fetch_finished_by_model.values()),
+            "target_end_utc": target_end.isoformat(),
             "city": str(family.city),
             "target_date": str(family.target_date),
             "metric": str(family.metric),
@@ -44066,6 +44137,136 @@ def _validate_day0_causal_bundle_successor(
     return actual
 
 
+def _build_direct_current_day0_causal_bundle(
+    *,
+    payload: dict[str, object],
+    family: object,
+    unit: str,
+    decision_time: datetime,
+    vector_witness: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Bind held-only current evidence without inventing a source-clock q.
+
+    The remaining-window probability is recomputed in this invocation from
+    the exact persisted vector rows and current observation state.  When a
+    target-day LOW ENS product is intrinsically boundary-ambiguous, no valid
+    posterior successor can carry those inputs.  This certificate freezes the
+    inputs that actually produce the held/reduce-only q; it never authorizes an
+    entry or relabels a rejected ENS snapshot as eligible.
+    """
+
+    if (
+        payload.get("_edli_day0_redecision_authority_scope")
+        != "held_exposure_current_day0_only_v1"
+        or payload.get("_edli_day0_direct_current_redecision_authority")
+        is not True
+    ):
+        raise ValueError("DAY0_DIRECT_CURRENT_REDECISION_AUTHORITY_REQUIRED")
+    metric = str(
+        payload.get("metric")
+        or payload.get("temperature_metric")
+        or getattr(family, "metric", "")
+        or ""
+    ).strip().lower()
+    city = str(getattr(family, "city", "") or "").strip()
+    target_date = str(getattr(family, "target_date", "") or "").strip()
+    source = str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or ""
+    ).strip()
+    observation_time_text = str(
+        payload.get("observation_time")
+        or payload.get("_edli_day0_probability_boundary_observation_time")
+        or ""
+    ).strip()
+    observed_extreme = _observed_day0_extreme_native(payload, metric)
+    probability_boundary = _day0_probability_boundary_native(payload, metric)
+    normalized_unit = str(
+        payload.get("settlement_unit") or unit or ""
+    ).strip().upper()
+    if decision_time.tzinfo is None or not all(
+        (city, target_date, source, observation_time_text)
+    ) or metric not in {"high", "low"} or normalized_unit not in {"C", "F"}:
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID")
+    try:
+        observed_at = datetime.fromisoformat(
+            observation_time_text.replace("Z", "+00:00")
+        )
+        observed_extreme_value = float(observed_extreme)
+        probability_boundary_value = float(probability_boundary)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID") from exc
+    if (
+        observed_at.tzinfo is None
+        or observed_at.astimezone(UTC) > decision_time.astimezone(UTC)
+    ):
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID")
+
+    revision_likelihood = payload.get(
+        "_edli_day0_provisional_revision_likelihood"
+    )
+    revision_identity = (
+        str(revision_likelihood.get("identity_hash") or "").strip()
+        if isinstance(revision_likelihood, Mapping)
+        else ""
+    )
+    observation_context = {
+        "authority": "held_current_redecision_direct_v1",
+        "source": source,
+        "station_id": str(payload.get("station_id") or "").strip() or None,
+        "observation_time": observed_at.astimezone(UTC).isoformat(),
+        "observation_available_at": str(
+            payload.get("observation_available_at") or ""
+        ).strip()
+        or None,
+        "observed_extreme_native": observed_extreme_value,
+        "probability_boundary_native": probability_boundary_value,
+        "probability_boundary_observation_time": str(
+            payload.get("_edli_day0_probability_boundary_observation_time")
+            or observation_time_text
+        ),
+        "sample_count": payload.get("sample_count")
+        or payload.get("observation_count"),
+        "unit": normalized_unit,
+        "evidence_finality": payload.get("evidence_finality"),
+        "revision_likelihood_identity": revision_identity or None,
+        "raw_payload_sha256": payload.get("raw_payload_sha256"),
+    }
+    from src.data.day0_hourly_vectors import (
+        build_day0_causal_evidence_bundle,
+        validate_day0_causal_evidence_bundle,
+    )
+
+    bundle = build_day0_causal_evidence_bundle(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        observation_context=observation_context,
+        cutoff_utc=decision_time.astimezone(UTC).isoformat(),
+        vector_witness=vector_witness,
+    )
+    validation = validate_day0_causal_evidence_bundle(
+        expected=bundle,
+        actual=bundle,
+    )
+    if not validation.ok:
+        raise ValueError("DAY0_DIRECT_CURRENT_CAUSAL_BUNDLE_INVALID")
+    payload.update(
+        {
+            "_edli_day0_causal_evidence_bundle": dict(bundle),
+            "_edli_day0_causal_evidence_bundle_validation": (
+                validation.receipt()
+            ),
+            "_edli_day0_causal_evidence_bundle_successor_materialized": False,
+            "_edli_day0_causal_evidence_bundle_authority": (
+                "held_current_redecision_direct_v1"
+            ),
+        }
+    )
+    return bundle
+
+
 def _day0_remaining_day_members(
     *,
     payload: dict[str, object],
@@ -44145,11 +44346,27 @@ def _day0_remaining_day_members(
         payload["_edli_day0_remaining_window_start_utc"] = (
             window_start.astimezone(timezone.utc).isoformat()
         )
+        vector_freshness_time = decision_time
+        local_target = date.fromisoformat(str(family.target_date)[:10])
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city_obj.timezone)),
+        ).astimezone(UTC)
+        if decision_time.astimezone(UTC) > target_end:
+            # The target-day tail is physically closed.  Its last causal
+            # pre-close vector cannot become stale merely because final daily
+            # settlement evidence publishes later; captures after target_end
+            # are rejected by the post-local witness gate above this seam.
+            vector_freshness_time = target_end
+            payload["_edli_day0_remaining_vector_freshness_as_of_utc"] = (
+                target_end.isoformat()
+            )
         expected_models = day0_hourly_models_for_city(city_obj)
         vectors = read_freshest_day0_hourly_vectors(
             city=str(family.city),
             target_date=str(family.target_date),
-            now=decision_time,
+            now=vector_freshness_time,
             expected_models=expected_models,
             require_expected=bool(expected_models),
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
@@ -44174,18 +44391,25 @@ def _day0_remaining_day_members(
                 "current_vector_witness_unavailable"
             )
             return None
-        # The posterior's immutable Day0 causal bundle is the only authority
-        # that may sponsor these vectors.  In particular, a held position may
-        # not rebind its old q to a newly captured member set.  The producer
-        # must first materialize a self-validating successor row; until then
-        # this seam fails closed and leaves the prior witness untouched.
-        validated_bundle = _validate_day0_causal_bundle_successor(
-            conn=forecast_conn,
-            payload=payload,
-            family=family,
-            decision_time=decision_time,
-            vector_witness=current_vector_witness,
-        )
+        if payload.get("_edli_day0_direct_current_redecision_authority") is True:
+            validated_bundle = _build_direct_current_day0_causal_bundle(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
+            )
+        else:
+            # Source-clock actions retain the immutable posterior successor
+            # contract.  A newly captured member set cannot be rebound to an
+            # older posterior in place.
+            validated_bundle = _validate_day0_causal_bundle_successor(
+                conn=forecast_conn,
+                payload=payload,
+                family=family,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
+            )
         payload["_edli_day0_remaining_vector_witness"] = dict(
             validated_bundle["carrier_vector_witness"]
         )
