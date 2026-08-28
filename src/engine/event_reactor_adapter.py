@@ -37578,6 +37578,10 @@ def _prepare_current_global_probability_family(
                 current_day0_payload[
                     "_edli_day0_redecision_authority_scope"
                 ] = "held_exposure_current_day0_only_v1"
+            elif probability_use is _CurrentProbabilityUse.HELD_MONITOR:
+                current_day0_payload[
+                    "_edli_day0_redecision_authority_scope"
+                ] = "held_exposure_current_bundle_day0_only_v1"
             if provisional_day0_observation and bundle is None:
                 if not current_day0_redecision_only:
                     raise ValueError(
@@ -38357,6 +38361,19 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
+            "_edli_day0_remaining_content_identity",
+            "_edli_day0_probability_operator",
+            "_edli_day0_remaining_carrier_q",
+            "_edli_day0_remaining_probability_samples",
+            "_edli_day0_remaining_probability_sample_count",
+            "_edli_day0_remaining_carrier_future_extremes_c",
+            "_edli_day0_remaining_carrier_path_error_sigma_c",
+            "_edli_day0_remaining_carrier_probability_cutoff_utc",
+            "_edli_day0_remaining_vector_witness",
+            "_edli_day0_current_vector_witness_rebound",
+            "_edli_day0_source_clock_carrier_provenance",
+            "_edli_day0_decision_carrier_rebuild_basis",
+            "_edli_day0_held_carrier_rebuild_basis",
             "_edli_day0_current_temperature_native",
             "_edli_day0_current_temperature_observed_at_utc",
             "_edli_day0_current_temperature_source",
@@ -38412,6 +38429,15 @@ def _prepare_current_global_probability_family(
             "remaining_models": payload.get("_edli_day0_remaining_model_names"),
             "remaining_capture_times": payload.get(
                 "_edli_day0_remaining_capture_times_utc"
+            ),
+            "remaining_content_identity": payload.get(
+                "_edli_day0_remaining_content_identity"
+            ),
+            "remaining_vector_witness": payload.get(
+                "_edli_day0_remaining_vector_witness"
+            ),
+            "decision_carrier_rebuild_basis": payload.get(
+                "_edli_day0_decision_carrier_rebuild_basis"
             ),
             "current_temperature_native": payload.get(
                 "_edli_day0_current_temperature_native"
@@ -43445,16 +43471,24 @@ def _rebuild_decision_time_day0_carrier(
     """Rebuild the effective Day0 carrier from current causal hourly vectors.
 
     ENTRY must use the current bundle's empirical likelihood; it cannot borrow
-    held A' pinned/prior-only authority. Held A' remains the sole reduce-only
-    exception that can use its prior complete source-clock bundle. In both
-    cases the current vector witness was already compared at the selection seam
-    and the source-clock carrier remains immutable provenance.
+    held A' pinned/prior-only authority. A held current-bundle recompute uses
+    the same source-clock likelihood as ENTRY but rebases its action q on the
+    latest causal observation and remaining path. Held A' remains the sole
+    reduce-only exception that can use a prior complete source-clock bundle.
+    The source-clock carrier remains immutable provenance in every case.
     """
     held_scope = payload.get("_edli_day0_redecision_authority_scope")
     if authority_kind == "entry_current_remaining_path":
         if entry_authority is not True or held_scope is not None:
             raise ValueError("DAY0_ENTRY_CURRENT_CARRIER_AUTHORITY_REQUIRED")
         rebuild_basis = "entry_current_state_same_vector_witness_v1"
+    elif authority_kind == "held_current_remaining_path":
+        if (
+            entry_authority is not False
+            or held_scope != "held_exposure_current_bundle_day0_only_v1"
+        ):
+            raise ValueError("DAY0_HELD_CURRENT_CARRIER_AUTHORITY_REQUIRED")
+        rebuild_basis = "held_current_bundle_current_state_vector_witness_v1"
     elif authority_kind == "held_a_prime":
         if (
             entry_authority is not False
@@ -43845,11 +43879,22 @@ def _day0_remaining_day_members(
                 "provider_source_cycle_time_by_model_utc",
                 "provider_source_available_at_by_model_utc",
             )
-            if any(
+            witness_changed = any(
                 persisted_vector_witness.get(field) != current_vector_witness.get(field)
                 for field in compare_fields
-            ):
-                raise ValueError("DAY0_CURRENT_VECTOR_WITNESS_MISMATCH")
+            )
+            if witness_changed:
+                held_scope = payload.get("_edli_day0_redecision_authority_scope")
+                if held_scope not in {
+                    "held_exposure_current_day0_only_v1",
+                    "held_exposure_current_bundle_day0_only_v1",
+                }:
+                    raise ValueError("DAY0_CURRENT_VECTOR_WITNESS_MISMATCH")
+                _snapshot_day0_source_clock_carrier_provenance(payload)
+                payload["_edli_day0_remaining_vector_witness"] = (
+                    current_vector_witness
+                )
+                payload["_edli_day0_current_vector_witness_rebound"] = True
         else:
             payload["_edli_day0_remaining_vector_witness"] = current_vector_witness
         from src.strategy.live_inference.source_clock_vnext import (
@@ -43941,6 +43986,21 @@ def _day0_remaining_day_members(
                 future_extremes_c=extremes_c,
                 authority_kind="entry_current_remaining_path",
                 entry_authority=True,
+            )
+        elif (
+            payload.get("_edli_day0_redecision_authority_scope")
+            == "held_exposure_current_bundle_day0_only_v1"
+            and is_noaa_preliminary
+            and has_likelihood
+        ):
+            _rebuild_decision_time_day0_carrier(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                future_extremes_c=extremes_c,
+                authority_kind="held_current_remaining_path",
+                entry_authority=False,
             )
         elif (
             payload.get("_edli_day0_redecision_authority_scope")

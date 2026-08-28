@@ -8249,7 +8249,9 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert held_witness.yes_point_q.tolist() == pytest.approx(
         witness.yes_point_q.tolist()
     )
-    assert "_edli_day0_redecision_authority_scope" not in held_payload
+    assert held_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_bundle_day0_only_v1"
+    )
     assert (
         held_payload["_edli_day0_source_clock_bound_posterior_identity"]
         == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
