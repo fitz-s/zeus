@@ -38,6 +38,7 @@ No live wiring: nothing in this module is imported by the entry path.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -46,6 +47,8 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from src.decision_kernel.canonicalization import stable_hash
+
+_LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level constants (plan item 9, verbatim).
@@ -64,6 +67,16 @@ P_CLIP_HI = 0.995
 # using only walk-forward predictions made on an early "tuning" slice of the
 # timeline (never the report's evaluation tail — see walk_forward()).
 LAMBDA_GRID: tuple[float, ...] = (0.1, 1.0, 10.0)
+
+# Hard clamp on the fitted beta (reversal_plan_tier0_2026-08-24.md item 26,
+# external review verdict). Walk-forward evidence: raw q loses 0.3507 paired
+# log loss to the market; the calibrated r removes 97.2% of that gap; beta was
+# never observed above ~0.10-0.12 in walk-forward fits. An unclamped refit can
+# silently amplify a source-side change (e.g. a forecast provenance shift) into
+# an outsized weight on q_raw, which this clamp forecloses regardless of what
+# any future refit's IRLS solve returns.
+BETA_MIN = 0.0
+BETA_MAX = 0.12
 
 # lead = (target_date - decision_date).days. Only these three buckets are
 # modeled; any other lead value (including negative, or >=3) fails closed —
@@ -298,7 +311,17 @@ def fit(
         y = np.array([r[2] for r in design_rows], dtype=np.float64)
         coef = _fit_irls(X, y, offset, lambda_)
         alpha = {bucket: float(coef[i]) for i, bucket in enumerate(lead_buckets)}
-        beta = float(coef[-1])
+        raw_beta = float(coef[-1])
+        beta = min(max(raw_beta, BETA_MIN), BETA_MAX)
+        if beta != raw_beta:
+            _LOG.warning(
+                "market-anchored fit beta clamped: raw=%.6f clamped=%.6f "
+                "training_cutoff=%s n_train=%d",
+                raw_beta,
+                beta,
+                training_cutoff,
+                len(design_rows),
+            )
 
     p_clip = (P_CLIP_LO, P_CLIP_HI)
     param_hash = _param_hash(
