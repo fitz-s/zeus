@@ -28529,6 +28529,20 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         "current_venue_auction_identity",
         lambda *_, **__: "venue",
     )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
 
     def select(prepared_by_event, *, current_scope, **_kwargs):
         assert current_scope.family_keys == (family_b,)
@@ -28705,6 +28719,109 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
     }
 
 
+def test_global_batch_preserves_ineligible_family_receipt_when_peer_has_no_positive_trade(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_b = scope.family_keys[1]
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    prepared_b = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=family_b,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-b",
+        )
+    )
+    ineligible_reason = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:IDENTITY_MISMATCH"
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        )
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda prepared_by_event, **_: (
+            selected
+            if tuple(prepared_by_event) == (event_b.event_id,)
+            else pytest.fail("the ineligible family must be excluded from selection")
+        ),
+    )
+
+    provenance = object()
+
+    def prepare(event, _at):
+        if event.event_id == event_a.event_id:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                q_live=0.42,
+                family_id="Alpha|2026-07-10|high",
+                decision_proof_bundle=provenance,
+                reason=ineligible_reason,
+            )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared_b,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("no-positive peer must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.economic_cut_completed is False
+    assert result.receipts[event_a.event_id].reason == (
+        f"GLOBAL_FAMILY_INELIGIBLE:{ineligible_reason}"
+    )
+    assert result.receipts[event_a.event_id].q_live == 0.42
+    assert result.receipts[event_a.event_id].family_id == (
+        "Alpha|2026-07-10|high"
+    )
+    assert result.receipts[event_a.event_id].decision_proof_bundle is provenance
+    assert result.receipts[event_b.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    )
+
+
 def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -28762,8 +28879,10 @@ def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
 
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
-    assert {receipt.reason for receipt in result.receipts.values()} == {
-        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
+    assert {
+        receipt.reason for receipt in result.receipts.values()
+    } == {
+        f"GLOBAL_FAMILY_INELIGIBLE:{reason}"
     }
 
 

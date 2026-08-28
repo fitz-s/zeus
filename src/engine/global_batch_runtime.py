@@ -5978,6 +5978,7 @@ def process_current_global_batch(
         tuple[str, str], OpportunityEvent
     ] = {}
     scoped_rejection_by_event: dict[str, str] = {}
+    ineligible_by_event: dict[str, str] = {}
     selection_snapshot_release: Callable[[], None] | None = None
     actuation_started = False
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
@@ -6463,7 +6464,14 @@ def process_current_global_batch(
         release_selection_snapshot()
         receipts: dict[str, EventSubmissionReceipt] = {}
         for event in event_tuple:
-            event_reason = scoped_rejection_by_event.get(event.event_id, reason)
+            event_reason = scoped_rejection_by_event.get(event.event_id)
+            if event_reason is None:
+                ineligible_reason = ineligible_by_event.get(event.event_id)
+                event_reason = (
+                    f"GLOBAL_FAMILY_INELIGIBLE:{ineligible_reason}"
+                    if ineligible_reason is not None
+                    else reason
+                )
             prior = preflight_rejection_receipts.get(event.event_id)
             if prior is not None:
                 if prior.event_id != event.event_id:
@@ -6870,7 +6878,6 @@ def process_current_global_batch(
             )
             for city, target_date, metric in missing_held_families
         }
-        ineligible_by_event: dict[str, str] = {}
         for family_key, scope_event in decision_scope.events_by_family:
             if cancelled(f"prepare_family:{family_key}"):
                 return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
@@ -6949,8 +6956,16 @@ def process_current_global_batch(
                 ):
                     reason = str(failure_receipt.reason)
                     ineligible_by_family[family_key] = reason
-                    if family_key in claimed_by_family:
-                        ineligible_by_event[owner.event_id] = reason
+                    ineligible_by_event[owner.event_id] = reason
+                    preflight_rejection_receipts[owner.event_id] = replace(
+                        failure_receipt,
+                        event_id=owner.event_id,
+                        causal_snapshot_id=owner.causal_snapshot_id,
+                        submitted=False,
+                        side_effect_status="NO_SUBMIT",
+                        reason=reason,
+                        proof_accepted=False,
+                    )
                     continue
                 return reject(
                     "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
@@ -7710,6 +7725,7 @@ def process_current_global_batch(
                 f"GLOBAL_AUCTION_NO_TRADE:{no_trade_reason}",
                 economic_cut_completed=(
                     no_trade_reason in _COMPLETE_ECONOMIC_NO_TRADE_REASONS
+                    and not ineligible_by_family
                 ),
             )
         log_winner(initial_select_stage, selected, probabilities)
