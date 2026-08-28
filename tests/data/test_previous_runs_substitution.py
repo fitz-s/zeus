@@ -3296,6 +3296,24 @@ def test_current_probability_debt_promotes_any_exact_day0_seed_trigger(
         ),
         encoding="utf-8",
     )
+    stale_low = tmp_path / "Hong_Kong.2026-08-28.low.stale.json"
+    stale_low.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": low_family[0],
+                "target_date": low_family[1],
+                "temperature_metric": low_family[2],
+                "upgrade_trigger": "instrument_set_expansion",
+                "day0_observed_extreme_observation_time": (
+                    "2026-08-28T13:20:00+00:00"
+                ),
+                "computed_at": "2026-08-28T13:32:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         queue_mod,
         "_current_money_risk_scopes",
@@ -3307,13 +3325,17 @@ def test_current_probability_debt_promotes_any_exact_day0_seed_trigger(
         lambda **_kwargs: frozenset({low_family}),
     )
 
-    priority = queue_mod._cycle_advance_seed_priority_map(None, (high, low))
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (high, stale_low, low),
+    )
     ranked = sorted(
-        (high, low),
+        (high, stale_low, low),
         key=lambda path: queue_mod._cycle_advance_file_sort_key(path, priority),
     )
 
     assert priority[low.name][0] == -11.0
+    assert priority[stale_low.name][0] == -11.0
     assert priority[high.name][0] == -4.0
     assert ranked[0] == low
 

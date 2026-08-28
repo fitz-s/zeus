@@ -1660,6 +1660,17 @@ def _cycle_advance_seed_priority_map(
             else:
                 priority_tier = tier
             if current_debt_day0:
+                if observation_time is not None:
+                    # Current capital needs the newest causal state first.
+                    # Older identities remain queued for durable ownership
+                    # cleanup, but cannot spend the single priority slot ahead
+                    # of a materializable successor for the held family.
+                    inverse_observation_clock = (
+                        10**18 - int(observation_time.timestamp() * 1_000_000)
+                    )
+                    request_time = (
+                        f"{inverse_observation_clock:018d}|{request_time}"
+                    )
                 priority_tier = -11.0
             elif capital_protection_retry:
                 priority_tier = -10.0
