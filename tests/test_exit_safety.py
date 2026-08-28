@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused/audited: 2026-08-28
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -6275,6 +6275,76 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
         configure_global_ledger(None)
 
 
+def test_execute_exit_order_returns_exact_matched_submit_fill(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(
+        conn,
+        snapshot_id="snap-exit-matched-submit-fill",
+        orderbook_top_bid="0.74",
+        orderbook_top_ask="0.75",
+    )
+
+    class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
+
+        def place_limit_order(self, **_kwargs):
+            raw = {
+                "success": True,
+                "status": "MATCHED",
+                "orderID": "ord-exit-matched-submit",
+                "size_matched": "5.00",
+                "avgPrice": "0.75",
+                "tradeIDs": ["trade-exit-matched-submit"],
+                "transactionHashes": ["0xexitmatchedsubmit"],
+            }
+            final = self.bound_envelope.with_updates(
+                raw_response_json=json.dumps(
+                    raw,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                order_id=raw["orderID"],
+            )
+            return {**raw, "_venue_submission_envelope": final.to_dict()}
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-matched-submit",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.75,
+                best_bid=0.74,
+                exact_limit_price=0.75,
+                submit_order_type="GTC",
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=_snapshot_hash(conn, snapshot_id),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-matched-submit",
+        )
+
+        assert (result.status, result.reason) == ("filled", "sell order filled")
+        assert result.command_state == "FILLED"
+        assert result.fill_price == pytest.approx(0.75)
+        assert result.filled_at
+    finally:
+        _clear_exit_submit_prereqs()
+
+
 def test_exit_collateral_network_fetch_precedes_lease_and_persists_atomically(conn, monkeypatch):
     from src.execution import executor
     from src.execution.executor import create_exit_order_intent, execute_exit_order
@@ -7406,6 +7476,95 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         "min_order": "0.01",
         "neg_risk": False,
     }
+
+
+def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-exact-submit-exit",
+        market_id="condition-exact-submit-exit",
+        condition_id="condition-exact-submit-exit",
+        city="Moscow",
+        cluster="europe",
+        target_date="2026-08-28",
+        bin_label="19C",
+        direction="buy_no",
+        token_id=NO_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=6.0,
+        shares=12.0,
+        cost_basis_usd=6.0,
+        strategy_key="forecast_qkernel_entry",
+        env="test",
+    )
+    portfolio = PortfolioState(positions=[position])
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: exit_lifecycle.OrderResult(
+            trade_id=position.trade_id,
+            status="filled",
+            fill_price=0.74,
+            filled_at="2026-08-28T08:32:55+00:00",
+            order_id="ord-exact-submit-exit",
+            external_order_id="ord-exact-submit-exit",
+            command_state="FILLED",
+            command_id="cmd-exact-submit-exit",
+        ),
+    )
+
+    class NoSecondPoll:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"exact submit fill must not be polled: {order_id}")
+
+    context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.74,
+        current_market_price_is_fresh=True,
+        best_bid=0.74,
+    )
+    result = exit_lifecycle._execute_live_exit(
+        portfolio,
+        position,
+        context,
+        exit_lifecycle.ExitIntent(
+            trade_id=position.trade_id,
+            reason="EDGE_REVERSAL",
+            token_id=NO_TOKEN,
+            shares=12.0,
+            current_market_price=0.74,
+            best_bid=0.74,
+            close_position=True,
+        ),
+        NoSecondPoll(),
+        conn=None,
+        execution_evidence=None,
+        is_red_force_exit=False,
+        exit_intent_already_recorded=True,
+    )
+
+    assert result == "exit_filled: EDGE_REVERSAL"
+    assert position.state == "economically_closed"
+    assert position.exit_state == "sell_filled"
+    assert position.exit_price == pytest.approx(0.74)
 
 
 def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_token(
