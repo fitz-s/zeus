@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-19
+# Last reused/audited: 2026-08-27
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md; 2026-08-19
 #   market-relative capital evidence retirement of stale ENS live authority.
 """Relationship tests for readiness-bound replacement posterior selection.
@@ -1259,7 +1259,7 @@ def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute(mo
         decorrelated_providers_complete=False,
         city="Tel Aviv",
     )
-    _bind_test_hwm(monkeypatch, frontier=_dt(6, 7), eligible=_dt(6, 6))
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 7), eligible=_dt(6, 0))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
@@ -1349,7 +1349,7 @@ def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave(monkey
             decorrelated_providers_complete=False,
             city="Tel Aviv",
         )
-    _bind_test_hwm(monkeypatch, frontier=_dt(6, 1, 21), eligible=_dt(6, 1, 20))
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 1, 21), eligible=_dt(6, 0))
 
     result = read_prior_complete_replacement_forecast_bundle(
         conn,
@@ -1365,6 +1365,47 @@ def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave(monkey
     assert result.ok is True
     assert result.bundle is not None
     assert result.bundle.posterior_id == old_complete_id
+
+
+def test_prior_complete_frontier_resets_after_new_eligible_ensemble(monkeypatch) -> None:
+    conn = _conn()
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 0, 1),
+        computed_at=_dt(6, 0, 2),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+        city="Tel Aviv",
+        strict_day0=True,
+    )
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 1),
+        source_available_at=_dt(6, 1, 1),
+        computed_at=_dt(6, 1, 2),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+        city="Tel Aviv",
+    )
+    _bind_test_hwm(monkeypatch, frontier=_dt(6, 1), eligible=_dt(6, 1))
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Tel Aviv",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 2),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        raw_input_hwm_conn=conn,
+    )
+
+    assert result.ok is False
+    assert result.status == "NOT_APPLICABLE"
+    assert result.reason_code == "REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET"
 
 
 def test_pinned_reader_is_entry_isolated() -> None:

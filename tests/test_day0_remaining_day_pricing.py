@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-26
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-26; last_reused=2026-08-26
+# Last reused or audited: 2026-08-27
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -866,6 +866,23 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
     )
     assert payload["_edli_day0_remaining_content_identity"]
     assert payload["_edli_day0_remaining_carrier_path_error_sigma_c"] >= 0.0
+
+    current_bundle_payload = dict(base_payload)
+    current_bundle_payload["_edli_day0_redecision_authority_scope"] = (
+        "held_exposure_current_bundle_day0_only_v1"
+    )
+    era._rebuild_decision_time_day0_carrier(
+        payload=current_bundle_payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
+        future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+        authority_kind="held_current_remaining_path",
+        entry_authority=False,
+    )
+    assert current_bundle_payload[
+        "_edli_day0_decision_carrier_rebuild_basis"
+    ] == "held_current_bundle_current_state_vector_witness_v1"
 
     entry_payload = dict(base_payload)
     entry_payload.pop("_edli_day0_redecision_authority_scope")
@@ -3062,6 +3079,52 @@ class TestRemainingDayMembers:
 
         assert members is None
         assert "DAY0_CURRENT_VECTOR_WITNESS_MISMATCH" in caplog.text
+
+    def test_held_current_vector_witness_rebind_preserves_source_clock_provenance(
+        self, monkeypatch
+    ):
+        """Held q may move to current vectors without rewriting its source carrier."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = _vector(model="ecmwf_ifs", temps=[25.0] * 24)
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **_kwargs: [vector],
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: {"vector_id": "current-vector"},
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 20.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "_edli_day0_redecision_authority_scope": (
+                "held_exposure_current_bundle_day0_only_v1"
+            ),
+            "_edli_day0_remaining_vector_witness": {
+                "vector_id": "source-vector"
+            },
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            forecast_conn=object(),
+        )
+
+        assert members is not None
+        assert payload["_edli_day0_remaining_vector_witness"] == {
+            "vector_id": "current-vector"
+        }
+        assert payload["_edli_day0_current_vector_witness_rebound"] is True
+        assert payload["_edli_day0_source_clock_carrier_provenance"][
+            "remaining_vector_witness"
+        ] == {"vector_id": "source-vector"}
 
     def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era

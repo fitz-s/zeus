@@ -1576,6 +1576,65 @@ def read_prior_complete_replacement_forecast_bundle(
     )
     if candidate_reason is not None:
         return ReplacementForecastBundleReadResult("BLOCKED", candidate_reason)
+    try:
+        hwm_deadline = raw_input_hwm_deadline_monotonic
+        if raw_input_hwm_read_max_seconds is not None:
+            stage_deadline = time.monotonic() + max(
+                0.0, float(raw_input_hwm_read_max_seconds)
+            )
+            hwm_deadline = (
+                stage_deadline
+                if hwm_deadline is None
+                else min(hwm_deadline, stage_deadline)
+            )
+        if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+            return ReplacementForecastBundleReadResult(
+                "BLOCKED", "REPLACEMENT_RAW_INPUT_HWM:basis=HWM_READ_DEADLINE"
+            )
+        deadline_holder: list[float | None] = [hwm_deadline]
+        handler_installed = False
+        if hwm_deadline is not None and hasattr(
+            raw_input_hwm_conn, "set_progress_handler"
+        ):
+            raw_input_hwm_conn.set_progress_handler(
+                lambda: int(
+                    deadline_holder[0] is not None
+                    and time.monotonic() >= deadline_holder[0]
+                ),
+                1_000,
+            )
+            handler_installed = True
+        try:
+            continuity_status, continuity_reason = _latest_complete_held_continuity(
+                raw_input_hwm_conn,
+                row=candidate,
+                provenance=candidate_provenance,
+                city=city,
+                target_date=target_date_text,
+                metric=metric,
+                decision_time=decision_utc,
+            )
+        finally:
+            if handler_installed:
+                raw_input_hwm_conn.set_progress_handler(None, 0)
+    except ReplacementInputHwmReadUnavailable as exc:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{exc.blocker_reason()}"
+        )
+    except sqlite3.OperationalError as exc:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:basis=hwm_read_failed:{exc}"
+        )
+    if continuity_status is _HeldContinuityStatus.BLOCKED:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            continuity_reason or "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+        )
+    if continuity_status is _HeldContinuityStatus.RESET:
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            continuity_reason or "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+        )
     result = read_pinned_replacement_forecast_bundle(
         conn,
         posterior_id=int(candidate["posterior_id"]),
