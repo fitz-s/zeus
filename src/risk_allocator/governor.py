@@ -837,19 +837,15 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     with _named_sqlite_rows(conn) as read_conn:
         current_rows = _load_current_position_exposure_rows(read_conn)
         current_position_ids = {
-            str(_row_mapping(row).get("position_id") or "") for row in current_rows
+            str(_row_mapping(row).get("position_id") or "")
+            for row in current_rows
+            if str(_row_mapping(row).get("position_id") or "")
         }
-        covered_position_ids = (
-            current_position_ids | _load_closed_position_ids(read_conn)
-        )
-        rows = _load_legacy_position_lot_rows(
-            read_conn,
-            covered_position_ids=covered_position_ids,
-        )
+        rows = _load_legacy_position_lot_rows(read_conn)
     lots: list[ExposureLot] = []
     for row in rows:
         row_map = _row_mapping(row)
-        if str(row_map.get("runtime_position_id") or "") in covered_position_ids:
+        if str(row_map.get("runtime_position_id") or "") in current_position_ids:
             continue
         payload = _coerce_payload(row_map.get("raw_payload_json"))
         submit_payload = _coerce_payload(row_map.get("submit_payload_json"))
@@ -892,35 +888,7 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     return tuple(lots)
 
 
-def _load_closed_position_ids(conn: Any) -> set[str]:
-    if not _has_table(conn, "position_current"):
-        return set()
-    if not _has_column(conn, "position_current", "position_id"):
-        return set()
-    if not _has_column(conn, "position_current", "phase"):
-        return set()
-    return {
-        str(_row_mapping(row).get("position_id") or "")
-        for row in conn.execute(
-            """
-            SELECT position_id
-              FROM position_current
-             WHERE phase IN (
-                 'economically_closed',
-                 'settled',
-                 'voided',
-                 'admin_closed'
-             )
-            """
-        ).fetchall()
-    }
-
-
-def _load_legacy_position_lot_rows(
-    conn: Any,
-    *,
-    covered_position_ids: set[str] | None = None,
-) -> list[Mapping[str, Any]]:
+def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
     if not _has_table(conn, "position_lots"):
         return []
     has_commands = _has_table(conn, "venue_commands")
@@ -950,26 +918,28 @@ def _load_legacy_position_lot_rows(
         else "LEFT JOIN (SELECT NULL AS command_id, NULL AS market_id, NULL AS token_id, NULL AS decision_id) cmd ON 0"
     )
     command_provenance_predicate = "AND cmd.command_id IS NOT NULL" if has_commands else ""
+    has_projected_runtime_positions = (
+        has_commands
+        and _has_column(conn, "venue_commands", "position_id")
+        and _has_table(conn, "position_current")
+        and _has_column(conn, "position_current", "position_id")
+        and _has_column(conn, "position_current", "phase")
+    )
+    projection_join = (
+        "LEFT JOIN position_current pc ON pc.position_id = cmd.position_id "
+        "AND pc.phase IN "
+        "('economically_closed', 'settled', 'voided', 'admin_closed')"
+        if has_projected_runtime_positions
+        else ""
+    )
+    projection_predicate = (
+        "AND pc.position_id IS NULL" if has_projected_runtime_positions else ""
+    )
     state_index = (
         " INDEXED BY idx_position_lots_state"
         if _has_index(conn, "idx_position_lots_state")
         else ""
     )
-    covered = sorted(
-        str(position_id)
-        for position_id in (covered_position_ids or set())
-        if str(position_id)
-    )
-    covered_predicate = ""
-    params: list[object] = []
-    if covered and has_commands:
-        # One JSON parameter keeps statement shape and SQLite bind count
-        # bounded as terminal position history grows.  The compatibility lane
-        # must scale with unresolved lots, not with every settled position.
-        covered_predicate = (
-            "AND cmd.position_id NOT IN (SELECT value FROM json_each(?))"
-        )
-        params.append(json.dumps(covered, separators=(",", ":")))
     return list(
         conn.execute(
             f"""
@@ -987,13 +957,14 @@ def _load_legacy_position_lot_rows(
               {runtime_position_expr}
             FROM position_lots lot{state_index}
             {command_join}
+            {projection_join}
             WHERE lot.state IN (
               'OPTIMISTIC_EXPOSURE',
               'CONFIRMED_EXPOSURE',
               'EXIT_PENDING'
             )
               {command_provenance_predicate}
-              {covered_predicate}
+              {projection_predicate}
               AND NOT EXISTS (
                   SELECT 1
                     FROM position_lots newer
@@ -1002,7 +973,6 @@ def _load_legacy_position_lot_rows(
               )
             ORDER BY lot.position_id, lot.lot_id
             """,
-            params,
         ).fetchall()
     )
 
