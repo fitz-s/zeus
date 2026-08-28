@@ -5596,6 +5596,22 @@ def test_day0_buy_jit_accepts_exact_q_with_lane_specific_provenance(
         authority_certificate_hash="selected-cert",
         witness_identity="selected-entry",
     )
+    entry_current_content = dict(content)
+    entry_current_content.update(
+        {
+            "q_version": (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:entry-current"
+            ),
+            "posterior_identity_hash": "entry-current-posterior",
+            "source_truth_identity": "entry-current-source",
+        }
+    )
+    entry_current = SimpleNamespace(
+        **entry_current_content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="entry-current-cert",
+        witness_identity="current-entry",
+    )
     held_content = dict(content)
     held_content.update(
         {
@@ -5616,7 +5632,7 @@ def test_day0_buy_jit_accepts_exact_q_with_lane_specific_provenance(
     def prepare_current(*_args, **kwargs):
         if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
             kwargs["day0_payload_out"].update({"q_source": "day0"})
-            witness = selected
+            witness = entry_current
         else:
             witness = held
         return bridge.PreparedGlobalFamily(
@@ -5656,12 +5672,74 @@ def test_day0_buy_jit_accepts_exact_q_with_lane_specific_provenance(
     )
 
     assert rebound.probability_witness is selected
+    assert era._global_probability_witness_content_mismatches(
+        entry_current, selected
+    ) == (
+        "q_version",
+        "posterior_identity_hash",
+        "source_truth_identity",
+    )
+    assert era._global_probability_action_content_mismatches(
+        entry_current, selected
+    ) == ()
     assert era._global_probability_witness_content_mismatches(held, selected) == (
         "q_version",
         "posterior_identity_hash",
         "source_truth_identity",
     )
     assert era._global_probability_action_content_mismatches(held, selected) == ()
+
+    monkeypatch.setattr(
+        era,
+        "_rehydrate_held_pinned_bundle_for_actuation",
+        lambda *_args, **_kwargs: None,
+    )
+    sell_curve = ExecutableSellCurve(
+        token_id="sell-token",
+        side="YES",
+        snapshot_id="selected-sell-book",
+        book_hash="selected-sell-hash",
+        levels=(BookLevel(price=Decimal("0.40"), size=Decimal("1")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    sell_candidate = GlobalSingleOrderSellCandidate(
+        candidate_id="selected-sell",
+        family_key=str(selected.family_key),
+        bin_id="sell-bin",
+        condition_id="c0",
+        side="YES",
+        token_id="sell-token",
+        position_id="selected-position",
+        held_shares=Decimal("1"),
+        probability_witness_identity=str(selected.witness_identity),
+        book_snapshot_id=sell_curve.snapshot_id,
+        book_captured_at_utc=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        execution_curve_identity=executable_curve_identity(sell_curve),
+        ledger_snapshot_id="selected-ledger",
+        executable_sell_curve=sell_curve,
+        resolution_identity="selected-resolution",
+        neg_risk=False,
+        **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
+    )
+    sell_rebound, _sell_payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=SimpleNamespace(
+            probability_witness=selected,
+            decision=SimpleNamespace(candidate=sell_candidate),
+        ),
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+    assert sell_rebound.probability_witness is selected
     retired_content = dict(held_content)
     retired_content["q_version"] = "day0-semrev:retired-day0-v0:held"
     retired = SimpleNamespace(

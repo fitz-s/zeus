@@ -17552,7 +17552,7 @@ def _current_global_actuation_prepared_family(
     probability_mismatches = (
         ("probability_witness",)
         if current_witness is None
-        else _global_probability_witness_content_mismatches(
+        else _global_probability_action_content_mismatches(
             current_witness,
             selected,
         )
