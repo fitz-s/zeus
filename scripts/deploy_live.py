@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-06
+# Last reused/audited: 2026-08-27
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -1066,7 +1066,13 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             max_age_seconds=LIVE_MONITOR_CADENCE_CONTRACT_SECONDS,
             monitor_refreshed_only=True,
             require_fresh_inputs=True,
-            sample_limit=10,
+            sample_limit=256,
+        )
+        groups = monitor_restart_blocking_evidence(cadence)
+        reauction_handoff_ids = _exact_v4_reauction_restart_handoff_ids(
+            conn,
+            positions=groups.get("restart_blocking_stale_positions", ()),
+            now=now,
         )
     except (RuntimeError, sqlite3.Error) as exc:
         return {
@@ -1079,7 +1085,6 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         except UnboundLocalError:
             pass
 
-    groups = monitor_restart_blocking_evidence(cadence)
     open_count = int(cadence.get("open_position_count") or 0)
     monitored_ids = tuple(
         str(value or "").strip()
@@ -1091,6 +1096,8 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     restart_blocking_count = int(
         groups.get("restart_blocking_stale_position_count") or 0
     )
+    reauction_handoff_count = len(reauction_handoff_ids)
+    restart_blocking_count -= reauction_handoff_count
     quote_only_count = int(groups.get("quote_only_stale_position_count") or 0)
     fresh_count = int(cadence.get("fresh_position_count") or 0)
     identity_complete = (
@@ -1105,7 +1112,12 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         and int(cadence.get("future_monitor_event_count") or 0) == 0
         and restart_blocking_count == 0
         and quote_only_count == 0
-        and fresh_count + probability_degraded_count == open_count
+        and (
+            fresh_count
+            + probability_degraded_count
+            + reauction_handoff_count
+            == open_count
+        )
     )
     return {
         "green": green,
@@ -1113,10 +1125,121 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "monitored_position_ids": monitored_ids,
         "fresh_position_count": fresh_count,
         "probability_degraded_position_count": probability_degraded_count,
+        "reauction_handoff_position_count": reauction_handoff_count,
+        "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
         "quote_only_stale_position_count": quote_only_count,
         "sample": groups.get("restart_blocking_stale_positions", []),
     }
+
+
+def _exact_v4_reauction_restart_handoff_ids(
+    conn: sqlite3.Connection,
+    *,
+    positions: object,
+    now: datetime,
+) -> tuple[str, ...]:
+    """Return exact fresh canonical SELL debts that the new runtime can drain.
+
+    This is a repair handoff, never action authority. It applies only to the
+    typed completion defect being deployed: the loaded runtime already wrote a
+    fresh q/book MONITOR event and an exact V4 pending outbox debt, but cannot
+    bind that event's immutable lineage until the repaired runtime starts.
+    """
+
+    candidates = {
+        str(item.get("position_id") or "").strip(): str(
+            item.get("last_monitor_refreshed_at") or ""
+        ).strip()
+        for item in positions
+        if isinstance(item, dict)
+        and item.get("issue") == "monitor_exit_completion_unavailable"
+        and str(item.get("position_id") or "").strip()
+        and str(item.get("last_monitor_refreshed_at") or "").strip()
+    }
+    if not candidates:
+        return ()
+    position_columns = _sqlite_table_columns(conn, "position_current")
+    event_columns = _sqlite_table_columns(conn, "position_events")
+    if not {
+        "position_id",
+        "direction",
+        "token_id",
+        "no_token_id",
+    }.issubset(position_columns) or not {
+        "event_id",
+        "position_id",
+        "sequence_no",
+        "event_type",
+        "occurred_at",
+        "payload_json",
+    }.issubset(event_columns):
+        return ()
+
+    verified: list[str] = []
+    now_utc = now.astimezone(timezone.utc)
+    for position_id, expected_occurred_at in sorted(candidates.items()):
+        row = conn.execute(
+            """
+            SELECT pe.event_id, pe.occurred_at, pe.payload_json,
+                   pc.direction, pc.token_id, pc.no_token_id
+              FROM position_events pe
+              JOIN position_current pc ON pc.position_id = pe.position_id
+             WHERE pe.position_id = ?
+               AND pe.event_type = 'MONITOR_REFRESHED'
+             ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is None or str(row[1] or "") != expected_occurred_at:
+            continue
+        try:
+            payload = json.loads(str(row[2] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        obligation = payload.get("held_sell_reauction_obligation")
+        validations = payload.get("applied_validations")
+        if not isinstance(obligation, dict) or not isinstance(validations, list):
+            continue
+        validation_set = {str(value) for value in validations}
+        request_id = str(obligation.get("request_id") or "").strip()
+        direction = str(row[3] or "").strip().lower()
+        held_token_id = str(
+            row[5] if direction == "buy_no" else row[4] if direction == "buy_yes" else ""
+        ).strip()
+        try:
+            best_bid = float(obligation.get("held_best_bid"))
+        except (TypeError, ValueError):
+            continue
+        deadline = _parse_iso_utc(obligation.get("completion_deadline_at"))
+        if (
+            payload.get("last_monitor_prob_is_fresh") is not True
+            or payload.get("last_monitor_market_price_is_fresh") is not True
+            or obligation.get("schema_version") != 4
+            or str(obligation.get("position_id") or "").strip() != position_id
+            or not held_token_id
+            or str(obligation.get("held_token_id") or "").strip()
+            != held_token_id
+            or str(obligation.get("book_state") or "") != "EXECUTABLE"
+            or not math.isfinite(best_bid)
+            or not 0.05 <= best_bid <= 0.95
+            or not str(
+                obligation.get("probability_content_identity") or ""
+            ).strip()
+            or deadline is None
+            or deadline < now_utc
+            or not request_id
+            or "global_auction_completion_request_failed" not in validation_set
+            or "global_auction_completion_debt:REQUEST_REJECTED"
+            not in validation_set
+            or "GLOBAL_REAUCTION_PENDING" not in validation_set
+            or f"global_auction_completion_request_id:{request_id}"
+            not in validation_set
+        ):
+            continue
+        verified.append(position_id)
+    return tuple(verified)
 
 
 def _loaded_live_restart_obligation_gate(
@@ -1185,7 +1308,9 @@ def _loaded_live_restart_obligation_gate(
             "durable_entries_pause=true "
             "full_book_recent_held_quotes=true "
             "probability_degraded_positions="
-            f"{int(handoff.get('probability_degraded_position_count') or 0)}",
+            f"{int(handoff.get('probability_degraded_position_count') or 0)} "
+            "exact_v4_reauction_handoffs="
+            f"{int(handoff.get('reauction_handoff_position_count') or 0)}",
         )
     return (
         True,

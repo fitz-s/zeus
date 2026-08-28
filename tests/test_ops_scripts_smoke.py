@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-24
+# Last reused/audited: 2026-08-27
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -4269,6 +4269,142 @@ def test_deploy_live_pre_stop_handoff_requires_fresh_held_quote(
     handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
 
     assert handoff["green"] is expected_green
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_green"),
+    (
+        ("valid", True),
+        ("wrong_request_marker", False),
+        ("wrong_token", False),
+        ("expired_deadline", False),
+        ("stale_probability", False),
+        ("invalid_schema", False),
+    ),
+)
+def test_deploy_live_pre_stop_handoff_requires_exact_v4_reauction_debt(
+    monkeypatch,
+    tmp_path,
+    mutation,
+    expected_green,
+):
+    dl = _load(f"deploy_live_v4_reauction_handoff_{mutation}", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    occurred_at = now.isoformat()
+    request_id = "request-exact-v4"
+    held_token_id = "held-no-token"
+    obligation = {
+        "schema_version": 4,
+        "position_id": "pos-open",
+        "held_token_id": held_token_id,
+        "request_id": request_id,
+        "book_state": "EXECUTABLE",
+        "held_best_bid": 0.72,
+        "probability_content_identity": "q-current",
+        "completion_deadline_at": (now + timedelta(seconds=60)).isoformat(),
+    }
+    validations = [
+        "global_auction_completion_request_failed",
+        "global_auction_completion_debt:REQUEST_REJECTED",
+        "GLOBAL_REAUCTION_PENDING",
+        f"global_auction_completion_request_id:{request_id}",
+    ]
+    probability_fresh = True
+    if mutation == "wrong_request_marker":
+        validations[-1] = "global_auction_completion_request_id:other"
+    elif mutation == "wrong_token":
+        obligation["held_token_id"] = "other-token"
+    elif mutation == "expired_deadline":
+        obligation["completion_deadline_at"] = (
+            now - timedelta(seconds=1)
+        ).isoformat()
+    elif mutation == "stale_probability":
+        probability_fresh = False
+    elif mutation == "invalid_schema":
+        obligation["schema_version"] = "four"
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?)",
+        ("pos-open", "buy_no", "yes-token", held_token_id),
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "pos-open:monitor_refreshed:1",
+            "pos-open",
+            1,
+            "MONITOR_REFRESHED",
+            occurred_at,
+            json.dumps(
+                {
+                    "last_monitor_prob_is_fresh": probability_fresh,
+                    "last_monitor_market_price_is_fresh": True,
+                    "held_sell_reauction_obligation": obligation,
+                    "applied_validations": validations,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-open"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [
+            {
+                "position_id": "pos-open",
+                "issue": "monitor_exit_completion_unavailable",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {
+                "position_id": "pos-open",
+                "issue": "monitor_exit_completion_unavailable",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is expected_green
+    assert handoff["reauction_handoff_position_count"] == int(expected_green)
+    assert handoff["restart_blocking_position_count"] == int(not expected_green)
 
 
 def test_deploy_live_loaded_restart_refuses_unpaused_monitor_handoff(
