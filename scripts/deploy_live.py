@@ -1113,11 +1113,46 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     )
     reauction_handoff_count = len(reauction_handoff_ids)
     restart_blocking_count -= reauction_handoff_count
-    quote_only_count = int(groups.get("quote_only_stale_position_count") or 0)
+    quote_only_count_raw = groups.get("quote_only_stale_position_count")
+    quote_only_shape_error: str | None = None
+    if isinstance(quote_only_count_raw, bool) or not isinstance(
+        quote_only_count_raw, int
+    ) or quote_only_count_raw < 0:
+        quote_only_count = 0
+        quote_only_shape_error = "count_invalid"
+    else:
+        quote_only_count = quote_only_count_raw
     fresh_count = int(cadence.get("fresh_position_count") or 0)
     probability_positions = list(
         groups.get("probability_only_stale_positions") or []
     )
+    quote_only_raw = groups.get("quote_only_stale_positions")
+    if quote_only_raw is None:
+        quote_only_positions: list[object] = []
+    elif isinstance(quote_only_raw, list):
+        quote_only_positions = quote_only_raw
+    else:
+        quote_only_positions = []
+        quote_only_shape_error = quote_only_shape_error or "records_not_list"
+    quote_only_ids_list: list[str] = []
+    if quote_only_shape_error is None and len(quote_only_positions) != quote_only_count:
+        quote_only_shape_error = "count_mismatch"
+    if quote_only_shape_error is None:
+        for item in quote_only_positions:
+            if not isinstance(item, dict):
+                quote_only_shape_error = "record_not_mapping"
+                break
+            position_id = str(item.get("position_id") or "").strip()
+            if not position_id:
+                quote_only_shape_error = "position_id_missing"
+                break
+            if item.get("issue") != "monitor_clob_stale":
+                quote_only_shape_error = "issue_invalid"
+                break
+            if position_id in quote_only_ids_list:
+                quote_only_shape_error = "position_id_duplicate"
+                break
+            quote_only_ids_list.append(position_id)
     restart_blocking_positions = [
         item
         for item in list(groups.get("restart_blocking_stale_positions") or [])
@@ -1134,7 +1169,12 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         str(item.get("position_id") or "").strip()
         for item in restart_blocking_positions
     )
-    classified_positions = [*probability_positions, *restart_blocking_positions]
+    quote_only_ids = tuple(quote_only_ids_list)
+    classified_positions = [
+        *probability_positions,
+        *restart_blocking_positions,
+        *quote_only_positions,
+    ]
     stale_classified_ids: list[str] = []
     missing_monitor_timestamp_ids: list[str] = []
     invalid_monitor_timestamp_ids: list[str] = []
@@ -1188,6 +1228,9 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "fresh_position_count": fresh_count,
         "probability_degraded_position_count": probability_degraded_count,
         "probability_degraded_position_ids": probability_ids,
+        "quote_only_stale_position_ids": quote_only_ids,
+        "quote_only_stale_shape_valid": quote_only_shape_error is None,
+        "quote_only_stale_shape_error": quote_only_shape_error,
         "reauction_handoff_position_count": reauction_handoff_count,
         "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
@@ -1267,6 +1310,9 @@ def _stuck_monitor_recovery_admission(
         "future_monitor_event_count",
         "non_monitor_chain_risk_position_count",
         "quote_only_stale_position_count",
+        "quote_only_stale_position_ids",
+        "quote_only_stale_shape_valid",
+        "quote_only_stale_shape_error",
         "reauction_handoff_position_count",
         "probability_degraded_position_count",
         "probability_degraded_position_ids",
@@ -1292,8 +1338,8 @@ def _stuck_monitor_recovery_admission(
         return False, "STUCK_MONITOR_RECOVERY_REFUSED:future_monitor_evidence"
     if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
         return False, "STUCK_MONITOR_RECOVERY_REFUSED:non_monitor_chain_risk"
-    if int(handoff.get("quote_only_stale_position_count") or 0) != 0:
-        return False, "STUCK_MONITOR_RECOVERY_REFUSED:held_quote_stale"
+    if handoff.get("quote_only_stale_shape_valid") is not True:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:quote_only_shape_invalid"
     if int(handoff.get("reauction_handoff_position_count") or 0) != 0:
         return False, "STUCK_MONITOR_RECOVERY_REFUSED:reauction_handoff_present"
     if handoff.get("missing_monitor_timestamp_position_ids"):
@@ -1303,13 +1349,23 @@ def _stuck_monitor_recovery_admission(
 
     probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
     restart_ids = tuple(handoff.get("restart_blocking_position_ids") or ())
-    classified_ids = (*probability_ids, *restart_ids)
+    quote_only_ids = tuple(handoff.get("quote_only_stale_position_ids") or ())
+    classified_ids = (*probability_ids, *restart_ids, *quote_only_ids)
     classified_set = {str(position_id).strip() for position_id in classified_ids}
     if (
         len(probability_ids)
         != int(handoff.get("probability_degraded_position_count") or 0)
         or len(restart_ids)
         != int(handoff.get("restart_blocking_position_count") or 0)
+        or len(quote_only_ids)
+        != int(handoff.get("quote_only_stale_position_count") or 0)
+        or not all(str(position_id).strip() for position_id in classified_ids)
+        or set(str(position_id).strip() for position_id in probability_ids)
+        & set(str(position_id).strip() for position_id in restart_ids)
+        or set(str(position_id).strip() for position_id in probability_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
+        or set(str(position_id).strip() for position_id in restart_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
         or len(classified_ids) != open_count
         or len(classified_set) != open_count
         or classified_set != expected_set
@@ -1330,6 +1386,7 @@ def _stuck_monitor_recovery_admission(
         True,
         "STUCK_MONITOR_RECOVERY_ADMITTED: "
         f"open_positions={open_count} fresh_positions=0 "
+        f"quote_only_stale_positions={len(quote_only_ids)} "
         f"monitor_stale_bound_seconds={LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS} "
         "held_quote_sidecar_current=true",
     )

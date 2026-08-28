@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-28
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -4201,6 +4201,9 @@ def _stuck_monitor_handoff(position_ids, **overrides):
         "future_monitor_event_count": 0,
         "non_monitor_chain_risk_position_count": 0,
         "quote_only_stale_position_count": 0,
+        "quote_only_stale_position_ids": (),
+        "quote_only_stale_shape_valid": True,
+        "quote_only_stale_shape_error": None,
         "reauction_handoff_position_count": 0,
         "probability_degraded_position_count": 1,
         "probability_degraded_position_ids": (position_ids[0],),
@@ -4253,6 +4256,41 @@ def test_deploy_live_loaded_restart_admits_exact_stuck_monitor_recovery(
     assert "fresh_positions=0" in detail
 
 
+def test_deploy_live_loaded_restart_admits_exact_total_stall_with_quote_only_partition(
+    monkeypatch,
+):
+    dl = _load("deploy_live_restart_stuck_monitor_quote_only_admit", "deploy_live.py")
+    position_ids = ("pos-probability", "pos-restart", "pos-quote")
+    handoff = _stuck_monitor_handoff(
+        position_ids,
+        probability_degraded_position_count=1,
+        probability_degraded_position_ids=("pos-probability",),
+        restart_blocking_position_count=1,
+        restart_blocking_position_ids=("pos-restart",),
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": len(position_ids),
+            "all_open_position_ids": position_ids,
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert ok is True
+    assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
+    assert "quote_only_stale_positions=1" in detail
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_reason"),
     (
@@ -4261,6 +4299,7 @@ def test_deploy_live_loaded_restart_admits_exact_stuck_monitor_recovery(
         ("open_unclassified", "open_classification_incomplete"),
         ("future_monitor", "future_monitor_evidence"),
         ("partial_fresh", "partial_or_fresh_handoff"),
+        ("quote_identity_overlap", "open_classification_incomplete"),
     ),
 )
 def test_deploy_live_stuck_monitor_recovery_refuses_each_non_total_stall_boundary(
@@ -4286,6 +4325,9 @@ def test_deploy_live_stuck_monitor_recovery_refuses_each_non_total_stall_boundar
         handoff["future_monitor_event_count"] = 1
     elif mutation == "partial_fresh":
         handoff["fresh_position_count"] = 1
+    elif mutation == "quote_identity_overlap":
+        handoff["quote_only_stale_position_count"] = 1
+        handoff["quote_only_stale_position_ids"] = (position_ids[0],)
     monkeypatch.setattr(
         dl,
         "_held_quote_sidecar_current_evidence",
@@ -4359,6 +4401,167 @@ def test_deploy_live_stuck_monitor_recovery_rejects_missing_invalid_or_naive_tim
     assert handoff[field] == ("pos-open",)
     assert ok is False
     assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_ok", "expected_reason"),
+    (
+        (None, False, "monitor_timestamp_missing"),
+        ("not-a-time", False, "monitor_timestamp_invalid"),
+        ("stale", True, None),
+        (
+            "2026-08-28T12:00:00+00:00",
+            False,
+            "monitor_evidence_not_stale",
+        ),
+    ),
+)
+def test_deploy_live_stuck_monitor_quote_only_partition_requires_stale_parseable_timestamp(
+    monkeypatch, tmp_path, timestamp, expected_ok, expected_reason
+):
+    dl = _load("deploy_live_restart_quote_only_timestamp", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    now = datetime.now(timezone.utc)
+    if timestamp == "stale":
+        timestamp = (
+            now
+            - timedelta(seconds=dl.LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS + 1)
+        ).isoformat()
+    elif timestamp == "2026-08-28T12:00:00+00:00":
+        timestamp = now.isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-quote"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    groups = {
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "restart_blocking_stale_position_count": 0,
+        "restart_blocking_stale_positions": [],
+        "quote_only_stale_position_count": 1,
+        "quote_only_stale_positions": [
+            {
+                "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                "last_monitor_refreshed_at": timestamp,
+            }
+        ],
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_a, **_k: evidence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _e: groups)
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-quote",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert handoff["quote_only_stale_position_ids"] == ("pos-quote",)
+    assert ok is expected_ok
+    if expected_ok:
+        assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
+    else:
+        assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("count", "records"),
+    (
+        (
+            0,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                }
+            ],
+        ),
+        (
+            2,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                },
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                },
+            ],
+        ),
+        (
+            1,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_probability_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                }
+            ],
+        ),
+        (1, ["not-a-record"]),
+    ),
+)
+def test_deploy_live_stuck_monitor_quote_only_records_require_exact_shape(
+    monkeypatch, tmp_path, count, records
+):
+    dl = _load("deploy_live_restart_quote_only_shape", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-quote"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    groups = {
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "restart_blocking_stale_position_count": 0,
+        "restart_blocking_stale_positions": [],
+        "quote_only_stale_position_count": count,
+        "quote_only_stale_positions": records,
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_a, **_k: evidence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _e: groups)
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-quote",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert handoff["quote_only_stale_shape_valid"] is False
+    assert ok is False
+    assert detail == "STUCK_MONITOR_RECOVERY_REFUSED:quote_only_shape_invalid"
 
 
 def test_deploy_live_normal_green_handoff_does_not_use_stuck_monitor_recovery(
