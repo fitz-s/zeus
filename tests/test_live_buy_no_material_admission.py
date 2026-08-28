@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Prove material-bin BUY_NO admission uses native side uncertainty without weakening live gates.
 # Reuse: Re-audit replacement bound identity, receipt plumbing, and legacy-source behavior before relying on it.
 # Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
@@ -25,6 +25,7 @@ from src.calibration.qlcb_provenance import CALIBRATION_SOURCES
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     qkernel_current_state_identity_hash,
     stable_hash,
 )
@@ -76,6 +77,21 @@ def _sealed_global_current_buy_no_economics() -> dict[str, object]:
         "selection_guard_cell_key": "samples-current",
         "selection_guard_n": 64,
         "global_actuation_identity": "actuation-current",
+        "global_winner_event_id": "event-current",
+        "global_auction_receipt": GlobalAuctionReceiptRef(
+            decision_log_id=1,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash="a" * 64,
+            execution_binding_hash="b" * 64,
+            artifact_summary_hash="c" * 64,
+            schema_version=21,
+            winner_event_id="event-current",
+            winner_candidate_id="candidate-current",
+            winner_actuation_identity="actuation-current",
+            selection_epoch_identity="epoch-current",
+        ).as_payload(),
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "global_execution_mode": "TAKER_LIMIT",
         "global_economic_identity": "economic-current",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         "global_candidate_id": "candidate-current",
@@ -116,6 +132,15 @@ def _sealed_global_current_buy_no_economics() -> dict[str, object]:
             "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
         ),
         "global_terminal_payoff_semantics": "BINARY_0_1",
+        "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+        "global_ruin_probability_reduction": 0.0,
+        "global_terminal_ruin_probability_reduction": 0.0,
+        "global_proposal_expected_delta_log_wealth": 0.01,
+        "global_proposal_expected_ev_usd": 2.9,
+        "global_proposal_capital_lock_hours": 24.0,
+        "global_proposal_expected_log_growth_per_hour": 0.01 / 24.0,
+        "global_proposal_expected_capital_efficiency": 0.01,
+        "global_proposal_fill_semantics": "IMMEDIATE_FILL",
     }
     economics["current_state_identity_hash"] = (
         qkernel_current_state_identity_hash(economics)
@@ -160,6 +185,7 @@ def _sealed_global_current_jit_economics() -> dict[str, object]:
     economics.update(
         {
             "global_execution_mode": "TAKER_LIMIT",
+            "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
             "global_winner_event_id": "event-current",
             "global_auction_receipt": GlobalAuctionReceiptRef(
                 decision_log_id=1,
@@ -460,6 +486,7 @@ def test_current_qkernel_mean_redecision_binds_action_q_not_point_q() -> None:
             "payoff_q_point": 0.71,
             "payoff_q_action": 0.58,
             "payoff_q_lcb": 0.56,
+            "global_execution_mode": "TAKER_LIMIT",
             "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
             "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
         }
@@ -494,6 +521,103 @@ def test_current_qkernel_mean_redecision_binds_action_q_not_point_q() -> None:
     assert reason(changed_action) == "qkernel_payoff_q"
     unsealed = {**economics, "current_state_identity_hash": "not-current"}
     assert reason(unsealed) == "qkernel_current_state:current_state_identity_hash"
+
+
+def test_global_current_redecision_preserves_certified_replacement_parent() -> None:
+    economics = _sealed_global_current_jit_economics()
+    for field in (
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+    ):
+        economics.pop(field)
+    action_q = 0.58
+    shares = 10.0
+    cost = 0.32
+    expected_cost = shares * cost
+    loss_payoff = -expected_cost
+    win_payoff = shares - expected_cost
+    wealth_after_loss = 100.0 + loss_payoff
+    wealth_after_win = 100.0 + win_payoff
+    expected_ev = action_q * shares - expected_cost
+    expected_delta_log_wealth = (
+        (1.0 - action_q) * math.log(wealth_after_loss / 100.0)
+        + action_q * math.log(wealth_after_win / 100.0)
+    )
+    economics.update(
+        {
+            "global_probability_authority": "replacement_0_1",
+            "global_posterior_id": 271828,
+            "global_condition_id": "cond-wellington-high-24c",
+            "global_family_key": "Wellington|2026-07-12|high",
+            "q_lcb_authority": "qkernel_payoff_bound",
+            "probability_authority": "qkernel_payoff_direct_route",
+            "pre_qkernel_q_posterior": 0.65,
+            "pre_qkernel_q_lcb_5pct": 0.62,
+            "payoff_q_point": action_q,
+            "payoff_q_action": action_q,
+            "payoff_q_lcb": 0.56,
+            "global_current_sample_payoff_q_mean": action_q,
+            "edge_lcb": 0.56 - cost,
+            "global_execution_mode": "TAKER_LIMIT",
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+            "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+            "edge_expected": action_q - cost,
+            "global_limit_price": str(cost),
+            "global_expected_fill_price_before_fee": str(cost),
+            "global_expected_delta_log_wealth": expected_delta_log_wealth,
+            "global_expected_ev_usd": expected_ev,
+            "global_expected_capital_efficiency": (
+                expected_delta_log_wealth / expected_cost
+            ),
+            "global_proposal_expected_delta_log_wealth": expected_delta_log_wealth,
+            "global_proposal_expected_ev_usd": expected_ev,
+            "global_proposal_expected_log_growth_per_hour": (
+                expected_delta_log_wealth / 24.0
+            ),
+            "global_proposal_expected_capital_efficiency": (
+                expected_delta_log_wealth / expected_cost
+            ),
+            "global_cut_time_win_probability_mean": action_q,
+            "global_cut_time_loss_probability_mean": 1.0 - action_q,
+            "global_terminal_win_probability_mean": action_q,
+            "global_terminal_loss_probability_mean": 1.0 - action_q,
+            "global_cut_time_expected_value_usd": expected_ev,
+            "global_expected_value_usd": expected_ev,
+        }
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    kwargs = {
+        "direction": "buy_no",
+        "q_direction": action_q,
+        "q_lcb": 0.56,
+        "execution_price": 0.32,
+        "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+        "same_bin_yes_posterior": 0.35,
+        "replacement_no_bound_certificate": _REPLACEMENT_NO_CERT,
+        "replacement_no_bound_expected": _REPLACEMENT_NO_EXPECTED,
+        "qkernel_execution_economics": economics,
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 271828,
+        "condition_id": "cond-wellington-high-24c",
+        "token_id": "token-no-current",
+        "family_id": "Wellington|2026-07-12|high",
+        "candidate_id": "candidate-current",
+        **_global_current_parent_kwargs(),
+    }
+
+    assert live_buy_no_conservative_evidence_rejection_reason(**kwargs) is None
+    assert (
+        live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "same_bin_yes_posterior": 0.34}
+        )
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+    )
 
 
 def test_material_yes_buy_no_without_allowed_source_is_rejected_even_with_positive_edge() -> None:
@@ -692,6 +816,12 @@ def test_global_current_parent_mutation_breaks_sealed_identity() -> None:
 def test_resealed_global_parent_transplant_is_rejected(field: str) -> None:
     economics = _sealed_global_current_buy_no_economics()
     economics[field] = f"{field}-transplanted"
+    receipt_ref = dict(economics["global_auction_receipt"])
+    if field == "global_actuation_identity":
+        receipt_ref["winner_actuation_identity"] = economics[field]
+    elif field == "global_selection_epoch_identity":
+        receipt_ref["selection_epoch_identity"] = economics[field]
+    economics["global_auction_receipt"] = receipt_ref
     economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         economics
     )
@@ -791,7 +921,7 @@ def test_receipt_gate_binds_global_current_certificate_to_exact_receipt() -> Non
 
 
 def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:
-    economics = _sealed_global_current_buy_no_economics()
+    economics = _sealed_global_current_jit_economics()
     for field in (
         "global_robust_delta_log_wealth",
         "global_robust_ev_usd",
@@ -818,6 +948,7 @@ def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:
         {
             "payoff_q_point": action_q,
             "payoff_q_action": action_q,
+            "global_execution_mode": "TAKER_LIMIT",
             "global_current_sample_payoff_q_mean": 0.65,
             "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
             "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
@@ -827,6 +958,14 @@ def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:
             "global_expected_delta_log_wealth": expected_delta_log_wealth,
             "global_expected_ev_usd": expected_ev,
             "global_expected_capital_efficiency": (
+                expected_delta_log_wealth / expected_cost
+            ),
+            "global_proposal_expected_delta_log_wealth": expected_delta_log_wealth,
+            "global_proposal_expected_ev_usd": expected_ev,
+            "global_proposal_expected_log_growth_per_hour": (
+                expected_delta_log_wealth / 24.0
+            ),
+            "global_proposal_expected_capital_efficiency": (
                 expected_delta_log_wealth / expected_cost
             ),
             "global_cut_time_win_probability_mean": action_q,
