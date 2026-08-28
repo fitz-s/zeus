@@ -6694,6 +6694,7 @@ def process_current_global_batch(
     selection_cancelled: Callable[[], bool] | None = None,
     final_actuation_cancelled: Callable[[], bool] | None = None,
     held_sell_reauction_requests: tuple[object, ...] = (),
+    required_held_family_keys: frozenset[str] = frozenset(),
     restrict_to_family_keys: frozenset[str] | None = None,
     _probability_supersession_reauction_count: int = 0,
     _market_authority_supersession_reauction_count: int = 0,
@@ -6705,6 +6706,12 @@ def process_current_global_batch(
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
     held_request_tuple = tuple(held_sell_reauction_requests or ())
+    required_held_family_keys = frozenset(
+        str(family_key or "").strip()
+        for family_key in required_held_family_keys
+    )
+    if "" in required_held_family_keys:
+        raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_INVALID")
     held_completion_deadlines: list[datetime] = []
     for request in held_request_tuple:
         if int(getattr(request, "schema_version", 1) or 1) != 4:
@@ -7314,6 +7321,23 @@ def process_current_global_batch(
             )
             for city, target_date, metric in held_families
         )
+        # INV-47 — required generic held-family completion scope. SCOPE: only
+        # the family keys named by this generic wake; it never adds a V4 token
+        # obligation or broadens exact-completion scope. DRAIN: while a target
+        # remains canonically held, every retry rebuilds its current full-q,
+        # book, wealth, and SELL/HOLD/CASH cut in this same batch. RESET: a
+        # terminal decision for every required target clears the wake; a
+        # canonical absence proves that target is no longer exposed and is a
+        # terminal no-trade, rather than an ownerless permanent retry.
+        missing_required_held_family_keys = required_held_family_keys.difference(
+            held_family_keys
+        )
+        if missing_required_held_family_keys:
+            return reject(
+                "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_NO_LONGER_EXPOSED:"
+                + ",".join(sorted(missing_required_held_family_keys)),
+                economic_cut_completed=True,
+            )
         scope_at = current_time()
         proof_buy_candidates_enabled = (
             proof_candidate_policy_rejection_resolver is not None
@@ -7421,6 +7445,14 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
+        missing_required_carrier_keys = required_held_family_keys.difference(
+            full_scope.family_keys
+        )
+        if missing_required_carrier_keys:
+            return reject(
+                "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_CARRIER_MISSING:"
+                + ",".join(sorted(missing_required_carrier_keys))
+            )
         decision_scope = full_scope
         if restrict_to_family_keys is not None:
             current_family_keys = frozenset(full_scope.family_keys)
@@ -7617,6 +7649,14 @@ def process_current_global_batch(
         held_obligation_family_keys = {
             obligation.family_key for obligation in holding_obligations
         }
+        missing_required_obligation_keys = required_held_family_keys.difference(
+            held_obligation_family_keys
+        )
+        if missing_required_obligation_keys:
+            return reject(
+                "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_SCOPE_MISSING:"
+                + ",".join(sorted(missing_required_obligation_keys))
+            )
         full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {
             weather_family_id(
@@ -7641,7 +7681,10 @@ def process_current_global_batch(
             failure_receipt = prepared_receipt
             held_prepare_attempted = bool(
                 prepare_held_event is not None
-                and family_key in held_obligation_family_keys
+                and (
+                    family_key in held_obligation_family_keys
+                    or family_key in required_held_family_keys
+                )
             )
             if held_prepare_attempted:
                 held_receipt = prepare_held_event(scope_event, scope_at)
@@ -7745,6 +7788,14 @@ def process_current_global_batch(
             prepared.probability_witness.family_key
             for prepared in prepared_by_event.values()
         )
+        missing_required_preparation_keys = required_held_family_keys.difference(
+            eligible_family_keys
+        )
+        if missing_required_preparation_keys:
+            return reject(
+                "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE:"
+                + ",".join(sorted(missing_required_preparation_keys))
+            )
         scope = (
             current_global_auction_scope_from_events(
                 tuple(
@@ -7822,6 +7873,14 @@ def process_current_global_batch(
                 prepared.probability_witness.family_key
                 for prepared in prepared_by_event.values()
             )
+            missing_required_book_keys = required_held_family_keys.difference(
+                eligible_family_keys
+            )
+            if missing_required_book_keys:
+                return reject(
+                    "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE:"
+                    + ",".join(sorted(missing_required_book_keys))
+                )
             scope = (
                 current_global_auction_scope_from_events(
                     tuple(
@@ -9104,6 +9163,7 @@ def process_current_global_batch(
                         selection_cancelled=selection_cancelled,
                         final_actuation_cancelled=final_actuation_cancelled,
                         work_context=work_context,
+                        required_held_family_keys=required_held_family_keys,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
                             _probability_supersession_reauction_count

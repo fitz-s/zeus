@@ -54,6 +54,119 @@ def _ctf_units(shares: float) -> int:
     return int(round(float(shares) * _CTF_SCALE))
 
 
+def test_scalar_statistical_sell_queues_family_global_preparation_without_v4_debt(
+    conn,
+    monkeypatch,
+    tmp_path,
+):
+    """A normal replacement scalar wakes canonical q preparation, never V4."""
+
+    from src.engine import cycle_runtime
+    from src.events import reactor
+    from src.events.event_store import EventStore
+    from src.runtime import reactor_wake
+
+    position = SimpleNamespace(
+        trade_id="scalar-replacement-held-sell",
+        city="Paris",
+        target_date="2026-08-28",
+        temperature_metric="high",
+        direction="buy_yes",
+        token_id="scalar-replacement-yes",
+        no_token_id="scalar-replacement-no",
+        last_monitor_at="2026-08-28T12:00:00+00:00",
+        _monitor_probability_receipt={
+            "held_side_probability": 0.8028004,
+            "posterior_id": 9970,
+        },
+    )
+    exit_context = SimpleNamespace(best_bid=0.84)
+
+    # This is the incident shape: the local scalar has a negative exit edge,
+    # but no canonical full-family probability content identity.
+    assert 0.8028004 - 0.84 < 0
+    assert cycle_runtime._monitor_global_sell_request_context(
+        position, exit_context
+    )["probability_content_identity"] == ""
+
+    wake_path = tmp_path / "scalar-family-preparation-wake.json"
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        assert cycle_runtime._request_current_global_family_preparation(
+            position,
+            wake_path=wake_path,
+        )
+        wake = reactor_wake.read_reactor_wake(path=wake_path)
+        assert wake is not None
+        assert wake.forecast_families == (("Paris", "2026-08-28", "high"),)
+        assert wake.held_sell_reauction_requests == ()
+        assert not hasattr(position, "_held_sell_reauction_obligation")
+
+        # The generic wake reaches the existing current-global seam. A fake
+        # terminal no-trade cut proves it is consumable without a V4 request,
+        # local scalar SELL, or venue side effect.
+        batch_calls: list[tuple[object, ...]] = []
+
+        def submit(*_args, **_kwargs):
+            return None
+
+        def process_global_batch(events, *_args, **_kwargs):
+            batch_calls.append(tuple(events))
+            return reactor.GlobalBatchSubmitResult(
+                receipts={},
+                winner_event_id=None,
+                venue_submit_count=0,
+                economic_cut_completed=True,
+            )
+
+        submit.process_global_batch = process_global_batch
+        generic_reactor = reactor.OpportunityEventReactor(
+            EventStore(conn),
+            source_truth_gate=lambda _event: True,
+            executable_snapshot_gate=lambda _event: True,
+            riskguard_gate=lambda _event: True,
+            final_intent_submit=submit,
+            reject=lambda *_args: None,
+        )
+        result = generic_reactor.process_pending(
+            decision_time=datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc),
+            limit=1,
+            allow_empty_global_completion=True,
+        )
+        assert batch_calls == [()]
+        assert result.global_auction_completed_non_cancelled == 1
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    # An incomplete family cannot be published as a generic wake, and a
+    # durable-publication failure cannot fall through to a local scalar SELL.
+    incomplete_position = SimpleNamespace(
+        trade_id="scalar-family-missing-city",
+        city="",
+        target_date="2026-08-28",
+        temperature_metric="high",
+    )
+    missing_wake_path = tmp_path / "missing-family-wake.json"
+    assert not cycle_runtime._request_current_global_family_preparation(
+        incomplete_position,
+        wake_path=missing_wake_path,
+    )
+    assert not missing_wake_path.exists()
+
+    failed_wake_path = tmp_path / "failed-family-wake.json"
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: False,
+    )
+    assert not cycle_runtime._request_current_global_family_preparation(
+        position,
+        wake_path=failed_wake_path,
+    )
+    assert not failed_wake_path.exists()
+    assert not hasattr(position, "_held_sell_reauction_obligation")
+
+
 def _fresh_exit_collateral_payload(
     *,
     token_id: str = YES_TOKEN,

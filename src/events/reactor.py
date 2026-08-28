@@ -8609,7 +8609,8 @@ def run_edli_event_reactor_cycle(
         )
 
     completion_recovery_cycle = bool(
-        held_sell_completion_cycle
+        completion_wake
+        or held_sell_completion_cycle
         or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     )
     paused_forecast_carrier = (
@@ -9433,6 +9434,24 @@ def run_edli_event_reactor_cycle(
             )
             return not completion_wake
         _construct_checkpoint("before_adapter")
+        from src.events.candidate_binding import weather_family_id
+
+        required_held_family_keys = (
+            frozenset(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric.lower(),
+                )
+                for city, target_date, metric in forecast_wake_families
+            )
+            if (
+                completion_wake
+                and forecast_wake_families
+                and not held_sell_completion_cut_requests
+            )
+            else frozenset()
+        )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -9482,6 +9501,7 @@ def run_edli_event_reactor_cycle(
                 else frozenset()
             ),
             held_sell_reauction_requests=held_sell_completion_cut_requests,
+            required_held_family_keys=required_held_family_keys,
             held_family_provider=held_family_provider,
             construction_work_context=construct_context,
         )

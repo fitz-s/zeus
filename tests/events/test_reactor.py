@@ -695,6 +695,235 @@ def test_paused_forecast_held_auction_is_wired_through_reduce_only_completion_cu
     assert materialized < completion_mode < process_pending
 
 
+def test_generic_family_completion_requires_canonical_held_target_before_cut():
+    """A generic wake cannot be completed by an unrelated global family."""
+    from src.engine import global_batch_runtime
+    from src.events.candidate_binding import weather_family_id
+
+    conn, store = _store()
+    assert store is not None
+    event = _forecast_event("required-held-missing")
+    required = weather_family_id(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    decision_at = datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc)
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda *_args: pytest.fail(
+                "missing held target must fail before probability preparation"
+            ),
+            actuate_winner=lambda *_args: pytest.fail(
+                "missing held target must never actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_args: None,
+            current_time_provider=lambda: decision_at,
+            required_held_family_keys=frozenset({required}),
+        )
+    finally:
+        conn.close()
+
+    assert result.economic_cut_completed is True
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_NO_LONGER_EXPOSED:" + required
+    )
+
+
+def test_generic_family_completion_does_not_clear_when_other_family_prepares(
+    monkeypatch,
+):
+    """A target preparation failure remains incomplete even with another q."""
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    from src.engine import global_batch_runtime
+    from src.engine.global_auction_universe import (
+        current_global_auction_scope_from_events,
+    )
+    from src.events.candidate_binding import weather_family_id
+
+    conn, store = _store()
+    assert store is not None
+    target = _forecast_event("required-target")
+    other_payload = json.loads(target.payload_json)
+    other_payload["city"] = "Dallas"
+    other = replace(
+        target,
+        event_id="required-other-family",
+        entity_key="Dallas|2026-05-24|high|required-other",
+        payload_json=json.dumps(other_payload, sort_keys=True),
+    )
+    decision_at = datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc)
+    target_key = weather_family_id(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    other_key = weather_family_id(
+        city="Dallas",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    scope = current_global_auction_scope_from_events(
+        (target, other),
+        captured_at_utc=decision_at,
+    )
+    prepared_calls: list[str] = []
+    held_calls: list[str] = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Chicago", "2026-05-24", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_kwargs: scope,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: SimpleNamespace(economic_identity="wealth"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_obligations",
+        lambda *_args, **_kwargs: (SimpleNamespace(family_key=target_key),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_forecast_carrier_matches",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def prepared_for(event):
+        family_key = target_key if event.event_id == target.event_id else other_key
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=family_key,
+                captured_at_utc=decision_at,
+            )
+        )
+
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (target, other),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda event, _at: (
+                prepared_calls.append(event.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    prepared_global_family=prepared_for(event),
+                )
+            ),
+            prepare_held_event=lambda event, _at: (
+                held_calls.append(event.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:test",
+                )
+            ),
+            actuate_winner=lambda *_args: pytest.fail(
+                "incomplete required target must never actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_args: None,
+            current_time_provider=lambda: decision_at,
+            required_held_family_keys=frozenset({target_key}),
+        )
+    finally:
+        conn.close()
+
+    assert set(prepared_calls) == {target.event_id, other.event_id}
+    assert held_calls == [target.event_id]
+    assert result.economic_cut_completed is False
+    assert result.winner_event_id is None
+    assert all(
+        receipt.reason.startswith(
+            "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE:"
+        )
+        for receipt in result.receipts.values()
+    )
+
+
+def test_generic_family_completion_contract_is_separate_from_exact_v4_scope():
+    """Wake family requirements flow to the real batch without V4 scope reuse."""
+    from src.engine import event_reactor_adapter, global_batch_runtime
+    from src.events import reactor
+
+    adapter_source = inspect.getsource(
+        event_reactor_adapter.event_bound_live_adapter_from_trade_conn
+    )
+    batch_source = inspect.getsource(global_batch_runtime.process_current_global_batch)
+    reactor_source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+
+    assert "required_held_family_keys=required_held_family_keys" in adapter_source
+    assert "required_held_family_keys=required_held_family_keys" in batch_source
+    assert "required_held_family_keys=required_held_family_keys" in reactor_source
+    assert "GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT" in adapter_source
+    assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE" in batch_source
+    assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE" in batch_source
+
+
+def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(
+    tmp_path,
+):
+    """One family wake stays queued until its own global cut is terminal."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "required-family-wake.json"
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        for _ in range(2):
+            assert reactor.request_global_auction_completion(
+                reason="GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED",
+                position_id="held-position",
+                family=("Chicago", "2026-05-24", "high"),
+                wake_path=wake_path,
+            )
+        wakes = reactor_wake.reactor_wakes_since(None, path=wake_path)
+        assert len(wakes) == 1
+        assert wakes[0].forecast_families == (("Chicago", "2026-05-24", "high"),)
+        assert wakes[0].held_sell_reauction_requests == ()
+
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=0),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+        )
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_durable_exact_completion_debt_gets_one_bounded_fairness_turn(monkeypatch):
     from src.events import reactor
     from src.runtime import reactor_wake

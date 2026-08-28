@@ -6720,6 +6720,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
             False,
         ),
         ("UNREGISTERED_STATISTICAL_SELL", False, True, "blocked", False, False),
+        ("UNREGISTERED_STATISTICAL_SELL", False, False, "blocked", False, False),
         ("DAY0_HARD_FACT_BIN_DEAD_FOO", False, True, "blocked", False, False),
         ("RED_FORCE_EXIT", True, True, "direct", False, False),
         ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct", False, False),
@@ -6802,6 +6803,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             "2026-07-14T17:59:59+00:00"
             if posterior_support_zero
             else "2026-07-14T18:00:00+00:00"
+        )
+        setattr(
+            position,
+            monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            True,
         )
         setattr(
             position,
@@ -6971,6 +6977,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     def request_global_completion(**kwargs):
         auction_completion_requests.append(kwargs)
+        if trigger == "UNREGISTERED_STATISTICAL_SELL":
+            # A scalar receipt has no V4-compatible full-q lineage. Its only
+            # legal request is the generic family preparation wake.
+            return request_accepted
         if malformed_request:
             return True, SimpleNamespace(
                 request_id="request-global-auction-owned-sell-malformed"
@@ -7107,6 +7117,64 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert published_requests == []
         assert reserved_requests == []
         assert execute_calls == []
+    elif trigger == "UNREGISTERED_STATISTICAL_SELL":
+        assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert results[0].exit_reason == (
+            "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+            if request_accepted
+            else "GLOBAL_FULL_FAMILY_PREPARATION_UNAVAILABLE"
+        )
+        assert "local_statistical_sell_non_authoritative_record" in (
+            pos.applied_validations
+        )
+        assert "global_statistical_sell_scalar_requires_full_family" in (
+            pos.applied_validations
+        )
+        assert (
+            "global_auction_full_family_preparation:"
+            + ("PUBLISHED" if request_accepted else "PUBLISH_FAILED")
+        ) in pos.applied_validations
+        assert not any(
+            "REQUEST_REJECTED" in validation
+            or "global_auction_completion_debt:" in validation
+            or "global_auction_completion_request_id:" in validation
+            for validation in pos.applied_validations
+        )
+        assert summary[
+            "monitor_statistical_sell_full_family_preparation_requested"
+            if request_accepted
+            else "monitor_statistical_sell_full_family_preparation_failed"
+        ] == 1
+        assert auction_completion_requests == [
+            {
+                "reason": (
+                    "GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED"
+                ),
+                "position_id": pos.trade_id,
+                "family": (
+                    pos.city,
+                    pos.target_date,
+                    pos.temperature_metric,
+                ),
+                "wake_path": None,
+            }
+        ]
+        payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json FROM position_events
+                 WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+                 ORDER BY sequence_no DESC LIMIT 1
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+        )
+        assert "held_sell_reauction_obligation" not in payload
+        assert published_requests == []
+        assert reserved_requests == []
+        assert execute_calls == []
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -7124,11 +7192,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else "global_auction_completion_request_failed"
         )
         assert request_status in pos.applied_validations
-        expected_authority_outcome = (
-            "PROBABILITY_CONTENT"
-            if trigger == "UNREGISTERED_STATISTICAL_SELL"
-            else "COVERAGE_NOT_PUBLISHED"
-        )
+        expected_authority_outcome = "COVERAGE_NOT_PUBLISHED"
         assert (
             f"global_auction_authority_outcome:{expected_authority_outcome}"
             in pos.applied_validations
@@ -7238,23 +7302,13 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else "monitor_statistical_sell_auction_completion_request_failed"
         )
         assert summary[request_summary_key] == 1
-        expected_request_context = (
-            {
-                "probability_content_identity": "",
-                "held_best_bid": None,
-                "bid_observed_at": "",
-                "book_state": "UNKNOWN",
-                "probability_observed_at": "",
-            }
-            if trigger == "UNREGISTERED_STATISTICAL_SELL"
-            else {
-                "probability_content_identity": "probability-content-current",
-                "held_best_bid": 0.49,
-                "bid_observed_at": "2026-07-14T18:00:00+00:00",
-                "book_state": "EXECUTABLE",
-                "probability_observed_at": "",
-            }
-        )
+        expected_request_context = {
+            "probability_content_identity": "probability-content-current",
+            "held_best_bid": 0.49,
+            "bid_observed_at": "2026-07-14T18:00:00+00:00",
+            "book_state": "EXECUTABLE",
+            "probability_observed_at": "",
+        }
         assert auction_completion_requests == [
             {
                 "reason": (

@@ -7493,6 +7493,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_completion_reserved: bool = False,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_sell_reauction_requests: tuple[object, ...] = (),
+    required_held_family_keys: frozenset[str] = frozenset(),
     held_family_provider: Callable[[], object] | None = None,
     construction_work_context: "WorkContext | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
@@ -7571,6 +7572,14 @@ def event_bound_live_adapter_from_trade_conn(
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_INVALID")
     if exact_completion_sell_keys and not selection_completion_reserved:
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED")
+    required_held_family_keys = frozenset(
+        str(family_key or "").strip()
+        for family_key in required_held_family_keys
+    )
+    if "" in required_held_family_keys:
+        raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_INVALID")
+    if required_held_family_keys and exact_completion_sell_keys:
+        raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT")
     exact_completion_family_keys: frozenset[str] | None = None
     if (
         selection_completion_reserved
@@ -11266,6 +11275,7 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
                 held_sell_reauction_requests=held_sell_reauction_requests,
+                required_held_family_keys=required_held_family_keys,
                 # Ordinary proof-only entry evaluation remains global. An exact
                 # held-SELL completion instead owns only the requested actions:
                 # portfolio wealth still carries every holding, while unrelated

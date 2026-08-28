@@ -6299,6 +6299,45 @@ def _monitor_global_sell_request_context(position, exit_context) -> dict[str, ob
     }
 
 
+def _request_current_global_family_preparation(
+    position,
+    *,
+    wake_path=None,
+) -> bool:
+    """Wake the canonical global cut when a local scalar cannot name full q.
+
+    This is deliberately a family-scoped generic completion wake: it carries no
+    held token, scalar probability, or V4 lineage.  The reactor therefore
+    rebuilds the held family's full current q/book/wealth cut through its
+    held-purpose global preparation seam before it can consider SELL/HOLD/CASH.
+    A failed publication leaves no malformed V4 debt behind.
+    """
+
+    family = (
+        str(getattr(position, "city", "") or "").strip(),
+        str(getattr(position, "target_date", "") or "").strip(),
+        str(getattr(position, "temperature_metric", "") or "").strip().lower(),
+    )
+    position_id = str(
+        getattr(position, "position_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    ).strip()
+    if not position_id or not all(family) or family[2] not in {"high", "low"}:
+        return False
+
+    from src.events.reactor import request_global_auction_completion
+
+    return bool(
+        request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED",
+            position_id=position_id,
+            family=family,
+            wake_path=wake_path,
+        )
+    )
+
+
 def _current_monitor_global_holding_coverage(
     *,
     conn,
@@ -9845,7 +9884,40 @@ def execute_monitoring_phase(
                     ).strip(),
                 },
             )
-            if statistical_sell_requires_global and global_holding_coverage.covered:
+            if statistical_sell_requires_global and not probability_content_identity:
+                completion_requested = _request_current_global_family_preparation(
+                    pos
+                )
+                should_exit = False
+                exit_reason = (
+                    "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+                    if completion_requested
+                    else "GLOBAL_FULL_FAMILY_PREPARATION_UNAVAILABLE"
+                )
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "local_statistical_sell_non_authoritative_record",
+                            "global_statistical_sell_scalar_requires_full_family",
+                            (
+                                "global_auction_full_family_preparation:"
+                                f"{'PUBLISHED' if completion_requested else 'PUBLISH_FAILED'}"
+                            ),
+                        ]
+                    )
+                )
+                summary[
+                    "monitor_statistical_sell_full_family_preparation_requested"
+                    if completion_requested
+                    else "monitor_statistical_sell_full_family_preparation_failed"
+                ] = summary.get(
+                    "monitor_statistical_sell_full_family_preparation_requested"
+                    if completion_requested
+                    else "monitor_statistical_sell_full_family_preparation_failed",
+                    0,
+                ) + 1
+            elif statistical_sell_requires_global and global_holding_coverage.covered:
                 coverage = global_holding_coverage.coverage
                 coverage_receipt_id = global_holding_coverage.decision_log_id
                 assert coverage is not None and coverage_receipt_id is not None
