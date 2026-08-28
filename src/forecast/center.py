@@ -652,7 +652,16 @@ def build_center(
             oos = _emos_oos_strength(case)
             shrunk = shrink(mu_emos, toward=mu_consensus, strength=oos)
             mu_candidate = float(shrunk)
-            center_method = "SHRUNK_EMOS"
+            # RECEIPT HONESTY (2026-08-28, fusion-audit item 17): at strength 0
+            # shrink() returns mu_consensus exactly — EMOS moved nothing — yet
+            # this branch used to stamp SHRUNK_EMOS unconditionally, so every
+            # production receipt claimed an EMOS-adjusted center while
+            # emos_oos_strength is structurally 0.0 (no fitted OOS weight is
+            # threaded onto ForecastCase). Stamp SHRUNK_EMOS only when EMOS
+            # actually has weight; the note still records the proposal either
+            # way so the unused mu_emos stays visible in telemetry.
+            if oos > 0.0:
+                center_method = "SHRUNK_EMOS"
             emos_note = (
                 f"emos_mu={mu_emos:.4f} shrunk toward consensus={mu_consensus:.4f} "
                 f"@ strength={oos:.3f} -> candidate={mu_candidate:.4f}; "
