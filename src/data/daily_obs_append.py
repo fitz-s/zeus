@@ -49,7 +49,7 @@ Public API:
   uses `WuDailyScheduler` to find WU cities whose local peak+4h window
   is active, fetches them for today, plus HKO current+prior month on
   every call (idempotent).
-- `catch_up_missing(conn, *, days_back, max_cities)` — daemon boot
+- `catch_up_missing(conn, *, days_back, max_cities)` — bounded repair
   entrypoint: queries data_coverage for MISSING / retry-ready FAILED
   rows within `days_back` and fills them via the same write path.
 """
@@ -1658,6 +1658,25 @@ OGIMET_CITIES: dict[str, _OgimetTarget] = {
     ),
 }
 
+
+def daily_observation_source_for_city(city_name: str) -> str | None:
+    """Return the canonical daily-settlement observation source for a city."""
+    city_cfg = cities_by_name.get(city_name)
+    if city_cfg is None:
+        return None
+    if city_cfg.settlement_source_type == "wu_icao":
+        return WU_SOURCE
+    if city_cfg.settlement_source_type == "hko":
+        return HKO_SOURCE
+    if city_cfg.settlement_source_type == "noaa":
+        target = OGIMET_CITIES.get(city_name)
+        if target is None:
+            raise RuntimeError(
+                f"{city_name}: NOAA daily observation source has no Ogimet mapping"
+            )
+        return target.source_tag
+    return None
+
 _OGIMET_METAR_URL = "https://www.ogimet.com/cgi-bin/getmetar"
 _OGIMET_SYNOP_URL = "https://www.ogimet.com/cgi-bin/getsynop"
 _OGIMET_HEADERS = {"User-Agent": "zeus-ogimet-live/1.0 (research; contact via repo)"}
@@ -1995,15 +2014,16 @@ def catch_up_missing(
     conn,
     *,
     days_back: int = 30,
-    max_cities: int = 46,
+    max_cities: int | None = None,
     rebuild_run_id: Optional[str] = None,
 ) -> dict:
-    """Daemon boot entrypoint: fill data_coverage MISSING rows within N days.
+    """Fill source-applicable data_coverage MISSING rows within N days.
 
     Queries `data_coverage` for WU/HKO rows whose status is MISSING or
     retry-ready FAILED within the last `days_back` days, groups by city,
-    and calls the appropriate appender. Use days_back=7 for routine
-    post-downtime catch-up; use days_back=30 for daemon-wide audit passes.
+    and calls the appropriate appender. Rows stamped for a source that no
+    longer applies to the city are reported and skipped. Use days_back=7 for
+    routine post-downtime catch-up; use days_back=30 for audit passes.
     """
     from src.state.data_coverage import find_pending_fills
 
@@ -2017,9 +2037,13 @@ def catch_up_missing(
     hko_months: set[tuple[int, int]] = set()
     ogimet_by_city: dict[str, list[date]] = {}
     ogimet_sources = {t.source_tag for t in OGIMET_CITIES.values()}
+    inapplicable_pending = 0
     for r in rows:
         target = date.fromisoformat(r["target_date"])
         if target < cutoff:
+            continue
+        if r["data_source"] != daily_observation_source_for_city(r["city"]):
+            inapplicable_pending += 1
             continue
         if r["data_source"] == WU_SOURCE:
             wu_by_city.setdefault(r["city"], []).append(target)
@@ -2030,10 +2054,11 @@ def catch_up_missing(
 
     totals = {"wu_cities_touched": 0, "wu_inserted": 0, "wu_guard_rejected": 0,
               "hko_months_touched": 0, "hko_inserted": 0, "hko_incomplete": 0,
-              "ogimet_cities_touched": 0, "ogimet_inserted": 0, "ogimet_guard_rejected": 0}
+              "ogimet_cities_touched": 0, "ogimet_inserted": 0, "ogimet_guard_rejected": 0,
+              "inapplicable_pending_skipped": inapplicable_pending}
 
     for i, (city_name, dates) in enumerate(wu_by_city.items()):
-        if i >= max_cities:
+        if max_cities is not None and i >= max_cities:
             break
         stats = append_wu_city(city_name, dates, conn, rebuild_run_id=rebuild_run_id)
         totals["wu_cities_touched"] += 1

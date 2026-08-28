@@ -48,6 +48,12 @@ from typing import Iterable, Optional
 import yaml
 
 from src.config import City, cities as ALL_CITIES, cities_by_name
+from src.data.daily_obs_append import (
+    HKO_SOURCE,
+    OGIMET_CITIES,
+    WU_SOURCE,
+    daily_observation_source_for_city,
+)
 from src.data.forecast_source_registry import forecast_table_source_ids
 from src.state.data_coverage import (
     CoverageReason,
@@ -71,8 +77,13 @@ DEFAULT_EXCEPTIONS_PATH = PROJECT_ROOT / "config" / "data_availability_exception
 # is the single source of truth the scanner uses to build expected sets and
 # that live appenders must match when writing coverage rows.
 
+
 SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
-    DataTable.OBSERVATIONS: ("wu_icao_history", "hko_daily_api"),
+    DataTable.OBSERVATIONS: (
+        WU_SOURCE,
+        HKO_SOURCE,
+        *(target.source_tag for target in OGIMET_CITIES.values()),
+    ),
     DataTable.OBSERVATION_INSTANTS: ("openmeteo_archive_hourly",),
     DataTable.SOLAR_DAILY: ("openmeteo_archive_solar",),
     DataTable.FORECASTS: forecast_table_source_ids(),
@@ -86,10 +97,8 @@ def _source_applies_to_city(data_source: str, city: City) -> bool:
     WU-sourced cities use ``wu_icao_history``; HKO-sourced cities use
     ``hko_daily_api``.  For every other table, all cities share the same source.
     """
-    if data_source == "wu_icao_history":
-        return city.settlement_source_type != "hko"
-    if data_source == "hko_daily_api":
-        return city.settlement_source_type == "hko"
+    if data_source in SOURCES_BY_TABLE[DataTable.OBSERVATIONS]:
+        return data_source == daily_observation_source_for_city(city.name)
     return True
 
 

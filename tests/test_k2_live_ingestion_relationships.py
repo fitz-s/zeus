@@ -1,6 +1,6 @@
 # Created: 2026-04-13
-# Last reused/audited: 2026-04-25
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Last reused/audited: 2026-08-28
+# Lifecycle: created=2026-04-13; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Protect K2 live-ingestion and backfill relationship contracts.
 # Reuse: Keep tests fixture-backed; inspect source-routing assumptions before extending.
 # Authority basis: K2 live-ingestion packet; P1 daily observation writer provenance packet.
@@ -30,8 +30,10 @@ import ast
 import inspect
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -44,7 +46,7 @@ from src.data import (
 )
 from src.data import ingestion_guard
 from src.data.hole_scanner import DataTable as ScannerDataTable
-from src.data.hole_scanner import HoleScanner, SOURCES_BY_TABLE
+from src.data.hole_scanner import HoleScanner, SOURCES_BY_TABLE, _source_applies_to_city
 from src.state.data_coverage import (
     CoverageReason,
     CoverageStatus,
@@ -129,6 +131,105 @@ def test_R2_daily_obs_sources_match_registry() -> None:
         f"daily_obs_append.HKO_SOURCE={daily_obs_append.HKO_SOURCE!r} not in "
         f"hole_scanner's OBSERVATIONS sources {expected!r}"
     )
+    assert {
+        target.source_tag for target in daily_obs_append.OGIMET_CITIES.values()
+    } <= set(expected)
+
+
+def test_R2_daily_obs_registry_uses_exact_noaa_proxy_source() -> None:
+    from src.config import cities_by_name
+
+    for city_name, target in daily_obs_append.OGIMET_CITIES.items():
+        city = cities_by_name[city_name]
+        assert _source_applies_to_city(target.source_tag, city)
+        assert not _source_applies_to_city(daily_obs_append.WU_SOURCE, city)
+
+
+def test_R2_daily_obs_catch_up_skips_inapplicable_source(monkeypatch) -> None:
+    rows = [
+        {
+            "city": "Istanbul",
+            "target_date": "2026-08-21",
+            "data_source": daily_obs_append.WU_SOURCE,
+        },
+        {
+            "city": "Istanbul",
+            "target_date": "2026-08-21",
+            "data_source": "ogimet_metar_ltfm",
+        },
+        {
+            "city": "Busan",
+            "target_date": "2026-08-21",
+            "data_source": daily_obs_append.WU_SOURCE,
+        },
+    ]
+    wu_calls: list[tuple[str, list[date]]] = []
+    ogimet_calls: list[tuple[str, list[date]]] = []
+
+    monkeypatch.setattr(
+        "src.state.data_coverage.find_pending_fills",
+        lambda *args, **kwargs: rows,
+    )
+    monkeypatch.setattr(
+        daily_obs_append,
+        "append_wu_city",
+        lambda city, dates, conn, **kwargs: (
+            wu_calls.append((city, dates))
+            or {"inserted": 1, "guard_rejected": 0}
+        ),
+    )
+    monkeypatch.setattr(
+        daily_obs_append,
+        "append_ogimet_city",
+        lambda city, dates, conn, **kwargs: (
+            ogimet_calls.append((city, dates))
+            or {"inserted": 1, "guard_rejected": 0}
+        ),
+    )
+
+    result = daily_obs_append.catch_up_missing(
+        object(),
+        days_back=30,
+        rebuild_run_id="test",
+    )
+
+    assert wu_calls == [("Busan", [date(2026, 8, 21)])]
+    assert ogimet_calls == [("Istanbul", [date(2026, 8, 21)])]
+    assert result["inapplicable_pending_skipped"] == 1
+
+
+def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
+    import src.ingest_main as ingest_main
+
+    @contextmanager
+    def acquired_lock(_name):
+        yield True
+
+    world_conn = MagicMock()
+    forecasts_conn = MagicMock()
+    obs_conn = MagicMock()
+    obs_ctx = MagicMock()
+    obs_ctx.__enter__.return_value = obs_conn
+    obs_ctx.__exit__.return_value = False
+    scanner = MagicMock()
+    scanner.scan_all.return_value = []
+
+    with (
+        patch("src.data.job_lock.acquire_lock", acquired_lock),
+        patch("src.data.hole_scanner.HoleScanner", return_value=scanner),
+        patch("src.state.db.get_world_connection", return_value=world_conn),
+        patch("src.state.db.get_forecasts_connection", return_value=forecasts_conn),
+        patch("src.state.db.get_forecasts_connection_with_world", return_value=obs_ctx),
+        patch(
+            "src.data.daily_obs_append.catch_up_missing",
+            return_value={"wu_inserted": 0},
+        ) as catch_up,
+    ):
+        ingest_main._k2_hole_scanner_tick()
+
+    catch_up.assert_called_once_with(obs_conn, days_back=30)
+    world_conn.close.assert_called_once()
+    forecasts_conn.close.assert_called_once()
 
 
 def test_R2_hourly_instants_source_match_registry() -> None:

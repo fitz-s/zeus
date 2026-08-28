@@ -1614,13 +1614,24 @@ def _k2_forecasts_daily_tick():
 
 @_scheduler_job("ingest_k2_hole_scanner")
 def _k2_hole_scanner_tick():
-    """K2 hole scanner daily patrol (ingest daemon copy).
+    """K2 hole scanner and bounded recent-hole drain (ingest daemon copy).
 
     Acquires advisory lock before running.
+
+    SCOPE: configured daily-observation sources in the most recent 30 days.
+    DRAIN: every daily scanner tick immediately runs the existing guarded
+    source-specific catch-up after recording holes.
+    RESET: a successful observation write moves its exact coverage key to
+    WRITTEN; transient failures retain their existing retry embargo.
     """
     from src.data.job_lock import acquire_lock
+    from src.data.daily_obs_append import catch_up_missing
     from src.data.hole_scanner import HoleScanner
-    from src.state.db import get_world_connection, get_forecasts_connection
+    from src.state.db import (
+        get_forecasts_connection,
+        get_forecasts_connection_with_world,
+        get_world_connection,
+    )
     with acquire_lock("hole_scanner") as acquired:
         if not acquired:
             logger.info("ingest k2_hole_scanner_tick skipped_lock_held")
@@ -1635,6 +1646,9 @@ def _k2_hole_scanner_tick():
         finally:
             conn.close()
             forecasts_conn.close()
+        with get_forecasts_connection_with_world(write_class="bulk") as obs_conn:
+            catch_up = catch_up_missing(obs_conn, days_back=30)
+        logger.info("K2 hole_scanner observation catch-up: %s", catch_up)
 
 
 @_scheduler_job("ingest_k2_obs_tick")
