@@ -5820,6 +5820,7 @@ def _edli_day0_hourly_refresh_due_families(
     *,
     cities: Iterable[Any],
     decision_time: datetime,
+    deadline_monotonic: float | None = None,
 ) -> _Day0HourlyPriorityProbe:
     """Current authorized Day0 facts whose hourly authority is due to refresh.
 
@@ -5858,6 +5859,19 @@ def _edli_day0_hourly_refresh_due_families(
     fact_conn = None
     vector_conn = None
 
+    def deadline_expired() -> bool:
+        return (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        )
+
+    def install_deadline(conn: Any) -> None:
+        if deadline_monotonic is None:
+            return
+        setter = getattr(conn, "set_progress_handler", None)
+        if callable(setter):
+            setter(lambda: 1 if deadline_expired() else 0, 1_000)
+
     def close_connections() -> list[str]:
         errors: list[str] = []
         for role, conn in (("world", fact_conn), ("forecasts", vector_conn)):
@@ -5872,6 +5886,8 @@ def _edli_day0_hourly_refresh_due_families(
     try:
         fact_conn = get_world_connection_read_only()
         vector_conn = get_forecasts_connection_read_only()
+        install_deadline(fact_conn)
+        install_deadline(vector_conn)
     except Exception as exc:  # noqa: BLE001 -- no authority proof means no priority borrow.
         close_errors = close_connections()
         logging.getLogger("zeus.events.reactor").warning(
@@ -5884,6 +5900,8 @@ def _edli_day0_hourly_refresh_due_families(
     read_error = None
     try:
         for city in cities:
+            if deadline_expired():
+                raise TimeoutError("DAY0_HOURLY_PRIORITY_PROBE_DEADLINE_EXPIRED")
             city_name = str(getattr(city, "name", "") or "").strip()
             timezone_name = str(getattr(city, "timezone", "") or "").strip()
             city_obj = city_map.get(city_name)
@@ -5897,6 +5915,10 @@ def _edli_day0_hourly_refresh_due_families(
             if not expected_models:
                 continue
             for metric in ("high", "low"):
+                if deadline_expired():
+                    raise TimeoutError(
+                        "DAY0_HOURLY_PRIORITY_PROBE_DEADLINE_EXPIRED"
+                    )
                 fact = _latest_authorized_day0_fact(
                     fact_conn,
                     city=city_name,
@@ -6137,11 +6159,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
         decision_time = datetime.now(timezone.utc)
+        refresh_budget_seconds = _day0_hourly_refresh_budget_seconds()
+        refresh_deadline_monotonic = time.monotonic() + refresh_budget_seconds
         cities = _rc()
         held_families = sorted(_edli_current_held_position_family_keys())
         priority_probe = _edli_day0_hourly_refresh_due_families(
             cities=cities,
             decision_time=decision_time,
+            deadline_monotonic=refresh_deadline_monotonic,
         )
         try:
             priority_families = _edli_day0_hourly_priority_families(
@@ -6246,12 +6271,26 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 0, priority_city_count - held_city_count
             )
             cursor_advance = 1
+        remaining_budget_seconds = (
+            refresh_deadline_monotonic - time.monotonic()
+        )
+        if remaining_budget_seconds < 1.0:
+            _log.warning(
+                "edli_day0_hourly_refresh deferred: readiness probe exhausted "
+                "cycle budget budget_s=%.3f remaining_s=%.3f",
+                refresh_budget_seconds,
+                max(0.0, remaining_budget_seconds),
+            )
+            return
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
-            budget_s=_day0_hourly_refresh_budget_seconds(),
+            budget_s=remaining_budget_seconds,
             max_cities=max_cities,
-            timeout_s=_day0_hourly_fetch_timeout_seconds(),
+            timeout_s=min(
+                _day0_hourly_fetch_timeout_seconds(),
+                remaining_budget_seconds,
+            ),
             quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
             # Recovery has its own hard ceiling below the held-capital reserve.
