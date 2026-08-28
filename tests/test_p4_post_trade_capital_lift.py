@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-12
+# Last reused or audited: 2026-08-28
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1250,6 +1251,129 @@ def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
             "5000",
         )
     ]
+
+
+def test_capital_evidence_unchanged_frontier_skips_heavy_scan(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    frontier = (11, 22, 33, 44, 55)
+    monkeypatch.setattr(daemon, "_CAPITAL_EVIDENCE_FRONTIER", frontier)
+    monkeypatch.setattr(
+        daemon, "_capital_evidence_change_frontier", lambda: frontier
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_current_regime_capital_evidence_isolated",
+        lambda: pytest.fail("unchanged frontier must not launch the evaluator"),
+    )
+
+    result = daemon._current_regime_capital_evidence_if_changed()
+
+    assert result == {
+        "status": "SKIPPED_UNCHANGED_CAPITAL_FRONTIER",
+        "frontier": frontier,
+    }
+
+
+def test_capital_evidence_changed_frontier_runs_and_commits_after_success(
+    monkeypatch,
+):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    previous = (1, 2, 3, 4, 5)
+    current = (1, 2, 4, 4, 5)
+    monkeypatch.setattr(daemon, "_CAPITAL_EVIDENCE_FRONTIER", previous)
+    monkeypatch.setattr(
+        daemon, "_capital_evidence_change_frontier", lambda: current
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_current_regime_capital_evidence_isolated",
+        lambda: {"verdict": "FAIL"},
+    )
+
+    assert daemon._current_regime_capital_evidence_if_changed() == {
+        "verdict": "FAIL"
+    }
+    assert daemon._CAPITAL_EVIDENCE_FRONTIER == current
+
+
+def test_capital_evidence_failed_scan_does_not_advance_frontier(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    previous = (1, 2, 3, 4, 5)
+    current = (1, 2, 4, 4, 5)
+    monkeypatch.setattr(daemon, "_CAPITAL_EVIDENCE_FRONTIER", previous)
+    monkeypatch.setattr(
+        daemon, "_capital_evidence_change_frontier", lambda: current
+    )
+
+    def fail():
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(
+        daemon, "_current_regime_capital_evidence_isolated", fail
+    )
+
+    with pytest.raises(RuntimeError, match="scan failed"):
+        daemon._current_regime_capital_evidence_if_changed()
+    assert daemon._CAPITAL_EVIDENCE_FRONTIER == previous
+
+
+def test_capital_evidence_frontier_tracks_only_causal_append_facts(
+    monkeypatch,
+    tmp_path,
+):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    schemas = {
+        "zeus_trades.db": (
+            "CREATE TABLE position_events(event_type TEXT);"
+            "CREATE TABLE venue_command_events(event_type TEXT);"
+            "CREATE TABLE execution_fact(filled_at TEXT);"
+        ),
+        "zeus-forecasts.db": (
+            "CREATE TABLE settlement_outcomes("
+            "settlement_id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT);"
+        ),
+        "zeus-world.db": "CREATE TABLE edli_live_order_events(event_type TEXT);",
+    }
+    for name, schema in schemas.items():
+        conn = sqlite3.connect(tmp_path / name)
+        conn.executescript(schema)
+        conn.close()
+    factories = {
+        "get_trade_connection_read_only": "zeus_trades.db",
+        "get_forecasts_connection_read_only": "zeus-forecasts.db",
+        "get_world_connection_read_only": "zeus-world.db",
+    }
+    for function, name in factories.items():
+        monkeypatch.setattr(
+            f"src.state.db.{function}",
+            lambda name=name: sqlite3.connect(tmp_path / name),
+        )
+
+    assert daemon._capital_evidence_change_frontier() == (0, 0, 0, 0, 0)
+
+    trade = sqlite3.connect(tmp_path / "zeus_trades.db")
+    trade.execute(
+        "INSERT INTO position_events(event_type) VALUES ('MONITOR_REFRESHED')"
+    )
+    trade.execute(
+        "INSERT INTO execution_fact(filled_at) VALUES "
+        "('2026-08-28T08:00:00+00:00')"
+    )
+    trade.commit()
+    trade.close()
+    assert daemon._capital_evidence_change_frontier() == (0, 0, 1, 0, 0)
+
+    forecasts = sqlite3.connect(tmp_path / "zeus-forecasts.db")
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes(value) VALUES ('settlement')"
+    )
+    forecasts.commit()
+    forecasts.close()
+    assert daemon._capital_evidence_change_frontier() == (0, 0, 1, 1, 0)
 
 
 def test_capital_evidence_child_revalidates_prior_proof_registry():
