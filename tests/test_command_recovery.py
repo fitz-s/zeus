@@ -34504,6 +34504,94 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
         verified.close()
 
 
+def test_unavailable_identity_submit_does_not_starve_cancel_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    """A timed-out submit point read still yields to an independent cancel."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "identity-unavailable-cancel-fairness.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-unreadable", position_id="pos-unreadable")
+    _advance_to_submitting(
+        seed,
+        command_id="cmd-unreadable",
+        venue_order_id="ord-unreadable",
+    )
+    _insert(seed, command_id="cmd-cancel", position_id="pos-cancel")
+    _advance_to_cancel_pending(
+        seed,
+        command_id="cmd-cancel",
+        venue_order_id="ord-cancel",
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    point_read_timeouts = []
+
+    def _point_orders(_order_ids, *, timeout_seconds):
+        point_read_timeouts.append(timeout_seconds)
+        return {}, True
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        _point_orders,
+    )
+    snapshot = SimpleNamespace(
+        get_order=lambda order_id: (
+            {
+                "orderID": "ord-cancel",
+                "status": "CANCELED",
+                "original_size": "5",
+                "size_matched": "0",
+            }
+            if order_id == "ord-cancel"
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["identity_bound_inflight_point_read_timed_out"] is True
+    assert summary["identity_bound_inflight_yielded_to_other_capital"] is True
+    assert summary["cancel_recovery_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert point_read_timeouts == [pytest.approx(20.0, abs=0.1)]
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+        assert _get_state(verified, "cmd-cancel") == "CANCELLED"
+    finally:
+        verified.close()
+
+
 def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     tmp_path,
     monkeypatch,

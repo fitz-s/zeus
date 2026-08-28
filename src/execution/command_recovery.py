@@ -29339,11 +29339,14 @@ def _reconcile_passes_short_conn(
             # a response that repeats the command's already-persisted order id;
             # unavailable/NOT_FOUND responses remain durable continuations.
             assert_no_open_connection("recovery.identity_bound_inflight_fast")
-            identity_deadline = _capital_deadline()
-            point_read_budget = _identity_bound_point_read_budget_seconds()
-            point_read_budget = min(
-                point_read_budget,
-                max(0.0, identity_deadline - time.monotonic()),
+            assert scheduler_deadline is not None
+            identity_network_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                _identity_bound_point_read_budget_seconds(),
+            )
+            point_read_budget = max(
+                0.0,
+                identity_network_deadline - time.monotonic(),
             )
             if point_read_budget <= 0.0:
                 raw_point_orders, point_read_timed_out = {}, True
@@ -29364,8 +29367,9 @@ def _reconcile_passes_short_conn(
                     venue_order_id=venue_order_id,
                 )
             }
+            identity_apply_deadline = _capital_deadline()
             identity_conn_factory = _capital_apply_conn_factory(
-                identity_deadline,
+                identity_apply_deadline,
             )
             identity_result = _run_capital_pass(
                 "identity_bound_inflight_fast",
@@ -29381,22 +29385,31 @@ def _reconcile_passes_short_conn(
                     snapshot_conn_factory=read_conn_factory,
                     label="recovery.identity_bound_inflight_fast",
                 ),
-                deadline_monotonic=identity_deadline,
+                deadline_monotonic=identity_apply_deadline,
             )
             if identity_result is not None:
                 _accumulate(summary, "identity_bound_inflight_fast", identity_result)
             summary["identity_bound_inflight_priority_active"] = True
-            # A bounded exact-order continuation is the live-tick contract.
-            # Do not let unrelated cancel/terminal candidates re-enter the
-            # account-wide snapshot or historical point sweep after it.
-            return (
-                terminal_fill_review_result
-                or exit_fill_result
-                or preexisting_terminal_result
-                or identity_result
-                or terminal_late_fill_result
-                or preexisting_obligation_result
+            identity_advanced = int(
+                (identity_result or {}).get("advanced", 0) or 0
+            ) > 0
+            other_capital_candidates = bool(
+                cancel_candidates or terminal_candidates or partial_candidates
             )
+            if identity_advanced or not other_capital_candidates:
+                # A bounded exact-order continuation is the live-tick contract.
+                # Defer account-wide and historical reads, but never let an
+                # unavailable submit consume the only turn of independent
+                # cancel/terminal capital release work.
+                return (
+                    terminal_fill_review_result
+                    or exit_fill_result
+                    or preexisting_terminal_result
+                    or identity_result
+                    or terminal_late_fill_result
+                    or preexisting_obligation_result
+                )
+            summary["identity_bound_inflight_yielded_to_other_capital"] = True
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
                 terminal_fill_review_result
