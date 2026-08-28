@@ -5330,11 +5330,19 @@ def _day0_family_snapshot_covers_condition(
 
 
 def _target_day_has_canonical_observation(conn, position: Position) -> bool:
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    table_ref = (
+        "world.observation_instants"
+        if "world" in attached
+        else "observation_instants"
+    )
     return (
         conn.execute(
-            """
+            f"""
             SELECT 1
-              FROM observation_instants
+              FROM {table_ref}
              WHERE city = ?
                AND target_date = ?
              LIMIT 1
@@ -5594,17 +5602,10 @@ def _build_current_global_day0_family_snapshot(
     from src.events.opportunity_event import OpportunityEvent
     from src.state.db import (
         get_forecasts_connection_read_only,
-        get_world_connection_read_only,
+        get_forecasts_connection_with_world_read_only,
     )
-    from src.engine.global_auction_universe import (
-        WorkContext,
-        bounded_work_sqlite,
-    )
+    from src.engine.global_auction_universe import WorkContext
 
-    world = None
-    forecasts = None
-    world_seed = None
-    forecasts_seed = None
     hwm_forecasts = None
     try:
         prepare_deadline = _held_monitor_stage_deadline(
@@ -5618,40 +5619,19 @@ def _build_current_global_day0_family_snapshot(
         hwm_deadline: list[float | None] = [None]
         hwm_handoff_started = [False]
         with ExitStack() as prepare_sqlite:
-            world_seed = get_world_connection_read_only()
-            world = prepare_sqlite.enter_context(
-                (
-                    bounded_work_sqlite(
-                        world_seed,
-                        prepare_context,
-                        stage="held_monitor_probability_prepare:world",
-                        shared_connection=False,
-                        keep_independent_connection_open=True,
-                    )
-                    if isinstance(world_seed, sqlite3.Connection)
-                    else _day0_snapshot_sqlite_read_deadline(
-                        world_seed,
-                        prepare_deadline,
-                    )
-                )
+            forecasts_seed = prepare_sqlite.enter_context(
+                get_forecasts_connection_with_world_read_only()
             )
-            forecasts_seed = get_forecasts_connection_read_only()
             forecasts = prepare_sqlite.enter_context(
-                (
-                    bounded_work_sqlite(
-                        forecasts_seed,
-                        prepare_context,
-                        stage="held_monitor_probability_prepare:forecasts",
-                        shared_connection=False,
-                        keep_independent_connection_open=True,
-                    )
-                    if isinstance(forecasts_seed, sqlite3.Connection)
-                    else _day0_snapshot_sqlite_read_deadline(
-                        forecasts_seed,
-                        prepare_deadline,
-                    )
+                _day0_snapshot_sqlite_read_deadline(
+                    forecasts_seed,
+                    prepare_deadline,
                 )
             )
+            # The attached world schema is part of this read's source identity.
+            # Reopening forecasts alone would discard it before the NOAA
+            # likelihood carrier reads the raw observation ledger.
+            world = forecasts
             prepare_context.checkpoint("held_monitor_probability_prepare:connections")
 
             def _begin_raw_hwm_read() -> float:
@@ -5674,13 +5654,22 @@ def _build_current_global_day0_family_snapshot(
                     hwm_handoff_started[0] = True
                 return float(hwm_deadline[0])
 
+            attached = {
+                str(database[1])
+                for database in world.execute("PRAGMA database_list").fetchall()
+            }
+            opportunity_events_table = (
+                "world.opportunity_events"
+                if "world" in attached
+                else "opportunity_events"
+            )
             row = world.execute(
-                """
+                f"""
             SELECT event_id, event_type, entity_key, source, observed_at,
                    available_at, received_at, causal_snapshot_id, payload_hash,
                    idempotency_key, priority, expires_at, payload_json,
                    schema_version, created_at
-              FROM opportunity_events
+              FROM {opportunity_events_table}
                    INDEXED BY idx_opportunity_events_day0_family_extreme
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(payload_json, '$.city') = ?
@@ -5819,14 +5808,6 @@ def _build_current_global_day0_family_snapshot(
     finally:
         if hwm_forecasts is not None:
             hwm_forecasts.close()
-        if forecasts is not None and forecasts is not forecasts_seed:
-            forecasts.close()
-        if world is not None and world is not world_seed:
-            world.close()
-        if forecasts_seed is not None:
-            forecasts_seed.close()
-        if world_seed is not None:
-            world_seed.close()
 
     witness = prepared.probability_witness
     condition_ids = tuple(binding.condition_id for binding in witness.bindings)

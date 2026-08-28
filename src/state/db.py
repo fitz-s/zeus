@@ -633,6 +633,35 @@ def get_forecasts_connection_read_only(
     )
 
 
+@contextlib.contextmanager
+def get_forecasts_connection_with_world_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+):
+    """Yield forecasts-MAIN plus a read-only ``world`` attachment.
+
+    This is the read authority counterpart to
+    :func:`get_forecasts_connection_with_world`, not a writer shortcut: both
+    database files use SQLite ``mode=ro``, ``query_only`` remains enabled after
+    the attachment, and the context owns the connection lifetime.  It is for
+    one coherent read that needs forecast-class tables and world-class evidence
+    such as ``world.observation_prints``; it must never be used for a cross-DB
+    write transaction.
+    """
+    conn = get_forecasts_connection_read_only(
+        deadline_monotonic=deadline_monotonic,
+    )
+    try:
+        world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+        conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
+        # ``_connect_read_only`` sets this before ATTACH; repeat it so the
+        # full attached connection has an explicit no-write backstop.
+        conn.execute("PRAGMA query_only = ON")
+        yield conn
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # zeus-world.db IN-PROCESS WRITE SERIALIZATION (2026-05-31)
 # --------------------------------------------------------------------------

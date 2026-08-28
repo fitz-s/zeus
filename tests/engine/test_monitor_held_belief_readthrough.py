@@ -41,6 +41,15 @@ import pytest
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 
 
+@contextmanager
+def _monitor_forecast_world_reader(conn):
+    """Test double for the monitor's single forecast-MAIN/world reader."""
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def test_held_a_prime_tel_aviv_eleven_bin_rebuild_has_500_coherent_rows():
     import src.engine.event_reactor_adapter as era
     from src.types.market import Bin as MarketBin
@@ -1163,7 +1172,11 @@ def test_day0_monitor_selects_latest_event_as_of_frozen_decision_time(monkeypatc
         "_target_day_has_canonical_observation",
         lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
     connections = iter((forecasts, hwm))
     monkeypatch.setattr(
         db,
@@ -1209,7 +1222,11 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
     monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
     monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
     monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
     connections = iter((forecasts, hwm))
     observed_connection_deadlines = []
 
@@ -1264,7 +1281,11 @@ def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
 
     monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
     monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
-    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
     monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
     monkeypatch.setattr(
         bundle_reader,
@@ -1285,7 +1306,7 @@ def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
             hwm_deadline_monotonic=time.monotonic() + 2.5,
         )
 
-    assert observed == {"forecast_connections": 1, "hwm_connections": 0}
+    assert observed == {"forecast_connections": 0, "hwm_connections": 0}
 
 
 @pytest.mark.parametrize("probability_use", ["HELD_MONITOR", "REDUCE_ONLY_EXIT"])
@@ -1892,8 +1913,8 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
 
     monkeypatch.setattr(
         db,
-        "get_world_connection_read_only",
-        lambda: read_only(world_path),
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(read_only(world_path)),
     )
     monkeypatch.setattr(
         db,
@@ -1976,10 +1997,7 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
             )
         assert time.monotonic() - started < 1.0
         assert holder.is_alive()
-        assert shared_flags == [
-            ("held_monitor_probability_prepare:world", False),
-            ("held_monitor_probability_prepare:forecasts", False),
-        ]
+        assert shared_flags == []
         for conn in opened:
             with pytest.raises(sqlite3.ProgrammingError):
                 conn.execute("SELECT 1")
@@ -2014,7 +2032,11 @@ def test_day0_hwm_handoff_keeps_independent_prepare_reads_alive(
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: read_only(world_path))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(read_only(world_path)),
+    )
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
@@ -2065,7 +2087,11 @@ def test_day0_prepare_timeout_does_not_start_or_mislabel_hwm(monkeypatch):
     monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
     monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
     monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_with_world_read_only",
+        lambda **_kwargs: _monitor_forecast_world_reader(world),
+    )
     connections = iter((forecasts, hwm))
     monkeypatch.setattr(
         db,
