@@ -99,7 +99,7 @@ class _HeldMonitorBootstrap:
     """One bounded, TRADE-only snapshot reused by the monitor's authority lane."""
 
     portfolio: PortfolioState
-    allocator_refresh: dict
+    allocator_snapshot: dict
 
 
 def preserve_held_sell_reauction_deadline(
@@ -13341,14 +13341,33 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
     position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
     if not position_ids:
         return {"released": 0, "position_ids": []}
-    released = _append_exit_retry_release_events_and_update_projection(
-        conn,
-        position_ids,
-        observed_at=observed_at,
-        release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
-        release_error="allocator_not_configured_released",
-        deadline_monotonic=deadline_monotonic,
+    from src.risk_allocator import (
+        AllocationDenied,
+        assert_global_submit_allows,
+        global_actuation_authority_lease,
     )
+
+    try:
+        with global_actuation_authority_lease():
+            assert_global_submit_allows(reduce_only=True)
+            released = _append_exit_retry_release_events_and_update_projection(
+                conn,
+                position_ids,
+                observed_at=observed_at,
+                release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
+                release_error="allocator_not_configured_released",
+                deadline_monotonic=deadline_monotonic,
+            )
+    except AllocationDenied as exc:
+        logger.info(
+            "Allocator authority changed before exit-retry release: %s",
+            exc.decision.reason,
+        )
+        return {
+            "released": 0,
+            "position_ids": [],
+            "error": exc.decision.reason,
+        }
     changed = int(released.get("released", 0) or 0)
     position_ids = list(released.get("position_ids", []) or [])
     id_set = set(position_ids)
@@ -13361,61 +13380,6 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
         position_ids,
     )
     return released
-
-
-def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict:
-    """Configure risk allocator before held-position exit decisions run.
-
-    The held-position monitor is an independent live lane and can run before the
-    EDLI reactor's allocator refresh after daemon restart. It must not reach the
-    executor with unconfigured risk singletons, because that turns real exit
-    decisions into ``allocator_not_configured`` backoff.
-    """
-
-    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
-    from src.control.ws_gap_guard import summary as _ws_gap_summary
-    from src.risk_allocator import configure_global_allocator, refresh_global_allocator
-    from src.riskguard.riskguard import get_current_level
-
-    try:
-        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
-        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
-        _drawdown_pct = (
-            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
-            if _baseline > 0.0
-            else 0.0
-        )
-        result = refresh_global_allocator(
-            conn,
-            ledger={
-                "current_drawdown_pct": _drawdown_pct,
-                "risk_level": get_current_level().value,
-            },
-            heartbeat=_heartbeat_summary(),
-            ws_status=_ws_gap_summary(),
-        )
-        logger.info(
-            "held-position monitor allocator refresh: configured=%r drawdown_pct=%.3f",
-            result.get("configured"),
-            _drawdown_pct,
-        )
-        return result
-    except Exception as exc:  # noqa: BLE001 - fail closed with explicit state.
-        try:
-            configure_global_allocator(None, None)
-        except Exception:  # noqa: BLE001
-            pass
-        logger.error(
-            "held-position monitor allocator refresh FAILED: %s; exit submit remains fail-closed",
-            exc,
-            exc_info=True,
-        )
-        return {
-            "configured": False,
-            "fail_closed": True,
-            "error": str(exc),
-            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
-        }
 
 
 def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
@@ -13675,18 +13639,25 @@ def _load_held_monitor_bootstrap(
     deadline_monotonic: float,
     target_families: Collection[tuple[str, str, str]] | None,
 ) -> _HeldMonitorBootstrap:
-    """Hydrate held exposure and allocator state in one TRADE-only read unit.
+    """Hydrate held exposure and read the published allocator snapshot.
 
-    SCOPE: one monitor claim's open-position portfolio plus allocator exposure.
-    DRAIN: the next recurring monitor retries after the read contention clears.
-    RESET: every claim opens a new query-only connection and recomputes both
-    values.  Cross-DB authority and all writes remain in the later monitor
-    connection, after this bootstrap has closed.
+    The current held probability is causally independent of a global allocator
+    rebuild.  Recomputing lots, commands, and reconcile findings inside this
+    preparation tranche can consume the only complete probability-read reserve
+    and blind every held position under DB pressure.  The independent allocator
+    refresh lane publishes the process snapshot; an absent snapshot remains
+    fail-closed for submit without suppressing monitor redecision.
+
+    SCOPE: one monitor claim's open-position portfolio and the already-published
+    allocator snapshot. DRAIN: independent allocator refresh publishes a later
+    snapshot while recurring monitor attempts continue. RESET: every claim
+    re-reads both current exposure and the process snapshot.
     """
     from src.engine.cycle_runner import (
         get_held_monitor_bootstrap_connection,
         load_portfolio,
     )
+    from src.risk_allocator import summary as allocator_summary
 
     conn = get_held_monitor_bootstrap_connection(
         deadline_monotonic=deadline_monotonic,
@@ -13705,14 +13676,11 @@ def _load_held_monitor_bootstrap(
                 deadline_monotonic=deadline_monotonic,
             )
             ensure_preparation_live()
-            allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
-                conn,
-                portfolio,
-            )
+            allocator_snapshot = allocator_summary()
             ensure_preparation_live()
             return _HeldMonitorBootstrap(
                 portfolio=portfolio,
-                allocator_refresh=allocator_refresh,
+                allocator_snapshot=allocator_snapshot,
             )
     finally:
         try:
@@ -14080,7 +14048,7 @@ def run_exit_monitor_cycle(
     monitor_completion_marked = False
     try:
         portfolio = bootstrap.portfolio
-        held_monitor_allocator_refresh = bootstrap.allocator_refresh
+        held_monitor_allocator_snapshot = bootstrap.allocator_snapshot
         with _held_monitor_preparation_deadline(
             conn,
             monitor_deadline_monotonic,
@@ -14093,12 +14061,12 @@ def run_exit_monitor_cycle(
                     conn=conn,
                 )
                 ensure_authority_live()
-            summary["held_monitor_allocator_refresh"] = (
-                held_monitor_allocator_refresh
+            summary["held_monitor_allocator_snapshot"] = (
+                held_monitor_allocator_snapshot
             )
             if (
                 target_families is None
-                and held_monitor_allocator_refresh.get("configured")
+                and held_monitor_allocator_snapshot.get("configured")
             ):
                 ensure_authority_live()
                 summary["held_monitor_allocator_retry_release"] = (

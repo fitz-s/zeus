@@ -14,7 +14,9 @@ cancels, redeems, mutates production DB/state artifacts, or authorizes cutover.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -79,6 +81,7 @@ class CapPolicy:
     optimistic_exposure_weight: float = 0.5
     taker_min_depth_micro: int = 50_000_000
     maker_deadline_seconds: int = 30 * 60
+    allocator_authority_max_age_seconds: int = 150
 
     def __post_init__(self) -> None:
         positive_int_fields = (
@@ -87,6 +90,7 @@ class CapPolicy:
             "max_correlated_exposure_micro",
             "taker_min_depth_micro",
             "maker_deadline_seconds",
+            "allocator_authority_max_age_seconds",
         )
         for name in positive_int_fields:
             if int(getattr(self, name)) <= 0:
@@ -561,14 +565,20 @@ _DEFAULT_ALLOCATOR = RiskAllocator()
 _GLOBAL_GOVERNOR: PortfolioGovernor | None = None
 _GLOBAL_ALLOCATOR: RiskAllocator | None = None
 _GLOBAL_GOVERNOR_STATE: GovernorState | None = None
+_GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC: float | None = None
 _GLOBAL_ALLOCATION_LOCK = RLock()
 
 
 def configure_global_allocator(allocator: RiskAllocator | None, governor_state: GovernorState | None = None) -> None:
-    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE
+    global _GLOBAL_ALLOCATOR, _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC, _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_ALLOCATOR = allocator
         _GLOBAL_GOVERNOR_STATE = governor_state
+        _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC = (
+            time.monotonic()
+            if allocator is not None and governor_state is not None
+            else None
+        )
 
 
 @contextmanager
@@ -587,9 +597,11 @@ def global_actuation_authority_lease() -> Iterator[None]:
 
 
 def configure_global_governor_state(governor_state: GovernorState | None) -> None:
-    global _GLOBAL_GOVERNOR_STATE
+    global _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC, _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_GOVERNOR_STATE = governor_state
+        if governor_state is None:
+            _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC = None
 
 
 def clear_global_allocator() -> None:
@@ -599,11 +611,26 @@ def clear_global_allocator() -> None:
 def snapshot_global_auction_capital_authority() -> AuctionCapitalAuthority:
     """Freeze current exposure and caps without freezing actuation readiness."""
 
-    with _GLOBAL_ALLOCATION_LOCK:
-        allocator = _GLOBAL_ALLOCATOR
-    if allocator is None:
-        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
+    allocator, _governor_state = _snapshot_global_actuation_authority()
     return AuctionCapitalAuthority(allocator)
+
+
+def _global_allocator_authority_age_seconds_locked() -> float | None:
+    published_at = _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC
+    if published_at is None:
+        return None
+    age_seconds = time.monotonic() - published_at
+    if not math.isfinite(age_seconds) or age_seconds < 0.0:
+        return None
+    return age_seconds
+
+
+def _global_allocator_authority_is_fresh_locked(allocator: RiskAllocator) -> bool:
+    age_seconds = _global_allocator_authority_age_seconds_locked()
+    return bool(
+        age_seconds is not None
+        and age_seconds <= allocator.cap_policy.allocator_authority_max_age_seconds
+    )
 
 
 def _snapshot_global_actuation_authority() -> tuple[RiskAllocator, GovernorState]:
@@ -612,11 +639,15 @@ def _snapshot_global_actuation_authority() -> tuple[RiskAllocator, GovernorState
     with _GLOBAL_ALLOCATION_LOCK:
         allocator = _GLOBAL_ALLOCATOR
         governor_state = _GLOBAL_GOVERNOR_STATE
-    if allocator is None or governor_state is None:
-        raise AllocationDenied(
-            AllocationDecision(False, "allocator_not_configured", 0)
-        )
-    return allocator, governor_state
+        if allocator is None or governor_state is None:
+            raise AllocationDenied(
+                AllocationDecision(False, "allocator_not_configured", 0)
+            )
+        if not _global_allocator_authority_is_fresh_locked(allocator):
+            raise AllocationDenied(
+                AllocationDecision(False, "allocator_authority_stale", 0)
+            )
+        return allocator, governor_state
 
 
 def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecision:
@@ -679,6 +710,48 @@ def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecis
     return AllocationDecision(True, "allowed", 0, reduce_only=reduce_only)
 
 
+def assert_global_red_force_exit_submit_allows() -> AllocationDecision:
+    """Preserve RED reduction when only allocator freshness has expired.
+
+    The execution layer may call this boundary only after independently
+    validating one canonical ``RED_FORCE_EXIT`` protective authority.  That
+    authority is rebound to a fresh executable snapshot there and a later B2
+    risk attestation must still be RED immediately before command persistence.
+    This narrow boundary therefore ignores only allocator snapshot age; a
+    missing allocator/governor pair or a true kill switch remains blocking.
+    """
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        allocator = _GLOBAL_ALLOCATOR
+        governor_state = _GLOBAL_GOVERNOR_STATE
+        if allocator is None or governor_state is None:
+            raise AllocationDenied(
+                AllocationDecision(
+                    False,
+                    "allocator_not_configured",
+                    0,
+                    reduce_only=True,
+                )
+            )
+        kill_reason = allocator.kill_switch_reason(governor_state)
+        if kill_reason:
+            raise AllocationDenied(
+                AllocationDecision(
+                    False,
+                    kill_reason,
+                    0,
+                    reduce_only=True,
+                )
+            )
+        stale = not _global_allocator_authority_is_fresh_locked(allocator)
+    return AllocationDecision(
+        True,
+        "red_force_exit_allocator_stale_allowed" if stale else "allowed",
+        0,
+        reduce_only=True,
+    )
+
+
 def select_global_order_type(snapshot: Any) -> str:
     """Return the concrete venue order type allowed by the current governor.
 
@@ -702,21 +775,46 @@ def summary() -> dict[str, Any]:
     with _GLOBAL_ALLOCATION_LOCK:
         allocator = _GLOBAL_ALLOCATOR
         governor_state = _GLOBAL_GOVERNOR_STATE
+        age_seconds = _global_allocator_authority_age_seconds_locked()
+        authority_fresh = bool(
+            allocator is not None
+            and governor_state is not None
+            and _global_allocator_authority_is_fresh_locked(allocator)
+        )
     if governor_state is None:
-        return {"configured": False, "entry": {"allow_submit": False, "reason": "allocator_not_configured"}}
+        return {
+            "configured": False,
+            "authority_fresh": False,
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
     if allocator is None:
         return {
             "configured": False,
+            "authority_fresh": False,
             "state": governor_state.to_dict(),
             "kill_switch_reason": "allocator_not_configured",
             "reduce_only": True,
             "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
+    if not authority_fresh:
+        return {
+            "configured": False,
+            "authority_fresh": False,
+            "authority_age_seconds": age_seconds,
+            "authority_max_age_seconds": allocator.cap_policy.allocator_authority_max_age_seconds,
+            "state": governor_state.to_dict(),
+            "kill_switch_reason": "allocator_authority_stale",
+            "reduce_only": True,
+            "entry": {"allow_submit": False, "reason": "allocator_authority_stale"},
         }
     kill_reason = allocator.kill_switch_reason(governor_state)
     reduce_only = allocator.reduce_only_mode_active(governor_state)
     entry_reason = kill_reason or ("reduce_only_mode_active" if reduce_only else "ok")
     return {
         "configured": True,
+        "authority_fresh": True,
+        "authority_age_seconds": age_seconds,
+        "authority_max_age_seconds": allocator.cap_policy.allocator_authority_max_age_seconds,
         "state": governor_state.to_dict(),
         "kill_switch_reason": kill_reason,
         "reduce_only": reduce_only,
@@ -801,6 +899,12 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
         optimistic_exposure_weight=float(data.get("optimistic_exposure_weight", CapPolicy().optimistic_exposure_weight)),
         taker_min_depth_micro=int(data.get("taker_min_depth_micro", CapPolicy().taker_min_depth_micro)),
         maker_deadline_seconds=int(data.get("maker_deadline_seconds", CapPolicy().maker_deadline_seconds)),
+        allocator_authority_max_age_seconds=int(
+            data.get(
+                "allocator_authority_max_age_seconds",
+                CapPolicy().allocator_authority_max_age_seconds,
+            )
+        ),
     )
 
 

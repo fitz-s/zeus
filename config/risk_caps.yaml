@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+# Last reused/audited: 2026-08-28
+# Authority basis: A2 allocator law plus held-monitor stale-authority incident.
 # R3 A2 engineering defaults. Operators may tune these later; absence of this
 # file still loads sane defaults in src/risk_allocator/governor.py.
 max_per_market_micro: 250000000
@@ -15,3 +15,7 @@ ws_gap_seconds_limit: 15
 optimistic_exposure_weight: 0.5
 taker_min_depth_micro: 50000000
 maker_deadline_seconds: 1800
+# The independent execution-authority refresh runs every 60 seconds. Preserve
+# one missed tick plus bounded scheduler jitter, then fail closed; a previously
+# configured process singleton is not perpetual submit authority.
+allocator_authority_max_age_seconds: 150

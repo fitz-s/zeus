@@ -139,8 +139,18 @@ def _assert_risk_allocator_allows_submit(intent: ExecutionIntent):
     return assert_global_allocation_allows(intent)
 
 
-def _assert_risk_allocator_allows_exit_submit():
+def _assert_risk_allocator_allows_exit_submit(
+    *,
+    red_force_exit_authorized: bool = False,
+):
     """Fail before exit command persistence/SDK contact when A2 kill switch is armed."""
+
+    if red_force_exit_authorized:
+        from src.risk_allocator.governor import (
+            assert_global_red_force_exit_submit_allows,
+        )
+
+        return assert_global_red_force_exit_submit_allows()
     from src.risk_allocator import assert_global_submit_allows
 
     return assert_global_submit_allows(reduce_only=True)
@@ -6676,8 +6686,6 @@ def execute_exit_order(
         )
 
     cutover_component = _assert_cutover_allows_submit(IntentKind.EXIT)
-    risk_allocator_decision = _assert_risk_allocator_allows_exit_submit()
-
     # -----------------------------------------------------------------------
     # build phase — pure, no I/O (INV-30)
     # -----------------------------------------------------------------------
@@ -6747,7 +6755,14 @@ def execute_exit_order(
             )
         # The submitted floor and the executable counterparty bid are both
         # action authority.  Neither may leave the absolute live band.
-        selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        selected_order_type = (
+            "FAK"
+            if intent.protective_sell_execution_authority is not None
+            else _select_risk_allocator_order_type(
+                conn,
+                intent.executable_snapshot_id,
+            )
+        )
         try:
             if intent.protective_sell_execution_authority is not None:
                 if str(intent.submit_order_type or "").upper() != "FAK":
@@ -6839,6 +6854,15 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        protective_authority = intent.protective_sell_execution_authority
+        red_force_exit_authorized = bool(
+            marketable_certificate_error is None
+            and getattr(protective_authority, "kind", "") == "RED_FORCE_EXIT"
+            and intent.red_handoff is not None
+        )
+        risk_allocator_decision = _assert_risk_allocator_allows_exit_submit(
+            red_force_exit_authorized=red_force_exit_authorized,
+        )
         if order_type not in {"GTC", "GTD", "FAK"}:
             return OrderResult(
                 trade_id=intent.trade_id,

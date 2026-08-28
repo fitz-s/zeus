@@ -349,7 +349,7 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
     monkeypatch.setattr(
         db_module,
         "get_trade_connection_with_world",
-        lambda **_kwargs: conn,
+        lambda **_kwargs: sqlite3.connect(":memory:"),
     )
     monkeypatch.setattr(
         db_module,
@@ -22123,7 +22123,8 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     assert "get_held_monitor_bootstrap_connection" in bootstrap_source
     assert "open_positions_only=True" in bootstrap_source
     assert bootstrap_source.count("load_portfolio(") == 1
-    assert bootstrap_source.count("_refresh_global_allocator_for_held_position_monitor(") == 1
+    assert "allocator_summary()" in bootstrap_source
+    assert "refresh_global_allocator(" not in bootstrap_source
 
     captured = {}
 
@@ -22320,9 +22321,10 @@ def test_monitor_preparation_interrupt_becomes_typed_deadline(monkeypatch):
     assert conn.busy_ms == 30_000
 
 
-def test_held_monitor_bootstrap_is_trade_only_and_reuses_one_snapshot(monkeypatch):
+def test_held_monitor_bootstrap_uses_published_allocator_without_recompute(monkeypatch):
     from src.engine import cycle_runner
     from src.execution import exit_lifecycle
+    from src import risk_allocator
 
     calls = []
 
@@ -22364,10 +22366,23 @@ def test_held_monitor_bootstrap_is_trade_only_and_reuses_one_snapshot(monkeypatc
         lambda **kwargs: calls.append(("portfolio", kwargs)) or portfolio,
     )
     monkeypatch.setattr(
-        exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda conn, loaded: calls.append(("allocator", conn, loaded))
-        or {"configured": True},
+        risk_allocator,
+        "summary",
+        lambda: calls.append(("allocator_snapshot",))
+        or {
+            "configured": False,
+            "entry": {
+                "allow_submit": False,
+                "reason": "allocator_not_configured",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        risk_allocator,
+        "refresh_global_allocator",
+        lambda *_args, **_kwargs: pytest.fail(
+            "held monitor must not recompute global allocator before probability redecision"
+        ),
     )
 
     bootstrap = exit_lifecycle._load_held_monitor_bootstrap(
@@ -22376,10 +22391,74 @@ def test_held_monitor_bootstrap_is_trade_only_and_reuses_one_snapshot(monkeypatc
     )
 
     assert bootstrap.portfolio is portfolio
-    assert bootstrap.allocator_refresh == {"configured": True}
+    assert bootstrap.allocator_snapshot["configured"] is False
+    assert bootstrap.allocator_snapshot["entry"]["allow_submit"] is False
     assert [call[0] for call in calls].count("portfolio") == 1
-    assert [call[0] for call in calls].count("allocator") == 1
+    assert [call[0] for call in calls].count("allocator_snapshot") == 1
     assert calls[-1] == ("close",)
+
+
+def test_stale_allocator_cannot_release_monitor_retry_after_snapshot(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.execution import exit_lifecycle
+    from src.risk_allocator import CapPolicy, GovernorState, RiskAllocator
+    from src.risk_allocator import configure_global_allocator
+    from src.risk_allocator import governor as governor_module
+
+    clock = [100.0]
+    monkeypatch.setattr(governor_module.time, "monotonic", lambda: clock[0])
+    configure_global_allocator(
+        RiskAllocator(CapPolicy(allocator_authority_max_age_seconds=5)),
+        GovernorState(
+            current_drawdown_pct=0.0,
+            heartbeat_health=HeartbeatHealth.HEALTHY,
+            ws_gap_active=False,
+            unknown_side_effect_count=0,
+            reconcile_finding_count=0,
+        ),
+    )
+
+    class Conn:
+        def execute(self, _sql, _params):
+            return SimpleNamespace(fetchall=lambda: [("position-stale",)])
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_append_exit_retry_release_events_and_update_projection",
+        lambda *_args, **_kwargs: pytest.fail(
+            "expired allocator authority must not release retry debt"
+        ),
+    )
+    clock[0] = 106.0
+    result = exit_lifecycle._release_allocator_config_blocked_exit_retries_after_refresh(
+        Conn(),
+        SimpleNamespace(positions=[]),
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    assert result == {
+        "released": 0,
+        "position_ids": [],
+        "error": "allocator_authority_stale",
+    }
+
+
+def test_red_stale_allocator_bypass_requires_validated_protective_authority():
+    from src.execution import executor
+
+    source = inspect.getsource(executor.execute_exit_order)
+    certificate_check = source.index("marketable_certificate_error =")
+    red_binding = source.index("red_force_exit_authorized = bool(")
+    allocator_gate = source.index(
+        "_assert_risk_allocator_allows_exit_submit(",
+        red_binding,
+    )
+
+    assert certificate_check < red_binding < allocator_gate
+    assert 'getattr(protective_authority, "kind", "") == "RED_FORCE_EXIT"' in source
+    assert "and intent.red_handoff is not None" in source
 
 
 def test_monitor_preparation_cutoff_preserves_one_complete_probability_read(
@@ -22584,6 +22663,11 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
 
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
     def incomplete_monitor(
@@ -22606,9 +22690,8 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
 
     monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", incomplete_monitor)
     monkeypatch.setattr(
-        exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args: {"configured": False},
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -22712,6 +22795,11 @@ def test_exit_monitor_releases_claim_before_slow_portfolio_export(monkeypatch):
 
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
     monkeypatch.setattr(
@@ -22720,9 +22808,8 @@ def test_exit_monitor_releases_claim_before_slow_portfolio_export(monkeypatch):
         lambda *_args, **_kwargs: (True, False),
     )
     monkeypatch.setattr(
-        exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args: {"configured": False},
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -22786,6 +22873,11 @@ def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
 
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
     monkeypatch.setattr(
@@ -22794,9 +22886,8 @@ def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
         lambda *_args, **_kwargs: (False, False),
     )
     monkeypatch.setattr(
-        exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args: {"configured": False},
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -22992,6 +23083,11 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
         "get_connection",
         lambda *, deadline_monotonic: conn,
     )
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
     monkeypatch.setattr(decision_chain, "store_artifact", lambda *_args: 1)
@@ -23001,9 +23097,8 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
         lambda *_args, **kwargs: monitor_kwargs.update(kwargs) or (False, False),
     )
     monkeypatch.setattr(
-        exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args: {"configured": False},
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -25073,7 +25168,16 @@ def test_red_release_writer_lease_failure_is_typed_and_does_not_append(monkeypat
     assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='EXIT_RETRY_RELEASED'").fetchone()[0] == 0
 
 
-def _configure_real_red_executor_call_chain(monkeypatch, conn, *, b2, reader=None, sdk_exception=None, observed_envelopes=None):
+def _configure_real_red_executor_call_chain(
+    monkeypatch,
+    conn,
+    *,
+    b2,
+    reader=None,
+    sdk_exception=None,
+    observed_envelopes=None,
+    use_real_allocator_guard=False,
+):
     """Keep lifecycle and executor real while isolating only external/pure gates."""
     from src.execution import executor, exit_lifecycle
     from src.riskguard import riskguard
@@ -25119,7 +25223,8 @@ def _configure_real_red_executor_call_chain(monkeypatch, conn, *, b2, reader=Non
     monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: False)
     monkeypatch.setattr(executor, "_select_risk_allocator_order_type", lambda *_args, **_kwargs: "FAK")
     monkeypatch.setattr(executor, "_assert_cutover_allows_submit", lambda *_args, **_kwargs: {"component": "cutover", "allowed": True})
-    monkeypatch.setattr(executor, "_assert_risk_allocator_allows_exit_submit", lambda *_args, **_kwargs: {"component": "allocator", "allowed": True})
+    if not use_real_allocator_guard:
+        monkeypatch.setattr(executor, "_assert_risk_allocator_allows_exit_submit", lambda *_args, **_kwargs: {"component": "allocator", "allowed": True})
     monkeypatch.setattr(executor, "_assert_heartbeat_allows_submit", lambda *_args, **_kwargs: {"component": "heartbeat", "allowed": True})
     monkeypatch.setattr(executor, "_assert_ws_gap_allows_submit", lambda *_args, **_kwargs: {"component": "ws_gap", "allowed": True})
     monkeypatch.setattr(executor, "_marketable_sell_certificate_error", lambda *_args, **_kwargs: None, raising=False)
@@ -25171,7 +25276,11 @@ def _configure_real_red_executor_call_chain(monkeypatch, conn, *, b2, reader=Non
         "executable_snapshot_orderbook_top_ask": 0.40,
         "execution_authority_deadline_utc": "",
     })
-    monkeypatch.setattr(exit_lifecycle, "_build_protective_sell_execution_authority", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_build_protective_sell_execution_authority",
+        lambda **_kwargs: SimpleNamespace(kind="RED_FORCE_EXIT"),
+    )
     monkeypatch.setattr("src.state.venue_command_repo._assert_snapshot_gate", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     if reader is None:
@@ -25234,6 +25343,107 @@ def test_real_execute_exit_red_path_commits_command_before_one_sdk_call(monkeypa
     assert replay
     assert len(sdk_calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE intent_kind='EXIT'").fetchone()[0] == 1
+
+
+def test_real_red_executor_uses_protective_authority_when_allocator_ttl_expires(
+    monkeypatch,
+):
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.execution import exit_lifecycle
+    from src.risk_allocator import CapPolicy, GovernorState, RiskAllocator
+    from src.risk_allocator import clear_global_allocator, configure_global_allocator
+    from src.risk_allocator import governor as governor_module
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture("red-stale-allocator-call-chain")
+    intent = exit_lifecycle.build_exit_intent(
+        position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            fresh_prob=0.2,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.4,
+            current_market_price_is_fresh=True,
+            best_bid=0.39,
+            best_ask=0.40,
+            hours_to_settlement=10.0,
+            position_state="active",
+        ),
+    )
+    handoff = exit_lifecycle.persist_red_exit_handoff(
+        conn,
+        position,
+        exit_intent=intent,
+        attestation=RiskAttestation(
+            RiskLevel.RED,
+            "stale-allocator-A",
+            "2026-08-24T00:00:00+00:00",
+            51,
+        ),
+        attempt_id="stale-allocator-attempt",
+    )
+    assert handoff is not None
+    position._red_exit_handoff = handoff
+    b2 = RiskAttestation(
+        RiskLevel.RED,
+        "stale-allocator-B2",
+        "2026-08-24T00:00:01+00:00",
+        time.monotonic_ns(),
+    )
+    clock = [100.0]
+    monkeypatch.setattr(governor_module.time, "monotonic", lambda: clock[0])
+    configure_global_allocator(
+        RiskAllocator(CapPolicy(allocator_authority_max_age_seconds=5)),
+        GovernorState(
+            current_drawdown_pct=0.0,
+            heartbeat_health=HeartbeatHealth.HEALTHY,
+            ws_gap_active=False,
+            unknown_side_effect_count=0,
+            reconcile_finding_count=0,
+        ),
+    )
+    clock[0] = 106.0
+    sdk_calls = _configure_real_red_executor_call_chain(
+        monkeypatch,
+        conn,
+        b2=b2,
+        use_real_allocator_guard=True,
+    )
+    try:
+        result = exit_lifecycle.execute_exit(
+            _make_portfolio(position),
+            position,
+            ExitContext(
+                exit_reason="RED_FORCE_EXIT",
+                fresh_prob=0.2,
+                fresh_prob_is_fresh=True,
+                current_market_price=0.4,
+                current_market_price_is_fresh=True,
+                best_bid=0.39,
+                best_ask=0.40,
+                hours_to_settlement=10.0,
+                position_state="active",
+            ),
+            conn=conn,
+            exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+        )
+    finally:
+        clear_global_allocator()
+
+    assert sdk_calls and len(sdk_calls) == 1, result
+    assert result
+    capability = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM venue_command_events "
+            "WHERE event_type='SUBMIT_REQUESTED'"
+        ).fetchone()[0]
+    )["execution_capability"]
+    allocator = next(
+        component
+        for component in capability["components"]
+        if component["component"] == "risk_allocator"
+    )
+    assert allocator["reason"] == "red_force_exit_allocator_stale_allowed"
 
 
 def test_real_cycle_monitor_red_handoff_reaches_real_executor(tmp_path, monkeypatch):
