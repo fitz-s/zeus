@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-28
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -36820,6 +36820,67 @@ def test_global_auction_trade_receipt_yields_to_registered_monitor(
     verify = sqlite3.connect(trade_path)
     assert verify.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 1
     verify.close()
+
+
+def test_exact_held_sell_receipt_uses_monitor_writer_priority(tmp_path, monkeypatch):
+    from src.engine.global_auction_universe import WorkContext
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteCoordinator,
+        WritePriority,
+    )
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    setup = sqlite3.connect(trade_path)
+    setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    observed_priorities = []
+    original_lease = coordinator.lease
+
+    def recording_lease(*args, **kwargs):
+        observed_priorities.append(kwargs.get("priority"))
+        return original_lease(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "lease", recording_lease)
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(
+        decision_chain,
+        "store_artifact",
+        lambda conn, _artifact: conn.execute(
+            "INSERT INTO receipt_probe VALUES ('persisted')"
+        ).lastrowid,
+    )
+    exact_request = SimpleNamespace(schema_version=4, position_id="held-position")
+    assert global_batch_runtime._global_auction_receipt_write_priority(()) == "standard"
+    assert (
+        global_batch_runtime._global_auction_receipt_write_priority((exact_request,))
+        == "monitor"
+    )
+
+    conn = sqlite3.connect(trade_path)
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=WorkContext(time.monotonic() + 2.0),
+        owner="test_exact_held_sell_receipt",
+        priority=global_batch_runtime._global_auction_receipt_write_priority(
+            (exact_request,)
+        ),
+    )
+
+    assert persist(object()) == 1
+    assert observed_priorities == [WritePriority.MONITOR]
+    assert conn.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 1
+    conn.close()
 
 
 def test_global_auction_trade_receipt_contention_is_typed_deferred(

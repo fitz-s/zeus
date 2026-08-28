@@ -89,6 +89,15 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
 _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
 
+
+def _global_auction_receipt_write_priority(
+    held_sell_reauction_requests: Sequence[object],
+) -> str:
+    """Give an exact reduce-only held-SELL receipt monitor writer priority."""
+
+    return "monitor" if held_sell_reauction_requests else "standard"
+
+
 class _GlobalArtifactCommitRevoked(RuntimeError):
     """A receipt lost current authority before its durable commit."""
 
@@ -103,6 +112,7 @@ def _global_auction_trade_write_lease(
     *,
     work_context: WorkContext | None,
     owner: str,
+    priority: str = "standard",
 ):
     """Admit one canonical auction write behind MONITOR without leasing fixtures."""
 
@@ -141,13 +151,14 @@ def _global_auction_trade_write_lease(
         WritePriority,
         default_runtime_write_coordinator,
     )
+    resolved_priority = WritePriority(str(priority))
 
     try:
         with default_runtime_write_coordinator().lease(
             (DBIdentity.TRADE,),
             owner=owner,
             write_class=WriteClass.LIVE,
-            priority=WritePriority.STANDARD,
+            priority=resolved_priority,
             deadline_ms=deadline_ms,
             max_hold_ms=_GLOBAL_AUCTION_WRITE_MAX_HOLD_MS,
         ) as lease:
@@ -170,6 +181,7 @@ def _global_auction_artifact_persister(
     *,
     work_context: WorkContext | None,
     owner: str,
+    priority: str = "standard",
     before_commit: Callable[[], str | None] | None = None,
 ) -> Callable[[object], int | None]:
     """Build the only durable auction unit: INSERT plus guarded commit."""
@@ -182,6 +194,7 @@ def _global_auction_artifact_persister(
             conn,
             work_context=work_context,
             owner=owner,
+            priority=priority,
         ) as lease:
             before_changes = conn.total_changes
             try:
@@ -8489,6 +8502,13 @@ def process_current_global_batch(
                         trade_conn,
                         work_context=work_context,
                         owner="global_auction_selection_receipt",
+                        # SCOPE: only a cut carrying an exact durable held-SELL
+                        # request. DRAIN: its immutable receipt commits before
+                        # any venue side effect. RESET: an empty request tuple
+                        # leaves ordinary BUY-capable auctions STANDARD.
+                        priority=_global_auction_receipt_write_priority(
+                            held_request_tuple
+                        ),
                         before_commit=(
                             lambda: (
                                 "HELD_SELL_DEADLINE_EXPIRED"
