@@ -8074,11 +8074,37 @@ def _execute_live_exit(
                 },
             )
 
-        # Quick fill check (non-blocking — next cycle does full check)
-        if order_id and clob:
+        # The executor may already have persisted exact full-fill truth from
+        # the submit response.  Consume that durable seam before a second venue
+        # read: point-order status can report MATCHED, which is not full-close
+        # authority by itself and previously stranded a proven FILL_CONFIRMED
+        # command at EXIT_ORDER_POSTED until network-dependent recovery ran.
+        immediate_fill_price = (
+            _extract_fill_price_decimal(sell_result)
+            if sell_result.status == "filled"
+            and sell_result.command_state == "FILLED"
+            else None
+        )
+        if immediate_fill_price is not None:
+            status = "CONFIRMED"
+            status_payload = {
+                "status": status,
+                "remaining_size": "0",
+                "matched_size": str(exit_intent.shares),
+                "avgPrice": str(immediate_fill_price),
+            }
+        elif order_id and clob:
             status, status_payload = _check_order_fill(clob, order_id)
+        else:
+            status, status_payload = None, {}
+
+        # Quick fill check (non-blocking — next cycle does full check)
+        if immediate_fill_price is not None or (order_id and clob):
             if status in FILL_STATUSES:
-                actual_price_decimal = _extract_fill_price_decimal(status_payload)
+                actual_price_decimal = (
+                    immediate_fill_price
+                    or _extract_fill_price_decimal(status_payload)
+                )
                 if actual_price_decimal is None:
                     _mark_exit_fill_economics_missing(
                         position,

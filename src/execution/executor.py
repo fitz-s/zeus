@@ -8039,6 +8039,14 @@ def execute_exit_order(
                     else "sell order posted"
                 )
             ),
+            fill_price=(
+                float(fill_price)
+                if fill_event_type == "FILL_CONFIRMED"
+                else None
+            ),
+            filled_at=(
+                ack_time if fill_event_type == "FILL_CONFIRMED" else None
+            ),
             order_id=order_id,
             submitted_price=limit_price,
             shares=shares,
