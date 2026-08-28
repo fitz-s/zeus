@@ -377,11 +377,6 @@ _MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
 _MAKER_FILL_DKW_DELTA = Decimal("0.01")
 _MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
 _MAKER_FILL_SAMPLE_MODEL = "empirical_price_improved_gtc_deadline_dkw99_v1"
-# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 8: a
-# convex entry (held side price below this) exits only on belief reversal or
-# emergency, never on capital-velocity reallocation — GLOBAL_CAPITAL_OPTIMAL_SELL
-# is not eligible for it.
-CONVEX_HOLD_PRICE_THRESHOLD = Decimal("0.25")
 
 
 @dataclass(frozen=True)
@@ -664,37 +659,6 @@ def _current_held_obligations(
             )
         )
     return tuple(sorted(obligations, key=lambda row: row.position_id))
-
-
-def _convex_hold_exempt_position_ids(portfolio_state: object) -> frozenset[str]:
-    """Position ids whose entry economics are convex (avg entry price below
-    ``CONVEX_HOLD_PRICE_THRESHOLD``) and therefore ineligible for the
-    capital-velocity GLOBAL_CAPITAL_OPTIMAL_SELL reallocation objective.
-
-    Reads only the position's own typed ``effective_exposure().avg_price``
-    (fill/chain-derived, never a forbidden local-ledger authority column) —
-    see docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 8.
-    A position with no positive avg entry price is not exempt (nothing to
-    classify as convex); it stays eligible for the ordinary capital-velocity
-    objective.
-    """
-
-    exempt: set[str] = set()
-    for position in tuple(getattr(portfolio_state, "positions", ()) or ()):
-        position_id = str(
-            getattr(position, "position_id", "")
-            or getattr(position, "trade_id", "")
-            or ""
-        ).strip()
-        if not position_id:
-            continue
-        effective_exposure = getattr(position, "effective_exposure", None)
-        if not callable(effective_exposure):
-            continue
-        avg_price = float(getattr(effective_exposure(), "avg_price", 0.0) or 0.0)
-        if 0.0 < avg_price < float(CONVEX_HOLD_PRICE_THRESHOLD):
-            exempt.add(position_id)
-    return frozenset(exempt)
 
 
 def _expected_holding_coverage_key(
@@ -7629,18 +7593,12 @@ def process_current_global_batch(
         selection_state = None
         selection_wealth = None
         holding_obligations: tuple[_CurrentHeldObligation, ...] = ()
-        convex_hold_exempt_position_ids: frozenset[str] = frozenset()
         if held_families:
             selection_state, selection_wealth = capture_selection_wealth()
             holding_obligations = (
                 _current_held_obligations(selection_state, selection_wealth)
                 if selection_state is not None
                 else ()
-            )
-            convex_hold_exempt_position_ids = (
-                _convex_hold_exempt_position_ids(selection_state)
-                if selection_state is not None
-                else frozenset()
             )
         claimed_by_family = {}
         duplicate_owner_by_event: dict[str, str] = {}
@@ -7813,11 +7771,6 @@ def process_current_global_batch(
                 _current_held_obligations(selection_state, selection_wealth)
                 if selection_state is not None
                 else ()
-            )
-            convex_hold_exempt_position_ids = (
-                _convex_hold_exempt_position_ids(selection_state)
-                if selection_state is not None
-                else frozenset()
             )
         selection_wealth_economic_identity = str(
             getattr(selection_wealth, "economic_identity", "") or ""
@@ -8071,25 +8024,6 @@ def process_current_global_batch(
                 # fresh buy_candidates_enabled authority.
                 if not buy_candidates_enabled and action == "BUY":
                     return "GLOBAL_BUY_CANDIDATES_DISABLED"
-                # SCOPE: auction SELL candidates on a convex held position —
-                # blocks both capital-velocity GLOBAL_CAPITAL_OPTIMAL_SELL and
-                # auction-routed statistical sells (q is cardinal-disqualified,
-                # so a q-scored sell is not a valid convex exit trigger —
-                # reversal_plan_tier0 item 8). DRAIN: hard-fact zero-support
-                # direct sells (POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES, routed
-                # in cycle_runtime outside this auction), RED force exits, and
-                # operational emergencies are untouched. RESET: avg entry
-                # price at or above CONVEX_HOLD_PRICE_THRESHOLD restores
-                # ordinary auction eligibility.
-                if (
-                    action == "SELL"
-                    and str(getattr(candidate, "position_id", "") or "")
-                    in convex_hold_exempt_position_ids
-                ):
-                    return (
-                        "GLOBAL_SELL_CONVEX_HOLD_EXEMPT:"
-                        f"{CONVEX_HOLD_PRICE_THRESHOLD}"
-                    )
                 key = (
                     action,
                     str(getattr(candidate, "family_key", "") or ""),
