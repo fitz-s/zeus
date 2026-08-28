@@ -25225,13 +25225,13 @@ def _reconcile_authenticated_entry_trade_fact(
     order_type = order_type.removesuffix("_LIMIT")
     filled_notional = filled * fill_price
     submitted_notional = requested * submitted_price
-    price_improved_fak_overfill = bool(
+    price_improved_taker_overfill = bool(
         share_overfill
         and str(command.get("side") or "").upper() == "BUY"
-        and order_type == "FAK"
+        and order_type in {"FAK", "FOK"}
         and filled_notional <= submitted_notional
     )
-    if share_overfill and not price_improved_fak_overfill:
+    if share_overfill and not price_improved_taker_overfill:
         raise ValueError(
             "authenticated entry fill exceeds submitted share/capital bound"
         )
@@ -25306,8 +25306,8 @@ def _reconcile_authenticated_entry_trade_fact(
         "filled_notional": _decimal_text(filled_notional),
         "submitted_notional": _decimal_text(submitted_notional),
         "fill_bound_semantics": (
-            "PRICE_IMPROVED_FAK_NOTIONAL_BOUNDED"
-            if price_improved_fak_overfill
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+            if price_improved_taker_overfill
             else "SHARE_AND_NOTIONAL_BOUNDED"
         ),
         "remaining_size": _decimal_text(remaining),
@@ -25319,7 +25319,7 @@ def _reconcile_authenticated_entry_trade_fact(
             "authenticated_confirmed_trade_facts": True,
             "fill_price_respects_submitted_limit": True,
             "cumulative_fill_within_submitted_capital_bound": True,
-            "price_improved_fak_share_overfill": price_improved_fak_overfill,
+            "price_improved_taker_share_overfill": price_improved_taker_overfill,
         },
         "source_proof": {
             "source_function": (

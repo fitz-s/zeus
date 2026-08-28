@@ -5481,25 +5481,27 @@ class TestAuthenticatedEntryTradeFactProjection:
         ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
-    def test_price_improved_fak_overfill_bootstraps_missing_position(
-        self, conn, monkeypatch
+    @pytest.mark.parametrize("order_type", ["FAK", "FOK"])
+    def test_price_improved_taker_overfill_bootstraps_missing_position(
+        self, conn, monkeypatch, order_type
     ):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
         )
 
-        command_id = "cmd-authenticated-fak-price-improvement"
-        position_id = "pos-authenticated-fak-price-improvement"
-        order_id = "ord-authenticated-fak-price-improvement"
-        token_id = "tok-authenticated-fak-price-improvement"
+        suffix = order_type.lower()
+        command_id = f"cmd-authenticated-{suffix}-price-improvement"
+        position_id = f"pos-authenticated-{suffix}-price-improvement"
+        order_id = f"ord-authenticated-{suffix}-price-improvement"
+        token_id = f"tok-authenticated-{suffix}-price-improvement"
         _insert(
             conn,
             command_id=command_id,
             position_id=position_id,
-            decision_id="dec-authenticated-fak-price-improvement",
+            decision_id=f"dec-authenticated-{suffix}-price-improvement",
             token_id=token_id,
             event_slug="highest-temperature-in-singapore-on-july-24-2026-30c",
-            order_type="FAK",
+            order_type=order_type,
             size=173.0,
             price=0.09,
         )
@@ -5576,7 +5578,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             conn,
             command_id=command_id,
             order_id=order_id,
-            trade_id="trade-authenticated-fak-price-improvement",
+            trade_id=f"trade-authenticated-{suffix}-price-improvement",
             filled_size="189.77",
             fill_price="0.08",
         )
