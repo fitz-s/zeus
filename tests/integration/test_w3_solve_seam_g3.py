@@ -6089,6 +6089,28 @@ def _stale_day0_carrier_and_current_observations():
     return conn, carrier
 
 
+def test_latest_authorized_day0_fact_sample_count_is_causal():
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, _carrier = _stale_day0_carrier_and_current_observations()
+    try:
+        fact = current_plan._latest_authorized_day0_fact(
+            conn,
+            city="Moscow",
+            target_date="2026-07-10",
+            temperature_metric="high",
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert fact is not None
+    assert fact["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert fact["sample_count"] == 2
+
+
 def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     conn, carrier = _stale_day0_carrier_and_current_observations()
     conditioning = {
