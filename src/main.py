@@ -4832,7 +4832,6 @@ def _edli_event_reactor_cycle(
         _settings_section("edli", {})
     )
     canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
-    canonical_monitor_debt_at_start = canonical_monitor_entry_block is not None
     if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
         monitor_entry_block = None
@@ -4884,23 +4883,21 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_successor_pending.is_set()
-                or (
-                    not canonical_monitor_debt_at_start
-                    and monitor_entry_block is None
-                    and _held_position_monitor_debt_pending()
-                )
+                or _held_position_monitor_canonical_debt.is_set()
+                or _held_position_monitor_handoff_pending.is_set()
             )
         ),
         held_position_monitor_debt_pending=(
-            # Debt already present at admission is carried by the exact family
-            # BUY block. Debt that first appears after admission cancels this
-            # replayable cut so the next cut can rebuild that scope.
+            # SCOPE: any ordinary global cut while canonical held-monitor
+            # coverage is overdue.  DRAIN: the cut exits at its next SQLite
+            # checkpoint, releases its snapshots and active lock, then the
+            # monitor owns the next tranche.  RESET: current canonical monitor
+            # evidence clears the debt.  A family BUY block is not sufficient:
+            # it cannot let a broad auction retain the monitor's writer lane.
             lambda: (
                 _periodic_held_position_monitor_fairness_debt.is_set()
-                or (
-                    not canonical_monitor_debt_at_start
-                    and _held_position_monitor_debt_pending()
-                )
+                or _held_position_monitor_canonical_debt.is_set()
+                or _held_position_monitor_handoff_pending.is_set()
             )
         ),
     )
@@ -8656,7 +8653,16 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
     from src.events.reactor import run_edli_continuous_redecision_screen_cycle
 
-    run_edli_continuous_redecision_screen_cycle(screen_lock=_edli_redecision_screen_lock)
+    run_edli_continuous_redecision_screen_cycle(
+        screen_lock=_edli_redecision_screen_lock,
+        # This callback executes from SQLite's progress handler.  It must stay
+        # O(1): canonical debt is maintained by the monitor recovery reader,
+        # and handoff is the monitor's explicit ownership claim.
+        monitor_preempt_requested=lambda: (
+            _held_position_monitor_canonical_debt.is_set()
+            or _held_position_monitor_handoff_pending.is_set()
+        ),
+    )
 
 
 

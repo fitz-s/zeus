@@ -32,6 +32,7 @@ connection inside the same cycle.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import json
@@ -116,6 +117,10 @@ class TerminalExitHeldTokenMismatch(RuntimeError):
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+# Priming is a read-only identity scan.  Keep its interrupt cadence tight
+# enough that a monitor waiter can preempt a large CTE before it holds a read
+# snapshot for a material part of the scheduler tick.
+_RECOVERY_PRIMING_PROGRESS_OPCODES = 1_000
 # Current cancel/unknown rows can freeze every new entry while still retaining
 # venue exposure. Give only that exact capital-release lane a short retry
 # window: the general live tick remains a nowait 100ms probe, and an announced
@@ -27548,6 +27553,17 @@ def _recovery_priority_conn_factory(
     return _factory
 
 
+def _install_recovery_read_deadline(conn, deadline_monotonic: float) -> None:
+    """Install the legacy bounded-read deadline callback on ``conn``."""
+
+    set_progress_handler = getattr(conn, "set_progress_handler", None)
+    if callable(set_progress_handler):
+        set_progress_handler(
+            lambda: int(time.monotonic() >= deadline_monotonic),
+            _LIVE_TICK_DB_PROGRESS_OPCODES,
+        )
+
+
 def _recovery_read_conn_factory(
     conn_factory,
     *,
@@ -27562,12 +27578,7 @@ def _recovery_read_conn_factory(
         conn = conn_factory()
         try:
             conn.execute("PRAGMA busy_timeout = 0")
-            set_progress_handler = getattr(conn, "set_progress_handler", None)
-            if callable(set_progress_handler):
-                set_progress_handler(
-                    lambda: int(time.monotonic() >= deadline_monotonic),
-                    _LIVE_TICK_DB_PROGRESS_OPCODES,
-                )
+            _install_recovery_read_deadline(conn, deadline_monotonic)
         except BaseException:
             conn.close()
             raise
@@ -27685,6 +27696,111 @@ def _run_recovery_pass_with_lock_policy(
                 len(lock_retry_delays) + 1,
             )
             time.sleep(delay)
+
+
+def _recovery_priming_monitor_preempt_requested() -> bool:
+    """Return whether the monitor has reserved the trade writer turn.
+
+    Priming must never acquire the writer lease.  The callback is intentionally
+    fail-closed: if coordinator state cannot be read, the expensive read is
+    interrupted and the caller defers the whole priming/apply continuation.
+    """
+
+    try:
+        from src.state.write_coordinator import (
+            DBIdentity,
+            default_runtime_write_coordinator,
+        )
+
+        return bool(
+            default_runtime_write_coordinator().has_pending_monitor_waiter(
+                (DBIdentity.TRADE,)
+            )
+        )
+    except BaseException:  # noqa: BLE001 - preemption state must fail closed.
+        logger.warning(
+            "recovery: priming monitor-preempt callback failed; interrupting read",
+            exc_info=True,
+        )
+        return True
+
+
+@contextlib.contextmanager
+def _open_recovery_priming_read_connection(
+    conn_factory,
+    *,
+    deadline_monotonic: float,
+    preempt_callback: Callable[[], bool] | None = None,
+    state: dict[str, str] | None = None,
+):
+    """Open, interrupt, and close the priming connection as one RO unit.
+
+    The production ``default_trade_read_conn_factory`` opens a ``mode=ro``
+    SQLite URI without writer flocks.  ``query_only`` is asserted here too so
+    test/fallback factories cannot accidentally turn the priming phase into a
+    write path.  Cleanup is kept inside this context rather than delegated to
+    the caller: clear the progress handler, rollback any read snapshot, and
+    close before APPLY can acquire a writer lease.
+    """
+
+    conn = None
+    try:
+        if time.monotonic() >= deadline_monotonic:
+            raise _LiveTickDBBudgetExhausted
+        conn = conn_factory()
+        conn.execute("PRAGMA query_only = ON")
+        query_only = conn.execute("PRAGMA query_only").fetchone()
+        if query_only is not None and int(query_only[0]) != 1:
+            raise RuntimeError("recovery priming connection is not query_only")
+
+        def _interrupt_priming_read() -> int:
+            try:
+                if time.monotonic() >= deadline_monotonic:
+                    if state is not None:
+                        state["reason"] = "deadline"
+                    return 1
+                if preempt_callback is not None and preempt_callback():
+                    if state is not None:
+                        state["reason"] = "monitor_preempted"
+                    return 1
+            except BaseException:  # noqa: BLE001 - callback failure is preempt.
+                if state is not None:
+                    state["reason"] = "monitor_preempted"
+                logger.warning(
+                    "recovery: priming interrupt callback failed; interrupting read",
+                    exc_info=True,
+                )
+                return 1
+            return 0
+
+        conn.set_progress_handler(
+            _interrupt_priming_read,
+            _RECOVERY_PRIMING_PROGRESS_OPCODES,
+        )
+        yield conn
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except Exception:  # noqa: BLE001 - still attempt rollback/close.
+                logger.debug(
+                    "recovery: priming progress-handler cleanup failed",
+                    exc_info=True,
+                )
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - still close the read connection.
+                logger.debug(
+                    "recovery: priming read rollback failed",
+                    exc_info=True,
+                )
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - cleanup is best effort after read.
+                logger.warning(
+                    "recovery: priming read connection close failed",
+                    exc_info=True,
+                )
 
 
 def _active_venue_command_priming_rows(
@@ -30119,9 +30235,25 @@ def _reconcile_passes_short_conn(
         summary["deferred_full_sweep"] = True
         return
 
-    # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
+    # -- PHASE 1: SNAPSHOT (collect priming keys on an independent RO connection)
+    # ``restart_preflight`` may be called without a scheduler deadline.  It
+    # still gets a hard priming bound so a historical CTE cannot pin recovery
+    # indefinitely before the first APPLY lease is attempted.
+    priming_deadline = scheduler_deadline
+    if priming_deadline is None:
+        priming_deadline = time.monotonic() + (
+            _RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS
+            if scope == "restart_preflight"
+            else scheduled_recovery_budget_seconds()
+        )
+    priming_state: dict[str, str] = {}
     try:
-        with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
+        with _open_recovery_priming_read_connection(
+            read_conn_factory,
+            deadline_monotonic=priming_deadline,
+            preempt_callback=_recovery_priming_monitor_preempt_requested,
+            state=priming_state,
+        ) as conn:
             priming = _collect_recovery_priming_keys(conn, scope=scope)
     except _LiveTickDBBudgetExhausted:
         summary["db_budget_deferred"] = True
@@ -30131,10 +30263,25 @@ def _reconcile_passes_short_conn(
         summary["deferred_full_sweep"] = True
         return
     except sqlite3.OperationalError as exc:
+        if priming_state.get("reason") == "monitor_preempted":
+            summary["monitor_preempted"] = True
+            summary["monitor_preempted_at"] = "priming_snapshot"
+            summary["db_lock_deferred"] = True
+            summary["db_lock_deferred_at"] = "priming_snapshot"
+            summary["db_lock_deferred_count"] = 1
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
+        if priming_state.get("reason") == "deadline":
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = "priming_snapshot"
+            summary["db_budget_deferred_count"] = 1
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
         if (
             "interrupted" in str(exc).lower()
-            and scheduler_deadline is not None
-            and time.monotonic() >= scheduler_deadline
+            and time.monotonic() >= priming_deadline
         ):
             summary["db_budget_deferred"] = True
             summary["db_budget_deferred_at"] = "priming_snapshot"

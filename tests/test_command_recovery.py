@@ -1814,6 +1814,119 @@ def test_bounded_recovery_read_factory_interrupts_query_at_deadline(monkeypatch)
         conn.close()
 
 
+def test_priming_read_unit_is_query_only_and_closes_after_rollback(tmp_path):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-ro.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE candidates (value INTEGER)")
+    seed.executemany("INSERT INTO candidates VALUES (?)", [(1,), (2,)])
+    seed.commit()
+    seed.close()
+
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    state = {}
+    with command_recovery._open_recovery_priming_read_connection(
+        _read_factory,
+        deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        preempt_callback=lambda: False,
+        state=state,
+    ) as conn:
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert conn.execute("SELECT sum(value) FROM candidates").fetchone()[0] == 3
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE forbidden (value INTEGER)")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert state == {}
+
+
+def test_priming_read_interrupts_on_monitor_preemption_and_releases_read_unit(
+    tmp_path,
+):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-preempt.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE candidates (value INTEGER)")
+    seed.commit()
+    seed.close()
+
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    callback_calls = []
+
+    def _preempt():
+        callback_calls.append(True)
+        return True
+
+    state = {}
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        with command_recovery._open_recovery_priming_read_connection(
+            _read_factory,
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+            preempt_callback=_preempt,
+            state=state,
+        ) as conn:
+            conn.execute(
+                "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                "SELECT n + 1 FROM seq WHERE n < 1000000) "
+                "SELECT sum(n) FROM seq"
+            ).fetchone()
+
+    assert callback_calls
+    assert state["reason"] == "monitor_preempted"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+
+
+def test_priming_callback_exception_is_fail_closed_preemption(tmp_path):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-callback-error.db"
+    sqlite3.connect(db_path).close()
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    state = {}
+
+    def _broken_callback():
+        raise RuntimeError("monitor state unavailable")
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        with command_recovery._open_recovery_priming_read_connection(
+            _read_factory,
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+            preempt_callback=_broken_callback,
+            state=state,
+        ) as conn:
+            conn.execute(
+                "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                "SELECT n + 1 FROM seq WHERE n < 1000000) "
+                "SELECT sum(n) FROM seq"
+            ).fetchone()
+
+    assert state["reason"] == "monitor_preempted"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+
+
 def test_live_tick_snapshot_uses_complete_account_truth_and_shared_deadline():
     from src.execution import command_recovery
 

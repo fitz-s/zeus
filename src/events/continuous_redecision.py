@@ -33,7 +33,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager, nullcontext
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -54,16 +54,25 @@ class SqliteDeadlineFence:
     deadline_monotonic: float
     generation: int
     stage: str = "belief_scan"
+    cancel_requested: Callable[[], bool] | None = None
     active_generation: int = field(init=False)
 
     def __post_init__(self) -> None:
         self.active_generation = self.generation
 
     def expired(self) -> bool:
-        return (
-            self.active_generation == self.generation
-            and time.monotonic() >= self.deadline_monotonic
-        )
+        if self.active_generation != self.generation:
+            return False
+        if time.monotonic() >= self.deadline_monotonic:
+            return True
+        if self.cancel_requested is None:
+            return False
+        try:
+            return bool(self.cancel_requested())
+        except Exception:
+            # A monitor-priority probe is a safety boundary.  An unreadable
+            # probe cannot authorize a broad read to keep running.
+            return True
 
     def deactivate(self) -> None:
         self.active_generation = -1

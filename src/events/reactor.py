@@ -8490,25 +8490,17 @@ def run_edli_event_reactor_cycle(
         exact_executable_held_completion = True
         durable_exact_held_completion_requests = ()
 
-    # SCOPE: an exact V4 completion may pass monitor admission; generic fairness
-    # debt cannot. DRAIN: the currently active cut reaches an existing safe
-    # checkpoint, then the monitor gets one bounded successor turn before this
-    # generic wake can reacquire the sole reactor lock. RESET: the monitor clears
-    # its own fairness debt; exact debt remains durable and independently scoped.
-    if (
-        not exact_executable_held_completion
-        and _defer_for_held_position_monitor("edli_event_reactor")
-    ):
+    # An exact held SELL is not permission to retain the broad reactor lane.
+    # It may only suppress monitor preemption during the final process_pending
+    # actuation window below; setup, snapshots, and global construction yield.
+    if _defer_for_held_position_monitor("edli_event_reactor"):
         return False
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
     if not producer_fast_path and _urgent_wake_pending():
         return False
-    if (
-        not exact_executable_held_completion
-        and _defer_for_held_position_monitor("edli_event_reactor")
-    ):
+    if _defer_for_held_position_monitor("edli_event_reactor"):
         return False
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
@@ -8519,6 +8511,7 @@ def run_edli_event_reactor_cycle(
         or exact_executable_held_completion
     )
     paused_forecast_held_auction = False
+    exact_final_actuation_window = False
 
     def _yield_for_held_position_monitor(stage: str) -> bool:
         unresolved_monitor_handoff = _held_position_monitor_preemption_pending(
@@ -8536,7 +8529,7 @@ def run_edli_event_reactor_cycle(
                 paused_forecast_held_auction
                 or committed_day0_wake
                 or (
-                    held_sell_completion_cycle
+                    (held_sell_completion_cycle and not exact_executable_held_completion)
                     or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
                 )
             )
@@ -8550,10 +8543,9 @@ def run_edli_event_reactor_cycle(
             # RESET: fresh canonical monitor evidence clears the debt and the
             # durable completion token/request still owns the next auction.
             return False
-        if exact_executable_held_completion:
-            # The monitor's ordinary handoff cannot consume this exact SELL
-            # turn.  The turn remains reduce-only and still rebinds q/book
-            # before it can reach the global selection or venue boundary.
+        if exact_final_actuation_window:
+            # SCOPE: only the final bounded reduce-only process_pending call.
+            # All discovery and snapshot construction above remain preemptible.
             return False
         if not monitor_pressure:
             return False
@@ -8584,7 +8576,7 @@ def run_edli_event_reactor_cycle(
         return (
             _urgent_wake_pending()
             or (
-                not exact_executable_held_completion
+                not exact_final_actuation_window
                 and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
             )
             or _held_position_monitor_preemption_pending(
@@ -8599,7 +8591,7 @@ def run_edli_event_reactor_cycle(
                 ),
                 (
                     None
-                    if exact_executable_held_completion
+                    if exact_final_actuation_window
                     else held_position_monitor_debt_pending
                 ),
             )
@@ -8679,10 +8671,7 @@ def run_edli_event_reactor_cycle(
         if not producer_fast_path and _urgent_wake_pending():
             active_lock.release()
             return False
-        if (
-            not exact_executable_held_completion
-            and _defer_for_held_position_monitor("edli_event_reactor")
-        ):
+        if _defer_for_held_position_monitor("edli_event_reactor"):
             active_lock.release()
             return False
         if _yield_for_held_position_monitor("runtime_db_setup"):
@@ -9168,9 +9157,7 @@ def run_edli_event_reactor_cycle(
                 monitor_debt_pending=held_position_monitor_debt_pending,
                 completion_due=False,
                 exact_held_completion=held_sell_completion_cycle,
-                exact_executable_held_completion=(
-                    exact_executable_held_completion
-                ),
+                exact_executable_held_completion=exact_final_actuation_window,
             )
         )
         construct_context = WorkContext(
@@ -9179,7 +9166,7 @@ def run_edli_event_reactor_cycle(
                 _urgent_wake_pending()
                 or _construct_monitor_cancelled()
                 or (
-                    not exact_executable_held_completion
+                    not exact_final_actuation_window
                     and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
                 )
             ),
@@ -9549,12 +9536,14 @@ def run_edli_event_reactor_cycle(
         targeted_only_fast_path = producer_fast_path and (
             forecast_posterior_wake or bool(targeted_event_ids)
         )
-        _rr = reactor.process_pending(
-            decision_time=process_pending_decision_time,
-            limit=proof_limit,
-            targeted_event_ids=frozenset(targeted_event_ids),
-            targeted_only=targeted_only_fast_path,
-            bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
+        exact_final_actuation_window = exact_executable_held_completion
+        try:
+            _rr = reactor.process_pending(
+                decision_time=process_pending_decision_time,
+                limit=proof_limit,
+                targeted_event_ids=frozenset(targeted_event_ids),
+                targeted_only=targeted_only_fast_path,
+                bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
             # Generic monitor fairness is owed one *global* current cut, even
             # when no opportunity event is pending.  The adapter still owns the
             # full q/book/wealth comparison and can only produce HOLD/CASH here.
@@ -9562,18 +9551,18 @@ def run_edli_event_reactor_cycle(
                 _monitor_completion_mode.fairness_reserved
                 and not held_sell_completion_cut_requests
             ),
-            cancelled=_process_pending_cancelled(
-                committed_day0_wake=committed_day0_wake,
-                producer_fast_path=producer_fast_path,
-                urgent_wake_pending=_urgent_wake_pending,
-                urgent_day0_pending=urgent_day0_pending,
-                held_position_monitor_debt_pending=held_position_monitor_debt_pending,
-                exact_held_completion=active_held_sell_completion_cycle,
-                exact_executable_held_completion=(
-                    exact_executable_held_completion
+                cancelled=_process_pending_cancelled(
+                    committed_day0_wake=committed_day0_wake,
+                    producer_fast_path=producer_fast_path,
+                    urgent_wake_pending=_urgent_wake_pending,
+                    urgent_day0_pending=urgent_day0_pending,
+                    held_position_monitor_debt_pending=held_position_monitor_debt_pending,
+                    exact_held_completion=active_held_sell_completion_cycle,
+                    exact_executable_held_completion=exact_final_actuation_window,
                 ),
-            ),
-        )
+            )
+        finally:
+            exact_final_actuation_window = False
         terminal_no_book_completion = False
         exact_completion_terminal = False
         if held_sell_completion_cut_requests:
@@ -14050,7 +14039,11 @@ def _edli_redecision_family_keys_from_entity_keys(
     return out
 
 
-def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
+def run_edli_continuous_redecision_screen_cycle(
+    *,
+    screen_lock,
+    monitor_preempt_requested: Callable[[], bool] | None = None,
+) -> None:
     """P2 cheap-screen job (continuous re-decision resurrection 2026-06-12).
 
     Reads cached beliefs (world, RO) × freshest executable prices (trade, RO), runs the cheap edge
@@ -14097,6 +14090,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     _log = _logging.getLogger("zeus.events.reactor")
     # The continuous re-decision consumer is part of the one live topology.
     edli_cfg = _settings_section("edli", {})
+    if monitor_preempt_requested is not None and monitor_preempt_requested():
+        _log.info("edli_redecision_screen deferred: held-position monitor priority")
+        return
     if _defer_for_held_position_monitor("edli_redecision_screen"):
         return
     if not screen_lock.acquire(blocking=False):
@@ -14106,6 +14102,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     screen_stack: contextlib.ExitStack | None = None
     screen_fence = None
     try:
+        if monitor_preempt_requested is not None and monitor_preempt_requested():
+            _log.info("edli_redecision_screen deferred after claim: held-position monitor priority")
+            return
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
@@ -14133,6 +14132,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 screen_started + _edli_redecision_screen_budget_seconds(edli_cfg)
             ),
             generation=_next_edli_redecision_screen_generation(),
+            cancel_requested=monitor_preempt_requested,
         )
         screen_stack = contextlib.ExitStack()
 

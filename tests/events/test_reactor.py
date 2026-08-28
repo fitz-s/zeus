@@ -1348,7 +1348,7 @@ def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch)
     assert pauses == ["control_plane_command_drain_failed"]
 
 
-def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch):
+def test_main_monitor_cadence_debt_blocks_buy_and_preempts_ordinary_reactor(monkeypatch):
     import src.events.reactor as reactor_module
     import src.main as main
 
@@ -1379,6 +1379,11 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
         canonical_debt.is_set,
     )
     monkeypatch.setattr(
+        main,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
         reactor_module,
         "run_edli_event_reactor_cycle",
         lambda **kwargs: captured.update(kwargs) or True,
@@ -1390,7 +1395,7 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     )
     monitor_pending = captured["held_position_monitor_pending"]
     assert callable(monitor_pending)
-    assert monitor_pending() is False
+    assert monitor_pending() is True
     monitor_debt_pending = captured["held_position_monitor_debt_pending"]
     assert callable(monitor_debt_pending)
     assert monitor_debt_pending() is True
@@ -6278,7 +6283,7 @@ def test_generic_completion_cannot_reacquire_before_monitor_successor(
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
+def test_exact_executable_completion_yields_monitor_debt_before_broad_setup(
     monkeypatch,
 ):
     import src.events.reactor as reactor_module
@@ -6287,9 +6292,6 @@ def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
     from src.runtime.reactor_wake import make_held_sell_reauction_request
-
-    class SetupReached(RuntimeError):
-        pass
 
     request = make_held_sell_reauction_request(
         position_id="buenos-aires-exact-completion",
@@ -6333,15 +6335,21 @@ def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
     monkeypatch.setattr(
         db,
         "get_world_connection",
-        lambda: (_ for _ in ()).throw(SetupReached()),
+        lambda: pytest.fail("exact SELL must not protect broad reactor setup"),
+    )
+    reservations: list[str] = []
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        lambda **kwargs: reservations.append(kwargs["reason"]) or True,
     )
 
     lock = threading.Lock()
-    with pytest.raises(SetupReached):
-        reactor_module.run_edli_event_reactor_cycle(
-            active_lock=lock,
-            held_position_monitor_debt_pending=lambda: True,
-        )
+    assert reactor_module.run_edli_event_reactor_cycle(
+        active_lock=lock,
+        held_position_monitor_debt_pending=lambda: True,
+    ) is False
+    assert reservations == ["periodic_monitor_preemption"]
     assert not lock.locked()
 
 
