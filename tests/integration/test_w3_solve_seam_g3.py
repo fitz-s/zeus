@@ -14966,6 +14966,31 @@ def test_global_book_token_reuse_for_batch_slices_broader_cache():
     assert set(rebound) == {"family-a", "family-b"}
 
 
+def test_current_actuation_probability_reuses_selected_book_token_bindings(
+    monkeypatch,
+):
+    current = SimpleNamespace(family_key="family", bindings=("current",))
+    selected = SimpleNamespace(family_key="family", bindings=("selected",))
+    calls = []
+
+    def reuse(probabilities, cached_probabilities):
+        calls.append((probabilities, cached_probabilities))
+        return {"family": "rebound"}
+
+    monkeypatch.setattr(era, "_reuse_global_book_token_bindings", reuse)
+
+    assert era._rebind_current_actuation_probability_tokens(
+        current,
+        selected,
+    ) == "rebound"
+    assert calls == [({"family": current}, {"family": selected})]
+    no_bindings = SimpleNamespace(family_key="family", bindings=())
+    assert (
+        era._rebind_current_actuation_probability_tokens(no_bindings, selected)
+        is no_bindings
+    )
+
+
 def test_global_book_token_reuse_for_batch_rejects_real_topology_change():
     def probability(family, *, bin_suffix):
         return SimpleNamespace(
