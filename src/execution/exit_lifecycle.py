@@ -1020,7 +1020,7 @@ def latest_held_sell_reauction_obligation(
     try:
         rows = conn.execute(
             """
-            SELECT payload_json FROM position_events
+            SELECT event_id, event_type, payload_json FROM position_events
              WHERE position_id = ?
                AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
                AND payload_json LIKE '%"held_sell_reauction_obligation"%'
@@ -1048,7 +1048,7 @@ def latest_held_sell_reauction_obligation(
                 raise TimeoutError("held SELL obligation deadline expired")
             return {}
         try:
-            payload = json.loads(str(row[0] or "{}"))
+            payload = json.loads(str(row[2] or "{}"))
         except (TypeError, json.JSONDecodeError):
             if strict:
                 raise ValueError("held SELL obligation payload is unreadable")
@@ -1061,7 +1061,46 @@ def latest_held_sell_reauction_obligation(
             continue
         required = ("scope_identity", "generation", "position_id", "held_token_id")
         if all(str(obligation.get(key) or "").strip() for key in required):
-            return dict(obligation)
+            obligation_position_id = str(
+                obligation.get("position_id") or ""
+            ).strip()
+            obligation_token_id = str(
+                obligation.get("held_token_id") or ""
+            ).strip()
+            if (
+                obligation_position_id != position_id
+                or obligation_token_id != _asset_id_for_position(position)
+            ):
+                continue
+            bound = dict(obligation)
+            if (
+                int(bound.get("schema_version") or 0) == 4
+                and str(row[1] or "") == "MONITOR_REFRESHED"
+            ):
+                event_id = str(row[0] or "").strip()
+                request_id = str(bound.get("request_id") or "").strip()
+                validations = payload.get("applied_validations")
+                validation_set = (
+                    {str(value) for value in validations}
+                    if isinstance(validations, list)
+                    else set()
+                )
+                if (
+                    event_id
+                    and request_id
+                    and "GLOBAL_REAUCTION_PENDING" in validation_set
+                    and f"global_auction_completion_request_id:{request_id}"
+                    in validation_set
+                ):
+                    # The canonical MONITOR_REFRESHED event is the first V4
+                    # outbox debt: it owns both the current q/book witness and
+                    # the exact pending request. The next monitor may bind its
+                    # immutable event ID, but may not synthesize another clock.
+                    if not str(bound.get("debt_event_id") or "").strip():
+                        bound["debt_event_id"] = event_id
+                    if not str(bound.get("monitor_event_id") or "").strip():
+                        bound["monitor_event_id"] = event_id
+            return bound
     return {}
 
 

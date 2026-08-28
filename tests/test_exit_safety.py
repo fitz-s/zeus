@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-08-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-27; last_reused=2026-08-27
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 
 import pytest
 
@@ -622,6 +623,80 @@ def _seed_v4_monitor_lineage(
         (event_id, position_id, sequence_no, occurred_at, payload),
     )
     return event_id
+
+
+@pytest.mark.parametrize(
+    ("exact_pending_marker", "owned_identity"),
+    ((True, True), (False, True), (True, False)),
+)
+def test_latest_v4_reauction_obligation_binds_only_owning_monitor_event(
+    conn,
+    exact_pending_marker,
+    owned_identity,
+):
+    from src.execution import exit_lifecycle
+
+    position_id = f"pos-v4-monitor-outbox-{int(exact_pending_marker)}"
+    request_id = f"request-{int(exact_pending_marker)}"
+    event_id = f"{position_id}:monitor_refreshed:1"
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": f"scope-{position_id}",
+        "generation": f"generation-{position_id}",
+        "position_id": position_id if owned_identity else "other-position",
+        "held_token_id": (
+            f"token-{position_id}" if owned_identity else "other-token"
+        ),
+        "request_id": request_id,
+        "debt_event_id": "",
+        "monitor_event_id": "",
+    }
+    validations = ["GLOBAL_REAUCTION_PENDING"]
+    validations.append(
+        f"global_auction_completion_request_id:{request_id if exact_pending_marker else 'other'}"
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                  'forecast_qkernel_entry', 'src.engine.cycle_runtime', ?, 'test')
+        """,
+        (
+            event_id,
+            position_id,
+            "2026-08-27T23:00:00+00:00",
+            json.dumps(
+                {
+                    "held_sell_reauction_obligation": obligation,
+                    "applied_validations": validations,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+    restored = exit_lifecycle.latest_held_sell_reauction_obligation(
+        conn,
+        SimpleNamespace(
+            trade_id=position_id,
+            direction="buy_yes",
+            token_id=f"token-{position_id}",
+            no_token_id=f"no-token-{position_id}",
+        ),
+        strict=True,
+    )
+
+    if not owned_identity:
+        assert restored == {}
+    elif exact_pending_marker:
+        assert restored["debt_event_id"] == event_id
+        assert restored["monitor_event_id"] == event_id
+    else:
+        assert restored["debt_event_id"] == ""
+        assert restored["monitor_event_id"] == ""
 
 
 def _ack_exit(c, command_id: str = "cmd-exit-1", venue_order_id: str = "ord-1") -> None:
