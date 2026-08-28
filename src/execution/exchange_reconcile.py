@@ -385,12 +385,38 @@ def run_ws_gap_reconcile_and_clear(
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required", "findings": 0, "unresolved_findings": 0}
 
-    local_order_ids = set(_local_open_order_ids(conn))
+    local_order_ids = set(ws_gap_local_order_ids(conn))
     snapshot = fresh_reconcile_snapshot(
         adapter,
         observed_at=observed,
         trade_order_ids=local_order_ids,
     )
+    return apply_ws_gap_reconcile_snapshot_and_clear(
+        snapshot,
+        conn,
+        ws_guard=ws_guard,
+        observed_at=observed,
+        guard_summary=summary,
+    )
+
+
+def ws_gap_local_order_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Capture the DB-only M5 point-read scope before venue I/O."""
+
+    return _local_open_order_ids(conn)
+
+
+def apply_ws_gap_reconcile_snapshot_and_clear(
+    snapshot: FreshReconcileSnapshot,
+    conn: sqlite3.Connection,
+    *,
+    ws_guard: Any,
+    observed_at: datetime | str,
+    guard_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply one already-captured M5 venue snapshot without network I/O."""
+
+    observed = _coerce_dt(observed_at)
     findings = run_reconcile_sweep(snapshot.adapter, conn, context="ws_gap", observed_at=observed)
     unresolved = list_unresolved_findings(conn)
     result = {
@@ -410,7 +436,8 @@ def run_ws_gap_reconcile_and_clear(
     conn.commit()
     ws_guard.clear_after_m5_reconcile(
         observed_at=observed,
-        stale_after_seconds=int(summary.get("stale_after_seconds") or 0) or None,
+        stale_after_seconds=int(guard_summary.get("stale_after_seconds") or 0)
+        or None,
         findings_count=len(findings),
         unresolved_findings_count=len(unresolved),
     )

@@ -2614,48 +2614,100 @@ def _run_ws_gap_reconcile_if_required(
         summary = ws_guard.summary()
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required"}
-    owns_connection = conn_factory is None
-    conn = None
-    try:
-        from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
-        from src.state.db import get_trade_connection
+    def _release_retries(conn, result: dict) -> dict:
+        if result.get("status") != "cleared":
+            logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
+            return result
+        from src.execution.exit_lifecycle import (
+            _release_ws_gap_blocked_exit_retries_after_m5_clear,
+        )
 
-        conn = (conn_factory or (lambda: get_trade_connection(write_class="live")))()
-        result = run_ws_gap_reconcile_and_clear(
-            adapter,
+        released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
             conn,
-            ws_guard=ws_guard,
             observed_at=current,
         )
-        conn.commit()
-        if result.get("status") == "cleared":
-            from src.execution.exit_lifecycle import (
-                _release_ws_gap_blocked_exit_retries_after_m5_clear,
+        result["exit_retries_released"] = released.get("released", 0)
+        result["exit_retry_position_ids"] = released.get("position_ids", [])
+        logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
+        return result
+
+    if conn_factory is not None:
+        conn = None
+        try:
+            from src.execution.exchange_reconcile import (
+                run_ws_gap_reconcile_and_clear,
             )
 
-            released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
+            conn = conn_factory()
+            result = run_ws_gap_reconcile_and_clear(
+                adapter,
                 conn,
+                ws_guard=ws_guard,
                 observed_at=current,
             )
-            if released.get("released", 0):
-                conn.commit()
-            result["exit_retries_released"] = released.get("released", 0)
-            result["exit_retry_position_ids"] = released.get("position_ids", [])
-            logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
-        else:
-            logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
-        return result
+            result = _release_retries(conn, result)
+            conn.commit()
+            return result
+        except Exception as exc:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            logger.warning("M5 WS-gap reconcile failed closed: %s", exc)
+            return {"status": "failed_closed", "error": str(exc)}
+
+    # SCOPE: the exact M5 latch and local open-order ids captured in phase 1.
+    # DRAIN: phase 2 captures complete venue truth with no DB connection open;
+    # phase 3 applies findings and any exit-retry release in one short write.
+    # RESET: a complete no-finding snapshot clears the latch; incomplete truth
+    # stays fail-closed and the next maintenance cadence retries all phases.
+    try:
+        from src.execution.exchange_reconcile import (
+            apply_ws_gap_reconcile_snapshot_and_clear,
+            fresh_reconcile_snapshot,
+            ws_gap_local_order_ids,
+        )
+        from src.execution.venue_sync_contract import (
+            default_trade_conn_factory,
+            default_trade_read_conn_factory,
+            run_three_phase,
+        )
+
+        write_factory = getattr(
+            default_trade_conn_factory,
+            "trade_only_factory",
+            default_trade_conn_factory,
+        )
+
+        def _network(order_ids):
+            return fresh_reconcile_snapshot(
+                adapter,
+                observed_at=current,
+                trade_order_ids=set(order_ids),
+            )
+
+        def _apply(conn, snapshot):
+            result = apply_ws_gap_reconcile_snapshot_and_clear(
+                snapshot,
+                conn,
+                ws_guard=ws_guard,
+                observed_at=current,
+                guard_summary=summary,
+            )
+            return _release_retries(conn, result)
+
+        return run_three_phase(
+            ws_gap_local_order_ids,
+            _network,
+            _apply,
+            conn_factory=write_factory,
+            snapshot_conn_factory=default_trade_read_conn_factory,
+            label="venue_background.ws_gap_m5",
+        )
     except Exception as exc:
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
         logger.warning("M5 WS-gap reconcile failed closed: %s", exc)
         return {"status": "failed_closed", "error": str(exc)}
-    finally:
-        if owns_connection and conn is not None:
-            conn.close()
 
 
 # R4-b (2026-07-08): _release_ws_gap_blocked_exit_retries_after_m5_clear,

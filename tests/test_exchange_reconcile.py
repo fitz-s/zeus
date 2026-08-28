@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-08-28
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Authority basis: first-principles command-scoped entry/exit fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
