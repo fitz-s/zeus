@@ -172,6 +172,11 @@ LIVE_MONITOR_FULL_COVERAGE_CYCLES = 3
 LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = (
     LIVE_MONITOR_FULL_COVERAGE_CYCLES * 2 * 60
 )
+# This is deliberately longer than the held-quote sidecar freshness below: it
+# identifies a monitor that is truly stalled, rather than a normal in-flight
+# monitor pass.  Only that total-stall shape may recover by stopping it.
+LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS = LIVE_MONITOR_CADENCE_CONTRACT_SECONDS
+LIVE_HELD_QUOTE_SIDECAR_MAX_AGE_SECONDS = 180.0
 LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS = 2 * 60
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get(
@@ -1035,6 +1040,9 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
         return {
             "open_position_count": len(position_ids),
             "open_position_ids": position_ids[:10],
+            # The display sample remains bounded, but the exceptional recovery
+            # admission must prove classification against every open position.
+            "all_open_position_ids": position_ids,
             "nonterminal_command_count": len(command_ids),
             "nonterminal_command_ids": command_ids[:10],
         }
@@ -1107,6 +1115,53 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     restart_blocking_count -= reauction_handoff_count
     quote_only_count = int(groups.get("quote_only_stale_position_count") or 0)
     fresh_count = int(cadence.get("fresh_position_count") or 0)
+    probability_positions = list(
+        groups.get("probability_only_stale_positions") or []
+    )
+    restart_blocking_positions = [
+        item
+        for item in list(groups.get("restart_blocking_stale_positions") or [])
+        if isinstance(item, dict)
+        and str(item.get("position_id") or "").strip()
+        not in set(reauction_handoff_ids)
+    ]
+    probability_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in probability_positions
+        if isinstance(item, dict) and str(item.get("position_id") or "").strip()
+    )
+    restart_blocking_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in restart_blocking_positions
+    )
+    classified_positions = [*probability_positions, *restart_blocking_positions]
+    stale_classified_ids: list[str] = []
+    missing_monitor_timestamp_ids: list[str] = []
+    invalid_monitor_timestamp_ids: list[str] = []
+    for item in classified_positions:
+        if not isinstance(item, dict):
+            continue
+        position_id = str(item.get("position_id") or "").strip()
+        if not position_id:
+            continue
+        raw_occurred_at = item.get("last_monitor_refreshed_at")
+        timestamp_text = str(raw_occurred_at or "").strip()
+        if not timestamp_text:
+            missing_monitor_timestamp_ids.append(position_id)
+            continue
+        try:
+            parsed = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if parsed.tzinfo is None:
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        occurred_at = parsed.astimezone(timezone.utc)
+        if (
+            now - occurred_at
+        ).total_seconds() > LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS:
+            stale_classified_ids.append(position_id)
     identity_complete = (
         len(monitored_ids) == open_count
         and all(monitored_ids)
@@ -1132,12 +1187,152 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "monitored_position_ids": monitored_ids,
         "fresh_position_count": fresh_count,
         "probability_degraded_position_count": probability_degraded_count,
+        "probability_degraded_position_ids": probability_ids,
         "reauction_handoff_position_count": reauction_handoff_count,
         "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
+        "restart_blocking_position_ids": restart_blocking_ids,
+        "stale_classified_position_ids": tuple(stale_classified_ids),
+        "missing_monitor_timestamp_position_ids": tuple(missing_monitor_timestamp_ids),
+        "invalid_monitor_timestamp_position_ids": tuple(invalid_monitor_timestamp_ids),
         "quote_only_stale_position_count": quote_only_count,
+        "future_monitor_event_count": int(
+            cadence.get("future_monitor_event_count") or 0
+        ),
+        "non_monitor_chain_risk_position_count": int(
+            cadence.get("non_monitor_chain_risk_position_count") or 0
+        ),
         "sample": groups.get("restart_blocking_stale_positions", []),
     }
+
+
+def _held_quote_sidecar_current_evidence() -> dict[str, object]:
+    """Return the non-authorizing current-state proof for held quote refresh.
+
+    ``price-channel-ingest`` writes ``alive_at`` only after a successful M5
+    proof.  This admission therefore cannot treat a merely launched sidecar or
+    a future-dated heartbeat as current held-quote coverage.
+    """
+
+    path = (
+        Path(_require_live_repo())
+        / "state"
+        / "daemon-heartbeat-price-channel-ingest.json"
+    )
+    payload = _load_json(path)
+    observed_at = _parse_iso_utc(payload.get("alive_at"))
+    if not payload:
+        return {"current": False, "reason": "held_quote_sidecar_unreadable"}
+    if payload.get("daemon") != "price-channel-ingest":
+        return {"current": False, "reason": "held_quote_sidecar_identity_invalid"}
+    if payload.get("status") != "READY" or payload.get("liveness") != "ALIVE":
+        return {"current": False, "reason": "held_quote_sidecar_not_ready"}
+    if observed_at is None:
+        return {"current": False, "reason": "held_quote_sidecar_timestamp_invalid"}
+    age_seconds = (datetime.now(timezone.utc) - observed_at).total_seconds()
+    if age_seconds < 0.0:
+        return {
+            "current": False,
+            "reason": "held_quote_sidecar_timestamp_future",
+            "age_seconds": age_seconds,
+        }
+    if age_seconds > LIVE_HELD_QUOTE_SIDECAR_MAX_AGE_SECONDS:
+        return {
+            "current": False,
+            "reason": "held_quote_sidecar_stale",
+            "age_seconds": age_seconds,
+        }
+    return {"current": True, "age_seconds": age_seconds}
+
+
+def _stuck_monitor_recovery_admission(
+    *,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit only a fully classified, quote-supported total monitor stall.
+
+    This is a narrow stop-to-absent recovery, not alternate handoff authority.
+    Fresh or partial handoffs retain the ordinary ``green`` gate above.
+    """
+
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    required_handoff_fields = {
+        "open_position_count",
+        "fresh_position_count",
+        "future_monitor_event_count",
+        "non_monitor_chain_risk_position_count",
+        "quote_only_stale_position_count",
+        "reauction_handoff_position_count",
+        "probability_degraded_position_count",
+        "probability_degraded_position_ids",
+        "restart_blocking_position_count",
+        "restart_blocking_position_ids",
+        "stale_classified_position_ids",
+        "missing_monitor_timestamp_position_ids",
+        "invalid_monitor_timestamp_position_ids",
+    }
+    if pause_state.get("entries_paused") is not True:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:nonterminal_commands"
+    if open_count <= 0 or len(expected_ids) != open_count or len(expected_set) != open_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:canonical_open_identity_incomplete"
+    if not required_handoff_fields.issubset(handoff):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:handoff_evidence_incomplete"
+    if int(handoff.get("open_position_count") or 0) != open_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:handoff_open_count_mismatch"
+    if int(handoff.get("fresh_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:partial_or_fresh_handoff"
+    if int(handoff.get("future_monitor_event_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:future_monitor_evidence"
+    if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:non_monitor_chain_risk"
+    if int(handoff.get("quote_only_stale_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:held_quote_stale"
+    if int(handoff.get("reauction_handoff_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:reauction_handoff_present"
+    if handoff.get("missing_monitor_timestamp_position_ids"):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_timestamp_missing"
+    if handoff.get("invalid_monitor_timestamp_position_ids"):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_timestamp_invalid"
+
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    restart_ids = tuple(handoff.get("restart_blocking_position_ids") or ())
+    classified_ids = (*probability_ids, *restart_ids)
+    classified_set = {str(position_id).strip() for position_id in classified_ids}
+    if (
+        len(probability_ids)
+        != int(handoff.get("probability_degraded_position_count") or 0)
+        or len(restart_ids)
+        != int(handoff.get("restart_blocking_position_count") or 0)
+        or len(classified_ids) != open_count
+        or len(classified_set) != open_count
+        or classified_set != expected_set
+    ):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:open_classification_incomplete"
+    stale_ids = tuple(handoff.get("stale_classified_position_ids") or ())
+    if set(str(position_id).strip() for position_id in stale_ids) != expected_set:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_evidence_not_stale"
+
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "STUCK_MONITOR_RECOVERY_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "STUCK_MONITOR_RECOVERY_ADMITTED: "
+        f"open_positions={open_count} fresh_positions=0 "
+        f"monitor_stale_bound_seconds={LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS} "
+        "held_quote_sidecar_current=true",
+    )
 
 
 def _exact_v4_reauction_restart_handoff_ids(
@@ -1495,10 +1690,18 @@ def _loaded_live_restart_obligation_gate(
             handoff.get("green") is not True
             or int(handoff.get("open_position_count") or 0) != open_count
         ):
+            stuck_ok, stuck_detail = _stuck_monitor_recovery_admission(
+                obligations=obligations,
+                pause_state=pause_state,
+                handoff=handoff,
+            )
+            if stuck_ok:
+                return True, f"loaded live-trading {stuck_detail}"
             return (
                 False,
                 "loaded live-trading repair handoff is not current: "
-                f"open_positions={open_count} evidence={handoff}",
+                f"open_positions={open_count} evidence={handoff} "
+                f"stuck_monitor_recovery={stuck_detail}",
             )
         return (
             True,
