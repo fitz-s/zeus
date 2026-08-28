@@ -34172,6 +34172,31 @@ def test_global_sell_durable_market_channel_authority_is_exact_and_fail_closed()
             conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
             side=candidate.side, submit_at=now,
         )
+    fresh_raw_book = {"asset_id": candidate.token_id, **depth}
+    raw, authority = era._durable_global_sell_market_authority(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        submit_at=now,
+        current_raw_book=fresh_raw_book,
+        current_book_captured_at=now,
+    )
+    assert raw["asset_id"] == candidate.token_id
+    assert authority.snapshot.captured_at == now
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            side=candidate.side,
+            submit_at=now,
+            current_raw_book=fresh_raw_book,
+            current_book_captured_at=now - _dt.timedelta(seconds=2),
+        )
+    assert era._is_global_jit_authority_failure(
+        "ValueError:GLOBAL_JIT_DURABLE_BOOK_INVALID"
+    ) is True
     conn.execute(
         "UPDATE execution_feasibility_latest SET quote_seen_at = ?", (now.isoformat(),)
     )
@@ -34495,6 +34520,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         ctf_units = 10 * 1_000_000
         book_hash = "jit-sell-hash"
         fail_final_book = False
+        fail_metadata = False
 
         def __init__(self, **kwargs):
             if kwargs:
@@ -34515,7 +34541,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             assert tokens == ["yes-token"]
             if type(self).fail_final_book:
                 raise OSError("REST book unavailable")
-            return {
+            book = {
                 "yes-token": {
                     "asset_id": "yes-token",
                     "hash": type(self).book_hash,
@@ -34527,10 +34553,15 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     ],
                 }
             }
+            if type(self).fail_metadata:
+                book["yes-token"]["asks"] = [{"price": "0.61", "size": "10"}]
+            return book
 
         def get_held_clob_market_info(self, condition_id, *, timeout=None):
             actuation_steps.append("clob_metadata")
             assert condition_id == "condition-1"
+            if type(self).fail_metadata:
+                raise OSError("CLOB metadata unavailable")
             return {
                 "condition_id": condition_id,
                 "clobTokenIds": ["yes-token", "other-yes-token"],
@@ -34699,6 +34730,25 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     )
     assert preflight.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
     assert preflight.proof_accepted is True
+    Clob.fail_metadata = True
+    metadata_fallback = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=True,
+        preflight_receipt=None,
+    )
+    Clob.fail_metadata = False
+    assert metadata_fallback.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
+    assert metadata_fallback.proof_accepted is True
+    assert metadata_fallback.global_jit_candidate.raw_book["asks"] == [
+        {"price": "0.61", "size": "10"}
+    ]
     Clob.ctf_units = 0
     blocked = era._submit_current_global_sell(
         event,

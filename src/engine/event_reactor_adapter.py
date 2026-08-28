@@ -636,6 +636,7 @@ def _is_global_jit_authority_failure(reason: object) -> bool:
         "GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE",
         "GLOBAL_JIT_MARKET_",
         "GLOBAL_JIT_CLOB_MARKET_",
+        "GLOBAL_JIT_DURABLE_",
         "GLOBAL_BUY_JIT_CLOCK_INVALID",
         "GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING",
         "GLOBAL_BUY_JIT_TOKEN_MISMATCH",
@@ -13488,6 +13489,8 @@ def _durable_global_sell_market_authority(
     token_id: str,
     side: str,
     submit_at: datetime,
+    current_raw_book: Mapping[str, object] | None = None,
+    current_book_captured_at: datetime | None = None,
     max_quote_age: timedelta = timedelta(seconds=1),
 ) -> tuple[dict[str, object], _CurrentGlobalMarketAuthority]:
     """Hydrate one final SELL book from current durable market-channel truth.
@@ -13509,27 +13512,51 @@ def _durable_global_sell_market_authority(
     expected_direction = {"YES": "buy_yes", "NO": "buy_no"}.get(selected_side)
     if not expected_direction or not condition_id or not token_id:
         raise ValueError("GLOBAL_JIT_DURABLE_BOOK_IDENTITY_INVALID")
-    row = trade_conn.execute(
-        """
-        SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
-               book_hash_before, depth_before_json
-          FROM execution_feasibility_latest
-         WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
-           AND direction = ?
-        """,
-        (token_id, condition_id, selected_side, expected_direction),
-    ).fetchone()
-    if row is None:
-        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
-    try:
-        evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
-        quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
-        if quote_at.tzinfo is None:
-            raise ValueError("naive quote")
-        quote_at = quote_at.astimezone(UTC)
-        depth = json.loads(str(raw_depth or ""))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
+    has_current_book = current_raw_book is not None or current_book_captured_at is not None
+    if has_current_book:
+        if (
+            not isinstance(current_raw_book, Mapping)
+            or not isinstance(current_book_captured_at, datetime)
+            or current_book_captured_at.tzinfo is None
+        ):
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID")
+        depth = dict(current_raw_book)
+        quote_at = current_book_captured_at.astimezone(UTC)
+        row_condition = condition_id
+        row_token = str(depth.get("asset_id") or depth.get("token_id") or "")
+        row_side = selected_side
+        evidence_id = _hash_jsonish(
+            (
+                "GLOBAL_JIT_CURRENT_RAW_BOOK",
+                condition_id,
+                token_id,
+                selected_side,
+                quote_at.isoformat(),
+                depth,
+            )
+        )
+    else:
+        row = trade_conn.execute(
+            """
+            SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
+                   book_hash_before, depth_before_json
+              FROM execution_feasibility_latest
+             WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
+               AND direction = ?
+            """,
+            (token_id, condition_id, selected_side, expected_direction),
+        ).fetchone()
+        if row is None:
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
+        try:
+            evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
+            quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
+            if quote_at.tzinfo is None:
+                raise ValueError("naive quote")
+            quote_at = quote_at.astimezone(UTC)
+            depth = json.loads(str(raw_depth or ""))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
     if (
         str(row_condition) != condition_id
         or str(row_token) != token_id
@@ -13771,11 +13798,13 @@ def _submit_current_global_sell(
                 book_captured_at_utc = market_authority.snapshot.captured_at
             else:
                 raw_book: dict[str, object] = {}
+                current_book_captured_at: datetime | None = None
                 candidate_token_id = str(
                     getattr(candidate, "token_id", "") or ""
                 )
 
                 def _capture_final_sell_book():
+                    nonlocal current_book_captured_at
                     try:
                         books = clob.get_orderbook_snapshots(
                             [candidate_token_id],
@@ -13788,7 +13817,8 @@ def _submit_current_global_sell(
                         raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
                     raw_book.clear()
                     raw_book.update(dict(current_book))
-                    return raw_book, datetime.now(UTC)
+                    current_book_captured_at = datetime.now(UTC)
+                    return raw_book, current_book_captured_at
 
                 try:
                     try:
@@ -13821,12 +13851,33 @@ def _submit_current_global_sell(
                 except ValueError as rest_exc:
                     if not _is_global_jit_authority_failure(str(rest_exc)):
                         raise
+                    if (
+                        current_book_captured_at is None
+                        and not str(rest_exc).startswith(
+                            "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
+                        )
+                    ):
+                        try:
+                            _capture_final_sell_book()
+                        except ValueError:
+                            raw_book.clear()
+                            current_book_captured_at = None
+                    logging.getLogger(__name__).info(
+                        "global SELL JIT durable-metadata fallback: "
+                        "primary_reason=%s current_raw_book=%s",
+                        rest_exc,
+                        current_book_captured_at is not None,
+                    )
                     raw_book, market_authority = _durable_global_sell_market_authority(
                         trade_conn,
                         condition_id=str(getattr(candidate, "condition_id", "") or ""),
                         token_id=str(getattr(candidate, "token_id", "") or ""),
                         side=str(getattr(candidate, "side", "") or ""),
                         submit_at=datetime.now(UTC),
+                        current_raw_book=(
+                            raw_book if current_book_captured_at is not None else None
+                        ),
+                        current_book_captured_at=current_book_captured_at,
                     )
                 book_captured_at_utc = market_authority.snapshot.captured_at
                 try:
