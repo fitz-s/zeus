@@ -14347,6 +14347,16 @@ def _global_curve_supersession_from_receipt(
 
     reason = str(receipt.reason or "")
     market_prefix = "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+    if reason.startswith(
+        market_prefix + "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+    ):
+        # The JIT book proves this exact BUY is not executable under the
+        # pre-cliff capital-release law.  It does not invalidate another
+        # token's frozen q/book/wealth comparison.  SCOPE: the selected BUY
+        # candidate only.  DRAIN: exclude it and preflight the next-best
+        # action in this cut.  RESET: the next cut rebuilds this token from a
+        # fresh native book and may admit it when exit capacity returns.
+        return "CANDIDATE_BLOCKED", None, reason
     if reason.startswith(market_prefix):
         return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"

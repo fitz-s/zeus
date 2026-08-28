@@ -252,7 +252,12 @@ def build_presence_proof(
     order_size = _f(plan.get("size")) or 0.0
     limit_price = _f(plan.get("limit_price"))
     order_type = str(plan.get("order_type") or "").strip().upper()
-    is_fak = order_type in {"FAK", "FAK_LIMIT"}
+    is_immediate_buy_taker = order_type in {
+        "FAK",
+        "FAK_LIMIT",
+        "FOK",
+        "FOK_LIMIT",
+    }
     if order_size <= 0 or limit_price is None or limit_price <= 0:
         raise RuntimeError("SubmitPlanBuilt missing positive size/limit_price")
     attempted_at = _latest_event_time(conn, aggregate_id, "VenueSubmitAttempted")
@@ -323,19 +328,21 @@ def build_presence_proof(
         raise RuntimeError(
             "authenticated presence order id does not match the canonical venue command"
         )
-    if is_fak and (
+    if is_immediate_buy_taker and (
         len(unique_legs) != 1
         or unique_legs[0]["role"] != "TAKER"
         or unique_legs[0]["trader_side"] != "TAKER"
         or unique_legs[0]["side"] != "BUY"
     ):
-        raise RuntimeError("FAK presence must be one authenticated BUY taker leg")
+        raise RuntimeError(
+            "immediate BUY taker presence must be one authenticated BUY taker leg"
+        )
     if any(leg["side"] != "BUY" for leg in unique_legs):
         raise RuntimeError("presence leg side is missing or not BUY")
     for leg in unique_legs:
         match_time = _utc(leg.get("match_time"))
         if match_time < attempted_at - _MATCH_TIME_SKEW or (
-            is_fak and match_time > unknown_at + _MATCH_TIME_LAG
+            is_immediate_buy_taker and match_time > unknown_at + _MATCH_TIME_LAG
         ):
             raise RuntimeError(
                 "presence leg match_time is outside this submit attempt window; refusing historical attribution"
@@ -362,16 +369,17 @@ def build_presence_proof(
     total_fees = sum(float(leg["fees"]) for leg in unique_legs)
     if total_size <= 0:
         raise RuntimeError("presence legs sum to non-positive size")
-    # BUY FAK price improvement can return more outcome shares than the target
+    # Immediate BUY taker price improvement can return more outcome shares than
+    # the target
     # share count while preserving the approved capital bound (live CLOB truth:
     # original_size=173 @ 0.09, matched=189.77 @ 0.08). Shares are therefore not
     # the capital invariant. Exactly one order, its causal submit window, the BUY
     # limit, and total quote notional are. Multiple-order attribution and any
     # spend above the persisted limit-size budget still fail closed.
     material_share_overfill = total_size > order_size * 1.02 + 1e-6
-    if material_share_overfill and not is_fak:
+    if material_share_overfill and not is_immediate_buy_taker:
         raise RuntimeError(
-            f"non-FAK presence legs sum {total_size} exceed order size {order_size}; "
+            f"non-immediate-taker presence legs sum {total_size} exceed order size {order_size}; "
             "refusing possible mis-attribution / double-count"
         )
     max_notional_decimal = command_size * command_price
