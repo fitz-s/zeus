@@ -16749,11 +16749,14 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
-    ("execution_mode", "bid_price", "expected_accepted"),
+    ("execution_mode", "bid_price", "bid_size", "expected_accepted"),
     (
-        ("TAKER_LIMIT", "0.04", False),
-        ("TAKER_LIMIT", "0.05", True),
-        ("MAKER_REST", "0.04", False),
+        ("TAKER_LIMIT", "0.04", "100", False),
+        ("TAKER_LIMIT", "0.05", "100", True),
+        # Selection admitted 20 shares on an earlier book; submit JIT sees
+        # only six legal unwind shares and must force a new decision.
+        ("TAKER_LIMIT", "0.05", "6", False),
+        ("MAKER_REST", "0.04", "100", False),
     ),
 )
 def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hold(
@@ -16761,6 +16764,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
     execution_mode,
     side,
     bid_price,
+    bid_size,
     expected_accepted,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -16814,7 +16818,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
+            BookLevel(price=Decimal(bid_price), size=Decimal(bid_size)),
         ),
         **maker_terms,
     )
@@ -16871,7 +16875,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": bid_price, "size": "100"}],
+            "bids": [{"price": bid_price, "size": bid_size}],
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )

@@ -15280,18 +15280,6 @@ def _global_preflight_entry_jit_receipt(
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
         )
-        # Tier-0 research entries are hold-to-settle by design (reversal plan
-        # item 6 flat venue-min stake; item 8 even BLOCKS auction SELL for
-        # cheap positions): their loss bound is the full ~$1-5 entry cost, no
-        # exit leg exists in the plan, so demanding same-instant bid-side
-        # depth for the whole stake bans exactly the thin weather books the
-        # research mode must trade in (live 2026-08-26: every survivor of the
-        # 10-layer funnel died here on precliff_bid_shares=0). The check
-        # stays binding for every non-tier0 BUY, where liquidation capacity
-        # genuinely bounds the loss.
-        tier0_hold_to_settle_entry = (
-            execution_mode == "TAKER_LIMIT" and tier0_research_mode_enabled()
-        )
         if (
             not (
                 execution_mode == "TAKER_LIMIT"
@@ -15299,7 +15287,6 @@ def _global_preflight_entry_jit_receipt(
                 and typed_exact_payoff_binding
                 and exact_payoff_decision
             )
-            and not tier0_hold_to_settle_entry
             and liquidation_capacity + Decimal("1e-9") < shares
         ):
             raise ValueError(

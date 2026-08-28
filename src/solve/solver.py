@@ -5410,6 +5410,34 @@ def _score_global_single_order(
     raw_min_shares = _single_order_min_marketable_shares(
         candidate.economic_cost_curve
     )
+    liquidation_capacity = current_precliff_liquidation_capacity(
+        candidate.native_bid_levels
+    )
+    liquidation_cap_shares = (
+        liquidation_capacity / _SIZE_QUANTUM
+    ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+    requires_liquidation_capacity = not settlement_locked_exact_payoff
+    if requires_liquidation_capacity and (
+        raw_min_shares is None or liquidation_cap_shares < raw_min_shares
+    ):
+        # SCOPE: this statistical BUY and its current native bid curve only.
+        # DRAIN: the next auction rebuilds the candidate from a fresh book.
+        # RESET: a current in-band bid prefix large enough for one legal lot
+        # returns the candidate to the expected-log-growth solve.
+        reason = "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
+    if requires_liquidation_capacity:
+        capacity_max_shares = min(capacity_max_shares, liquidation_cap_shares)
+        raw_max_shares = min(raw_max_shares, liquidation_cap_shares)
     if (
         raw_min_shares is None
         or raw_max_shares < raw_min_shares
@@ -7403,6 +7431,17 @@ def select_global_single_order(
         if not capital_authority_available:
             rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
             continue
+        probability_witness = probability_witnesses[candidate.family_key]
+        settlement_locked_exact_payoff = (
+            candidate.settlement_locked_exact_payoff
+            and isinstance(probability_witness, DeterministicBinPayoffWitness)
+            and family_payoff_point_q(
+                probability_witness,
+                bin_id=candidate.bin_id,
+                side=candidate.side,
+            )
+            == 1.0
+        )
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:
             try:
@@ -7417,6 +7456,37 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
+        if not settlement_locked_exact_payoff:
+            liquidation_capacity = current_precliff_liquidation_capacity(
+                candidate.native_bid_levels
+            )
+            liquidation_cap_shares = (
+                liquidation_capacity / _SIZE_QUANTUM
+            ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+            liquidation_min_shares = _single_order_min_marketable_shares(
+                candidate.economic_cost_curve
+            )
+            if (
+                liquidation_min_shares is None
+                or liquidation_cap_shares < liquidation_min_shares
+            ):
+                rejections[candidate.candidate_id] = (
+                    "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+                )
+                continue
+            try:
+                candidate_capital_limit = min(
+                    candidate_capital_limit,
+                    _single_order_cost(
+                        candidate.economic_cost_curve,
+                        liquidation_cap_shares,
+                    ),
+                )
+            except ValueError:
+                rejections[candidate.candidate_id] = (
+                    "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+                )
+                continue
         buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=utility_liquid_cash,
@@ -7463,7 +7533,6 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        probability_witness = probability_witnesses[candidate.family_key]
         payoff_probability_mean = family_payoff_point_q(
             probability_witness,
             bin_id=candidate.bin_id,
@@ -7491,12 +7560,7 @@ def select_global_single_order(
             fractional_kelly_multiplier=multiplier,
             current_token_shares=candidate_endowment.current_token_shares,
             settlement_locked_exact_payoff=(
-                candidate.settlement_locked_exact_payoff
-                and isinstance(
-                    probability_witness,
-                    DeterministicBinPayoffWitness,
-                )
-                and payoff_probability_mean == 1.0
+                settlement_locked_exact_payoff and payoff_probability_mean == 1.0
             ),
         )
         if correction is not None and score.candidate is not None:
