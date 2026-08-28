@@ -7360,6 +7360,7 @@ def execute_monitoring_phase(
                 position,
                 conn=conn,
                 requester=request_global_sell_snapshot_reauction,
+                deadline_monotonic=global_sell_debt_deadline,
             ):
                 portfolio_dirty = True
                 summary["global_sell_snapshot_reauction_debts_recovered"] = (
@@ -7413,7 +7414,11 @@ def execute_monitoring_phase(
             for field, value in snapshot.items():
                 setattr(position, field, value)
 
-    def check_pending_retry_with_committed_global_reauction(position) -> bool:
+    def check_pending_retry_with_committed_global_reauction(
+        position,
+        *,
+        deadline_monotonic: float,
+    ) -> bool:
         nonlocal portfolio_dirty
 
         def defer_retry_runtime() -> bool:
@@ -7431,7 +7436,7 @@ def execute_monitoring_phase(
             field: getattr(position, field, "")
             for field in global_retry_runtime_fields
         }
-        if time.monotonic() >= auxiliary_deadline:
+        if time.monotonic() >= deadline_monotonic:
             return defer_retry_runtime()
         try:
             if conn is None:
@@ -7454,7 +7459,7 @@ def execute_monitoring_phase(
                 # RESET: a complete classification before auxiliary_deadline.
                 with _held_monitor_preparation_deadline(
                     conn,
-                    auxiliary_deadline,
+                    deadline_monotonic,
                 ):
                     global_retry = has_global_snapshot_retry_runtime(position)
                     released = check_pending_retries(
@@ -7474,7 +7479,7 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="late_global_sell_snapshot_reauction",
-            deadline_monotonic=auxiliary_deadline,
+            deadline_monotonic=deadline_monotonic,
         ):
             for field, value in previous_runtime.items():
                 setattr(position, field, value)
@@ -7483,6 +7488,7 @@ def execute_monitoring_phase(
             position,
             conn=conn,
             requester=request_global_sell_snapshot_reauction,
+            deadline_monotonic=deadline_monotonic,
         ):
             portfolio_dirty = True
             summary["global_sell_snapshot_reauction_debts_recovered"] = (
@@ -7636,9 +7642,8 @@ def execute_monitoring_phase(
                 clob,
                 conn=conn,
                 deadline_monotonic=auxiliary_deadline,
-                global_sell_reauction_requester=(
-                    request_global_sell_snapshot_reauction
-                ),
+                global_sell_reauction_requester=None,
+                recover_retry_pending=False,
             )
         except Exception as exc:  # noqa: BLE001 - one pending-exit fault must not blind held monitoring.
             logger = getattr(deps, "logger", None)
@@ -7731,78 +7736,6 @@ def execute_monitoring_phase(
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
-
-    # Debt reconstruction is auxiliary to current economic redecision. Bound
-    # the whole scan, not each row independently, so a larger held book cannot
-    # spend the 70s auxiliary window on serial lineage reads and leave only the
-    # 5s primary reserve for every q/book refresh.
-    debt_scan_deadline = min(
-        auxiliary_deadline,
-        time.monotonic() + _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS,
-    )
-    global_sell_debt_deadline = debt_scan_deadline
-    summary["global_sell_snapshot_reauction_scan_budget_seconds"] = (
-        _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS
-    )
-    committed_debt_candidates: list[object] = []
-    for index, position in enumerate(portfolio_positions):
-        if time.monotonic() >= debt_scan_deadline:
-            defer_optional_maintenance("GLOBAL_SELL_DEBT_SCAN_DEADLINE")
-            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
-                len(portfolio_positions) - index
-            )
-            break
-        debt_status = classify_global_sell_snapshot_reauction_debt(
-            position,
-            conn,
-            auxiliary_deadline=debt_scan_deadline,
-        )
-        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
-            # SCOPE: unclassified positions in this held-monitor pass. DRAIN:
-            # the next pass reclassifies each against canonical truth. RESET:
-            # a bounded DEBT or NO_DEBT classification.
-            deferred = len(portfolio_positions) - index
-            defer_optional_maintenance(
-                "GLOBAL_SELL_DEBT_CLASSIFICATION_DEFERRED",
-                deferred,
-            )
-            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = deferred
-            summary["global_sell_snapshot_reauction_classification_deferred"] = (
-                summary.get("global_sell_snapshot_reauction_classification_deferred", 0)
-                + deferred
-            )
-            break
-        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEBT:
-            committed_debt_candidates.append(position)
-    committed_debt_positions = tuple(committed_debt_candidates)
-    if committed_debt_positions:
-        if time.monotonic() >= global_sell_debt_deadline:
-            defer_optional_maintenance(
-                "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
-                len(committed_debt_positions),
-            )
-            summary["global_sell_snapshot_reauction_deadline_deferred"] = len(
-                committed_debt_positions
-            )
-            summary["global_sell_snapshot_reauction_debts_pending"] = (
-                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
-                + len(committed_debt_positions)
-            )
-        elif conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
-            conn,
-            summary,
-            deps,
-            boundary="before_global_sell_snapshot_reauction",
-            deadline_monotonic=global_sell_debt_deadline,
-        ):
-            summary["global_sell_snapshot_reauction_debts_pending"] = (
-                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
-                + 1
-            )
-        else:
-            drain_committed_global_sell_snapshot_reauction_debts(
-                committed_debt_positions
-            )
 
     durable_hard_facts = {}
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
@@ -8482,8 +8415,6 @@ def execute_monitoring_phase(
                     + 1
                 )
             else:
-                if run_exit_preflight:
-                    check_pending_retry_with_committed_global_reauction(pos)
                 if release_pending_exit_without_order_if_retryable(pos, conn=conn):
                     portfolio_dirty = True
                     summary["monitor_released_pending_exit_without_order"] = (
@@ -8533,9 +8464,6 @@ def execute_monitoring_phase(
                 counter="monitor_exit_retry_cooldown_holds",
             )
             continue
-
-        if run_exit_preflight:
-            check_pending_retry_with_committed_global_reauction(pos)
 
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
         # PHASE LAW): the quarantine-admin-resolution monitor branch is
@@ -9474,18 +9402,6 @@ def execute_monitoring_phase(
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (
                         summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
                     )
-                    if (
-                        pending_exit_monitor_only
-                        and check_pending_retry_with_committed_global_reauction(
-                            pos
-                        )
-                    ):
-                        pending_exit_monitor_only = False
-                        portfolio_dirty = True
-                        summary["pending_exit_liquidity_wait_released"] = (
-                            summary.get("pending_exit_liquidity_wait_released", 0)
-                            + 1
-                        )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             # An absorbing hard fact makes the held token worth exactly zero at
@@ -10596,6 +10512,125 @@ def execute_monitoring_phase(
                 # DRAIN: commit before the unchanged outer claim expires.
                 # RESET: the next position receives its own fresh child clock.
                 deadline_monotonic=monitor_deadline,
+            )
+
+    # Historical reauction debt recovery is auxiliary.  It may use only the
+    # wall-clock budget left after every admitted position has had its current
+    # probability, book, and capital action reconsidered.  Running this O(n)
+    # lineage scan before the primary loop lets stale recovery history consume
+    # the exact lead time needed to exit before a market gap.
+    debt_scan_started = time.monotonic()
+    primary_redecision_complete = not (
+        summary.get("held_monitor_preempted")
+        or summary.get("held_monitor_positions_deferred", 0)
+        or summary.get("monitor_canonical_write_failed", 0)
+    )
+    debt_scan_deadline = debt_scan_started
+    if primary_redecision_complete:
+        debt_scan_deadline = min(
+            monitor_deadline,
+            debt_scan_started + _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS,
+        )
+    else:
+        # SCOPE: historical debt for this pass only. DRAIN: the next pass first
+        # completes current redecision, then retries this scan. RESET: a pass
+        # with no preempted or deferred current position.
+        defer_optional_maintenance(
+            "GLOBAL_SELL_DEBT_AWAITS_PRIMARY_REDECISION",
+            len(portfolio_positions),
+        )
+    global_sell_debt_deadline = debt_scan_deadline
+    summary["global_sell_snapshot_reauction_scan_budget_seconds"] = max(
+        0.0,
+        debt_scan_deadline - debt_scan_started,
+    )
+    if primary_redecision_complete and run_exit_preflight:
+        for index, position in enumerate(portfolio_positions):
+            if time.monotonic() >= debt_scan_deadline:
+                deferred = len(portfolio_positions) - index
+                defer_optional_maintenance(
+                    "GLOBAL_SELL_RETRY_RUNTIME_DEADLINE",
+                    deferred,
+                )
+                summary["global_sell_snapshot_reauction_retry_runtime_deferred"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_retry_runtime_deferred",
+                        0,
+                    )
+                    + deferred
+                )
+                break
+            check_pending_retry_with_committed_global_reauction(
+                position,
+                deadline_monotonic=debt_scan_deadline,
+            )
+    committed_debt_candidates: list[object] = []
+    for index, position in enumerate(portfolio_positions):
+        if time.monotonic() >= debt_scan_deadline:
+            deferred = len(portfolio_positions) - index
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_SCAN_DEADLINE",
+                deferred,
+            )
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
+                deferred
+            )
+            break
+        debt_status = classify_global_sell_snapshot_reauction_debt(
+            position,
+            conn,
+            auxiliary_deadline=debt_scan_deadline,
+        )
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
+            # SCOPE: unclassified positions in this held-monitor pass. DRAIN:
+            # the next pass reclassifies them after current economic redecision.
+            # RESET: a bounded DEBT or NO_DEBT classification.
+            deferred = len(portfolio_positions) - index
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_CLASSIFICATION_DEFERRED",
+                deferred,
+            )
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
+                deferred
+            )
+            summary["global_sell_snapshot_reauction_classification_deferred"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_classification_deferred",
+                    0,
+                )
+                + deferred
+            )
+            break
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEBT:
+            committed_debt_candidates.append(position)
+    committed_debt_positions = tuple(committed_debt_candidates)
+    if committed_debt_positions:
+        if time.monotonic() >= global_sell_debt_deadline:
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
+                len(committed_debt_positions),
+            )
+            summary["global_sell_snapshot_reauction_deadline_deferred"] = len(
+                committed_debt_positions
+            )
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + len(committed_debt_positions)
+            )
+        elif conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
+            conn,
+            summary,
+            deps,
+            boundary="before_global_sell_snapshot_reauction",
+            deadline_monotonic=global_sell_debt_deadline,
+        ):
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + 1
+            )
+        else:
+            drain_committed_global_sell_snapshot_reauction_debts(
+                committed_debt_positions
             )
 
     _emit_portfolio_rotation_evaluation_status(

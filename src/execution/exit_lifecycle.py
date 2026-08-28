@@ -10599,6 +10599,7 @@ def check_pending_exits(
     cycle_budget_seconds: float | None = None,
     deadline_monotonic: float | None = None,
     global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+    recover_retry_pending: bool = True,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
 
@@ -10729,6 +10730,12 @@ def check_pending_exits(
             stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
             continue
         if exit_state == "retry_pending":
+            if not recover_retry_pending:
+                stats["unchanged"] += 1
+                stats["retry_recovery_deferred"] = (
+                    stats.get("retry_recovery_deferred", 0) + 1
+                )
+                continue
             import copy
 
             retry_released = False

@@ -21023,8 +21023,11 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
         conn,
         deadline_monotonic,
         global_sell_reauction_requester,
+        recover_retry_pending,
     ):
-        del conn, global_sell_reauction_requester
+        del conn
+        assert global_sell_reauction_requester is None
+        assert recover_retry_pending is False
         preparation_order.append("preflight")
         observed_deadlines.append(deadline_monotonic)
         clock[0] = deadline_monotonic
@@ -21309,14 +21312,14 @@ def test_replacement_hwm_prefetch_threads_deadline_through_connection(monkeypatc
     ]
 
 
-def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
-    """Auxiliary O(n) work cannot spend the replacement-HWM reserve first."""
+def test_current_redecision_precedes_auxiliary_debt_scan(monkeypatch):
+    """Historical debt cannot outrank current q/book capital redecision."""
     from src.engine import cycle_runtime
     from src.execution import exit_lifecycle
 
-    position = _make_position(trade_id="hwm-before-debt-scan")
+    position = _make_position(trade_id="current-before-debt-scan")
     clock = [0.0]
-    order: list[tuple[str, float]] = []
+    order: list[str] = []
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         cycle_runtime,
@@ -21326,10 +21329,26 @@ def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
 
     def prefetch(positions, *, deadline_monotonic, **_kwargs):
         assert positions == [position]
-        order.append(("hwm", deadline_monotonic))
+        assert deadline_monotonic == pytest.approx(1.0)
+        order.append("hwm")
+
+    def refresh(_conn, _clob, current):
+        assert current is position
+        order.append("refresh")
+        return _monitor_test_edge_context(current)
+
+    def evaluate(current, _context):
+        assert current is position
+        order.append("decision")
+        return ExitDecision(False, "CURRENT_CAPITAL_HOLD")
+
+    def emit_canonical(_conn, current, **_kwargs):
+        assert current is position
+        order.append("canonical")
+        return True
 
     def classify(*_args, **_kwargs):
-        order.append(("debt", clock[0]))
+        order.append("debt")
         clock[0] = 6.0
         return exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
 
@@ -21337,6 +21356,13 @@ def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
         cycle_runtime,
         "_prefetch_held_replacement_artifact_hwm",
         prefetch,
+    )
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", evaluate)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        emit_canonical,
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -21357,12 +21383,173 @@ def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
         _monitor_test_artifact(),
         _monitor_test_tracker(),
         summary,
-        deps=_monitor_test_deps("test_hwm_before_debt_scan"),
+        deps=_monitor_test_deps("test_current_before_debt_scan"),
         run_exit_preflight=False,
         held_position_monitor_budget_seconds=6.0,
     )
 
-    assert order == [("hwm", pytest.approx(1.0)), ("debt", 0.0)]
+    assert order == ["hwm", "refresh", "decision", "canonical", "debt"]
+
+
+def test_pending_retry_recovery_waits_for_current_canonical_redecision(
+    monkeypatch,
+):
+    """Fill polling may run first; retry recovery and debt may not."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="pending-retry-after-current",
+        state="pending_exit",
+    )
+    position.exit_state = "retry_pending"
+    clock = [0.0]
+    order: list[str] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: order.append("hwm"),
+    )
+
+    def preflight(*_args, **kwargs):
+        assert kwargs["global_sell_reauction_requester"] is None
+        assert kwargs["recover_retry_pending"] is False
+        order.append("preflight")
+        return {"filled": 0, "retried": 0, "unchanged": 1, "filled_positions": []}
+
+    monkeypatch.setattr(exit_lifecycle, "check_pending_exits", preflight)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "release_pending_exit_without_order_if_retryable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "has_global_sell_snapshot_reauction_retry",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_pending_retries",
+        lambda *_args, **_kwargs: order.append("retry") or True,
+    )
+
+    def recover(_position, *, deadline_monotonic, **_kwargs):
+        assert deadline_monotonic == pytest.approx(1.0)
+        order.append("recover")
+        return False
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            order.append("debt")
+            or exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, current: (
+            order.append("refresh") or _monitor_test_edge_context(current)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda _self, _context: (
+            order.append("decision")
+            or ExitDecision(False, "CURRENT_PENDING_RETRY_HOLD")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: order.append("canonical") or True,
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        {"monitors": 0, "exits": 0},
+        deps=_monitor_test_deps("test_pending_retry_after_current"),
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert order == [
+        "hwm",
+        "preflight",
+        "refresh",
+        "decision",
+        "canonical",
+        "retry",
+        "recover",
+        "debt",
+    ]
+
+
+def test_canonical_write_failure_defers_auxiliary_debt(monkeypatch):
+    """Historical debt cannot reuse an older cut after canonical write loss."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(trade_id="canonical-failure-before-debt")
+    clock = [0.0]
+    _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debt scan must not reuse a prior canonical monitor cut"
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_canonical_failure_before_debt"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert summary["monitor_canonical_write_failed"] == 1
+    assert summary["global_sell_snapshot_reauction_scan_budget_seconds"] == 0.0
+    assert "GLOBAL_SELL_DEBT_AWAITS_PRIMARY_REDECISION" in summary[
+        "held_monitor_optional_maintenance_defer_reasons"
+    ]
 
 
 def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
@@ -21400,7 +21587,7 @@ def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
         exit_lifecycle,
         "classify_global_sell_snapshot_reauction_debt",
         lambda *_args, **_kwargs: pytest.fail(
-            "expired auxiliary debt scan must not start"
+            "debt scan must wait while current positions remain deferred"
         ),
     )
     monkeypatch.setattr(
@@ -21457,6 +21644,10 @@ def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
     assert summary["held_monitor_deadline_defer_reason"] == (
         "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
     )
+    assert summary["global_sell_snapshot_reauction_scan_budget_seconds"] == 0.0
+    assert "GLOBAL_SELL_DEBT_AWAITS_PRIMARY_REDECISION" in summary[
+        "held_monitor_optional_maintenance_defer_reasons"
+    ]
 
 
 def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
@@ -21488,7 +21679,9 @@ def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
     )
     recovered: list[str] = []
 
-    def recover(position, **_kwargs):
+    def recover(position, *, deadline_monotonic, **_kwargs):
+        assert evaluations == [active.trade_id]
+        assert deadline_monotonic == pytest.approx(1.0)
         recovered.append(position.trade_id)
         clock[0] = 1.0
         return False
@@ -21515,7 +21708,6 @@ def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
     assert recovered == [debt.trade_id]
     assert evaluations == [active.trade_id]
     assert summary["global_sell_snapshot_reauction_debts_pending"] == 1
-    assert summary["held_monitor_optional_maintenance_deferred"] >= 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
 
 
