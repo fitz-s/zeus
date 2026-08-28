@@ -2258,6 +2258,40 @@ scripts:
     required_helpers: [src.engine.event_reactor_adapter.build_event_bound_no_submit_receipt]
     required_tests: [tests/events/test_reactor.py]
 
+  enrich_no_trade_regret_outcomes.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/enrich_no_trade_regret_outcomes.py [--since ISO] [--limit N] [--chunk-size N] [--db PATH] [--fcst-db PATH] (--apply)"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      One-shot hindsight backfill of no_trade_regret_events.{later_outcome,would_have_won,
+      would_have_filled} for rows carrying a condition_id + buy_yes/buy_no direction whose
+      (city,target_date,metric) has a VERIFIED settlement_outcomes row. NoTradeRegretLedger
+      .enrich_after_settlement (src/strategy/live_inference/no_trade_regret.py) exists but had
+      no caller — this is that caller. Grades via the canonical grade_receipt() truth function
+      and _bin_from_market_event() bin constructor (src/analysis/settlement_guard_report.py),
+      the same primitives settlement_attribution/settlement_skill_attribution already trust —
+      does not invent a second win/loss law. Idempotent (WHERE would_have_won IS NULL).
+    do_not_use_when: >
+      Do not treat "not enriched" as "would have lost" — most rejection stages
+      (EXECUTOR_EXPRESSIBILITY family-level rejections, most TRADE_SCORE auction-exhaustion
+      rows) never named a specific bin/direction and are structurally ungradeable; this script
+      correctly skips them rather than guessing. Do not run --apply without dry-run evidence
+      reviewed first.
+    promotion_barrier: "Backfills hindsight-only ledger columns for offline selection-effect analysis; does not affect live entry/exit decisions or any calibration currently wired into the entry path."
+    unguarded_write_rationale: "--apply performs UPDATE-only writes on no_trade_regret_events under db_writer_lock(WORLD, BULK), lock acquired/released per chunk (precedent: scripts/migrations/202608_decision_log_retention.py); dry-run is the default and opens the world DB mode=ro."
+    required_helpers: [src.contracts.graded_receipt.grade_receipt, src.analysis.settlement_guard_report._bin_from_market_event, src.strategy.live_inference.no_trade_regret.NoTradeRegretLedger, src.strategy.live_inference.no_trade_regret.classify_fillable_bucket]
+    required_tests: [tests/scripts/test_enrich_no_trade_regret_outcomes.py]
+
   backfill_settlement_unit_2026_06_03.py:
     class: one_time_repair
     status: active
