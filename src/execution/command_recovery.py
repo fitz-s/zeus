@@ -4306,6 +4306,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                pc.shares AS projected_shares,
                pc.cost_basis_usd AS projected_cost_basis_usd,
                pc.order_id AS projected_order_id,
+               pc.fill_authority AS projected_fill_authority,
                env.condition_id AS env_condition_id,
                env.yes_token_id AS env_yes_token_id,
                env.no_token_id AS env_no_token_id,
@@ -4374,6 +4375,17 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     )
                 ) <= 0.000001
                 AND NOT (
+                    COALESCE(pc.fill_authority, '') IN ('', 'none')
+                    AND COALESCE(flow.exit_filled_size, 0) <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.shares, 0) - entry_fill.filled_size
+                    ) <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.cost_basis_usd, 0)
+                        - (entry_fill.filled_size * entry_fill.fill_price)
+                    ) <= 0.000001
+                )
+                AND NOT (
                     COALESCE(flow.exit_filled_size, 0) <= 0.000001
                     AND EXISTS (
                         SELECT 1
@@ -4407,6 +4419,40 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND ABS(CAST(COALESCE(pc.shares, '0') AS REAL)) <= 0.000000001
                     AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)) <= 0.000000001
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                )
+                OR (
+                    -- A prior projection atom may carry exact authenticated
+                    -- fill economics but lack the authority field required by
+                    -- the runtime exposure contract.  Re-run the same
+                    -- command-bound fold without changing quantity or cost.
+                    (
+                        cmd.state IN ('FILLED', 'PARTIAL', 'CANCELLED')
+                        OR (
+                            cmd.state = 'REVIEW_REQUIRED'
+                            AND entry_fill.has_confirmed_fill = 1
+                        )
+                    )
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                    AND lower(COALESCE(pc.order_id, '')) =
+                        lower(cmd.venue_order_id)
+                    AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                    AND ABS(COALESCE(pc.shares, 0) - entry_fill.filled_size)
+                        <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.cost_basis_usd, 0)
+                        - (entry_fill.filled_size * entry_fill.fill_price)
+                    ) <= 0.000001
+                    AND EXISTS (
+                        SELECT 1
+                          FROM position_events pe
+                         WHERE pe.position_id = cmd.position_id
+                           AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                           AND (
+                                pe.command_id = cmd.command_id
+                                OR lower(COALESCE(pe.order_id, '')) =
+                                   lower(cmd.venue_order_id)
+                           )
+                    )
                 )
                 OR (
                     -- Command control state cannot veto authenticated fill
@@ -4522,30 +4568,33 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                       )
                   )
            )
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM venue_command_events absorbed_event
-                WHERE absorbed_event.command_id = cmd.command_id
-                  AND absorbed_event.event_type = 'FILL_CONFIRMED'
-                  AND json_extract(absorbed_event.payload_json, '$.recovered_from') =
-                      'edli_confirmed_fill_already_absorbed'
-                  AND json_type(absorbed_event.payload_json, '$.proof_hash') = 'text'
-                  AND NULLIF(TRIM(CAST(json_extract(
-                      absorbed_event.payload_json, '$.proof_hash'
-                  ) AS TEXT)), '') IS NOT NULL
-                  AND json_type(absorbed_event.payload_json, '$.absorbed_position_id') =
-                      'text'
-                  AND json_extract(absorbed_event.payload_json, '$.absorbed_position_id') =
-                      cmd.position_id
-                  AND json_type(absorbed_event.payload_json, '$.filled_size') IN (
-                      'integer', 'real', 'text'
-                  )
-                  AND CAST(COALESCE(json_extract(
-                      absorbed_event.payload_json, '$.filled_size'
-                  ), '0') AS REAL) > 0
-                  AND CAST(json_extract(
-                      absorbed_event.payload_json, '$.filled_size'
-                  ) AS REAL) = CAST(entry_fill.filled_size AS REAL)
+           AND (
+               COALESCE(pc.fill_authority, '') IN ('', 'none')
+               OR NOT EXISTS (
+                   SELECT 1
+                     FROM venue_command_events absorbed_event
+                    WHERE absorbed_event.command_id = cmd.command_id
+                      AND absorbed_event.event_type = 'FILL_CONFIRMED'
+                      AND json_extract(absorbed_event.payload_json, '$.recovered_from') =
+                          'edli_confirmed_fill_already_absorbed'
+                      AND json_type(absorbed_event.payload_json, '$.proof_hash') = 'text'
+                      AND NULLIF(TRIM(CAST(json_extract(
+                          absorbed_event.payload_json, '$.proof_hash'
+                      ) AS TEXT)), '') IS NOT NULL
+                      AND json_type(absorbed_event.payload_json, '$.absorbed_position_id') =
+                          'text'
+                      AND json_extract(absorbed_event.payload_json, '$.absorbed_position_id') =
+                          cmd.position_id
+                      AND json_type(absorbed_event.payload_json, '$.filled_size') IN (
+                          'integer', 'real', 'text'
+                      )
+                      AND CAST(COALESCE(json_extract(
+                          absorbed_event.payload_json, '$.filled_size'
+                      ), '0') AS REAL) > 0
+                      AND CAST(json_extract(
+                          absorbed_event.payload_json, '$.filled_size'
+                      ) AS REAL) = CAST(entry_fill.filled_size AS REAL)
+               )
            )
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
@@ -6244,6 +6293,9 @@ def _append_filled_entry_projection_repair(
                 return False
         before_shares = _float_or_none(candidate.get("projected_shares"))
         before_cost = _float_or_none(candidate.get("projected_cost_basis_usd"))
+        before_fill_authority = str(
+            candidate.get("projected_fill_authority") or ""
+        ).strip()
         expected_shares = _float_or_none(candidate.get("fill_filled_size"))
         expected_price = _float_or_none(candidate.get("fill_price"))
         same_order_reobservation = (
@@ -6401,6 +6453,7 @@ def _append_filled_entry_projection_repair(
                 )
         return bool(
             existing_fill is None
+            or before_fill_authority in {"", "none"}
             or (
                 same_order_reobservation
                 and expected_position_shares is not None

@@ -15749,7 +15749,8 @@ class TestRecoveryResolutionTable:
         current = conn.execute(
             """
             SELECT phase, condition_id, token_id, no_token_id, shares, cost_basis_usd,
-                   entry_price, order_id, order_status, strategy_key, temperature_metric
+                   entry_price, order_id, order_status, strategy_key,
+                   temperature_metric, fill_authority
               FROM position_current
              WHERE position_id = 'pos-001'
             """
@@ -15766,6 +15767,7 @@ class TestRecoveryResolutionTable:
             "order_status": "filled",
             "strategy_key": "opening_inertia",
             "temperature_metric": "high",
+            "fill_authority": "venue_confirmed_full",
         }
         events = conn.execute(
             """
@@ -15816,6 +15818,29 @@ class TestRecoveryResolutionTable:
             "venue_status": "MATCHED",
             "terminal_exec_status": "filled",
         }
+        conn.execute(
+            "UPDATE position_current SET fill_authority = NULL "
+            "WHERE position_id = 'pos-001'"
+        )
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        authority_repair = reconcile_filled_entry_projection_repairs(
+            conn,
+            mock_client,
+        )
+        assert authority_repair == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT fill_authority FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()["fill_authority"] == "venue_confirmed_full"
+
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_projection_repair"] == {
             "scanned": 0,
