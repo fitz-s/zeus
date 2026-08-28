@@ -8139,6 +8139,11 @@ def test_global_sell_reauction_queued_executable_attempt_is_coalesced(
         "wake_path": wake_path,
         "return_request": True,
         "prepare_only": True,
+        "completion_deadline_at": "2026-08-08T18:01:00+00:00",
+        "selection_epoch_identity": "selection-attempt-refresh",
+        "sell_book_witness_identity": "book-attempt-refresh",
+        "debt_event_id": "position:monitor_refreshed:1",
+        "monitor_event_id": "position:monitor_refreshed:1",
     }
     first_result = reactor.request_global_auction_completion(
         **common,
@@ -8181,6 +8186,73 @@ def test_global_sell_reauction_queued_executable_attempt_is_coalesced(
     assert latest.generation == first.generation
     assert latest.attempt_identity == first.attempt_identity
     assert latest.held_best_bid == pytest.approx(0.49)
+
+
+def test_global_sell_reauction_consumed_attempt_starts_current_generation(
+    tmp_path,
+):
+    """A consumed V4 lineage cannot reject the next canonical monitor cut."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "reactor-wake-consumed-attempt.json"
+    common = {
+        "reason": "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        "position_id": "global-reauction-consumed-attempt",
+        "family": ("Paris", "2026-08-08", "high"),
+        "probability_content_identity": "q-consumed-attempt",
+        "held_token_id": "paris-yes-consumed-attempt",
+        "book_state": "EXECUTABLE",
+        "schema_version": 4,
+        "wake_path": wake_path,
+        "return_request": True,
+    }
+    first_accepted, first = reactor.request_global_auction_completion(
+        **common,
+        held_best_bid=0.49,
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+        completion_deadline_at="2026-08-08T18:00:30+00:00",
+        selection_epoch_identity="selection-first",
+        sell_book_witness_identity="book-first",
+        debt_event_id="position:monitor_refreshed:1",
+        monitor_event_id="position:monitor_refreshed:1",
+    )
+    assert first_accepted is True
+    assert first is not None
+    first_wakes = reactor_wake.reactor_wakes_since(None, path=wake_path)
+    assert len(first_wakes) == 1
+    assert reactor_wake.acknowledge_reactor_wake(
+        first_wakes[0],
+        path=wake_path,
+    ) is True
+    assert not reactor_wake.v4_held_sell_reauction_request_is_queued(
+        first,
+        path=wake_path,
+    )
+
+    second_accepted, second = reactor.request_global_auction_completion(
+        **common,
+        held_best_bid=0.47,
+        bid_observed_at="2026-08-08T18:00:31+00:00",
+        probability_observed_at="2026-08-08T18:00:31+00:00",
+        completion_deadline_at="2026-08-08T18:01:01+00:00",
+        selection_epoch_identity="selection-second",
+        sell_book_witness_identity="book-second",
+        debt_event_id="position:monitor_refreshed:2",
+        monitor_event_id="position:monitor_refreshed:2",
+    )
+
+    assert second_accepted is True
+    assert second is not None
+    assert second.scope_identity == first.scope_identity
+    assert second.generation != first.generation
+    assert second.selection_epoch_identity == "selection-second"
+    assert second.sell_book_witness_identity == "book-second"
+    assert reactor_wake.v4_held_sell_reauction_request_is_queued(
+        second,
+        path=wake_path,
+    )
 
 
 def test_expired_global_sell_reauction_rebinds_current_q_and_book(tmp_path):

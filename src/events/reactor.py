@@ -7276,6 +7276,25 @@ def request_global_auction_completion(
                 str(scope_identity or ""),
                 path=wake_path,
             )
+            existing_request_is_queued = bool(
+                existing_v4 is not None
+                and v4_held_sell_reauction_request_is_queued(
+                    existing_v4,
+                    path=wake_path,
+                )
+            )
+            start_after_consumed_attempt = bool(
+                existing_v4 is not None
+                and not existing_request_is_queued
+                and not generation
+                and not force_new_generation
+            )
+            if start_after_consumed_attempt:
+                # SCOPE: this exact V4 scope after its prior wake was consumed.
+                # DRAIN: publish one new immutable generation from the current
+                # canonical monitor q/book. RESET: the new wake becomes queued
+                # and ordinary coalescing resumes until its terminal receipt.
+                force_new_generation = True
             if (
                 existing_v4 is not None
                 and generation
@@ -7283,10 +7302,15 @@ def request_global_auction_completion(
                 and not force_new_generation
             ):
                 raise ValueError("HELD_SELL_REAUCTION_GENERATION_CONFLICT")
-            if existing_v4 is not None and not generation and not force_new_generation:
+            if (
+                existing_v4 is not None
+                and existing_request_is_queued
+                and not generation
+                and not force_new_generation
+            ):
                 held_request_kwargs["generation"] = existing_v4.generation
             lineage_upgrade = False
-            if existing_v4 is not None:
+            if existing_v4 is not None and existing_request_is_queued:
                 for field in (
                     "selection_epoch_identity",
                     "sell_book_witness_identity",
@@ -7316,13 +7340,6 @@ def request_global_auction_completion(
                 or existing_v4.scope_identity != held_request.scope_identity
             ):
                 raise ValueError("HELD_SELL_REAUCTION_LINEAGE_SCOPE_CONFLICT")
-            existing_request_is_queued = bool(
-                existing_v4 is not None
-                and v4_held_sell_reauction_request_is_queued(
-                    existing_v4,
-                    path=wake_path,
-                )
-            )
             context_upgrade = bool(
                 existing_request_is_queued
                 and existing_v4.book_state != "EXECUTABLE"

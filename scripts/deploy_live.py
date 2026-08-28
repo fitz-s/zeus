@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-28
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -1069,10 +1069,17 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             sample_limit=256,
         )
         groups = monitor_restart_blocking_evidence(cadence)
-        reauction_handoff_ids = _exact_v4_reauction_restart_handoff_ids(
+        event_handoff_ids = _exact_v4_reauction_restart_handoff_ids(
             conn,
             positions=groups.get("restart_blocking_stale_positions", ()),
             now=now,
+        )
+        lineage_handoff_ids = _v4_lineage_reauction_restart_handoff_ids(
+            conn,
+            positions=groups.get("restart_blocking_stale_positions", ()),
+        )
+        reauction_handoff_ids = tuple(
+            sorted({*event_handoff_ids, *lineage_handoff_ids})
         )
     except (RuntimeError, sqlite3.Error) as exc:
         return {
@@ -1236,6 +1243,198 @@ def _exact_v4_reauction_restart_handoff_ids(
             or "GLOBAL_REAUCTION_PENDING" not in validation_set
             or f"global_auction_completion_request_id:{request_id}"
             not in validation_set
+        ):
+            continue
+        verified.append(position_id)
+    return tuple(verified)
+
+
+def _v4_lineage_reauction_restart_handoff_ids(
+    conn: sqlite3.Connection,
+    *,
+    positions: object,
+) -> tuple[str, ...]:
+    """Pair a fresh failed monitor cut with its exact durable V4 lineage.
+
+    The loaded runtime can refresh q/book faster than it can terminate the
+    prior immutable V4 attempt.  A lineage conflict then leaves the latest
+    monitor event without an embedded obligation even though its typed lineage
+    index remains durable.  The lineage is restart handoff evidence only: the
+    new runtime must still rebind current q/book and pass submit-time authority.
+    """
+
+    candidates = {
+        str(item.get("position_id") or "").strip(): str(
+            item.get("last_monitor_refreshed_at") or ""
+        ).strip()
+        for item in positions
+        if isinstance(item, dict)
+        and item.get("issue") == "monitor_exit_completion_unavailable"
+        and str(item.get("position_id") or "").strip()
+        and str(item.get("last_monitor_refreshed_at") or "").strip()
+    }
+    if not candidates:
+        return ()
+    position_columns = _sqlite_table_columns(conn, "position_current")
+    event_columns = _sqlite_table_columns(conn, "position_events")
+    if not {
+        "position_id",
+        "direction",
+        "token_id",
+        "no_token_id",
+    }.issubset(position_columns) or not {
+        "position_id",
+        "sequence_no",
+        "event_type",
+        "occurred_at",
+        "payload_json",
+    }.issubset(event_columns):
+        return ()
+
+    try:
+        from src.runtime.reactor_wake import (
+            REACTOR_WAKE_FILENAME,
+            held_sell_reauction_scope_identity,
+            latest_v4_held_sell_reauction_request,
+        )
+
+        wake_path = (
+            Path(_require_live_repo()) / "state" / REACTOR_WAKE_FILENAME
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ()
+
+    verified: list[str] = []
+    for position_id, expected_occurred_at in sorted(candidates.items()):
+        row = conn.execute(
+            """
+            SELECT pe.occurred_at, pe.payload_json,
+                   pc.direction, pc.token_id, pc.no_token_id
+              FROM position_events pe
+              JOIN position_current pc ON pc.position_id = pe.position_id
+             WHERE pe.position_id = ?
+               AND pe.event_type = 'MONITOR_REFRESHED'
+             ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is None or str(row[0] or "") != expected_occurred_at:
+            continue
+        try:
+            payload = json.loads(str(row[1] or "{}"))
+            probability = float(payload.get("last_monitor_prob"))
+            best_bid = float(payload.get("last_monitor_best_bid"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        validations_raw = payload.get("applied_validations")
+        validations = (
+            {str(value) for value in validations_raw}
+            if isinstance(validations_raw, list)
+            else set()
+        )
+        probability_receipt = payload.get("monitor_probability_receipt")
+        day0_receipt = payload.get("day0_monitor_probability_receipt")
+        monitor_lineage = payload.get("held_sell_reauction_monitor_lineage")
+        direction = str(row[2] or "").strip().lower()
+        held_token_id = str(
+            row[4]
+            if direction == "buy_no"
+            else row[3]
+            if direction == "buy_yes"
+            else ""
+        ).strip()
+        family = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
+            str(
+                payload.get("metric")
+                or (
+                    day0_receipt.get("metric")
+                    if isinstance(day0_receipt, dict)
+                    else ""
+                )
+                or ""
+            ).strip().lower(),
+        )
+        if (
+            payload.get("last_monitor_prob_is_fresh") is not True
+            or payload.get("last_monitor_market_price_is_fresh") is not True
+            or payload.get("held_sell_full_depth_action_authority") is not True
+            or not 0.0 <= probability <= 1.0
+            or not 0.05 <= best_bid <= 0.95
+            or not held_token_id
+            or not isinstance(probability_receipt, dict)
+            or not str(
+                probability_receipt.get("probability_content_identity") or ""
+            ).strip()
+            or not isinstance(monitor_lineage, dict)
+            or not str(
+                monitor_lineage.get("selection_epoch_identity") or ""
+            ).strip()
+            or not str(
+                monitor_lineage.get("sell_book_witness_identity") or ""
+            ).strip()
+            or "sell_reversal" not in validations
+            or "global_auction_completion_request_failed" not in validations
+            or "global_auction_completion_debt:REQUEST_REJECTED"
+            not in validations
+            or "GLOBAL_REAUCTION_PENDING" not in validations
+        ):
+            continue
+
+        if not all(family):
+            continue
+        probability_content_identity = str(
+            probability_receipt.get("probability_content_identity") or ""
+        ).strip()
+        scope_identity = held_sell_reauction_scope_identity(
+            position_id=position_id,
+            family=family,
+            probability_content_identity=probability_content_identity,
+            held_token_id=held_token_id,
+            schema_version=4,
+        )
+        try:
+            request = latest_v4_held_sell_reauction_request(
+                scope_identity,
+                path=wake_path,
+            )
+        except (OSError, TypeError, ValueError):
+            continue
+        if request is None:
+            continue
+        try:
+            request_bid = float(getattr(request, "held_best_bid", None))
+        except (TypeError, ValueError):
+            continue
+        if (
+            int(getattr(request, "schema_version", 0) or 0) != 4
+            or getattr(request, "lineage_status", "") != "COMPLETE"
+            or str(getattr(request, "scope_identity", "") or "")
+            != scope_identity
+            or str(getattr(request, "position_id", "") or "") != position_id
+            or str(getattr(request, "held_token_id", "") or "")
+            != held_token_id
+            or tuple(getattr(request, "family", ()) or ()) != family
+            or str(getattr(request, "book_state", "") or "")
+            != "EXECUTABLE"
+            or not 0.05 <= request_bid <= 0.95
+            or not all(
+                str(getattr(request, field, "") or "").strip()
+                for field in (
+                    "request_id",
+                    "material_identity",
+                    "attempt_identity",
+                    "scope_identity",
+                    "generation",
+                    "probability_content_identity",
+                    "selection_epoch_identity",
+                    "sell_book_witness_identity",
+                    "debt_event_id",
+                    "monitor_event_id",
+                )
+            )
         ):
             continue
         verified.append(position_id)
