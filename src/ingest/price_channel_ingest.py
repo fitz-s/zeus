@@ -3015,7 +3015,13 @@ def _m5_authority_deadline_check(deadline_monotonic: float) -> None:
         raise TimeoutError("m5_authority_proof_deadline_exhausted")
 
 
-def _edli_market_channel_universe_m5_failure_reason() -> str | None:
+def _edli_market_channel_universe_scoped_debt_reason() -> str | None:
+    """Return held-identity debt without changing the M5 authority verdict.
+
+    Canonical held identity belongs to the exact held snapshot/identity gates.
+    It is not user-channel or reconciliation evidence, so it must remain
+    observable without turning a completed M5 proof into a global WS failure.
+    """
     with _market_channel_bootstrap_lock:
         universe_debt = _market_channel_universe_refresh_debt
     reason = str((universe_debt or {}).get("reason", ""))
@@ -3291,13 +3297,13 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         "user_channel_messages": message_count,
         "venue_reconciliations": reconcile_count,
     }
-    # A registered sink is not canonical-ready if the current held identity
-    # could not be materialized.  Keep the daemon's canonical heartbeat in
-    # STARTING until the next M5 runs after that exact debt is drained.
-    universe_failure_reason = _edli_market_channel_universe_m5_failure_reason()
-    if universe_failure_reason:
-        result["scheduler_failed"] = True
-        result["scheduler_failure_reason"] = universe_failure_reason
+    # Canonical held-identity debt is scoped to the affected held
+    # snapshot/identity gates.  It remains visible for their fail-closed
+    # recovery path, but cannot relabel a successful user-channel/M5 proof as
+    # a global WS failure and block unrelated exit submissions.
+    universe_debt_reason = _edli_market_channel_universe_scoped_debt_reason()
+    if universe_debt_reason:
+        result["canonical_held_identity_debt"] = universe_debt_reason
     return result
 
 

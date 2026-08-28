@@ -185,6 +185,7 @@ def test_price_channel_starting_heartbeat_is_not_fresh_until_first_m5_success(
     assert ready["status"] == "READY"
     assert ready["ready"] is True
     assert ready["alive_at"]
+    assert ready["generation"] == daemon._HEARTBEAT_GENERATION
 
     daemon._write_price_channel_heartbeat(status="STOPPING")
     stopping = json.loads(
@@ -3790,7 +3791,7 @@ def test_market_channel_broad_partial_exit_retains_held_and_keeps_m5_debt(
     assert set(third.token_metadata) == {"held-token", "candidate-token"}
 
 
-def test_market_channel_canonical_identity_debt_fails_m5_for_all_typed_reasons(
+def test_market_channel_canonical_identity_debt_stays_scoped_for_all_typed_reasons(
     monkeypatch,
 ):
     from src.ingest import price_channel_ingest as lane
@@ -3805,7 +3806,7 @@ def test_market_channel_canonical_identity_debt_fails_m5_for_all_typed_reasons(
             "_market_channel_universe_refresh_debt",
             {"reason": reason},
         )
-        assert lane._edli_market_channel_universe_m5_failure_reason() == (
+        assert lane._edli_market_channel_universe_scoped_debt_reason() == (
             "canonical_held_identity"
         )
 
