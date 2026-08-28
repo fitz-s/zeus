@@ -91,6 +91,14 @@ class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
     DEFERRED = "DEFERRED"
 
 
+@dataclass(frozen=True)
+class _HeldMonitorBootstrap:
+    """One bounded, TRADE-only snapshot reused by the monitor's authority lane."""
+
+    portfolio: PortfolioState
+    allocator_refresh: dict
+
+
 def preserve_held_sell_reauction_deadline(
     obligation: Mapping[str, object],
     existing: Mapping[str, object],
@@ -13488,6 +13496,15 @@ def _held_monitor_preparation_deadline(
     try:
         yield ensure_live
         ensure_live()
+    except sqlite3.OperationalError as exc:
+        # SQLite reports a progress-handler deadline as ``interrupted`` rather
+        # than our typed timeout.  Preserve the monitor scheduler seam: this is
+        # a bounded preparation failure, never an UNKNOWN monitor outcome.
+        if expired() and "interrupted" in str(exc).lower():
+            raise TimeoutError(
+                "HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED"
+            ) from exc
+        raise
     finally:
         conn.set_progress_handler(None, 0)
         conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
@@ -13527,6 +13544,58 @@ def held_monitor_pre_artifact_reserve_seconds() -> float:
     from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
 
     return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+
+
+def _load_held_monitor_bootstrap(
+    *,
+    deadline_monotonic: float,
+    target_families: Collection[tuple[str, str, str]] | None,
+) -> _HeldMonitorBootstrap:
+    """Hydrate held exposure and allocator state in one TRADE-only read unit.
+
+    SCOPE: one monitor claim's open-position portfolio plus allocator exposure.
+    DRAIN: the next recurring monitor retries after the read contention clears.
+    RESET: every claim opens a new query-only connection and recomputes both
+    values.  Cross-DB authority and all writes remain in the later monitor
+    connection, after this bootstrap has closed.
+    """
+    from src.engine.cycle_runner import (
+        get_held_monitor_bootstrap_connection,
+        load_portfolio,
+    )
+
+    conn = get_held_monitor_bootstrap_connection(
+        deadline_monotonic=deadline_monotonic,
+    )
+    if conn is None:
+        raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+    try:
+        with _held_monitor_preparation_deadline(
+            conn,
+            deadline_monotonic,
+        ) as ensure_preparation_live:
+            portfolio = load_portfolio(
+                open_positions_only=True,
+                target_families=target_families,
+                connection=conn,
+                deadline_monotonic=deadline_monotonic,
+            )
+            ensure_preparation_live()
+            allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
+                conn,
+                portfolio,
+            )
+            ensure_preparation_live()
+            return _HeldMonitorBootstrap(
+                portfolio=portfolio,
+                allocator_refresh=allocator_refresh,
+            )
+    finally:
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        finally:
+            conn.close()
 
 
 def _persist_exit_monitor_artifact(
@@ -13786,7 +13855,6 @@ def run_exit_monitor_cycle(
         _execute_monitoring_phase,
         get_connection,
         get_tracker,
-        load_portfolio,
         save_tracker,
         save_portfolio,
     )
@@ -13840,12 +13908,32 @@ def run_exit_monitor_cycle(
         _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
-    conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
-    if conn is None:
-        logger.warning(
-            "exit_monitor: DB preparation deadline expired — preserving primary "
-            "redecision reserve for the recurring retry"
+    try:
+        bootstrap = _load_held_monitor_bootstrap(
+            deadline_monotonic=preparation_deadline_monotonic,
+            target_families=target_families,
         )
+    except TimeoutError as exc:
+        logger.warning(
+            "exit_monitor: TRADE-only bootstrap deadline expired — preserving "
+            "primary redecision reserve for the recurring retry: %s",
+            exc,
+        )
+        mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
+        return False
+    except sqlite3.OperationalError as exc:
+        logger.warning("exit_monitor: TRADE-only bootstrap unavailable: %s", exc)
+        mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
+        return False
+
+    # Bootstrap has closed its query-only TRADE connection.  Establish the
+    # existing cross-DB/write authority only for the subsequent belief and
+    # lifecycle lane; never reload portfolio or allocator state here.
+    conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)
+    if conn is None:
+        logger.warning("exit_monitor: authority connection unavailable after bootstrap")
         mark_held_position_monitor_complete()
         _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
         return False
@@ -13867,24 +13955,12 @@ def run_exit_monitor_cycle(
     succeeded = False
     monitor_completion_marked = False
     try:
+        portfolio = bootstrap.portfolio
+        held_monitor_allocator_refresh = bootstrap.allocator_refresh
         with _held_monitor_preparation_deadline(
             conn,
-            preparation_deadline_monotonic,
-        ) as ensure_preparation_live:
-            # Cadence detection is owned by the independent durable recovery
-            # lane in ``src.main``.  Re-reading the same event history here put
-            # optional diagnosis ahead of portfolio/allocator preparation: on
-            # an I/O-contended canonical DB it could consume this whole claim
-            # and prevent every held position from reaching redecision.  Keep
-            # the actuation prerequisite tranche free of diagnostic reads.
-            ensure_preparation_live()
-            portfolio = load_portfolio(
-                open_positions_only=True,
-                target_families=target_families,
-                connection=conn,
-                deadline_monotonic=preparation_deadline_monotonic,
-            )
-            ensure_preparation_live()
+            monitor_deadline_monotonic,
+        ) as ensure_authority_live:
             if risk_level is RiskLevel.RED:
                 summary["force_exit_review_scope"] = "sweep_active_positions"
                 summary["force_exit_sweep_trigger"] = "risk_level_red"
@@ -13892,13 +13968,7 @@ def run_exit_monitor_cycle(
                     portfolio,
                     conn=conn,
                 )
-                ensure_preparation_live()
-            held_monitor_allocator_refresh = (
-                _refresh_global_allocator_for_held_position_monitor(
-                    conn,
-                    portfolio,
-                )
-            )
+                ensure_authority_live()
             summary["held_monitor_allocator_refresh"] = (
                 held_monitor_allocator_refresh
             )
@@ -13906,13 +13976,13 @@ def run_exit_monitor_cycle(
                 target_families is None
                 and held_monitor_allocator_refresh.get("configured")
             ):
-                ensure_preparation_live()
+                ensure_authority_live()
                 summary["held_monitor_allocator_retry_release"] = (
                     _release_allocator_config_blocked_exit_retries_after_refresh(
                         conn,
                         portfolio,
                         observed_at=datetime.now(timezone.utc),
-                        deadline_monotonic=preparation_deadline_monotonic,
+                        deadline_monotonic=monitor_deadline_monotonic,
                     )
                 )
         summary["held_monitor_preparation_elapsed_seconds"] = max(

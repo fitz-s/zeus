@@ -21865,14 +21865,19 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     claim_offset = source.index("held_position_monitor_active.set()")
     deadline_offset = source.index("monitor_deadline_monotonic =")
     cutoff_offset = source.index("preparation_deadline_monotonic =")
-    connection_offset = source.index(
-        "conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)"
+    bootstrap_offset = source.index("bootstrap = _load_held_monitor_bootstrap(")
+    authority_connection_offset = source.index(
+        "conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)"
     )
-    assert claim_offset < deadline_offset < connection_offset
-    assert deadline_offset < cutoff_offset < connection_offset
-    preparation_offset = source.index("with _held_monitor_preparation_deadline(")
-    portfolio_offset = source.index("portfolio = load_portfolio(")
-    assert connection_offset < preparation_offset < portfolio_offset
+    assert claim_offset < deadline_offset < bootstrap_offset < authority_connection_offset
+    assert deadline_offset < cutoff_offset < bootstrap_offset
+    bootstrap_source = inspect.getsource(
+        __import__("src.execution.exit_lifecycle", fromlist=["_"])._load_held_monitor_bootstrap
+    )
+    assert "get_held_monitor_bootstrap_connection" in bootstrap_source
+    assert "open_positions_only=True" in bootstrap_source
+    assert bootstrap_source.count("load_portfolio(") == 1
+    assert bootstrap_source.count("_refresh_global_allocator_for_held_position_monitor(") == 1
 
     captured = {}
 
@@ -22026,6 +22031,111 @@ def test_monitor_preparation_sql_deadline_interrupts_and_restores(monkeypatch):
     assert conn.busy_ms == 30_000
 
 
+def test_monitor_preparation_interrupt_becomes_typed_deadline(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    clock = [10.0]
+
+    class Result:
+        def __init__(self, row=None):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class Conn:
+        def __init__(self):
+            self.busy_ms = 30_000
+            self.handler = None
+
+        def execute(self, sql):
+            if sql == "PRAGMA busy_timeout":
+                return Result((self.busy_ms,))
+            if sql.startswith("PRAGMA busy_timeout = "):
+                self.busy_ms = int(sql.rsplit(" ", 1)[-1])
+                return Result()
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, handler, _opcodes):
+            self.handler = handler
+
+    conn = Conn()
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+
+    with pytest.raises(
+        TimeoutError,
+        match="HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED",
+    ):
+        with exit_lifecycle._held_monitor_preparation_deadline(conn, 12.0):
+            clock[0] = 12.1
+            raise sqlite3.OperationalError("interrupted")
+
+    assert conn.handler is None
+    assert conn.busy_ms == 30_000
+
+
+def test_held_monitor_bootstrap_is_trade_only_and_reuses_one_snapshot(monkeypatch):
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+
+    calls = []
+
+    class Result:
+        def fetchone(self):
+            return (30_000,)
+
+    class Conn:
+        in_transaction = False
+
+        def execute(self, sql):
+            calls.append(("sql", sql))
+            return Result()
+
+        def set_progress_handler(self, *_args):
+            return None
+
+        def rollback(self):
+            pytest.fail("read-only bootstrap opened no transaction")
+
+        def close(self):
+            calls.append(("close",))
+
+    portfolio = _make_portfolio()
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda *, deadline_monotonic: calls.append(("bootstrap", deadline_monotonic))
+        or Conn(),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_connection",
+        lambda **_kwargs: pytest.fail("bootstrap must not attach authority DBs"),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "load_portfolio",
+        lambda **kwargs: calls.append(("portfolio", kwargs)) or portfolio,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda conn, loaded: calls.append(("allocator", conn, loaded))
+        or {"configured": True},
+    )
+
+    bootstrap = exit_lifecycle._load_held_monitor_bootstrap(
+        deadline_monotonic=time.monotonic() + 10.0,
+        target_families=None,
+    )
+
+    assert bootstrap.portfolio is portfolio
+    assert bootstrap.allocator_refresh == {"configured": True}
+    assert [call[0] for call in calls].count("portfolio") == 1
+    assert [call[0] for call in calls].count("allocator") == 1
+    assert calls[-1] == ("close",)
+
+
 def test_monitor_preparation_cutoff_preserves_one_complete_probability_read(
     monkeypatch,
 ):
@@ -22081,7 +22191,7 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
 
-    observed_deadlines = []
+    authority_deadlines = []
     completed = []
     outcomes = []
     active = threading.Event()
@@ -22089,10 +22199,15 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda *, deadline_monotonic: None,
+    )
+    monkeypatch.setattr(
+        cycle_runner,
         "get_connection",
-        lambda *, deadline_monotonic: observed_deadlines.append(
+        lambda *, deadline_monotonic: authority_deadlines.append(
             deadline_monotonic
-        ) or None,
+        ) or pytest.fail("attached authority connection must follow bootstrap"),
     )
 
     result = exit_lifecycle.run_exit_monitor_cycle(
@@ -22106,10 +22221,10 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
     )
 
     assert result is False
-    assert observed_deadlines == [pytest.approx(15.0)]
+    assert authority_deadlines == []
     assert completed == [True]
     assert not active.is_set()
-    assert outcomes == ["DB_CONTENDED"]
+    assert outcomes == ["REFRESH_DEADLINE"]
 
 
 def test_periodic_monitor_claim_never_crosses_scheduler_quantum(monkeypatch):
