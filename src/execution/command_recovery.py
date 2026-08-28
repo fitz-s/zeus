@@ -24954,6 +24954,7 @@ def _confirmed_entry_trade_fact_summary(
         + """
         SELECT fact.trade_fact_id,
                fact.trade_id,
+               fact.state,
                fact.filled_size,
                fact.fill_price,
                fact.raw_payload_json,
@@ -24983,6 +24984,7 @@ def _confirmed_entry_trade_fact_summary(
     sources: set[str] = set()
     trade_ids: list[str] = []
     fact_ids: list[int] = []
+    states: list[str] = []
     from src.execution.exchange_reconcile import (
         _json_mapping,
         _taker_buy_trade_economics,
@@ -25018,6 +25020,7 @@ def _confirmed_entry_trade_fact_summary(
         cost += exact_cost
         trade_ids.append(trade_id)
         fact_ids.append(int(fact["trade_fact_id"]))
+        states.append(str(fact.get("state") or "").upper())
         sources.add(str(fact.get("source") or "").upper())
         source_at = str(
             fact.get("venue_timestamp") or fact.get("observed_at") or ""
@@ -25032,6 +25035,7 @@ def _confirmed_entry_trade_fact_summary(
         "source": "REST" if "REST" in sources else "WS_USER",
         "trade_ids": trade_ids,
         "trade_fact_ids": fact_ids,
+        "states": states,
     }
 
 
@@ -25225,6 +25229,10 @@ def _reconcile_authenticated_entry_trade_fact(
     order_type = order_type.removesuffix("_LIMIT")
     filled_notional = filled * fill_price
     submitted_notional = requested * submitted_price
+    all_trade_facts_confirmed = bool(
+        facts["count"]
+        and all(state == "CONFIRMED" for state in facts.get("states", ()))
+    )
     price_improved_taker_overfill = bool(
         share_overfill
         and str(command.get("side") or "").upper() == "BUY"
@@ -25316,7 +25324,8 @@ def _reconcile_authenticated_entry_trade_fact(
             "command_state_accepts_fill": True,
             "entry_buy_identity": True,
             "bound_venue_order_id_matches_trade": True,
-            "authenticated_confirmed_trade_facts": True,
+            "authenticated_trade_facts": True,
+            "authenticated_confirmed_trade_facts": all_trade_facts_confirmed,
             "fill_price_respects_submitted_limit": True,
             "cumulative_fill_within_submitted_capital_bound": True,
             "price_improved_taker_share_overfill": price_improved_taker_overfill,
@@ -25386,10 +25395,20 @@ def _reconcile_authenticated_entry_trade_fact(
             )
         fill_event_payload = payload
         if cancel_pending or terminal_fill_review:
+            terminal_proof_class = (
+                "authenticated_trade_fact_full_fill"
+                if all_trade_facts_confirmed
+                else "authenticated_trade_fact_terminal_fill"
+            )
+            terminal_auth_predicate = (
+                "authenticated_confirmed_trade_facts"
+                if all_trade_facts_confirmed
+                else "authenticated_trade_facts"
+            )
             fill_event_payload = {
                 **payload,
                 "reason": "review_cleared_confirmed_fill",
-                "proof_class": "authenticated_trade_fact_full_fill",
+                "proof_class": terminal_proof_class,
                 "trade_id": str(facts["trade_ids"][-1]),
                 "cleared_at": observed_at,
                 "required_predicates": {
@@ -25398,6 +25417,7 @@ def _reconcile_authenticated_entry_trade_fact(
                     "latest_event_is_review_boundary": True,
                     "trade_facts_cover_command_or_leave_only_dust": True,
                     "source_fill_time_valid": True,
+                    terminal_auth_predicate: True,
                 },
             }
         if not already_filled and not partial_control_fold_complete:

@@ -5574,13 +5574,31 @@ class TestAuthenticatedEntryTradeFactProjection:
             "src.state.db.get_forecasts_connection_read_only",
             forecasts_connection,
         )
-        _append_confirmed_trade_fact(
+        trade_id = f"trade-authenticated-{suffix}-price-improvement"
+        _append_trade_fact(
             conn,
             command_id=command_id,
             order_id=order_id,
-            trade_id=f"trade-authenticated-{suffix}-price-improvement",
+            trade_id=trade_id,
+            state="CONFIRMED" if order_type == "FAK" else "MATCHED",
+            source="REST" if order_type == "FAK" else "WS_USER",
             filled_size="189.77",
             fill_price="0.08",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": (
+                    "partial_remainder_point_order_filled_without_full_trade_fact"
+                ),
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+            },
         )
 
         summary = reconcile_authenticated_entry_trade_facts(
@@ -5590,6 +5608,15 @@ class TestAuthenticatedEntryTradeFactProjection:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "FILLED"
+        fill_payload = json.loads(_get_events(conn, command_id)[-1]["payload_json"])
+        assert fill_payload["fill_bound_semantics"] == (
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+        )
+        assert fill_payload["proof_class"] == (
+            "authenticated_trade_fact_full_fill"
+            if order_type == "FAK"
+            else "authenticated_trade_fact_terminal_fill"
+        )
         position = conn.execute(
             """
             SELECT phase, city, target_date, temperature_metric, unit, bin_label, token_id,
@@ -5793,6 +5820,7 @@ class TestAuthenticatedEntryTradeFactProjection:
         ("order_type", "filled_size", "fill_price"),
         [
             ("FAK", "200", "0.08"),
+            ("FOK", "200", "0.08"),
             ("GTC", "189.77", "0.08"),
         ],
     )
