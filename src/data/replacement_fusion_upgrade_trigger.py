@@ -7,9 +7,9 @@
 #   served<5 posterior is then marked "covered" (q_lcb NOT NULL) by all three coverage gates —
 #   which key coverage on the baseline_b0 (ecmwf_open_data) run, BLIND to the bayes_precision_fusion decorrelated
 #   instrument set. So the scope never re-materializes even after its 5th provider lands.
-#   K-decision: compare both the served provider-family set and the exact persisted CURRENT row
-#   revisions consumed by the latest posterior. A new family OR a changed configured source row
-#   requires re-materialization.
+#   K-decision: compare both the served provider-family set and the exact persisted CURRENT input
+#   revisions consumed by the latest posterior. A new family, changed provider row, or changed
+#   Day0 hourly-vector bundle requires re-materialization.
 """SINGLE-AUTHORITY comparison + idempotent enqueue for the PARTIAL-fusion upgrade trigger.
 
 The decorrelated-provider FAMILY mapping (`decorrelated_provider_families_of`) is the SOLE
@@ -54,6 +54,7 @@ UTC = timezone.utc
 _RESERVATION_PREFIX = "__fusion_upgrade_reservation__:"
 _PUBLISH_PENDING_PREFIX = "__fusion_upgrade_publish_pending__:"
 _RESERVATION_TTL = timedelta(minutes=5)
+_DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
 
 
 @dataclass(frozen=True)
@@ -161,14 +162,105 @@ def _family_set_key(families: "frozenset[str] | set[str]") -> str:
 
 def _input_revision_marker_key(
     capturable_family_key: str,
-    revisions: Mapping[str, int],
+    revisions: Mapping[str, object],
 ) -> str:
-    """Durable transition key for one exact set of changed CURRENT raw rows."""
+    """Durable transition key for one exact set of changed CURRENT inputs."""
+
+    def revision_value(value: object) -> str:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     revision_key = ",".join(
-        f"{source}:{int(raw_id)}"
-        for source, raw_id in sorted(revisions.items())
+        f"{source}:{revision_value(revision)}"
+        for source, revision in sorted(revisions.items())
     )
     return f"{capturable_family_key}|input_revision={revision_key}"
+
+
+def _canonical_day0_vector_revision(
+    witness: object,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Return the exact complete hourly-vector bundle identity in canonical form."""
+
+    if not isinstance(witness, Mapping):
+        return None, ()
+    raw_models = witness.get("expected_models")
+    raw_ids = witness.get("vector_ids_by_model")
+    if not isinstance(raw_models, (list, tuple)) or not isinstance(raw_ids, Mapping):
+        return None, ()
+    models = tuple(dict.fromkeys(str(model).strip() for model in raw_models))
+    if not models or any(not model for model in models) or set(raw_ids) != set(models):
+        return None, ()
+    vector_ids = {
+        model: str(raw_ids.get(model) or "").strip()
+        for model in models
+    }
+    if any(not vector_id for vector_id in vector_ids.values()):
+        return None, ()
+    return (
+        json.dumps(
+            {
+                "expected_models": list(models),
+                "vector_ids_by_model": vector_ids,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        models,
+    )
+
+
+def _capturable_day0_vector_revision(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    expected_models: tuple[str, ...],
+    decision_time: datetime | None,
+) -> str | None:
+    """Read the newest persisted complete bundle for the posterior's exact model set."""
+
+    if (
+        decision_time is None
+        or decision_time.tzinfo is None
+        or decision_time.utcoffset() is None
+        or not expected_models
+    ):
+        return None
+    cutoff = decision_time.astimezone(UTC).isoformat()
+    placeholders = ",".join("?" for _ in expected_models)
+    try:
+        rows = conn.execute(
+            f"""SELECT model, vector_id, captured_at
+                  FROM day0_hourly_vectors
+                 WHERE city = ? AND target_date = ? AND captured_at <= ?
+                   AND model IN ({placeholders})
+                 ORDER BY captured_at DESC, model""",
+            (city, target_date, cutoff, *expected_models),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    by_capture: dict[str, dict[str, str]] = {}
+    for row in rows:
+        model = str(row[0] or "").strip()
+        vector_id = str(row[1] or "").strip()
+        captured_at = str(row[2] or "").strip()
+        if model and vector_id and captured_at:
+            by_capture.setdefault(captured_at, {})[model] = vector_id
+    for captured_at in sorted(by_capture, reverse=True):
+        vector_ids = by_capture[captured_at]
+        if set(vector_ids) != set(expected_models):
+            continue
+        revision, _models = _canonical_day0_vector_revision(
+            {
+                "expected_models": expected_models,
+                "vector_ids_by_model": vector_ids,
+            }
+        )
+        return revision
+    return None
 
 
 def _capturable_inputs_for_scope(
@@ -230,8 +322,15 @@ def _capturable_models_for_scope(
 
 def _latest_posterior_inputs(
     conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
-) -> tuple[str | None, frozenset[str], dict[str, int], frozenset[str]]:
-    """Return cycle, families, consumed CURRENT row ids, and configured source identities."""
+) -> tuple[
+    str | None,
+    frozenset[str],
+    dict[str, int],
+    frozenset[str],
+    str | None,
+    tuple[str, ...],
+]:
+    """Return cycle, provider inputs, and the consumed Day0 vector revision."""
     try:
         row = conn.execute(
             """
@@ -244,14 +343,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset()
+        return None, frozenset(), {}, frozenset(), None, ()
     if row is None:
-        return None, frozenset(), {}, frozenset()
+        return None, frozenset(), {}, frozenset(), None, ()
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset()
+        return source_cycle_iso, frozenset(), {}, frozenset(), None, ()
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -274,11 +373,16 @@ def _latest_posterior_inputs(
     )
     if not isinstance(configured, (list, tuple)):
         configured = []
+    day0_revision, day0_expected_models = _canonical_day0_vector_revision(
+        prov.get("day0_remaining_vector_witness")
+    )
     return (
         source_cycle_iso,
         decorrelated_provider_families_of(set(str(m) for m in used)),
         consumed,
         frozenset(str(source) for source in configured if str(source).strip()),
+        day0_revision,
+        day0_expected_models,
     )
 
 
@@ -339,9 +443,14 @@ def scope_capture_offers_larger_provider_set(
     Periodic catch-up omits it and compares every configured/previously-consumed source. Exact raw
     row ids make repeated polls no-ops once the resulting posterior commits.
     """
-    source_cycle_iso, served, consumed_inputs, configured_sources = _latest_posterior_inputs(
-        conn, city=city, target_date=target_date, metric=metric
-    )
+    (
+        source_cycle_iso,
+        served,
+        consumed_inputs,
+        configured_sources,
+        consumed_day0_vector_revision,
+        day0_expected_models,
+    ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
             "is_upgrade": False,
@@ -389,16 +498,42 @@ def scope_capture_offers_larger_provider_set(
         if source.startswith(("cwa_", "hko_"))
     )
     relevant_sources = (configured_sources or frozenset(consumed_inputs)) | station_sources
+    requested_sources = None
     if changed_sources is not None:
-        relevant_sources &= frozenset(
+        requested_sources = frozenset(
             str(source).strip() for source in changed_sources if str(source).strip()
         )
+        relevant_sources &= requested_sources
     changed_inputs = sorted(
         source
         for source in relevant_sources
         if source in capturable_inputs
         and capturable_inputs[source] != consumed_inputs.get(source)
     )
+    changed_revisions: dict[str, object] = {
+        source: capturable_inputs[source] for source in changed_inputs
+    }
+    day0_revision_requested = (
+        requested_sources is None
+        or _DAY0_HOURLY_VECTOR_SOURCE in requested_sources
+    )
+    if consumed_day0_vector_revision is not None and day0_revision_requested:
+        current_day0_vector_revision = _capturable_day0_vector_revision(
+            conn,
+            city=city,
+            target_date=target_date,
+            expected_models=day0_expected_models,
+            decision_time=decision_time,
+        )
+        if (
+            current_day0_vector_revision is not None
+            and current_day0_vector_revision != consumed_day0_vector_revision
+        ):
+            changed_inputs.append(_DAY0_HOURLY_VECTOR_SOURCE)
+            changed_inputs.sort()
+            changed_revisions[_DAY0_HOURLY_VECTOR_SOURCE] = (
+                current_day0_vector_revision
+            )
     input_revision_changed = bool(changed_inputs)
     return {
         "is_upgrade": family_upgrade or input_revision_changed,
@@ -409,9 +544,7 @@ def scope_capture_offers_larger_provider_set(
         "capturable_families": sorted(capturable_expected),
         "new_families": sorted(new_families),
         "changed_input_sources": changed_inputs,
-        "changed_input_revisions": {
-            source: capturable_inputs[source] for source in changed_inputs
-        },
+        "changed_input_revisions": changed_revisions,
     }
 
 

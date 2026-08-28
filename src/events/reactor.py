@@ -9334,7 +9334,11 @@ def run_edli_event_reactor_cycle(
         # requeue forever while broad warming rotates past them.
         _reactor_family_snapshot_refresher = _decision_family_snapshot_refresher
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
-        _reactor_day0_hourly_refresher = _edli_reactor_day0_hourly_refresher()
+        _reactor_day0_hourly_refresher = _edli_reactor_day0_hourly_refresher(
+            vector_revision_reseeder=(
+                _edli_day0_hourly_vector_revision_reseeder()
+            ),
+        )
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
@@ -11577,7 +11581,46 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
     return _refresh
 
-def _edli_reactor_day0_hourly_refresher(*, held_family_provider=None):
+def _edli_day0_hourly_vector_revision_reseeder():
+    """Build the exact-family bridge from a new hourly bundle to posterior q."""
+    from pathlib import Path
+
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    forecast_db = cfg.get("forecast_db")
+    seed_dir = cfg.get("seed_dir")
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+        return None
+
+    def _enqueue(*, city: str, target_date: str, metric: str):
+        from src.data.replacement_fusion_upgrade_trigger import (
+            _DAY0_HOURLY_VECTOR_SOURCE,
+            enqueue_fusion_upgrade_reseeds,
+        )
+
+        # SCOPE: only the exact city/date/metric blocked by the current witness.
+        # DRAIN: forecast-live consumes this existing priority seed queue every second.
+        # RESET: the committed posterior carries the same exact vector bundle revision,
+        # so the input-revision comparison becomes a no-op on the next auction.
+        return enqueue_fusion_upgrade_reseeds(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            limit=1,
+            scopes=((city, target_date, metric),),
+            changed_sources=(_DAY0_HOURLY_VECTOR_SOURCE,),
+        )
+
+    return _enqueue
+
+
+def _edli_reactor_day0_hourly_refresher(
+    *, held_family_provider=None, vector_revision_reseeder=None
+):
     """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
@@ -11638,17 +11681,37 @@ def _edli_reactor_day0_hourly_refresher(*, held_family_provider=None):
             )
             vectors_written = int(getattr(stats, "vectors_written", stats) or 0)
             cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+            revision_report = (
+                vector_revision_reseeder(
+                    city=family[0],
+                    target_date=family[1],
+                    metric=family[2],
+                )
+                if vector_revision_reseeder is not None
+                else None
+            )
+            revisions_enqueued = int(
+                (revision_report or {}).get("seeds_enqueued", 0) or 0
+            )
+            revisions_pending = int(
+                (revision_report or {}).get("already_enqueued", 0) or 0
+            )
             _log.info(
                 "reactor day0-hourly refresh attempted for %s/%s/%s: vectors_written=%d "
-                "cities_attempted=%d incomplete_expected_bundles=%d",
+                "cities_attempted=%d incomplete_expected_bundles=%d "
+                "vector_revision_seeds_enqueued=%d vector_revision_seeds_pending=%d",
                 family[0],
                 family[1],
                 family[2],
                 vectors_written,
                 cities_attempted,
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                revisions_enqueued,
+                revisions_pending,
             )
-            return vectors_written > 0
+            return bool(
+                vectors_written or revisions_enqueued or revisions_pending
+            )
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "reactor day0-hourly refresh failed for %s/%s/%s (fail-soft): %r",

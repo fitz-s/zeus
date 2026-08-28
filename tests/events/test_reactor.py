@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused/audited: 2026-08-28
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -16658,3 +16658,42 @@ def test_v4_registered_owner_monitor_cut_produces_exact_request_and_pending_gate
         },
         durable_reserved=True,
     ) is False
+
+
+def test_day0_hourly_refresh_drains_persisted_vector_revision_when_fetch_throttles(
+    monkeypatch,
+) -> None:
+    """A prior broad fetch must still trigger exact-family q materialization."""
+    import src.config as config
+    import src.data.day0_hourly_vectors as vectors
+    from src.events import reactor
+
+    family = ("Paris", "2026-08-28", "high")
+    calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {"Paris": SimpleNamespace(name="Paris")},
+    )
+    monkeypatch.setattr(
+        vectors,
+        "maybe_refresh_day0_hourly_vectors",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            vectors_written=0,
+            cities_attempted=0,
+            incomplete_expected_bundles=0,
+        ),
+    )
+
+    def reseed(*, city: str, target_date: str, metric: str):
+        calls.append((city, target_date, metric))
+        return {"seeds_enqueued": 1, "already_enqueued": 0}
+
+    refresh = reactor._edli_reactor_day0_hourly_refresher(
+        held_family_provider=lambda: (),
+        vector_revision_reseeder=reseed,
+    )
+
+    assert refresh(city=family[0], target_date=family[1], metric=family[2]) is True
+    assert calls == [family]
