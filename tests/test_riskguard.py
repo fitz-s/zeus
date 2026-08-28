@@ -6,7 +6,7 @@
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
-# 2026-08-22 prior contract: Day0 missing/inconclusive shadow history remained
+# 2026-08-22 prior contract: Day0 missing/inconclusive capital history remained
 # telemetry and only direct revision-scoped capital rejection gated BUY.
 # 2026-08-24 supersedes that admission shape: an unproven Day0 revision is
 # limited to one sequential in-flight capital probe; nonpositive/degraded
@@ -5368,7 +5368,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         return conn
 
     @staticmethod
-    def _validated_day0_shadow_evidence() -> dict:
+    def _validated_day0_alpha_evidence() -> dict:
         from src.events.day0_authority import (
             DAY0_PROBABILITY_SEMANTICS_REVISION,
         )
@@ -5394,7 +5394,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             ],
         }
 
-    def test_validated_shadow_ignores_unrelated_current_revision_realized_loss(self):
+    def test_validated_alpha_ignores_unrelated_current_revision_realized_loss(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         conn = self._live_capital_conn(
@@ -5419,7 +5419,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
             },
-            self._validated_day0_shadow_evidence(),
+            self._validated_day0_alpha_evidence(),
             required_evalue=10.0,
         )
         assert reason is None
@@ -5819,7 +5819,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert row["first_exit_filled_at"] == "2026-08-11T16:48:04+00:00"
         conn.close()
 
-    def test_validated_shadow_ignores_unresolved_live_fill(self):
+    def test_validated_alpha_ignores_unresolved_live_fill(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         conn = self._live_capital_conn(
@@ -5842,7 +5842,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
             },
-            self._validated_day0_shadow_evidence(),
+            self._validated_day0_alpha_evidence(),
             required_evalue=10.0,
         )
         assert reason is None
@@ -5852,7 +5852,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         "capital_status",
         ("capital_truth_unavailable", "capital_truth_degraded"),
     )
-    def test_validated_shadow_ignores_degraded_capital_curve(
+    def test_validated_alpha_ignores_degraded_capital_curve(
         self,
         capital_status,
     ):
@@ -5882,7 +5882,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
             },
-            self._validated_day0_shadow_evidence(),
+            self._validated_day0_alpha_evidence(),
             required_evalue=10.0,
         ) is None
         conn.close()
@@ -6064,7 +6064,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["rejected"] is True
         conn.close()
 
-    def test_unvalidated_shadow_remains_visible_under_evalue_contract(self):
+    def test_unvalidated_alpha_remains_visible_under_evalue_contract(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         rows = [
@@ -6715,515 +6715,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"selection_revision="
             f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}"
         ) in reason
-
-    def test_market_corrected_selector_cannot_gate_current_replacement_q_law(self):
-        current_probability_revision = (
-            riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
-        )
-        assert riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION == (
-            "global_single_order_authority_q_expected_growth_v3"
-        )
-        historical_rejection = {
-            "cohorts": [
-                {
-                    "decision_law_id": "executable_min_order_capital_gain_v2",
-                    "global_selection_revision": (
-                        "global_single_order_posterior_mean_expected_growth_v2"
-                    ),
-                    "probability_semantics_revisions": [
-                        current_probability_revision
-                    ],
-                    "model_over_market_evalue": 0.066284,
-                    "market_over_model_evalue": 15.086506,
-                    "independent_cluster_count": 11,
-                    "validated": False,
-                    "rejected": True,
-                }
-            ]
-        }
-
-        assert riskguard_module._market_relative_alpha_rejection_gate_reason(
-            {
-                "status": "ok",
-                "current_revision": current_probability_revision,
-            },
-            historical_rejection,
-            required_evalue=10.0,
-        ) == (None, ())
-
-    def test_day0_shadow_joins_only_later_verified_exact_condition(self, tmp_path):
-        from src.events.day0_authority import (
-            DAY0_PROBABILITY_SEMANTICS_REVISION,
-            bind_day0_probability_semantics,
-        )
-        from src.state.schema.no_trade_regret_events_schema import ensure_table
-        from src.strategy.live_inference.no_trade_regret import (
-            NoTradeRegretEvent,
-            NoTradeRegretLedger,
-        )
-
-        decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
-        q_version = bind_day0_probability_semantics("q-shadow")
-        envelope = {
-            "schema_version": 3,
-            "strategy_key": "day0_nowcast_entry",
-            "decision_law_id": "executable_min_order_capital_gain_v2",
-            "global_selection_revision": (
-                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-            ),
-            "probability_semantics_revision": (
-                DAY0_PROBABILITY_SEMANTICS_REVISION
-            ),
-            "selection_rule": (
-                "earliest_complete_global_cut_exact_global_posterior_mean_"
-                "expected_growth_winner_v3"
-            ),
-            "selection_epoch_identity": "selection",
-            "selection_cut_at_utc": decision_at.isoformat(),
-            "decision_at_utc": decision_at.isoformat(),
-            "family_key": "family",
-            "city": "Helsinki",
-            "target_date": "2026-08-10",
-            "metric": "high",
-            "bin_id": "23C",
-            "condition_id": "condition-23c",
-            "side": "YES",
-            "token_id": "token-yes",
-            "q": 0.90,
-            "q_version": q_version,
-            "probability_witness_identity": "witness",
-            "probability_content_identity": "content",
-            "posterior_identity_hash": "posterior",
-            "source_truth_identity": "source",
-            "resolution_identity": "resolution",
-            "topology_identity": "topology",
-            "band_alpha": 0.05,
-            "band_basis": "current-day0",
-            "probability_captured_at_utc": decision_at.isoformat(),
-            "book_epoch_identity": "book-epoch",
-            "book_snapshot_id": "book-snapshot",
-            "book_hash": "book-hash",
-            "book_captured_at_utc": decision_at.isoformat(),
-            "min_order_size": "5",
-            "raw_min_order_vwap": 0.20,
-            "fee_adjusted_min_order_cost": 0.21,
-            "expected_net_edge_per_share": 0.69,
-            "global_proof_winner": True,
-            "global_proof_candidate_id": "candidate-global-winner",
-            "global_proof_execution_mode": "TAKER_LIMIT",
-            "global_proof_shares": "5",
-            "global_proof_cost_usd": "1.05",
-            "global_proof_expected_delta_log_wealth": 0.01,
-            "global_proof_expected_ev_usd": 3.95,
-        }
-        conn = sqlite3.connect(":memory:")
-        ensure_table(conn)
-        NoTradeRegretLedger(conn).insert_idempotent(
-            NoTradeRegretEvent(
-                event_id=(
-                    "market-relative-alpha-shadow-v5-global-selection:"
-                    "day0_nowcast_entry:"
-                    f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
-                    f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
-                    "2026-08-10"
-                ),
-                rejection_stage="RISK_GUARD",
-                rejection_reason=(
-                    "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry"
-                ),
-                regret_bucket="RISK_CAP",
-                condition_id="condition-23c",
-                token_id="token-yes",
-                outcome_label="23C",
-                decision_time=decision_at.isoformat(),
-                city="Helsinki",
-                target_date="2026-08-10",
-                metric="high",
-                family_id="family",
-                bin_label="23C",
-                direction="buy_yes",
-                q_live=0.90,
-                c_fee_adjusted=0.21,
-                p_fill_lcb=1.0,
-                native_quote_available=True,
-                source_status="current_day0_probability_authority",
-                family_complete=True,
-                hypothetical_order_type="MARKETABLE_LIMIT",
-                hypothetical_fill_status="EXECUTABLE_AT_DECISION",
-                hypothetical_fill_price=0.20,
-                causal_snapshot_id="witness",
-                executable_snapshot_id="book-snapshot",
-                envelope_json=json.dumps(envelope, sort_keys=True),
-            )
-        )
-        conn.execute(
-            "UPDATE no_trade_regret_events SET created_at=?",
-            ((decision_at + timedelta(minutes=1)).isoformat(),),
-        )
-        conn.commit()
-
-        forecasts_path = tmp_path / "forecasts.db"
-        forecasts = sqlite3.connect(forecasts_path)
-        forecasts.executescript(
-            """
-            CREATE TABLE market_events (
-                condition_id TEXT,
-                city TEXT,
-                target_date TEXT,
-                temperature_metric TEXT,
-                outcome TEXT
-            );
-            CREATE TABLE settlement_outcomes (
-                city TEXT,
-                target_date TEXT,
-                temperature_metric TEXT,
-                settled_at TEXT,
-                authority TEXT
-            );
-            """
-        )
-        forecasts.execute(
-            "INSERT INTO market_events VALUES (?,?,?,?,?)",
-            (
-                "condition-23c",
-                "Helsinki",
-                "2026-08-10",
-                "high",
-                "YES",
-            ),
-        )
-        forecasts.execute(
-            "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
-            (
-                "Helsinki",
-                "2026-08-10",
-                "high",
-                "2026-08-11T10:00:00+00:00",
-                "VERIFIED",
-            ),
-        )
-        forecasts.commit()
-        forecasts.close()
-
-        rows, status = (
-            riskguard_module._settled_day0_market_relative_alpha_shadow_rows(
-                conn,
-                window_days=7.0,
-                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
-                forecasts_connection_factory=lambda: sqlite3.connect(
-                    forecasts_path
-                ),
-            )
-        )
-
-        assert status["status"] == "ok"
-        assert status["settlement_ready_count"] == 1
-        assert rows == [
-            {
-                "trade_id": conn.execute(
-                    "SELECT regret_event_id FROM no_trade_regret_events"
-                ).fetchone()[0],
-                "strategy": "day0_nowcast_entry",
-                "probability_semantics_ready": True,
-                "probability_semantics_revisions": (
-                    DAY0_PROBABILITY_SEMANTICS_REVISION,
-                ),
-                "decision_law_id": "executable_min_order_capital_gain_v2",
-                "global_selection_revision": (
-                    riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-                ),
-                "settled_at": "2026-08-11T10:00:00+00:00",
-                "entry_market_benchmark_ready": True,
-                "entry_market_benchmark": 0.20,
-                "entry_market_benchmark_family": (
-                    "Helsinki",
-                    "2026-08-10",
-                    "high",
-                ),
-                "p_posterior": 0.90,
-                "outcome": 1,
-                "capital_gain_proof_ready": True,
-                "hypothetical_min_order_size": 5.0,
-                "hypothetical_capital_committed_usd": 1.05,
-                "hypothetical_settlement_payout_usd": 5.0,
-                "hypothetical_realized_pnl_usd": 3.95,
-                "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v3"
-                ),
-            }
-        ]
-        envelope["global_selection_revision"] = (
-            "global_single_order_posterior_mean_expected_growth_v1"
-        )
-        conn.execute(
-            "UPDATE no_trade_regret_events SET envelope_json=?",
-            (json.dumps(envelope, sort_keys=True),),
-        )
-        conn.commit()
-        superseded_rows, superseded_status = (
-            riskguard_module._settled_day0_market_relative_alpha_shadow_rows(
-                conn,
-                window_days=7.0,
-                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
-                forecasts_connection_factory=lambda: sqlite3.connect(
-                    forecasts_path
-                ),
-            )
-        )
-        assert superseded_rows == []
-        assert superseded_status["blocked_reasons"] == {
-            "global_selection_revision_mismatch": 1,
-        }
-        conn.close()
-
-    @pytest.mark.parametrize(
-        ("revision", "shape_lag_hours", "stale_shape_reused", "expected_ready"),
-        (
-            (
-                riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                0.0,
-                False,
-                True,
-            ),
-            (
-                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                6.0,
-                True,
-                False,
-            ),
-        ),
-    )
-    def test_qkernel_shadow_requires_current_semantics_and_verified_settlement(
-        self,
-        tmp_path,
-        revision,
-        shape_lag_hours,
-        stale_shape_reused,
-        expected_ready,
-    ):
-        from src.state.schema.no_trade_regret_events_schema import ensure_table
-        from src.strategy.live_inference.no_trade_regret import (
-            NoTradeRegretEvent,
-            NoTradeRegretLedger,
-        )
-
-        decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
-        envelope = {
-            "schema_version": 3,
-            "strategy_key": "forecast_qkernel_entry",
-            "decision_law_id": "executable_min_order_capital_gain_v2",
-            "global_selection_revision": (
-                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-            ),
-            "probability_semantics_revision": revision,
-            "selection_rule": (
-                "earliest_complete_global_cut_exact_global_posterior_mean_"
-                "expected_growth_winner_v3"
-            ),
-            "selection_epoch_identity": "selection",
-            "selection_cut_at_utc": decision_at.isoformat(),
-            "decision_at_utc": decision_at.isoformat(),
-            "family_key": "family",
-            "city": "Helsinki",
-            "target_date": "2026-08-10",
-            "metric": "high",
-            "bin_id": "23C",
-            "condition_id": "condition-23c",
-            "side": "YES",
-            "token_id": "token-yes",
-            "q": 0.90,
-            "q_version": "joint-q-current",
-            "probability_witness_identity": "witness",
-            "probability_content_identity": "content",
-            "posterior_identity_hash": "posterior-current",
-            "source_truth_identity": "source",
-            "resolution_identity": "resolution",
-            "topology_identity": "topology",
-            "band_alpha": 0.05,
-            "band_basis": "current-qkernel",
-            "probability_captured_at_utc": decision_at.isoformat(),
-            "book_epoch_identity": "book-epoch",
-            "book_snapshot_id": "book-snapshot",
-            "book_hash": "book-hash",
-            "book_captured_at_utc": decision_at.isoformat(),
-            "min_order_size": "5",
-            "raw_min_order_vwap": 0.20,
-            "fee_adjusted_min_order_cost": 0.21,
-            "expected_net_edge_per_share": 0.69,
-            "global_proof_winner": True,
-            "global_proof_candidate_id": "candidate-global-winner",
-            "global_proof_execution_mode": "TAKER_LIMIT",
-            "global_proof_shares": "5",
-            "global_proof_cost_usd": "1.05",
-            "global_proof_expected_delta_log_wealth": 0.01,
-            "global_proof_expected_ev_usd": 3.95,
-        }
-        conn = sqlite3.connect(":memory:")
-        ensure_table(conn)
-        NoTradeRegretLedger(conn).insert_idempotent(
-            NoTradeRegretEvent(
-                event_id=(
-                    "market-relative-alpha-shadow-v5-global-selection:"
-                    "forecast_qkernel_entry:"
-                    f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
-                    f"{revision}:2026-08-10"
-                ),
-                rejection_stage="RISK_GUARD",
-                rejection_reason=(
-                    "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
-                ),
-                regret_bucket="RISK_CAP",
-                condition_id="condition-23c",
-                token_id="token-yes",
-                outcome_label="23C",
-                decision_time=decision_at.isoformat(),
-                city="Helsinki",
-                target_date="2026-08-10",
-                metric="high",
-                family_id="family",
-                bin_label="23C",
-                direction="buy_yes",
-                q_live=0.90,
-                c_fee_adjusted=0.21,
-                p_fill_lcb=1.0,
-                native_quote_available=True,
-                source_status="current_qkernel_probability_authority",
-                family_complete=True,
-                hypothetical_order_type="MARKETABLE_LIMIT",
-                hypothetical_fill_status="EXECUTABLE_AT_DECISION",
-                hypothetical_fill_price=0.20,
-                causal_snapshot_id="witness",
-                executable_snapshot_id="book-snapshot",
-                envelope_json=json.dumps(envelope, sort_keys=True),
-            )
-        )
-        conn.execute(
-            "UPDATE no_trade_regret_events SET created_at=?",
-            ((decision_at + timedelta(minutes=1)).isoformat(),),
-        )
-        conn.commit()
-
-        forecasts_path = tmp_path / "forecasts-qkernel.db"
-        forecasts = sqlite3.connect(forecasts_path)
-        forecasts.executescript(
-            """
-            CREATE TABLE market_events (
-                condition_id TEXT, city TEXT, target_date TEXT,
-                temperature_metric TEXT, outcome TEXT
-            );
-            CREATE TABLE settlement_outcomes (
-                city TEXT, target_date TEXT, temperature_metric TEXT,
-                settled_at TEXT, authority TEXT
-            );
-            CREATE TABLE forecast_posteriors (
-                posterior_identity_hash TEXT PRIMARY KEY,
-                provenance_json TEXT
-            );
-            """
-        )
-        forecasts.execute(
-            "INSERT INTO market_events VALUES (?,?,?,?,?)",
-            ("condition-23c", "Helsinki", "2026-08-10", "high", "YES"),
-        )
-        forecasts.execute(
-            "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
-            (
-                "Helsinki",
-                "2026-08-10",
-                "high",
-                "2026-08-11T10:00:00+00:00",
-                "VERIFIED",
-            ),
-        )
-        forecasts.execute(
-            "INSERT INTO forecast_posteriors VALUES (?,?)",
-            (
-                "posterior-current",
-                json.dumps(
-                    {
-                        "bayes_precision_fusion": {
-                            "current_evidence_shape": {
-                                "semantics_revision": revision,
-                                "translation_applied": False,
-                                "shape_lag_hours": shape_lag_hours,
-                                "stale_shape_reused": stale_shape_reused,
-                            }
-                        }
-                    }
-                ),
-            ),
-        )
-        forecasts.commit()
-        forecasts.close()
-
-        rows, status = (
-            riskguard_module._settled_qkernel_market_relative_alpha_shadow_rows(
-                conn,
-                window_days=7.0,
-                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
-                forecasts_connection_factory=lambda: sqlite3.connect(
-                    forecasts_path
-                ),
-            )
-        )
-
-        if not expected_ready:
-            assert rows == []
-            assert status["certificate_ready_count"] == 0
-            assert status["blocked_reasons"] == {
-                "certificate_identity_mismatch": 1
-            }
-            conn.close()
-            return
-
-        assert status["status"] == "ok"
-        assert status["settlement_ready_count"] == 1
-        assert rows[0]["strategy"] == "forecast_qkernel_entry"
-        assert rows[0]["probability_semantics_revisions"] == (revision,)
-        assert rows[0]["hypothetical_realized_pnl_usd"] == pytest.approx(3.95)
-        assert (
-            rows[0]["evidence_source"]
-            == "no_trade_regret_events_qkernel_shadow_v3"
-        )
-
-        forecasts = sqlite3.connect(forecasts_path)
-        forecasts.execute(
-            "UPDATE forecast_posteriors SET provenance_json=? "
-            "WHERE posterior_identity_hash=?",
-            (
-                json.dumps(
-                    {
-                        "bayes_precision_fusion": {
-                            "current_evidence_shape": {
-                                "semantics_revision": "superseded",
-                                "translation_applied": False,
-                                "shape_lag_hours": 0.0,
-                                "stale_shape_reused": False,
-                            }
-                        }
-                    }
-                ),
-                "posterior-current",
-            ),
-        )
-        forecasts.commit()
-        forecasts.close()
-
-        stale_rows, stale_status = (
-            riskguard_module._settled_qkernel_market_relative_alpha_shadow_rows(
-                conn,
-                window_days=7.0,
-                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
-                forecasts_connection_factory=lambda: sqlite3.connect(
-                    forecasts_path
-                ),
-            )
-        )
-        assert stale_rows == []
-        assert stale_status["blocked_reasons"] == {
-            "probability_semantics_not_current": 1
-        }
-        conn.close()
 
     def test_tick_gates_current_revision_without_mixing_legacy_selector(
         self,
@@ -9660,3 +9151,16 @@ def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
     assert level is RiskLevel.RED
     assert row["level"] == RiskLevel.RED.value
     assert details["host_power_floor_applied"] is True
+
+
+def test_riskguard_alpha_surface_has_no_alternate_persisted_reader():
+    """RiskGuard exposes only the actual-capital binding surface."""
+
+    assert hasattr(
+        riskguard_module,
+        "_bind_actual_global_capital_evidence",
+    )
+    assert not any(
+        "shadow" in name.lower()
+        for name in vars(riskguard_module)
+    )
