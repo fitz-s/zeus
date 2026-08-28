@@ -534,6 +534,18 @@ def _strategy_capital_allocation_receipt(wealth_witness: object) -> dict[str, ob
 
 _GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, _GlobalAuctionPayloadRef] = {}
 _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
+
+# One live-process MarketAnchoredFitProvider, reused across every
+# process_current_global_batch call so its internal TTL cache (see
+# src/calibration/market_anchored_live_fit.py) actually survives between
+# batches instead of refitting every batch. The connect lambda closes over
+# this module-level conn holder rather than a call's own world_conn, so it
+# always resolves the CURRENT batch's connection — never a stale one from
+# whatever batch happened to construct the provider.
+_MARKET_ANCHORED_FIT_PROVIDER_LOCK = threading.Lock()
+_MARKET_ANCHORED_FIT_PROVIDER = None
+_MARKET_ANCHORED_FIT_PROVIDER_CONN = None
+
 _GLOBAL_HOLDING_COVERAGE_LOCK = threading.Lock()
 _GLOBAL_HOLDING_COVERAGE_BY_POSITION: dict[
     str, _GlobalHoldingCoverageLease
@@ -6101,11 +6113,19 @@ def _market_anchored_correction_resolver(
     The fit rides ``world_conn`` — the batch's already-open world connection —
     rather than dialing its own: opening a second handle mid-decision is exactly
     what the entry path forbids. The provider caches behind a TTL, so the table
-    is read once per TTL for the whole batch, not once per candidate.
+    is read once per TTL for the whole process, not once per batch or candidate:
+    the provider instance itself is a module-level singleton (see
+    _MARKET_ANCHORED_FIT_PROVIDER above), reused across calls so its TTL cache
+    actually survives between batches. Its connect callable always resolves
+    _MARKET_ANCHORED_FIT_PROVIDER_CONN, refreshed to this call's world_conn
+    below, so a cached provider from an earlier batch never reads through a
+    stale connection captured at construction time.
 
     Returns None when no family in this batch has a usable target date; the
     solver then keeps every raw q, which is the pre-calibrator behavior.
     """
+
+    global _MARKET_ANCHORED_FIT_PROVIDER, _MARKET_ANCHORED_FIT_PROVIDER_CONN
 
     if not target_date_by_family:
         return None
@@ -6115,7 +6135,13 @@ def _market_anchored_correction_resolver(
     )
     from src.contracts.payoff_q_correction import PayoffQCorrection
 
-    provider = MarketAnchoredFitProvider(lambda: world_conn)
+    with _MARKET_ANCHORED_FIT_PROVIDER_LOCK:
+        _MARKET_ANCHORED_FIT_PROVIDER_CONN = world_conn
+        if _MARKET_ANCHORED_FIT_PROVIDER is None:
+            _MARKET_ANCHORED_FIT_PROVIDER = MarketAnchoredFitProvider(
+                lambda: _MARKET_ANCHORED_FIT_PROVIDER_CONN
+            )
+        provider = _MARKET_ANCHORED_FIT_PROVIDER
 
     def resolve(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         target_date = target_date_by_family.get(str(candidate.family_key))
