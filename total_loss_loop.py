@@ -1796,45 +1796,10 @@ def _settlement_backfill_positions(
     return result
 
 
-def _velocity(
-    trades: sqlite3.Connection,
-    token_id: str,
-    carrier_direction: str,
-) -> tuple[float, float]:
-    rows = trades.execute(
-        """
-        SELECT quote_seen_at,best_bid_before
-          FROM execution_feasibility_evidence
-         WHERE token_id=? AND direction=?
-           AND best_bid_before IS NOT NULL
-         ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3
-        """,
-        (token_id, carrier_direction),
-    ).fetchall()
-    points: list[tuple[datetime | None, float]] = []
-    for row in reversed(rows):
-        bid = _float(row[1])
-        if bid is not None:
-            points.append((parse_time(row[0]), bid))
-    if len(points) < 2:
-        return 0.0, 0.0
-    velocities: list[float] = []
-    for left, right in zip(points, points[1:]):
-        if left[0] is None or right[0] is None:
-            continue
-        seconds = (right[0] - left[0]).total_seconds()
-        if seconds > 0:
-            velocities.append((right[1] - left[1]) / seconds)
-    if not velocities:
-        return 0.0, 0.0
-    acceleration = velocities[-1] - velocities[-2] if len(velocities) > 1 else 0.0
-    return velocities[-1], acceleration
-
-
 def _monitor_dynamics(
     trades: sqlite3.Connection,
     position_id: str,
-) -> tuple[float, float, float | None, bool, datetime | None]:
+) -> tuple[float, float, float, float | None, bool, datetime | None]:
     rows = trades.execute(
         "SELECT occurred_at,payload_json FROM position_events "
         "WHERE position_id=? AND event_type='MONITOR_REFRESHED' "
@@ -1859,15 +1824,30 @@ def _monitor_dynamics(
         )
         latest_at = at
 
-    def slope(index: int) -> float:
+    def dynamics(index: int) -> tuple[float, float]:
         valid = [(at, values[index]) for at, *values in points if values[index] is not None]
         if len(valid) < 2:
-            return 0.0
-        left, right = valid[-2:]
-        seconds = (right[0] - left[0]).total_seconds()
-        return (float(right[1]) - float(left[1])) / seconds if seconds > 0 else 0.0
+            return 0.0, 0.0
+        velocities = []
+        for left, right in zip(valid, valid[1:]):
+            seconds = (right[0] - left[0]).total_seconds()
+            if seconds > 0:
+                velocities.append((float(right[1]) - float(left[1])) / seconds)
+        if not velocities:
+            return 0.0, 0.0
+        acceleration = velocities[-1] - velocities[-2] if len(velocities) > 1 else 0.0
+        return velocities[-1], acceleration
 
-    return slope(0), slope(1), latest_probability, latest_fresh, latest_at
+    probability_velocity, _ = dynamics(0)
+    market_velocity, market_acceleration = dynamics(1)
+    return (
+        probability_velocity,
+        market_velocity,
+        market_acceleration,
+        latest_probability,
+        latest_fresh,
+        latest_at,
+    )
 
 
 def refresh_precursor(
@@ -1904,23 +1884,25 @@ def refresh_precursor(
             continue
         if bid < floor:
             continue
-        velocity, acceleration = _velocity(
+        (
+            probability_velocity,
+            velocity,
+            acceleration,
+            probability,
+            monitor_fresh,
+            monitor_at,
+        ) = _monitor_dynamics(
             trades,
-            str(position["held_token_id"]),
-            str(position["direction"]),
+            str(position["position_id"]),
         )
         distance = max(0.0, bid - floor)
         time_to_floor = distance / max(-velocity, 1e-9) if velocity < 0 else float("inf")
         current_quote = quote.get("_current_quote", quote)
         quote_at = parse_time(str(current_quote["quote_seen_at"])) if current_quote else None
         quote_age = max(0.0, (now() - quote_at).total_seconds()) if quote_at else 1e9
-        probability_velocity, monitor_market_velocity, probability, monitor_fresh, monitor_at = _monitor_dynamics(
-            trades,
-            str(position["position_id"]),
-        )
         monitor_age = max(0.0, (now() - monitor_at).total_seconds()) if monitor_at else 1e9
         depth_loss = 1.0 if current_quote is None or reconcile_held_quote(current_quote)[0] == "quote_incomplete" else 0.0
-        market_ahead = max(0.0, probability_velocity - min(velocity, monitor_market_velocity))
+        market_ahead = max(0.0, probability_velocity - velocity)
         belief_gap = max(0.0, probability - bid) if probability is not None else 0.0
         score = (
             (1.0 / max(distance, 0.001))

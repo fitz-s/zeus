@@ -2808,75 +2808,6 @@ def test_absent_bid_is_hard_no_book_incident_without_fabricated_floor_time(cfg: 
     assert row["t_floor"] is None
 
 
-def test_velocity_uses_token_time_index_for_latest_three_quotes(cfg: dict) -> None:
-    for evidence_id, at, bid in (
-        ("velocity-1", "2026-08-22T09:00:01+00:00", 0.80),
-        ("velocity-2", "2026-08-22T09:00:02+00:00", 0.70),
-        ("velocity-3", "2026-08-22T09:00:03+00:00", 0.60),
-        ("velocity-4", "2026-08-22T09:00:04+00:00", 0.50),
-    ):
-        _quote(cfg, evidence_id, at, bid, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        plan = conn.execute(
-            "EXPLAIN QUERY PLAN "
-            "SELECT quote_seen_at,best_bid_before "
-            "FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction=? "
-            "AND best_bid_before IS NOT NULL "
-            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token", "buy_yes"),
-        ).fetchall()
-        newest = conn.execute(
-            "SELECT quote_seen_at FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction=? "
-            "AND best_bid_before IS NOT NULL "
-            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token", "buy_yes"),
-        ).fetchall()
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    plan_text = " ".join(str(column) for row in plan for column in row).upper()
-    assert "USING INDEX IDX_EXECUTION_FEASIBILITY_EVIDENCE_TOKEN_TIME" in plan_text
-    assert "SCAN EXECUTION_FEASIBILITY_EVIDENCE" not in plan_text
-    assert "TEMP B-TREE" not in plan_text
-    assert [row[0] for row in newest] == [
-        "2026-08-22T09:00:04+00:00",
-        "2026-08-22T09:00:03+00:00",
-        "2026-08-22T09:00:02+00:00",
-    ]
-    assert velocity == pytest.approx(-0.10)
-    assert acceleration == pytest.approx(0.0)
-
-
-@pytest.mark.parametrize("invalid_bid", ["not-a-price", "NaN", "+Infinity", "-Infinity"])
-def test_velocity_drops_invalid_sqlite_quote_values(cfg: dict, invalid_bid: str) -> None:
-    _quote(cfg, "velocity-finite-left", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
-    _quote(cfg, "velocity-invalid", "2026-08-22T09:00:02+00:00", invalid_bid, latest=False)
-    _quote(cfg, "velocity-finite-right", "2026-08-22T09:00:03+00:00", 0.60, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    assert velocity == pytest.approx(-0.10)
-    assert acceleration == pytest.approx(0.0)
-
-
-def test_velocity_returns_zero_with_fewer_than_two_finite_recent_quotes(cfg: dict) -> None:
-    _quote(cfg, "velocity-finite-old", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
-    for evidence_id, at, bid in (
-        ("velocity-nan", "2026-08-22T09:00:02+00:00", "NaN"),
-        ("velocity-positive-infinity", "2026-08-22T09:00:03+00:00", "+Infinity"),
-        ("velocity-negative-infinity", "2026-08-22T09:00:04+00:00", "-Infinity"),
-    ):
-        _quote(cfg, evidence_id, at, bid, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    assert (velocity, acceleration) == (0.0, 0.0)
-
-
 def test_depth_top_bid_overrides_conflicting_zero_scalar(cfg: dict) -> None:
     _position(cfg)
     _quote(
@@ -3678,15 +3609,31 @@ def test_monitor_dynamics_detect_market_moving_before_probability(cfg: dict) -> 
             "last_monitor_market_price_is_fresh": True,
         },
     )
+    _event(
+        cfg, "monitor-3", "p1", 3, "MONITOR_REFRESHED",
+        "2026-08-22T09:00:20+00:00",
+        phase_before="active", phase_after="active",
+        payload={
+            "last_monitor_prob": 0.30,
+            "last_monitor_market_price": 0.05,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price_is_fresh": True,
+        },
+    )
 
     with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
-        probability_velocity, market_velocity, probability, fresh, _ = loop._monitor_dynamics(
-            trades,
-            "p1",
-        )
+        (
+            probability_velocity,
+            market_velocity,
+            market_acceleration,
+            probability,
+            fresh,
+            _,
+        ) = loop._monitor_dynamics(trades, "p1")
 
     assert probability_velocity == pytest.approx(0.0)
-    assert market_velocity == pytest.approx(-0.01)
+    assert market_velocity == pytest.approx(-0.015)
+    assert market_acceleration == pytest.approx(-0.005)
     assert probability == pytest.approx(0.30)
     assert fresh is True
 
