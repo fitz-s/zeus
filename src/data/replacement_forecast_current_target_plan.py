@@ -931,7 +931,6 @@ def _latest_authorized_day0_fact(
             SELECT observed_extreme_native,
                    utc_timestamp,
                    observation_fact_time AS observation_time,
-                   (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
                    temp_unit,
@@ -944,30 +943,33 @@ def _latest_authorized_day0_fact(
             """,
             query_params,
         ).fetchall()
-        # Keep every bounded local-day projection available until the
-        # append-only print ledger has canonicalized corrections below. A
-        # single SQL extreme can be retracted, while a later plateau row can
-        # own the writer-validated digest of the canonical extreme.
-        for row in instant_rows:
+        def is_causally_eligible(row: sqlite3.Row) -> bool:
             if not row["observation_time"] or row["observed_extreme_native"] is None:
-                continue
+                return False
             utc_clock = _utc_instant(row["utc_timestamp"])
             fact_clock = _utc_instant(row["observation_time"])
             available_clock = _utc_instant(row["observation_available_at"])
-            if (
+            return not (
                 utc_clock is None
                 or fact_clock is None
                 or available_clock is None
                 or utc_clock > decision_utc
                 or fact_clock > decision_utc
                 or available_clock > decision_utc
-            ):
-                continue
+            )
+
+        causal_rows = [row for row in instant_rows if is_causally_eligible(row)]
+        causal_sample_count = len(causal_rows)
+        # Keep every bounded local-day projection available until the
+        # append-only print ledger has canonicalized corrections below. A
+        # single SQL extreme can be retracted, while a later plateau row can
+        # own the writer-validated digest of the canonical extreme.
+        for row in causal_rows:
             facts.append(
                 {
                     "observed_extreme_native": float(row["observed_extreme_native"]),
                     "observation_time": str(row["observation_time"]),
-                    "sample_count": int(row["sample_count"] or 0),
+                    "sample_count": causal_sample_count,
                     "source": "durable_observation_instants",
                     "observation_source": str(row["observation_source"] or ""),
                     "station_id": str(row["station_id"] or ""),
