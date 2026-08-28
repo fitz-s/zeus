@@ -1609,6 +1609,13 @@ def _cycle_advance_seed_priority_map(
         tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
             payload = payload_by_name[name]
+            current_debt_day0 = (
+                _TIMEOUT_RETRY_MARKER not in path_by_name[name].name
+                and fam_scope in current_probability_debt
+                and str(payload.get("upgrade_trigger") or "").strip()
+                == "day0_observation_advanced"
+                and name in day0_identity_by_name
+            )
             capital_protection_retry = _is_capital_protection_timeout_retry(
                 path_by_name[name],
                 payload,
@@ -1651,15 +1658,14 @@ def _cycle_advance_seed_priority_map(
                 request_time = (
                     f"{inverse_observation_clock:018d}|{request_time}"
                 )
-                priority[name] = (
-                    (-10.0 if capital_protection_retry else tier - 0.5),
-                    request_time,
-                )
+                priority_tier = tier - 0.5
             else:
-                priority[name] = (
-                    (-10.0 if capital_protection_retry else tier),
-                    request_time,
-                )
+                priority_tier = tier
+            if current_debt_day0:
+                priority_tier = -11.0
+            elif capital_protection_retry:
+                priority_tier = -10.0
+            priority[name] = (priority_tier, request_time)
     return priority
 
 
@@ -3820,16 +3826,22 @@ def process_replacement_forecast_live_materialization_queue(
         MATERIALIZATION_LANE_BACKGROUND,
     }:
         raise ValueError(f"unknown materialization lane: {lane}")
-    # The money-path priority consumer owns already-published requests.  Its
-    # plan is deliberately separate from discovery/seed transport: no preflight
-    # action may move, write, or terminally consume a request.
-    # The daemon passes ``seed_dir`` and ``seed_limit=1`` even to the priority
-    # job. Published held requests still outrank that seed tranche: planning
-    # them first prevents a blocked seed-reader from pinning the only consumer.
-    request_only = (
+    priority_seed_transport = (
         lane == MATERIALIZATION_LANE_PRIORITY
-        or seed_dir is None
-        or seed_limit == 0
+        and seed_dir is not None
+        and seed_limit != 0
+    )
+    # A priority seed bridge must prepare its bounded seed tranche before it
+    # claims a published request.  That makes newly-ready Day0 debt compete on
+    # the same priority axis as timeout retries, while HWM-waiting seeds remain
+    # producer-owned queue debt and never reach the child.
+    request_only = (
+        not priority_seed_transport
+        and (
+            lane == MATERIALIZATION_LANE_PRIORITY
+            or seed_dir is None
+            or seed_limit == 0
+        )
     )
     read_plan: _RequestClaimReadPlan | None = None
     if request_only:
@@ -3958,6 +3970,7 @@ def process_replacement_forecast_live_materialization_queue(
     if (
         lane == MATERIALIZATION_LANE_PRIORITY
         and read_plan is not None
+        and not priority_seed_transport
         and not read_plan.stale_conflict_batches
         and read_plan.claim.selected_files
     ):
@@ -3996,6 +4009,7 @@ def process_replacement_forecast_live_materialization_queue(
                 )
             if (
                 read_plan is not None
+                and not priority_seed_transport
                 and not read_plan.stale_conflict_batches
                 and read_plan.claim.selected_files
             ):

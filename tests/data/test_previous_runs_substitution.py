@@ -3008,7 +3008,7 @@ def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path,
             request_dir=request_dir, processed_dir=tmp_path / "processed",
             failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
             seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-            seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+            seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
             limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY, runner=_runner,
         )
 
@@ -3104,6 +3104,154 @@ def test_priority_empty_request_queue_bridges_day0_seed(tmp_path, monkeypatch):
     assert not tuple(request_dir.glob("*.json"))
 
 
+def test_priority_seed_bridge_drains_ready_day0_before_timeout_retry(
+    tmp_path, monkeypatch
+):
+    """A same-family Day0 successor outranks retry debt without bypassing HWM."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    family = ("Beijing", "2026-06-12", "high")
+    day0 = {
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-11T14:50:00+00:00",
+        "day0_observed_extreme_c": 30.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    retry_path = request_dir / "Held.timeout-retry-1-1.json"
+    retry_path.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "computed_at": "2026-06-11T14:49:00+00:00",
+                "source_cycle_time": "2026-06-11T06:00:00+00:00",
+                "day0_observed_extreme_observation_time": "2026-06-11T14:45:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ready_seed = seed_dir / "00-ready.json"
+    ready_seed.write_text(
+        json.dumps({**_minimal_seed(upgrade=False), **day0}), encoding="utf-8"
+    )
+    ahead_seed = seed_dir / "99-ahead.json"
+    ahead_seed.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": "Ahead City",
+                "source_cycle_time": "2026-06-11T18:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_scopes",
+        lambda families, **_kwargs: frozenset({family}) & families,
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset({family}),
+    )
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (retry_path, ready_seed),
+    )
+    assert priority[ready_seed.name][0] == -11.0
+    assert priority[retry_path.name][0] == -10.0
+    monkeypatch.setattr(
+        queue_mod,
+        "_seed_source_cycle_boundary",
+        lambda *, seed, **_kwargs: (
+            ("awaiting_current_ensemble_hwm", "2026-06-11T12:00:00+00:00")
+            if seed["city"] == "Ahead City"
+            else None
+        ),
+    )
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_validate_request_payload",
+        lambda _path: (True, "", ""),
+    )
+    started: list[str] = []
+    inflight_sizes: list[int] = []
+
+    def runner(argv):
+        input_path = Path(argv[argv.index("--input-json") + 1])
+        started.append(input_path.name)
+        inflight_sizes.append(
+            len(
+                tuple(
+                    path
+                    for path in (tmp_path / "inflight").glob("*/*.json")
+                    if path.name != queue_mod._CLAIM_METADATA_NAME
+                )
+            )
+        )
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"committed":true,"posterior_id":42,'
+                '"reactor_wake_published":true}\n'
+            ),
+            stderr="",
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=1,
+        discover=False,
+        limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=runner,
+    )
+
+    assert report.status == "PROCESSED"
+    assert started == [ready_seed.name]
+    assert inflight_sizes == [1]
+    assert retry_path.exists()
+    assert ahead_seed.exists()
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -3197,7 +3345,7 @@ def test_priority_same_identity_uses_metadata_when_active_body_is_malformed(tmp_
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda _argv: pytest.fail("same leased identity must not spawn"),
     )
@@ -3413,6 +3561,7 @@ def test_claim_read_deadline_releases_lock_for_priority_held_day0(tmp_path, monk
         queue_mod, "_current_money_risk_families",
         lambda **_kwargs: frozenset({("Istanbul", "2026-08-24", "high")}),
     )
+    monkeypatch.setattr(queue_mod, "_MATERIALIZATION_CLAIM_DEADLINE_SECONDS", 10.0)
     monkeypatch.setattr(
         queue_mod,
         "_claim_replacement_forecast_live_materialization_queue_locked",
@@ -3422,7 +3571,7 @@ def test_claim_read_deadline_releases_lock_for_priority_held_day0(tmp_path, monk
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=forecast_db,
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0,
         discover=False, limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\\n", stderr=""),
     )
@@ -3466,7 +3615,7 @@ def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monke
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
@@ -3533,7 +3682,7 @@ def test_priority_unrelated_stale_batch_does_not_block_held_request(tmp_path, mo
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr=""),
     )
@@ -3590,7 +3739,7 @@ def test_priority_legacy_unknown_inflight_scope_defers_without_consuming_held(
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
@@ -3646,7 +3795,7 @@ def test_priority_wal_commit_between_plan_and_apply_defers_without_claim(tmp_pat
             request_dir=request_dir, processed_dir=tmp_path / "processed",
             failed_dir=tmp_path / "failed", forecast_db=forecast_db,
             seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-            seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+            seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
             limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         )
     finally:
