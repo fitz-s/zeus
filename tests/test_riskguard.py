@@ -6133,12 +6133,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
         [
             (
-                "probation_in_flight", 1, 0, 0, 0.0,
-                "day0_revision_probation_in_flight(open=1,realized=0",
-            ),
-            (
-                "nonpositive", 0, 1, 0, -0.25,
-                "day0_revision_probation_nonpositive(realized=1,net_pnl_usd=-0.250000",
+                "nonpositive", 0, 3, 0, -0.25,
+                "day0_revision_probation_nonpositive(realized=3,net_pnl_usd=-0.250000",
             ),
             (
                 "capital_truth_degraded", 0, 0, 1, 0.0,
@@ -6181,12 +6177,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
         [
             (
-                "probation_in_flight", 1, 0, 0, 0.0,
-                "qkernel_revision_probation_in_flight(open=1,realized=0",
-            ),
-            (
-                "nonpositive", 0, 1, 0, -0.25,
-                "qkernel_revision_probation_nonpositive(realized=1,net_pnl_usd=-0.250000",
+                "nonpositive", 0, 3, 0, -0.25,
+                "qkernel_revision_probation_nonpositive(realized=3,net_pnl_usd=-0.250000",
             ),
             (
                 "capital_truth_degraded", 0, 0, 1, 0.0,
@@ -6241,9 +6233,12 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
         )
 
+        # Open positions never gate (concurrency is owned by the pinned sizing
+        # levers); a 15-close net-negative cohort is real statistical evidence
+        # and latches the nonpositive bound.
         assert reason == (
-            "qkernel_revision_probation_in_flight("
-            f"open=12,realized=15,revision={revision})"
+            "qkernel_revision_probation_nonpositive("
+            f"realized=15,net_pnl_usd=-31.278889,revision={revision})"
         )
         assert revisions == (revision,)
 
@@ -6279,6 +6274,33 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "open_position_count": 0,
                 "realized_position_count": 1,
                 "net_realized_pnl_usd": 0.25,
+            },
+        ) == (None, ())
+        # Open positions do not gate (2026-08-28): concurrency belongs to the
+        # pinned sizing levers and drawdown kill, not this probation bound.
+        assert riskguard_module._day0_revision_probation_gate_reason(
+            binding,
+            {"cohorts": []},
+            {
+                **base_curve,
+                "status": "probation_in_flight",
+                "open_position_count": 10,
+                "realized_position_count": 0,
+                "net_realized_pnl_usd": 0.0,
+            },
+        ) == (None, ())
+        # A sub-minimum nonpositive cohort (n < _PROBATION_MIN_REALIZED_SAMPLE)
+        # is noise, not disproof — and, since the latch blocks the next probe,
+        # gating on it would lock the strategy permanently.
+        assert riskguard_module._day0_revision_probation_gate_reason(
+            binding,
+            {"cohorts": []},
+            {
+                **base_curve,
+                "status": "nonpositive",
+                "open_position_count": 0,
+                "realized_position_count": 1,
+                "net_realized_pnl_usd": -1.067124,
             },
         ) == (None, ())
 
