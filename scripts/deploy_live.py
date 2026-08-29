@@ -1623,8 +1623,12 @@ def _fresh_failed_monitor_repair_handoff_admission(
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:repair_code_not_pending"
     if int(handoff.get("open_position_count") or 0) != open_count:
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_open_count_mismatch"
-    if int(handoff.get("fresh_position_count") or 0) != 0:
-        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:fresh_actionable_handoff"
+    fresh_count = int(handoff.get("fresh_position_count") or 0)
+    no_action_count = int(
+        handoff.get("fresh_failed_monitor_no_action_position_count") or 0
+    )
+    if fresh_count + no_action_count != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
     if int(handoff.get("future_monitor_event_count") or 0) != 0:
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:future_monitor_evidence"
     if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
@@ -1649,11 +1653,9 @@ def _fresh_failed_monitor_repair_handoff_admission(
     no_action_ids = tuple(handoff.get("fresh_failed_monitor_no_action_position_ids") or ())
     no_action_set = {str(position_id).strip() for position_id in no_action_ids}
     if (
-        len(no_action_ids)
-        != int(handoff.get("fresh_failed_monitor_no_action_position_count") or 0)
-        or len(no_action_ids) != open_count
-        or len(no_action_set) != open_count
-        or no_action_set != expected_set
+        len(no_action_ids) != no_action_count
+        or len(no_action_set) != no_action_count
+        or not no_action_set.issubset(expected_set)
     ):
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
 
@@ -1667,7 +1669,7 @@ def _fresh_failed_monitor_repair_handoff_admission(
     return (
         True,
         "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED: "
-        f"open_positions={open_count} fresh_actionable_positions=0 "
+        f"open_positions={open_count} fresh_actionable_positions={fresh_count} "
         "typed_no_action_partition=complete held_quote_sidecar_current=true "
         "restart_permission_only=true",
     )

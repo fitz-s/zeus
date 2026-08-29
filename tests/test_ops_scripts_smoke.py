@@ -4287,6 +4287,53 @@ def test_deploy_live_loaded_restart_admits_fresh_failed_monitor_repair_handoff(
     assert "restart_permission_only=true" in detail
 
 
+def test_deploy_live_loaded_restart_admits_mixed_fresh_repair_handoff(
+    monkeypatch, tmp_path
+):
+    """Fresh actions plus typed no-actions may cover the whole paused portfolio."""
+    dl = _load("deploy_live_restart_mixed_fresh_failed_monitor_admit", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-fresh", "pos-repair")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        fresh_position_count=1,
+        fresh_failed_monitor_no_action_position_count=1,
+        fresh_failed_monitor_no_action_position_ids=("pos-repair",),
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_pre_stop_monitor_handoff_evidence", lambda _db: handoff)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "fresh_actionable_positions=1" in detail
+
+
 def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(
     monkeypatch, tmp_path
 ):
@@ -4521,7 +4568,7 @@ def test_deploy_live_fresh_failed_handoff_rejects_malformed_internal_evidence(
 @pytest.mark.parametrize(
     ("mutation", "expected_reason"),
     (
-        ("fresh_actionable", "fresh_actionable_handoff"),
+        ("partition_overflow", "open_no_action_partition_incomplete"),
         ("nonterminal_command", "nonterminal_commands"),
         ("unpaused", "durable_entries_pause_false"),
         ("missing_id", "open_no_action_partition_incomplete"),
@@ -4546,7 +4593,7 @@ def test_deploy_live_fresh_failed_monitor_repair_handoff_refuses_boundaries(
     handoff = _fresh_failed_monitor_handoff(position_ids)
     repair_pending = {"pending": True}
     quote_sidecar = {"current": True, "age_seconds": 1.0}
-    if mutation == "fresh_actionable":
+    if mutation == "partition_overflow":
         handoff["fresh_position_count"] = 1
     elif mutation == "nonterminal_command":
         obligations["nonterminal_command_count"] = 1
