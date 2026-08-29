@@ -3556,6 +3556,111 @@ def test_current_money_seed_window_keeps_one_witness_per_source_cycle(tmp_path):
     assert prioritized[2:] == (seed_paths[1], ordinary)
 
 
+def test_current_money_seed_window_follows_rotated_cursor_order(tmp_path):
+    """A bounded priority window advances with the durable seed cursor."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-31", "high"),
+            ("Istanbul", "2026-08-31", "high"),
+            ("Tel Aviv", "2026-08-31", "high"),
+        }
+    )
+    paths = tuple(
+        tmp_path / name
+        for name in (
+            "Tel_Aviv.2026-08-31.high.20260829T120000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T120000Z.json",
+            "Istanbul.2026-08-31.high.20260829T120000Z.json",
+        )
+    )
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(paths, families)
+
+    assert prioritized == paths
+
+
+def test_background_seed_window_starts_outside_current_priority_scope(tmp_path):
+    """A broad seed cannot wait behind priority seeds the background lane cannot own."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-31", "high"),
+            ("Istanbul", "2026-08-31", "high"),
+        }
+    )
+    held_a = tmp_path / "Hong_Kong.2026-08-31.high.a.json"
+    held_b = tmp_path / "Istanbul.2026-08-31.high.b.json"
+    broad = tmp_path / "Zurich.2026-09-02.high.c.json"
+
+    ordered = queue_mod._deprioritize_current_money_risk_seed_files(
+        (held_a, held_b, broad), families
+    )
+
+    assert ordered == (broad, held_a, held_b)
+
+
+def test_priority_seed_inspection_stays_bounded_by_actionable_tranche(
+    tmp_path, monkeypatch
+):
+    """Thirty current families do not expand one priority lock hold to thirty reads."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+    families = frozenset(
+        (f"City {index:02d}", "2026-08-31", "high") for index in range(30)
+    )
+    for city, target_date, metric in families:
+        name = city.replace(" ", "_")
+        (seed_dir / f"{name}.{target_date}.{metric}.json").write_text(
+            "{}", encoding="utf-8"
+        )
+
+    observed: list[tuple[Path, ...]] = []
+
+    def _capture(paths, **_kwargs):
+        snapshot = tuple(paths)
+        observed.append(snapshot)
+        return snapshot, (), {path: {} for path in snapshot}, {}
+
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: families)
+    monkeypatch.setattr(
+        queue_mod, "_current_global_auction_scope_families", lambda _paths: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod, "_never_priced_enqueued_seed_families", lambda _db: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod, "_coalesce_superseded_materialization_seeds", _capture
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_priority_map_with_names",
+        lambda _db, paths, *_args, **_kwargs: (
+            {path.name: (0, path.name) for path in paths},
+            {path.name for path in paths},
+        ),
+    )
+
+    queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert len(observed) == 1
+    assert len(observed[0]) == queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS
+
+
 def test_complete_global_receipt_scope_maps_exact_queued_families(tmp_path, monkeypatch):
     """A schema-22 full cut maps family ids back to current queue identities."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

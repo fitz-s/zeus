@@ -3319,9 +3319,17 @@ def _prioritize_current_money_risk_seed_files(
     paths: Sequence[Path],
     families: frozenset[tuple[str, str, str]],
 ) -> tuple[Path, ...]:
-    """Put one newest witness per exposed family source cycle in the window."""
+    """Put one newest witness per exposed family source cycle in cursor order."""
 
-    prefixes = tuple(sorted(_current_money_risk_seed_prefixes(families)))
+    prefix_set = set(_current_money_risk_seed_prefixes(families))
+    prefixes = tuple(
+        dict.fromkeys(
+            prefix
+            for path in paths
+            for prefix in prefix_set
+            if path.name.startswith(prefix)
+        )
+    )
     if not prefixes:
         return tuple(paths)
     held_by_prefix: dict[str, list[Path]] = {prefix: [] for prefix in prefixes}
@@ -3372,6 +3380,27 @@ def _prioritize_current_money_risk_seed_files(
     # family tail regresses the durable cursor and can starve unrelated work.
     tail = tuple(path for path in paths if path not in promoted_set)
     return (*promoted, *tail)
+
+
+def _deprioritize_current_money_risk_seed_files(
+    paths: Sequence[Path],
+    families: frozenset[tuple[str, str, str]],
+) -> tuple[Path, ...]:
+    """Keep priority-owned seeds outside a background lane's bounded window."""
+
+    prefixes = _current_money_risk_seed_prefixes(families)
+    if not prefixes:
+        return tuple(paths)
+    priority: list[Path] = []
+    background: list[Path] = []
+    for path in paths:
+        target = (
+            priority
+            if any(path.name.startswith(prefix) for prefix in prefixes)
+            else background
+        )
+        target.append(path)
+    return (*background, *priority)
 
 
 def _interleave_current_priority_seed_files(
@@ -3594,13 +3623,16 @@ def _prepare_seed_requests(
     current_priority_scope = (
         current_money_risk | current_global_scope | never_priced_scope
     )
-    prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
-        rotated_raw_snapshot,
-        current_priority_scope,
-    )
-    current_priority_seed_family_count = sum(
-        any(path.name.startswith(prefix) for path in rotated_raw_snapshot)
-        for prefix in _current_money_risk_seed_prefixes(current_priority_scope)
+    prioritized_raw_snapshot = (
+        _deprioritize_current_money_risk_seed_files(
+            rotated_raw_snapshot,
+            current_priority_scope,
+        )
+        if lane == MATERIALIZATION_LANE_BACKGROUND
+        else _prioritize_current_money_risk_seed_files(
+            rotated_raw_snapshot,
+            current_priority_scope,
+        )
     )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
@@ -3609,7 +3641,6 @@ def _prepare_seed_requests(
     inspection_cap = max(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
-        current_priority_seed_family_count,
     )
     raw_window = prioritized_raw_snapshot[:inspection_cap]
     (
