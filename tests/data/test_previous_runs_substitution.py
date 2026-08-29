@@ -4030,6 +4030,65 @@ def test_background_uses_metadata_owner_for_corrupt_active_request_and_stale_rec
     assert (request_dir / "damaged.json").is_file()
 
 
+def test_stale_claim_recovery_moves_stage_receipt_with_request(tmp_path, monkeypatch):
+    """Recovery leaves no orphan progress file that keeps an empty batch alive."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    inflight_dir = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME
+    batch = inflight_dir / "stale-owner"
+    request_dir.mkdir()
+    batch.mkdir(parents=True)
+    claimed = batch / "Istanbul.json"
+    claimed.write_text(
+        json.dumps(
+            {
+                "city": "Istanbul",
+                "target_date": "2026-08-24",
+                "temperature_metric": "high",
+                "source_cycle_time": "2026-08-24T06:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    queue_mod._write_stage_receipt_payload(
+        claimed,
+        {"stage": "wake", "deadline_at": "2026-08-24T06:05:00+00:00"},
+    )
+    (batch / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": "2000-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod, "_materialization_subprocess_timeout_seconds", lambda: 1.0
+    )
+
+    _keys, recovered, _unknown = queue_mod._recover_stale_claims(
+        request_path=request_dir,
+        inflight_path=inflight_dir,
+    )
+
+    restored = request_dir / "Istanbul.json"
+    assert recovered == 1
+    assert restored.is_file()
+    assert queue_mod._stage_receipt_path(restored).is_file()
+    assert not batch.exists()
+
+
+def test_empty_claim_batch_removes_orphan_stage_receipt(tmp_path):
+    """A non-authority stage file cannot make an empty batch immortal."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    batch = tmp_path / "inflight" / "orphan"
+    batch.mkdir(parents=True)
+    orphan = batch / "Moscow.json.stage"
+    orphan.write_text('{"stage":"wake"}', encoding="utf-8")
+
+    queue_mod._remove_empty_claim_batch(batch)
+
+    assert not batch.exists()
+
+
 def test_fresh_malformed_request_never_claims_or_blocks_unrelated_held_priority(
     tmp_path, monkeypatch
 ):

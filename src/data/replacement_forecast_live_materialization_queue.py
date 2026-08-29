@@ -2955,6 +2955,12 @@ def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) ->
         except FileExistsError:
             attempt += 1
             continue
+        try:
+            _move_stage_receipt(path, target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            _fsync_directory(request_path)
+            raise
         _fsync_directory(request_path)
         path.unlink()
         _fsync_directory(path.parent)
@@ -3100,12 +3106,27 @@ def _restore_claimed_request_after_timeout(
 
 
 def _remove_empty_claim_batch(batch_path: Path) -> None:
+    """Remove a batch after its last authority-carrying request leaves.
+
+    SCOPE: one inflight directory with zero request JSON files. DRAIN: discard
+    only non-authority stage telemetry whose request body is already absent.
+    RESET: the directory disappears, so later queue scans cannot repeatedly
+    classify historical progress receipts as live ownership work.
+    """
+
     if _claim_request_files(batch_path):
         return
     try:
         (batch_path / _CLAIM_METADATA_NAME).unlink()
     except FileNotFoundError:
         pass
+    for stage_receipt in batch_path.glob(
+        f"*.json{_MATERIALIZATION_STAGE_RECEIPT_SUFFIX}"
+    ):
+        try:
+            stage_receipt.unlink()
+        except FileNotFoundError:
+            pass
     try:
         batch_path.rmdir()
     except OSError:
