@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -1227,6 +1227,12 @@ def _materialize(
     except Exception as exc:
         if conn.in_transaction:
             conn.rollback()
+        # A durable manifest write does not make an expired posterior attempt
+        # terminal. Preserve the typed DEFERRED result so the queue restores
+        # this exact request; converting it to generic ERROR drops the only
+        # executable seed after transient writer contention.
+        if isinstance(exc, MaterializationDeadlineExceeded):
+            raise
         if (
             isinstance(exc, sqlite3.OperationalError)
             and stage_receipt.deadline_expired()

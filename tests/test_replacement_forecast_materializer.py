@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Last reused/audited: 2026-08-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -4867,6 +4867,77 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
         "openmeteo_anchor_artifact_id": 17,
         "manifest_committed": True,
     }
+
+
+def test_materialize_script_preserves_deadline_deferred_after_manifest(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    payload = {
+        "city": "Shanghai",
+        "city_id": "Shanghai",
+        "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "computed_at": "2026-06-06T04:00:00+00:00",
+        "expires_at": "2026-06-06T06:00:00+00:00",
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
+        "openmeteo_payload_json": "anchor.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_json = tmp_path / "request.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "anchor.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "precision.json").write_text("{}", encoding="utf-8")
+    receipt = cli._DurablePreparationReceipt(
+        schema_ready=True,
+        anchor_artifact_id=17,
+        manifest_committed=True,
+    )
+    deadline_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+
+    monkeypatch.setattr(
+        cli,
+        "extract_openmeteo_ecmwf_ifs9_localday_anchor",
+        lambda *args, **kwargs: _anchor(),
+    )
+    monkeypatch.setattr(cli, "OpenMeteoIfs9PrecisionMetadata", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
+        lambda _metadata: _precision_guard(),
+    )
+    monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
+    monkeypatch.setattr(
+        cli, "_prepare_live_schema_and_manifest", lambda *args, **kwargs: receipt
+    )
+    monkeypatch.setattr(
+        cli,
+        "_commit_from_read_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            cli.MaterializationDeadlineExceeded("dependency_witness", deadline_at)
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+
+    with pytest.raises(cli.MaterializationDeadlineExceeded) as raised:
+        cli._materialize(
+            input_json,
+            commit=True,
+            init_schema=False,
+            conn=conn,
+            writer_lock=nullcontext,
+        )
+    conn.close()
+
+    assert raised.value.stage == "dependency_witness"
 
 
 def test_materialize_script_threads_day0_zero_observation_state(
