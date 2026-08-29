@@ -34061,13 +34061,26 @@ def _assert_provisional_day0_replacement_bundle(
 
     identity_payload = payload
     identity_value_is_celsius = False
+    identity_requires_celsius_unit = False
     equivalent_conditioning_time: str | None = None
     binding = payload.get("_edli_global_day0_binding")
     if isinstance(binding, Mapping):
+        probability_conditioning = binding.get(
+            "probability_conditioning_identity"
+        )
         statistical_conditioning = binding.get(
             "statistical_probability_conditioning"
         )
-        if isinstance(statistical_conditioning, Mapping):
+        if isinstance(probability_conditioning, Mapping):
+            # Settlement/payoff truth and probability conditioning may be
+            # carried by different authorized channels. Validate the posterior
+            # against the identity it actually consumed, after the producer has
+            # independently reconciled that identity with current physical
+            # truth.
+            identity_payload = probability_conditioning
+            identity_value_is_celsius = True
+            identity_requires_celsius_unit = True
+        elif isinstance(statistical_conditioning, Mapping):
             # The top-level Day0 payload deliberately remains settlement-channel
             # truth.  A fast-residual posterior is instead identified by its
             # separately validated statistical conditioning.  Comparing that
@@ -34166,6 +34179,10 @@ def _assert_provisional_day0_replacement_bundle(
     if (
         provisional.get("active") is not True
         or bool(provisional.get("support_truncation"))
+        or (
+            identity_requires_celsius_unit
+            and str(identity_payload.get("unit") or "").strip().upper() != "C"
+        )
         or not expected_source
         or not expected_time
         or str(provisional.get("source") or "").strip() != expected_source
@@ -35746,6 +35763,16 @@ def _global_day0_execution_payload(
         binding["statistical_probability_conditioning"] = dict(
             fast_residual_conditioning
         )
+    elif conditioning is not None:
+        binding["probability_conditioning_identity"] = {
+            "source": str(conditioning.get("source") or "").strip(),
+            "observation_time": str(
+                conditioning.get("observation_time") or ""
+            ).strip(),
+            "observed_extreme_c": float(conditioning["observed_extreme_c"]),
+            "unit": "C",
+            "metric": str(conditioning.get("metric") or metric).strip().lower(),
+        }
     remaining_witness = (
         conditioning.get("day0_remaining_vector_witness")
         if isinstance(conditioning, Mapping)

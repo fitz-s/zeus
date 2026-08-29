@@ -339,6 +339,130 @@ def test_day0_execution_payload_binds_fast_probability_without_promoting_settlem
     assert statistical["observed_extreme_c"] == 28.0
 
 
+def test_day0_execution_payload_keeps_settlement_and_probability_identities_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import replacement_forecast_current_target_plan as target_plan
+
+    settlement_fact = {
+        "observation_source": "ogimet_metar_uuww",
+        "observation_time": "2026-08-29T13:00:00+00:00",
+        "observation_available_at": "2026-08-29T13:01:00+00:00",
+        "observed_extreme_native": 21.0,
+        "sample_count": 20,
+        "station_id": "UUWW",
+        "unit": "C",
+        "raw_payload_sha256": "a" * 64,
+    }
+    physical_fact = {
+        "observation_source": "aviationweather_metar",
+        "observation_time": "2026-08-29T13:00:00+00:00",
+        "observation_available_at": "2026-08-29T13:00:10+00:00",
+        "observed_extreme_native": 21.0,
+        "sample_count": 20,
+        "station_id": "UUWW",
+        "unit": "C",
+    }
+
+    def latest_fact(*_args, **kwargs):
+        return (
+            settlement_fact
+            if kwargs["require_settlement_channel"]
+            else physical_fact
+        )
+
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", latest_fact)
+    city = SimpleNamespace(
+        name="Moscow",
+        timezone="UTC",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="UUWW",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "runtime_cities_by_name",
+        lambda: {"Moscow": city},
+    )
+    monkeypatch.setattr(
+        adapter.SettlementSemantics,
+        "for_city",
+        lambda _city: SimpleNamespace(round_single=lambda value: int(value)),
+    )
+    event = SimpleNamespace(
+        payload_json=json.dumps(
+            {
+                "city": "Moscow",
+                "target_date": "2026-08-29",
+                "metric": "high",
+                "source_match_status": "MATCH",
+                "local_date_status": "MATCH",
+                "station_match_status": "MATCH",
+                "dst_status": "UNAMBIGUOUS",
+                "metric_match_status": "MATCH",
+                "rounding_status": "MATCH",
+                "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+            }
+        )
+    )
+    conditioning = {
+        "active": True,
+        "source": "aviationweather_metar",
+        "observation_time": "2026-08-29T13:00:00+00:00",
+        "observed_extreme_c": 21.0,
+        "support_truncation": False,
+        "metric": "high",
+        "unit": "C",
+    }
+    payload = adapter._global_day0_execution_payload(
+        event,
+        family=SimpleNamespace(
+            city="Moscow",
+            target_date="2026-08-29",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C"),
+        conditioning=conditioning,
+        observation_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 8, 29, 13, 5, tzinfo=timezone.utc),
+        posterior_id=440992,
+        probability_base_identity="posterior-moscow",
+    )
+
+    assert payload["settlement_source"] == "ogimet_metar_uuww"
+    probability_identity = payload["_edli_global_day0_binding"][
+        "probability_conditioning_identity"
+    ]
+    assert probability_identity == {
+        "source": "aviationweather_metar",
+        "observation_time": "2026-08-29T13:00:00+00:00",
+        "observed_extreme_c": 21.0,
+        "unit": "C",
+        "metric": "high",
+    }
+    bundle = SimpleNamespace(
+        provenance_json={"day0_provisional_observation": conditioning}
+    )
+    adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+    for key, invalid in (
+        ("source", "aviationweather_other"),
+        ("observation_time", "2026-08-29T13:01:00+00:00"),
+        ("observed_extreme_c", 20.0),
+        ("unit", "F"),
+    ):
+        candidate = json.loads(json.dumps(payload))
+        candidate["_edli_global_day0_binding"]["probability_conditioning_identity"][
+            key
+        ] = invalid
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        ):
+            adapter._assert_provisional_day0_replacement_bundle(bundle, candidate)
+
+
 def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refutes_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
