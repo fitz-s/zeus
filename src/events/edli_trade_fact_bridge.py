@@ -380,7 +380,9 @@ def append_prepared_trade_fact_bridge_evidence(
     """CAS and append one prepared fact without re-running historical discovery."""
 
     row = evidence.row
-    trade_schema = "trades" if _schema_with_table(conn, "venue_trade_facts", preferred="trades") else "main"
+    trade_schema = (
+        _schema_with_table(conn, "venue_trade_facts", preferred="trades") or "main"
+    )
     facts = _q(trade_schema, "venue_trade_facts")
     current = conn.execute(
         f"""
@@ -409,6 +411,9 @@ def append_prepared_trade_fact_bridge_evidence(
     ).hexdigest()
     if current is None or current_fingerprint != evidence.fingerprint:
         raise RuntimeError("TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE")
+    latest_source_filter = (
+        "AND source = 'WS_USER'" if evidence.kind == "confirmed" else ""
+    )
     latest = conn.execute(
         f"""
         SELECT trade_fact_id
@@ -417,6 +422,7 @@ def append_prepared_trade_fact_bridge_evidence(
            AND venue_order_id = ?
            AND trade_id = ?
            AND UPPER(COALESCE(state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+           {latest_source_filter}
          ORDER BY CASE UPPER(COALESCE(state, ''))
                     WHEN 'CONFIRMED' THEN 3 WHEN 'MINED' THEN 2 ELSE 1 END DESC,
                   datetime(observed_at) DESC, trade_fact_id DESC
