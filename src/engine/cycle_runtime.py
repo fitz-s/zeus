@@ -9376,6 +9376,30 @@ def execute_monitoring_phase(
                 if deadline_expiry == "global":
                     break
                 continue
+            if conn is not None and bool(
+                getattr(conn, "in_transaction", False)
+            ):
+                released = _release_monitor_write_lock_boundary(
+                    conn,
+                    summary,
+                    deps,
+                    boundary="after_monitor_refresh_before_retry_quote",
+                    deadline_monotonic=position_deadline,
+                )
+                if not released and bool(
+                    getattr(conn, "in_transaction", False)
+                ):
+                    # SCOPE: only this position's optional retry quote and exit.
+                    # DRAIN: rollback/commit at this boundary or the position's
+                    # finally boundary; RESET: the next monitor attempt starts
+                    # from a fresh q/book cut. Never cross CLOB I/O with TRADE
+                    # writer ownership still active.
+                    summary[
+                        "held_monitor_positions_deferred_for_writer_lock"
+                    ] = summary.get(
+                        "held_monitor_positions_deferred_for_writer_lock", 0
+                    ) + 1
+                    continue
             if monitoring_non_executable_dust:
                 current_min_order_size = getattr(
                     pos,
@@ -10327,6 +10351,35 @@ def execute_monitoring_phase(
                         + 1
                     )
                 else:
+                    continue
+
+            if (
+                monitor_canonical_written
+                and conn is not None
+                and bool(getattr(conn, "in_transaction", False))
+            ):
+                released = _release_monitor_write_lock_boundary(
+                    conn,
+                    summary,
+                    deps,
+                    boundary="after_monitor_canonical_before_external_io",
+                    # The completed canonical cut belongs to the outer monitor
+                    # claim; the child q/book clock may already be consumed.
+                    deadline_monotonic=monitor_deadline,
+                )
+                if not released and bool(
+                    getattr(conn, "in_transaction", False)
+                ):
+                    # SCOPE: only this position's completion publish/venue exit.
+                    # DRAIN: rollback/commit at this boundary or the position's
+                    # finally boundary; RESET: the next monitor attempt rebuilds
+                    # exact current authority. No external side effect may start
+                    # while this connection still owns the canonical writer.
+                    summary[
+                        "held_monitor_positions_deferred_for_writer_lock"
+                    ] = summary.get(
+                        "held_monitor_positions_deferred_for_writer_lock", 0
+                    ) + 1
                     continue
 
             if (

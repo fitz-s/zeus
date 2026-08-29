@@ -7039,11 +7039,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     finally:
         release_hwm_snapshot()
 
-    # Probability refresh may persist a world-owned Day0 observation fact.
-    # Start the trade-owned quote evidence only after that write completes, so
-    # this thread cannot hold TRADE while waiting for WORLD.
-    _persist_monitor_quote(conn, pos, quote)
-
     _track_belief_staleness(pos)
 
     probability_authority_available = (
@@ -7065,6 +7060,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             held_best_bid=pos.last_monitor_best_bid,
             held_best_ask=pos.last_monitor_best_ask,
         )
+
+    # Probability refresh may persist a world-owned Day0 observation fact, and
+    # stale-q toxicity may fetch an adjacent CLOB book. Start trade-owned quote
+    # evidence only after both complete so TRADE never spans WORLD or CLOB I/O.
+    _persist_monitor_quote(conn, pos, quote)
 
     divergence_score = _compute_divergence_score(
         current_p_posterior, current_p_market, available=probability_authority_available

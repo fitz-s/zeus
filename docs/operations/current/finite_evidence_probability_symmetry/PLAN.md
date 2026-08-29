@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-29 — held monitor不得跨CLOB/venue I/O占用canonical writer
+
+- **实时反例：** `exit_monitor`在固定五分钟边界持续运行时，collateral writer与
+  harvester反复出现`WriteLeaseTimeout`/`database is locked`；下一30秒tick又恢复，
+  证明是周期性writer contention。source trace显示`refresh_position`先写quote evidence，
+  stale-q toxicity或retry quote随后再次访问CLOB；`MONITOR_REFRESHED`写完后也可直接进入
+  `execute_exit`，三处都可能把未提交TRADE transaction带入外部I/O。
+- **修复：** stale-q adjacent-book读取完成后才写quote evidence；retry quote前提交refresh
+  写入；canonical monitor event后、任何completion publish或venue exit前再次提交。
+  commit失败先rollback；只有transaction仍未释放时才局部推迟该持仓外部动作，下一
+  monitor cycle重建current q/book，绝不以stale truth补位。
+- **SCOPE / DRAIN / RESET：** scope仅为当前position本轮retry quote/completion/exit，
+  不改变q、BUY/SELL/HOLD/CASH经济比较或其他family。drain是两个显式writer boundary及
+  现有per-position finally；reset是下一轮从最新probability与book重新决策。
+- **验收：** behavioral antibodies要求stale-q adjacent CLOB先于quote evidence写入，且
+  refresh与canonical emit各自打开transaction后，retry CLOB与`execute_exit`均观察到
+  `in_transaction=False`；targeted monitor/exit suites、compile、planning-lock与diff通过。
+  live restart后跨至少两个固定五分钟边界不得再出现collateral writer timeout，同时
+  held coverage、decision receipts与venue事实继续推进。
+
 ## 2026-08-24 — screen cancel obligation dispatch lease
 
 - **Design:** screen persists only a versioned exact command/order obligation; recovery selects only that marker, claims it with `CANCEL_DISPATCH_STARTED` in one `BEGIN IMMEDIATE` transaction, and performs no DB I/O across venue I/O. The claim carries obligation id, owner boot UUID/pid, generation, attempt id, and expiry. A stale claimant cannot finalize; expired claims require a fresh point-order witness before reclaim. Post-venue ACK/unknown uses a separate bounded reserve.

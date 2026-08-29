@@ -2765,6 +2765,234 @@ def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypat
     assert summary["held_monitor_positions_deferred_for_commit_failure"] == 1
 
 
+def test_monitoring_phase_releases_writer_before_retry_quote_and_exit_io(
+    monkeypatch,
+):
+    """Current monitor writes must commit before either external I/O boundary."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    pos = _make_position(
+        trade_id="monitor-writer-before-external-io",
+        token_id="monitor-writer-before-external-io-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        city="Chicago",
+    )
+    conn.execute("CREATE TEMP TABLE monitor_writer_probe (stage TEXT NOT NULL)")
+    conn.commit()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [pos],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            pos.token_id: {
+                "asset_id": pos.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: True,
+    )
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **_kwargs: HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="current observed extreme killed held bin",
+            metric="high",
+            rounded_extreme=36.0,
+            source="durable_observation_instants",
+        ),
+    )
+
+    def refresh(current_conn, _clob, position, **_kwargs):
+        current_conn.execute(
+            "INSERT INTO monitor_writer_probe(stage) VALUES ('refresh')"
+        )
+        events.append("refresh_write")
+        position.last_monitor_prob = 0.20
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = -0.20
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = 0.40
+        position.last_monitor_best_ask = 0.42
+        position._zeus_held_monitor_full_depth_action_authority = True
+        position._zeus_held_monitor_min_order_size = 1.0
+        edge_ctx = _monitor_test_edge_context(position)
+        edge_ctx.divergence_score = 0.41
+        edge_ctx.market_velocity_1h = 0.0
+        return edge_ctx
+
+    def retry_quote(*, conn: object, exit_context, **_kwargs):
+        assert conn.in_transaction is False
+        events.append("retry_quote_io")
+        conn.execute(
+            "INSERT INTO monitor_writer_probe(stage) VALUES ('retry_quote')"
+        )
+        return exit_context, False
+
+    def emit(current_conn, *_args, **_kwargs):
+        current_conn.execute(
+            "INSERT INTO monitor_writer_probe(stage) VALUES ('canonical')"
+        )
+        events.append("canonical_write")
+        return True
+
+    def execute_exit(*, conn: object, **_kwargs):
+        assert conn.in_transaction is False
+        events.append("execute_exit_io")
+        return "sell_order_placed:test"
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_exact_zero_position",
+        refresh,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_refresh_pending_exit_retry_quote_from_current_clob",
+        retry_quote,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        emit,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.build_exit_intent",
+        lambda *_args, **_kwargs: SimpleNamespace(reason="DAY0_HARD_FACT_BIN_DEAD"),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        execute_exit,
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle._drain_same_turn_global_sell_reauction_after_no_fill",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_portfolio_rotation_evaluation_status",
+        lambda *_args, **_kwargs: None,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    deps = _monitor_test_deps("monitor_writer_before_external_io")
+    deps.cities_by_name = {
+        "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+    }
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert events == [
+        "refresh_write",
+        "retry_quote_io",
+        "canonical_write",
+        "execute_exit_io",
+    ]
+    assert conn.in_transaction is False
+    assert summary["exits"] == 1
+    conn.close()
+
+
+def test_refresh_position_reads_adjacent_clob_before_quote_writer(monkeypatch):
+    """Stale-q toxicity I/O must finish before monitor quote persistence starts."""
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TEMP TABLE monitor_quote_probe (stage TEXT NOT NULL)")
+    conn.commit()
+    pos = _make_position(
+        trade_id="adjacent-clob-before-quote-writer",
+        city="Chicago",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    events: list[str] = []
+    quote = monitor_refresh.HeldTokenMonitorQuote(
+        token_id=pos.token_id,
+        best_bid=0.40,
+        best_ask=0.42,
+        bid_size=20.0,
+        ask_size=20.0,
+        mark_price=0.41,
+        source_timestamp="2026-08-29T15:30:00+00:00",
+        min_order_size=1.0,
+        bid_ladder=((0.40, 20.0),),
+        full_depth_action_authority=True,
+    )
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_quote_refresh",
+        lambda *_args, **_kwargs: quote,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_probability_refresh",
+        lambda position, **_kwargs: (float("nan"), position, False),
+    )
+
+    def adjacent_book(*_args, **_kwargs):
+        assert conn.in_transaction is False
+        events.append("adjacent_clob_io")
+        return False
+
+    def persist_quote(current_conn, _position, _quote):
+        assert events == ["adjacent_clob_io"]
+        current_conn.execute(
+            "INSERT INTO monitor_quote_probe(stage) VALUES ('quote')"
+        )
+        events.append("quote_write")
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_detect_whale_toxicity_from_orderbook",
+        adjacent_book,
+    )
+    monkeypatch.setattr(monitor_refresh, "_persist_monitor_quote", persist_quote)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_causal_market_velocity_1h",
+        lambda *_args, **_kwargs: 0.0,
+    )
+
+    monitor_refresh.refresh_position(conn, object(), pos)
+
+    assert events == ["adjacent_clob_io", "quote_write"]
+    assert conn.in_transaction is True
+    conn.rollback()
+    conn.close()
+
+
 def test_global_sell_reauction_waits_for_outer_commit_before_network(monkeypatch):
     """A staged release cannot publish a wake before its outer commit."""
     from src.engine import cycle_runtime
