@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-29
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -2737,7 +2737,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         from src.execution.command_recovery import reconcile_unresolved_commands
         from src.events.edli_trade_fact_bridge import (
             append_confirmed_trade_facts_to_edli,
-            append_rest_filled_orphan_trade_facts_to_edli,
+            append_prepared_trade_fact_bridge_evidence,
         )
         from src.ingest.price_channel_ingest import (
             _edli_trade_fact_bridge_candidates_read_only,
@@ -2762,17 +2762,24 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 1000,
             )
             try:
-                summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
-                    bridge_conn,
-                    candidates=confirmed_candidates,
-                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
-                )
-                summary['rest_fill_orphan_bridge_appended'] = (
-                    append_rest_filled_orphan_trade_facts_to_edli(
-                        bridge_conn,
-                        candidates=rest_orphan_candidates,
-                        absorbed_fill_aggregate_ids=(),
+                summary['confirmed_fill_bridge_appended'] = 0
+                summary['rest_fill_orphan_bridge_appended'] = 0
+                for evidence in confirmed_candidates:
+                    summary['confirmed_fill_bridge_appended'] += (
+                        append_prepared_trade_fact_bridge_evidence(
+                            bridge_conn, evidence
+                        )
                     )
+                for evidence in rest_orphan_candidates:
+                    summary['rest_fill_orphan_bridge_appended'] += (
+                        append_prepared_trade_fact_bridge_evidence(
+                            bridge_conn, evidence
+                        )
+                    )
+                summary['confirmed_fill_bridge_appended'] += append_confirmed_trade_facts_to_edli(
+                    bridge_conn,
+                    candidates=(),
+                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
                 )
                 bridge_conn.commit()
             except sqlite3.OperationalError as exc:

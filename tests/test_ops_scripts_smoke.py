@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-29
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -2493,10 +2493,13 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
-    assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+    assert "append_rest_filled_orphan_trade_facts_to_edli" not in calls[0][2]
+    assert "append_prepared_trade_fact_bridge_evidence" in calls[0][2]
     assert "_edli_trade_fact_bridge_candidates_read_only" in calls[0][2]
-    assert "candidates=confirmed_candidates" in calls[0][2]
-    assert "candidates=rest_orphan_candidates" in calls[0][2]
+    assert "for evidence in confirmed_candidates:" in calls[0][2]
+    assert "for evidence in rest_orphan_candidates:" in calls[0][2]
+    assert "append_prepared_trade_fact_bridge_evidence(" in calls[0][2]
+    assert "candidates=()" in calls[0][2]
     assert "absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids" in calls[0][2]
     assert "recovery_deadline_monotonic = time.monotonic() + 60.0" in calls[0][2]
     assert "deadline_monotonic=recovery_deadline_monotonic" in calls[0][2]
