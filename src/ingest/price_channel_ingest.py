@@ -4944,7 +4944,10 @@ def _edli_refresh_held_position_quote_evidence(
                     append_evidence_token_ids=_edli_current_loss_audit_token_ids,
                 ),
                 fetch_orderbook=fetch_orderbook,
-                fetch_orderbooks=fetch_orderbooks,
+                # Held exposure is an exact per-token recovery scope.  A shared
+                # /books admission failure must not turn every native held token
+                # into zero-event freshness debt.
+                fetch_orderbooks=None,
             )
             # A canonical held-side quote cannot share its first REST/commit
             # tranche with audit or residual tokens.  A slow or denied sibling

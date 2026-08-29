@@ -4703,6 +4703,82 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     assert ordered == ["missing-token", "stale-token", "newer-token"]
 
 
+@pytest.mark.parametrize("failed_token", [None, "held-05"])
+def test_held_rest_seed_refresh_is_per_token_and_only_drains_successes(failed_token):
+    """A quiet WS recovers canonical held books without batch-wide failure."""
+
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketChannelOnlineService,
+        MarketTokenMetadata,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    token_ids = [f"held-{index:02d}" for index in range(12)]
+    ingestor = MarketChannelIngestor(
+        None,
+        active_token_ids=set(token_ids),
+        token_metadata={
+            token_id: MarketTokenMetadata(
+                condition_id="condition-held",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snapshot-{token_id}",
+                market_end_at="2099-01-01T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+        feasibility_conn=conn,
+    )
+    fetched = []
+    drained = []
+
+    def fetch_orderbook(token_id):
+        fetched.append(token_id)
+        if token_id == failed_token:
+            raise RuntimeError("one held token failed")
+        return {
+            "asset_id": token_id,
+            "market": "condition-held",
+            "timestamp": "1781863200000",
+            "hash": f"hash-{token_id}",
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "10"}],
+        }
+
+    def drain_successes(events):
+        drained.extend(json.loads(event.payload_json)["token_id"] for event in events)
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=fetch_orderbook,
+        fetch_orderbooks=None,
+    )
+    written = service.seed_rest_books_in_chunks(
+        token_ids=token_ids,
+        received_at="2026-08-28T00:00:00+00:00",
+        write_gate=contextlib.nullcontext(),
+        commit=conn.commit,
+        chunk_size=4,
+        deadline_monotonic=time.monotonic() + 10.0,
+        past_end_exit_refresh=True,
+        post_commit_quote_sink=drain_successes,
+    )
+
+    expected = [token_id for token_id in token_ids if token_id != failed_token]
+    assert fetched == token_ids
+    assert drained == expected
+    assert written == len(expected)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2 * len(expected)
+
+
 def test_price_channel_sqlite_wait_is_bounded_by_writer_hold_budget(monkeypatch, tmp_path):
     from src.ingest import price_channel_ingest as lane
 
@@ -5270,7 +5346,15 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
                 "asks": [{"price": "0.75", "size": "10"}],
             }
 
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None) -> dict:  # noqa: ANN001
+            raise AssertionError("held refresh must isolate REST calls per token")
+
     monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic=None: sqlite3.connect(trade_path),
+    )
     monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
     monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
