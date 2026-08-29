@@ -26,6 +26,51 @@ from src.events.live_profit_audit import (
     compute_fill_alpha_gap_from_authorities,
     record_edli_live_profit_audit_from_aggregate,
 )
+
+
+def test_cost_model_lookup_uses_indexed_semantic_identity_before_json_scan() -> None:
+    from src.events import live_profit_audit as audit
+
+    cost_hash = "a" * 64
+    pre_submit = {
+        "event_id": "event-1",
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+    }
+    payload = {
+        "cost_basis_hash": cost_hash,
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+    }
+    queries: list[str] = []
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Conn:
+        def execute(self, sql, params=()):
+            queries.append(sql)
+            if "FROM sqlite_master" in sql:
+                return _Result((1,))
+            if "WHERE certificate_hash" in sql:
+                return _Result(None)
+            if "semantic_key = ?" in sql:
+                assert params == (
+                    f"cost_model:event-1:cost_basis:{cost_hash[:16]}",
+                )
+                return _Result((json.dumps(payload),))
+            raise AssertionError("legacy JSON scan must not run for current semantic keys")
+
+    assert audit._load_verified_cost_model_payload(
+        _Conn(), cost_hash, pre_submit
+    ) == payload
+    assert len(queries) == 3
 from src.state.schema.edli_live_profit_audit_schema import (
     _RETIRED_COLUMNS,
     ensure_table,

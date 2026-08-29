@@ -457,6 +457,33 @@ def _load_verified_cost_model_payload(
         payload = _payload_json_or_none(direct)
         if payload is not None:
             return payload
+    # Current certificates have an exact, indexed semantic identity. Resolve it
+    # before the legacy inner-hash scan: running json_extract over the full
+    # CostModelCertificate history while appending a fill can exceed the bounded
+    # WORLD writer tranche and roll back the authoritative UserTradeObserved.
+    event_id = str(pre_submit.get("event_id") or "")
+    if event_id:
+        semantic_key = f"cost_model:{event_id}:cost_basis:{cost_hash[:16]}"
+        semantic = conn.execute(
+            """
+            SELECT payload_json
+            FROM decision_certificates
+            WHERE certificate_type = 'CostModelCertificate'
+              AND semantic_key = ?
+              AND verifier_status = 'VERIFIED'
+            ORDER BY decision_time DESC
+            LIMIT 1
+            """,
+            (semantic_key,),
+        ).fetchone()
+        if semantic is not None:
+            payload = _payload_json_or_none(semantic)
+            if (
+                payload is not None
+                and str(payload.get("cost_basis_hash") or "") == cost_hash
+                and _certificate_identity_matches_pre_submit(payload, pre_submit)
+            ):
+                return payload
     # Inner-hash path: resolve by the CostModelCertificate's own ``cost_basis_hash``
     # field, choosing the identity-matching cert (not the newest).
     candidates = conn.execute(
