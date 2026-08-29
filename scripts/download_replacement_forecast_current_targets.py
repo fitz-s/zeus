@@ -667,6 +667,124 @@ def _canonical_current_target_reuse(
     return reused
 
 
+def _canonical_sibling_payload_reuse(
+    forecast_db: Path,
+    *,
+    cycle: datetime,
+    targets: Sequence[object],
+) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
+    """Reuse one verified hourly payload for the missing HIGH/LOW twin.
+
+    Open-Meteo serves one run-pinned hourly ``temperature_2m`` payload per
+    city/date. HIGH and LOW are distinct downstream data versions, but their
+    raw bytes are identical; a provider quota must not strand one metric after
+    its sibling was already captured. SCOPE is one city/date/cycle sibling.
+    DRAIN is the normal manifest loop below. RESET is an exact metric artifact,
+    which then moves the family into ``_canonical_current_target_reuse``.
+    """
+
+    if not forecast_db.exists() or not targets:
+        return {}
+    wanted = {
+        (str(row.city), str(row.target_date)): str(row.temperature_metric)
+        for row in targets
+    }
+    cycle_iso = cycle.astimezone(UTC).isoformat()
+    try:
+        conn = _connect(forecast_db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT artifact_id, data_version, artifact_path, sha256, byte_size,
+                   captured_at, artifact_metadata_json
+            FROM raw_forecast_artifacts
+            WHERE source_id = ?
+              AND product_id = ?
+              AND source_cycle_time = ?
+              AND data_version IN (?, ?)
+            ORDER BY artifact_id DESC
+            """,
+            (
+                OPENMETEO_SOURCE_ID,
+                OPENMETEO_PRODUCT_ID,
+                cycle_iso,
+                OPENMETEO_HIGH_DATA_VERSION,
+                OPENMETEO_LOW_DATA_VERSION,
+            ),
+        ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    reused: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
+    excluded_metadata = {
+        "artifact_class",
+        "cities",
+        "city",
+        "target_date",
+        "target_dates",
+        "metric",
+        "source_run_id",
+        "openmeteo_payload_json",
+        "precision_metadata_json",
+    }
+    for row in rows:
+        try:
+            metadata = json.loads(str(row["artifact_metadata_json"] or "{}"))
+            key = (
+                str(metadata.get("city") or ""),
+                str(metadata.get("target_date") or ""),
+            )
+            wanted_metric = wanted.get(key)
+            sibling_metric = str(metadata.get("metric") or "")
+            row_metric = (
+                "high"
+                if str(row["data_version"]) == OPENMETEO_HIGH_DATA_VERSION
+                else "low"
+                if str(row["data_version"]) == OPENMETEO_LOW_DATA_VERSION
+                else ""
+            )
+            if (
+                wanted_metric is None
+                or {wanted_metric, sibling_metric} != {"high", "low"}
+                or sibling_metric != row_metric
+                or sibling_metric == wanted_metric
+                or key in reused
+            ):
+                continue
+            artifact_path = Path(str(row["artifact_path"]))
+            raw = artifact_path.read_bytes()
+            if (
+                len(raw) != int(row["byte_size"])
+                or hashlib.sha256(raw).hexdigest() != str(row["sha256"])
+            ):
+                continue
+            payload = json.loads(raw)
+            city_config = cities_by_name.get(key[0])
+            if city_config is None or not _current_target_payload_materializable(
+                payload,
+                city_timezone=city_config.timezone,
+                target_date=key[1],
+                cycle=cycle,
+            ):
+                continue
+            captured_at = datetime.fromisoformat(
+                str(row["captured_at"]).replace("Z", "+00:00")
+            ).astimezone(UTC)
+            provenance = {
+                name: value
+                for name, value in metadata.items()
+                if name not in excluded_metadata
+            }
+            provenance["raw_metric_sibling_reuse"] = sibling_metric
+            reused[key] = (payload, provenance, captured_at)
+        except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            continue
+    return reused
+
+
 def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest) -> Path:
     target = output_dir / (
         f"{manifest.source_id}.{manifest.data_version}."
@@ -1268,7 +1386,16 @@ def download_current_target_raw_inputs(
     )
     resolved_payloads: dict[
         tuple[str, str], tuple[dict, dict[str, object], datetime]
-    ] = {}
+    ] = _canonical_sibling_payload_reuse(
+        forecast_db,
+        cycle=cycle,
+        targets=tuple(
+            target
+            for target in targets
+            if _current_target_family_key(target) not in canonical_reuse
+        ),
+    )
+    sibling_payload_reuse_count = len(resolved_payloads)
     meta_wave_failures: dict[tuple[str, str], Exception] = {}
     unavailable_targets: set[tuple[str, str]] = set()
     processed_target_count = 0
@@ -1297,6 +1424,8 @@ def download_current_target_raw_inputs(
         if _current_target_family_key(target) in canonical_reuse:
             continue
         target_key = (target.city, target.target_date)
+        if target_key in resolved_payloads:
+            continue
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
         if payload_path.exists() and _current_target_payload_file_materializable(
             payload_path,
@@ -1650,6 +1779,7 @@ def download_current_target_raw_inputs(
         "db_artifact_ids": db_artifact_ids,
         "reused_canonical_artifact_count": len(canonical_reuse),
         "reused_canonical_artifact_ids": list(canonical_reuse.values()),
+        "sibling_payload_reuse_count": sibling_payload_reuse_count,
         "downloaded": downloaded,
         "skipped_city_count": len(skipped_cities),
         "skipped_cities": skipped_cities,

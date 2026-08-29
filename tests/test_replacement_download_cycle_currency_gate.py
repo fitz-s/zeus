@@ -57,7 +57,8 @@ CREATE TABLE raw_forecast_artifacts (
     artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
     trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
     training_allowed INTEGER NOT NULL DEFAULT 0,
-    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, product_id, data_version, source_cycle_time, sha256)
 )
 """
 
@@ -1252,6 +1253,118 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
     assert report["reused_canonical_artifact_count"] == 1
     assert report["target_rotation_advanced"] is False
     assert persisted == (original_capture, original_capture, 1)
+
+
+@pytest.mark.parametrize(
+    ("sibling_metric", "wanted_metric"),
+    (("high", "low"), ("low", "high")),
+)
+def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
+    tmp_path,
+    monkeypatch,
+    sibling_metric: str,
+    wanted_metric: str,
+) -> None:
+    """One canonical hourly payload supplies both metric manifests at one cycle."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    target = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric=wanted_metric,
+        covered=True,
+        missing_openmeteo_manifest=True,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    output_dir = tmp_path / "raw"
+    raw_dir = output_dir / AVAILABLE_CYCLE.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    sibling_path = raw_dir / (
+        f"openmeteo_Dallas_2026-06-10_{sibling_metric}_20260609T000000Z.json"
+    )
+    sibling_path.write_text(json.dumps(_anchor_payload()) + "\n")
+    captured_at = "2026-06-09T13:59:45+00:00"
+    raw = sibling_path.read_bytes()
+    sibling_data_version = (
+        dl.OPENMETEO_HIGH_DATA_VERSION
+        if sibling_metric == "high"
+        else dl.OPENMETEO_LOW_DATA_VERSION
+    )
+    wanted_data_version = (
+        dl.OPENMETEO_HIGH_DATA_VERSION
+        if wanted_metric == "high"
+        else dl.OPENMETEO_LOW_DATA_VERSION
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts (
+            source_id, product_id, data_version, source_cycle_time,
+            source_available_at, captured_at, artifact_path, sha256,
+            byte_size, artifact_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            dl.OPENMETEO_SOURCE_ID,
+            dl.OPENMETEO_PRODUCT_ID,
+            sibling_data_version,
+            AVAILABLE_CYCLE.isoformat(),
+            captured_at,
+            captured_at,
+            str(sibling_path),
+            hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            json.dumps(
+                {
+                    "city": "Dallas",
+                    "target_date": "2026-06-10",
+                    "metric": sibling_metric,
+                    "openmeteo_endpoint": "standard_api_meta_stamped",
+                    "run_authority": "provider_meta_declared",
+                    "openmeteo_payload_json": str(sibling_path),
+                    "precision_metadata_json": str(raw_dir / "unused-high-precision.json"),
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda *args, **kwargs: pytest.fail("verified sibling bytes must avoid network"),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", wanted_metric),),
+    )
+
+    conn = sqlite3.connect(db)
+    low = conn.execute(
+        "SELECT data_version, source_cycle_time, artifact_path, sha256, "
+        "json_extract(artifact_metadata_json, '$.metric'), "
+        "json_extract(artifact_metadata_json, '$.raw_metric_sibling_reuse') "
+        "FROM raw_forecast_artifacts WHERE data_version = ?",
+        (wanted_data_version,),
+    ).fetchone()
+    conn.close()
+    assert report["sibling_payload_reuse_count"] == 1
+    assert report["written_manifest_count"] == 1
+    assert low[:2] == (wanted_data_version, AVAILABLE_CYCLE.isoformat())
+    assert Path(low[2]).name.endswith(
+        f"_{wanted_metric}_20260609T000000Z.json"
+    )
+    assert low[3] == hashlib.sha256(Path(low[2]).read_bytes()).hexdigest()
+    assert low[4:] == (wanted_metric, sibling_metric)
 
 
 def test_canonical_reuse_refuses_and_repairs_semantically_wrong_precision_sidecar(
