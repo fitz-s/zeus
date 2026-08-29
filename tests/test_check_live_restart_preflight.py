@@ -8777,6 +8777,7 @@ def test_monitor_restart_classifies_terminal_partial_exit_subprecision_dust(
     recovered = evidence["settlement_recoverable_positions"][0]
     assert recovered["position_id"] == "terminal-subprecision-dust"
     assert recovered["closed_market_validation"] == "sell_share_precision_dust"
+    assert recovered["last_monitor_refreshed_at"] == now.isoformat()
     conn.close()
 
 

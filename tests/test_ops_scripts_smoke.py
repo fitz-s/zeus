@@ -4625,6 +4625,7 @@ def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
     dl = _load("deploy_live_restart_terminal_subprecision_dust", "deploy_live.py")
     trade_db = tmp_path / "zeus_trades.db"
     sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
     evidence = {
         "open_position_count": 1,
         "monitored_position_ids": ["pos-dust"],
@@ -4642,6 +4643,7 @@ def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
             {
                 "position_id": "pos-dust",
                 "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                "last_monitor_refreshed_at": occurred_at,
             }
         ],
         "future_monitor_event_count": 0,
@@ -4655,6 +4657,7 @@ def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
 
     assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-dust",)
     assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+    assert handoff["missing_monitor_timestamp_position_ids"] == ()
 
 
 def test_deploy_live_fresh_failed_handoff_rejects_closed_market_restart_duplicate(

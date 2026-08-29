@@ -97,17 +97,23 @@ def collect_monitor_cadence_evidence(
     review_managed: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
+        monitor_event = _latest_monitor_refreshed_event(
+            conn,
+            str(position["position_id"]),
+            event_columns,
+        )
         if _position_is_terminal_subprecision_dust_held_to_settlement(position):
-            settlement_recoverable.append(
-                {
-                    "position_id": position["position_id"],
-                    "phase": position["phase"],
-                    "chain_state": position["chain_state"],
-                    "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
-                    "closed_market_validation": "sell_share_precision_dust",
-                    "restart_resolution": "settlement_harvester_or_chain_size_change",
-                }
-            )
+            evidence = {
+                "position_id": position["position_id"],
+                "phase": position["phase"],
+                "chain_state": position["chain_state"],
+                "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                "closed_market_validation": "sell_share_precision_dust",
+                "restart_resolution": "settlement_harvester_or_chain_size_change",
+            }
+            if monitor_event is not None and monitor_event.get("occurred_at"):
+                evidence["last_monitor_refreshed_at"] = monitor_event["occurred_at"]
+            settlement_recoverable.append(evidence)
             # The venue cannot represent a SELL below one share quantum.  Keep
             # the positive residual in the monitor identity, but do not make a
             # permanently unavailable book a restart debt after the terminal
@@ -127,11 +133,6 @@ def collect_monitor_cadence_evidence(
             if not monitor_refreshed_only:
                 fresh_count += 1
                 continue
-        monitor_event = _latest_monitor_refreshed_event(
-            conn,
-            str(position["position_id"]),
-            event_columns,
-        )
         occurred_at = None if monitor_event is None else str(monitor_event.get("occurred_at") or "")
         position_evidence = {
             "position_id": position["position_id"],
