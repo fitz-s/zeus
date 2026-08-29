@@ -6707,6 +6707,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     ),
     (
         ("EDGE_REVERSAL", True, True, "delegated", False, False),
+        ("EDGE_REVERSAL", True, True, "lineage_upgrade", False, False),
         ("EDGE_REVERSAL", False, True, "blocked", False, False),
         ("EDGE_REVERSAL", False, False, "request_failed", False, False),
         ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False, False),
@@ -6790,6 +6791,28 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     )
     append_many_and_project(conn, events, projection)
     portfolio = _make_portfolio(pos)
+    if outcome == "lineage_upgrade":
+        pos._held_sell_reauction_obligation = {
+            "schema_version": 4,
+            "request_id": "request-incomplete-lineage",
+            "material_identity": "material-incomplete-lineage",
+            "attempt_identity": "attempt-incomplete-lineage",
+            "scope_identity": "scope-incomplete-lineage",
+            "generation": "generation-incomplete-lineage",
+            "position_id": pos.trade_id,
+            "family": (pos.city, pos.target_date, pos.temperature_metric),
+            "held_token_id": "paris-no",
+            "probability_content_identity": "probability-content-current",
+            "probability_observed_at": "2026-07-14T18:00:00+00:00",
+            "held_best_bid": 0.49,
+            "bid_observed_at": "2026-07-14T18:00:00+00:00",
+            "book_state": "EXECUTABLE",
+            "completion_deadline_at": "2026-07-14T18:00:30+00:00",
+            "selection_epoch_identity": "",
+            "sell_book_witness_identity": "",
+            "debt_event_id": "debt-monitor-event",
+            "monitor_event_id": "debt-monitor-event",
+        }
 
     def fake_refresh(_conn, _clob, position):
         position.last_monitor_prob = 0.0 if posterior_support_zero else 0.10
@@ -6899,6 +6922,15 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     from src.engine import global_batch_runtime
     from src.execution import exit_lifecycle
 
+    if outcome == "lineage_upgrade":
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "latest_held_sell_reauction_obligation",
+            lambda _conn, position, **_kwargs: dict(
+                position._held_sell_reauction_obligation
+            ),
+        )
+
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_fresh_snapshot_min_order",
@@ -6913,7 +6945,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             global_batch_runtime.CurrentGlobalHoldingCoverage(
                 outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
                 reason="test-coverage",
-                coverage=SimpleNamespace(selection_epoch_identity="epoch-current"),
+                coverage=SimpleNamespace(
+                    selection_epoch_identity="epoch-current",
+                    sell_book_witness_identity="book-current",
+                ),
                 decision_log_id=77,
             )
             if has_position_coverage
@@ -6977,9 +7012,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     def request_global_completion(**kwargs):
         auction_completion_requests.append(kwargs)
-        if trigger == "UNREGISTERED_STATISTICAL_SELL":
-            # A scalar receipt has no V4-compatible full-q lineage. Its only
-            # legal request is the generic family preparation wake.
+        if "held_token_id" not in kwargs:
+            # Missing full-q or coverage lineage can only request the generic
+            # side-effect-free family preparation wake.
             return request_accepted
         if malformed_request:
             return True, SimpleNamespace(
@@ -7007,8 +7042,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             material_identity="material-global-auction-owned-sell",
             attempt_identity="attempt-global-auction-owned-sell",
             schema_version=4,
-            scope_identity="scope-global-auction-owned-sell",
-            generation="generation-global-auction-owned-sell",
+            scope_identity=kwargs.get("scope_identity") or "scope-global-auction-owned-sell",
+            generation=kwargs.get("generation") or "generation-global-auction-owned-sell",
             position_id=pos.trade_id,
             family=(pos.city, pos.target_date, pos.temperature_metric),
             held_token_id="paris-no",
@@ -7018,6 +7053,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             bid_observed_at=kwargs["bid_observed_at"],
             book_state=kwargs["book_state"],
             completion_deadline_at=kwargs["completion_deadline_at"],
+            selection_epoch_identity=kwargs.get("selection_epoch_identity", ""),
+            sell_book_witness_identity=kwargs.get("sell_book_witness_identity", ""),
+            debt_event_id=kwargs.get("debt_event_id", ""),
+            monitor_event_id=kwargs.get("monitor_event_id", ""),
         )
 
     monkeypatch.setattr(
@@ -7096,6 +7135,20 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
+    elif outcome == "lineage_upgrade":
+        assert summary["monitor_statistical_sells_blocked_without_global_authority"] == 1
+        assert summary["exits"] == 0
+        assert results[0].exit_reason == "GLOBAL_REAUCTION_PENDING"
+        assert len(published_requests) == 1
+        assert reserved_requests == [pos.trade_id]
+        request = auction_completion_requests[0]
+        assert request["selection_epoch_identity"] == "epoch-current"
+        assert request["sell_book_witness_identity"] == "book-current"
+        assert request["debt_event_id"] == "debt-monitor-event"
+        assert request["monitor_event_id"] == "debt-monitor-event"
+        assert request["generation"] == "generation-incomplete-lineage"
+        assert request["scope_identity"] == "scope-incomplete-lineage"
+        assert event_order == ["canonical_monitor_refreshed", "publish"]
     elif outcome in {"dust", "sub_precision"}:
         assert summary["monitor_statistical_sell_dust_holds"] == 1
         assert summary["exits"] == 0
@@ -7117,7 +7170,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert published_requests == []
         assert reserved_requests == []
         assert execute_calls == []
-    elif trigger == "UNREGISTERED_STATISTICAL_SELL":
+    elif trigger == "UNREGISTERED_STATISTICAL_SELL" or outcome in {
+        "blocked",
+        "request_failed",
+    }:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert summary["exits"] == 0
         assert results[0].should_exit is False
@@ -7129,9 +7185,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert "local_statistical_sell_non_authoritative_record" in (
             pos.applied_validations
         )
-        assert "global_statistical_sell_scalar_requires_full_family" in (
-            pos.applied_validations
-        )
+        assert (
+            "global_statistical_sell_scalar_requires_full_family"
+            if trigger == "UNREGISTERED_STATISTICAL_SELL"
+            else "global_statistical_sell_coverage_requires_full_family"
+        ) in pos.applied_validations
         assert (
             "global_auction_full_family_preparation:"
             + ("PUBLISHED" if request_accepted else "PUBLISH_FAILED")
@@ -7175,159 +7233,6 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert published_requests == []
         assert reserved_requests == []
         assert execute_calls == []
-    elif outcome in {"blocked", "request_failed"}:
-        completion_accepted = request_accepted and not malformed_request
-        assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
-        assert (
-            summary["monitor_statistical_sells_blocked_without_global_authority"]
-            == 1
-        )
-        assert summary["exits"] == 0
-        assert results[0].should_exit is False
-        assert results[0].exit_reason == "GLOBAL_REAUCTION_PENDING"
-        assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
-        request_status = (
-            "global_auction_completion_requested"
-            if completion_accepted
-            else "global_auction_completion_request_failed"
-        )
-        assert request_status in pos.applied_validations
-        expected_authority_outcome = "COVERAGE_NOT_PUBLISHED"
-        assert (
-            f"global_auction_authority_outcome:{expected_authority_outcome}"
-            in pos.applied_validations
-        )
-        assert (
-            "global_auction_completion_debt:"
-            + ("DRAIN_PENDING" if completion_accepted else "REQUEST_REJECTED")
-        ) in pos.applied_validations
-        assert (
-            "global_auction_completion_monitor_identity:"
-            "global-auction-owned-sell:monitor_refreshed:"
-            "2026-07-14T18:00:00+00:00"
-        ) in pos.applied_validations
-        assert "GLOBAL_REAUCTION_PENDING" in pos.applied_validations
-        if completion_accepted:
-            assert (
-                "global_auction_completion_request_id:"
-                "request-global-auction-owned-sell"
-            ) in pos.applied_validations
-            payload = json.loads(
-                conn.execute(
-                    """
-                    SELECT payload_json FROM position_events
-                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
-                     ORDER BY sequence_no DESC LIMIT 1
-                    """,
-                    (pos.trade_id,),
-                ).fetchone()[0]
-            )
-            obligation = payload["held_sell_reauction_obligation"]
-            assert obligation["state"] == "ARMED"
-            assert obligation["request_id"] == "request-global-auction-owned-sell"
-            assert obligation["material_identity"] == (
-                "material-global-auction-owned-sell"
-            )
-            assert obligation["attempt_identity"] == (
-                "attempt-global-auction-owned-sell"
-            )
-            armed_at = datetime.fromisoformat(obligation["armed_at"])
-            deadline = datetime.fromisoformat(obligation["completion_deadline_at"])
-            assert (deadline - armed_at).total_seconds() == 30.0
-            assert published_requests[0].request_id == obligation["request_id"]
-            assert reserved_requests == [pos.trade_id]
-            assert event_order == ["canonical_monitor_refreshed", "publish"]
-        elif malformed_request:
-            assert (
-                "global_auction_completion_request_failed"
-                in pos.applied_validations
-            )
-            assert "global_auction_completion_debt:DRAIN_PENDING" not in (
-                pos.applied_validations
-            )
-            payload = json.loads(
-                conn.execute(
-                    """
-                    SELECT payload_json FROM position_events
-                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
-                     ORDER BY sequence_no DESC LIMIT 1
-                    """,
-                    (pos.trade_id,),
-                ).fetchone()[0]
-            )
-            assert "held_sell_reauction_obligation" not in payload
-            assert published_requests == []
-            assert reserved_requests == []
-        else:
-            assert (
-                "global_auction_completion_request_id:"
-                "request-global-auction-owned-sell-failed"
-            ) in pos.applied_validations
-            from src.execution.exit_lifecycle import (
-                needs_global_sell_snapshot_reauction,
-                recover_global_sell_snapshot_reauction_debt,
-            )
-
-            payload = json.loads(
-                conn.execute(
-                    """
-                    SELECT payload_json FROM position_events
-                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
-                     ORDER BY sequence_no DESC LIMIT 1
-                    """,
-                    (pos.trade_id,),
-                ).fetchone()[0]
-            )
-            obligation = payload["held_sell_reauction_obligation"]
-            assert obligation["scope_identity"] == (
-                "scope-global-auction-owned-sell"
-            )
-            assert obligation["generation"] == (
-                "generation-global-auction-owned-sell"
-            )
-            assert needs_global_sell_snapshot_reauction(pos, conn) is True
-            recovery_requests = []
-            assert recover_global_sell_snapshot_reauction_debt(
-                pos,
-                conn=conn,
-                requester=lambda position, force_new: (
-                    recovery_requests.append((position.trade_id, force_new)) or True
-                ),
-            ) is True
-            assert recovery_requests == [(pos.trade_id, True)]
-            assert needs_global_sell_snapshot_reauction(pos, conn) is False
-        request_summary_key = (
-            "monitor_statistical_sell_auction_completion_requested"
-            if completion_accepted
-            else "monitor_statistical_sell_auction_completion_request_failed"
-        )
-        assert summary[request_summary_key] == 1
-        expected_request_context = {
-            "probability_content_identity": "probability-content-current",
-            "held_best_bid": 0.49,
-            "bid_observed_at": "2026-07-14T18:00:00+00:00",
-            "book_state": "EXECUTABLE",
-            "probability_observed_at": "",
-        }
-        assert auction_completion_requests == [
-            {
-                "reason": (
-                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
-                ),
-                "position_id": pos.trade_id,
-                "family": (
-                    pos.city,
-                    pos.target_date,
-                    pos.temperature_metric,
-                ),
-                "held_token_id": "paris-no",
-                "completion_deadline_at": "2026-07-14T18:00:30+00:00",
-                "return_request": True,
-                "prepare_only": True,
-                **expected_request_context,
-            }
-        ]
-        assert execute_calls == []
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert summary.get(
@@ -7354,7 +7259,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             assert execute_authorities == [None]
         assert execute_calls == [pos]
         assert same_turn_reauction_drain_attempts == [pos.trade_id]
-    if outcome not in {"blocked", "request_failed", "dust"}:
+    if outcome not in {
+        "blocked",
+        "request_failed",
+        "dust",
+        "lineage_upgrade",
+    }:
         assert auction_completion_requests == []
     if outcome != "direct":
         assert same_turn_reauction_drain_attempts == []

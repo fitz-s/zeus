@@ -1984,6 +1984,83 @@ def test_reduce_only_actuation_rehydrates_selected_pinned_identity(monkeypatch):
     assert rehydrated is bundle
 
 
+def test_partial_deterministic_child_must_cover_requested_held_bin():
+    """An exact sibling cannot replace the held bin's current statistical q."""
+
+    import src.engine.event_reactor_adapter as era
+
+    exact_sibling = (("bin-31", 0),)
+
+    assert era._deterministic_payoffs_cover_required_bin(exact_sibling, None)
+    assert era._deterministic_payoffs_cover_required_bin(
+        exact_sibling,
+        "bin-31",
+    )
+    assert not era._deterministic_payoffs_cover_required_bin(
+        exact_sibling,
+        "bin-32",
+    )
+    assert not era._deterministic_payoffs_cover_required_bin((), "bin-32")
+
+
+def test_pinned_day0_overlay_rejection_conditions_surviving_joint_draws(
+    monkeypatch,
+):
+    """Incompatible bootstrap rows cannot erase unresolved held-bin q."""
+
+    import src.engine.event_reactor_adapter as era
+
+    samples = np.asarray(
+        (
+            (1.0, 0.0, 0.0),
+            (0.0, 0.6, 0.4),
+            (0.0, 0.2, 0.8),
+        ),
+        dtype=float,
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_global_probability_components",
+        lambda *_args, **_kwargs: (
+            samples,
+            np.asarray((1.0, 0.0, 0.0), dtype=float),
+            "pinned",
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_absorbing_mask",
+        lambda **_kwargs: np.asarray((0.0, 1.0, 1.0), dtype=float),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_deterministic_bin_payoffs",
+        lambda **_kwargs: (("bin-0", 0),),
+    )
+    payload = {}
+
+    conditioned, point_q, basis = era._held_pinned_day0_probability_components(
+        object(),
+        payload=payload,
+        family=object(),
+        candidates=(),
+        bindings=(),
+    )
+
+    assert conditioned == pytest.approx(
+        np.asarray(((0.0, 0.6, 0.4), (0.0, 0.2, 0.8)))
+    )
+    assert point_q == pytest.approx(np.asarray((0.0, 0.4, 0.6)))
+    assert basis == era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    assert payload["_edli_day0_held_pinned_zero_support_payoffs"] == (
+        ("bin-0", 0),
+    )
+    assert payload["_edli_day0_held_pinned_rejected_sample_count"] == 1
+    assert payload["_edli_day0_held_pinned_overlay"] == (
+        "authorized_monotone_day0_rejection_conditioning_v1"
+    )
+
+
 @pytest.mark.parametrize(
     (
         "parent_identity",

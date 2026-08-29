@@ -9889,7 +9889,39 @@ def execute_monitoring_phase(
                     ).strip(),
                 },
             )
-            if statistical_sell_requires_global and not probability_content_identity:
+            existing_reauction_obligation = {}
+            if statistical_sell_requires_global:
+                existing_reauction_obligation = (
+                    latest_held_sell_reauction_obligation(conn, pos)
+                )
+                if not isinstance(existing_reauction_obligation, dict):
+                    existing_reauction_obligation = {}
+            try:
+                existing_v4 = int(
+                    existing_reauction_obligation.get("schema_version") or 0
+                ) == 4
+            except (TypeError, ValueError):
+                existing_v4 = False
+            incomplete_v4_lineage = bool(
+                existing_v4
+                and not all(
+                    str(existing_reauction_obligation.get(field) or "").strip()
+                    for field in (
+                        "selection_epoch_identity",
+                        "sell_book_witness_identity",
+                        "debt_event_id",
+                        "monitor_event_id",
+                    )
+                )
+            )
+            needs_full_family_preparation = bool(
+                statistical_sell_requires_global
+                and (
+                    not probability_content_identity
+                    or global_holding_coverage.coverage is None
+                )
+            )
+            if needs_full_family_preparation:
                 completion_requested = _request_current_global_family_preparation(
                     pos
                 )
@@ -9904,7 +9936,11 @@ def execute_monitoring_phase(
                         [
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
-                            "global_statistical_sell_scalar_requires_full_family",
+                            (
+                                "global_statistical_sell_scalar_requires_full_family"
+                                if not probability_content_identity
+                                else "global_statistical_sell_coverage_requires_full_family"
+                            ),
                             (
                                 "global_auction_full_family_preparation:"
                                 f"{'PUBLISHED' if completion_requested else 'PUBLISH_FAILED'}"
@@ -9922,7 +9958,11 @@ def execute_monitoring_phase(
                     else "monitor_statistical_sell_full_family_preparation_failed",
                     0,
                 ) + 1
-            elif statistical_sell_requires_global and global_holding_coverage.covered:
+            elif (
+                statistical_sell_requires_global
+                and global_holding_coverage.covered
+                and not incomplete_v4_lineage
+            ):
                 coverage = global_holding_coverage.coverage
                 coverage_receipt_id = global_holding_coverage.decision_log_id
                 assert coverage is not None and coverage_receipt_id is not None
@@ -9956,11 +9996,6 @@ def execute_monitoring_phase(
                     request_global_auction_completion,
                 )
 
-                existing_reauction_obligation = (
-                    latest_held_sell_reauction_obligation(conn, pos)
-                )
-                if not isinstance(existing_reauction_obligation, dict):
-                    existing_reauction_obligation = {}
                 monitor_lineage = getattr(
                     pos,
                     "_held_sell_reauction_monitor_lineage",
@@ -10024,6 +10059,17 @@ def execute_monitoring_phase(
                     sell_book_witness_identity=request_book_witness,
                     debt_event_id=request_debt_event_id,
                     monitor_event_id=request_monitor_event_id,
+                    generation=(
+                        str(
+                            existing_reauction_obligation.get("generation")
+                            or ""
+                        ).strip()
+                        or None
+                    ),
+                    scope_identity=str(
+                        existing_reauction_obligation.get("scope_identity")
+                        or ""
+                    ).strip(),
                     return_request=True,
                     prepare_only=True,
                 )

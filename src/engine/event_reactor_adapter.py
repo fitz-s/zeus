@@ -36229,6 +36229,19 @@ def _bind_current_deterministic_day0_witness(
     payload["_edli_day0_deterministic_witness_identity"] = witness_identity
 
 
+def _deterministic_payoffs_cover_required_bin(
+    exact_yes_payoffs: tuple[tuple[str, int], ...],
+    required_bin_id: str | None,
+) -> bool:
+    """Use a partial exact witness only when it answers the requested bin."""
+
+    if not exact_yes_payoffs:
+        return False
+    return required_bin_id is None or required_bin_id in {
+        str(bin_id) for bin_id, _payoff in exact_yes_payoffs
+    }
+
+
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_settlement_simplex_v1"
 )
@@ -36702,7 +36715,8 @@ def _held_pinned_day0_probability_components(
     mask = _day0_absorbing_mask(payload=payload, family=family)
     masked_samples = np.asarray(samples, dtype=np.float64) * mask.reshape(1, -1)
     row_totals = masked_samples.sum(axis=1)
-    if np.any(row_totals <= 0.0) or not np.isfinite(row_totals).all():
+    valid_rows = np.isfinite(row_totals) & (row_totals > 0.0)
+    if not valid_rows.all():
         exact_yes_payoffs = _day0_deterministic_bin_payoffs(
             omega=SimpleNamespace(bins=bindings),
             family=family,
@@ -36724,6 +36738,26 @@ def _held_pinned_day0_probability_components(
             payload["_edli_day0_deterministic_scope_reason"] = (
                 "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT"
             )
+            if int(valid_rows.sum()) >= 2:
+                # Rejection-condition the pinned joint draws on the current
+                # monotone observation. Rows with no surviving bin contradict
+                # the new bound; surviving rows retain coherent statistical q.
+                conditioned = masked_samples[valid_rows]
+                conditioned /= row_totals[valid_rows].reshape(-1, 1)
+                payload[
+                    "_edli_day0_held_pinned_rejected_sample_count"
+                ] = int((~valid_rows).sum())
+                payload["_edli_day0_held_pinned_overlay"] = (
+                    "authorized_monotone_day0_rejection_conditioning_v1"
+                )
+                return (
+                    np.ascontiguousarray(conditioned, dtype=np.float64),
+                    np.ascontiguousarray(
+                        conditioned.mean(axis=0),
+                        dtype=np.float64,
+                    ),
+                    _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+                )
             return (
                 np.ascontiguousarray(masked_samples, dtype=np.float64),
                 np.ascontiguousarray(np.zeros_like(point_q), dtype=np.float64),
@@ -38268,51 +38302,55 @@ def _prepare_current_global_probability_family(
                 (str(bin_id), int(payoff))
                 for bin_id, payoff in zero_support_payoffs
             )
-            witness, _deterministic_payload = _build_day0_deterministic_witness(
-                event=event,
-                family=family,
-                omega=omega,
-                bindings=bindings,
-                exact_yes_payoffs=exact_yes_payoffs,
-                payload=payload,
-                current_day0_payload=current_day0_payload or {},
-                day0_base_identity=day0_base_identity,
-                source_cycle=source_cycle,
-                source_available_at=source_available_at,
-                resolution_identity=resolution_identity,
-                max_age=max_age,
-                decision_time=decision_time,
-                day0_payload_out=day0_payload_out,
-            )
-            reason = str(
-                payload.get("_edli_day0_deterministic_reason")
-                or "held_pinned_day0_observation_zero_support"
-            )
-            return PreparedGlobalFamily(
-                decision_id=stable_hash(
-                    {
-                        "authority_certificate_hash": witness.authority_certificate_hash,
-                        "witness_identity": witness.witness_identity,
-                    }
-                ),
-                probability_witness=witness,
-                candidate_seeds=(),
-                posterior_id=int(pinned_complete_bundle.posterior_id),
-                probability_authority="day0_deterministic_bin_payoff_v1",
-                day0_exit_authority_status="mature",
-                day0_exit_authority_reason=reason,
-                sell_action_authority_identity=sell_action_authority_identity(
-                    family_key=family.family_id,
-                    probability_witness_identity=witness.witness_identity,
-                    status="mature",
-                    reason=reason,
-                ),
-                day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
-                    event_type=event.event_type,
-                    payload=payload,
+            if _deterministic_payoffs_cover_required_bin(
+                exact_yes_payoffs,
+                required_bin_id,
+            ):
+                witness, _deterministic_payload = _build_day0_deterministic_witness(
+                    event=event,
                     family=family,
-                ),
-            )
+                    omega=omega,
+                    bindings=bindings,
+                    exact_yes_payoffs=exact_yes_payoffs,
+                    payload=payload,
+                    current_day0_payload=current_day0_payload or {},
+                    day0_base_identity=day0_base_identity,
+                    source_cycle=source_cycle,
+                    source_available_at=source_available_at,
+                    resolution_identity=resolution_identity,
+                    max_age=max_age,
+                    decision_time=decision_time,
+                    day0_payload_out=day0_payload_out,
+                )
+                reason = str(
+                    payload.get("_edli_day0_deterministic_reason")
+                    or "held_pinned_day0_observation_zero_support"
+                )
+                return PreparedGlobalFamily(
+                    decision_id=stable_hash(
+                        {
+                            "authority_certificate_hash": witness.authority_certificate_hash,
+                            "witness_identity": witness.witness_identity,
+                        }
+                    ),
+                    probability_witness=witness,
+                    candidate_seeds=(),
+                    posterior_id=int(pinned_complete_bundle.posterior_id),
+                    probability_authority="day0_deterministic_bin_payoff_v1",
+                    day0_exit_authority_status="mature",
+                    day0_exit_authority_reason=reason,
+                    sell_action_authority_identity=sell_action_authority_identity(
+                        family_key=family.family_id,
+                        probability_witness_identity=witness.witness_identity,
+                        status="mature",
+                        reason=reason,
+                    ),
+                    day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+                        event_type=event.event_type,
+                        payload=payload,
+                        family=family,
+                    ),
+                )
     elif final_daily_observation is not None:
         components = _final_daily_exact_probability_components(
             omega=omega,
