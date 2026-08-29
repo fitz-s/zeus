@@ -5080,6 +5080,49 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-29 Held hard-fact preclassification reads each causal family once
+
+Loaded production receipts showed the same 21-position held book completing in
+3.5 seconds when every local full-depth book was available, but taking 20--29
+seconds and deferring 6--11 positions when the auxiliary tranche expired before
+the local-book batch. The preceding hard-fact preclassification evaluated every
+sibling bin independently, so positions sharing the same city, target day,
+metric, source contract, and decision clock repeated the same durable
+observation read before applying different pure bin verdicts.
+
+One monitor cut now owns one cycle-local evidence cache keyed by that complete
+causal family identity. The source/anomaly/finality gates remain unchanged, and
+each position still receives its own direction/bin verdict; only the identical
+durable evidence read is reused. Missing evidence is also a valid cached result
+for the same cut. A new monitor cut creates a new cache and rereads current
+truth.
+
+SCOPE is one admitted held-monitor cut and sibling positions with identical
+source/date/metric/decision-time identity. DRAIN is completion of that cut; the
+cache is not persisted or shared across cycles. RESET is the next monitor cut,
+whose new decision clock forces a new durable source read. No quote,
+probability, settlement, exit, command, freshness, or full-depth authority is
+relaxed.
+
+Allowed files are `src/engine/cycle_runtime.py`,
+`src/execution/day0_hard_fact_exit.py`, `tests/test_live_safety_invariants.py`,
+and this plan. Acceptance requires the same-family read antibody, existing
+hard-fact and monitor deadline suites, compilation, planning lock, diff checks,
+and forward production receipts showing fewer family reads than classified
+sibling positions without any loss of canonical full-book coverage.
+
+The same incident also exposed an all-or-nothing local-book amplification. The
+bounded snapshot query used `fetchall()`, so an SQLite progress-handler
+interrupt discarded current full-depth rows already produced before the
+deadline and turned one slow lookup into network fallback for the entire held
+book. The reader now validates and retains rows incrementally. An interrupt
+still stops the query at the same one-second deadline; only already-completed,
+identity-exact, fresh rows survive, while every missing token remains explicit
+network/degraded debt. SCOPE is one local full-depth batch read. DRAIN is the
+existing bounded network or per-position retry for only the missing suffix.
+RESET is the next monitor cut and its new current snapshot read; partial books
+are cycle-local and never stale-reused.
+
 ## 2026-08-17 Restore the evidenced 1/8 sizing law after an unproved rollback
 
 The latest complete live global cut compared 1,694 fixed BUY/SELL proposals

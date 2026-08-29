@@ -5165,7 +5165,8 @@ def _fresh_local_held_monitor_orderbooks(
         ).fetchone()
         if invalidation_table is None:
             return {}
-        snapshot_rows = conn.execute(
+        snapshot_rows = []
+        snapshot_cursor = conn.execute(
             f"""
             WITH requested(condition_id, token_id) AS (
                 VALUES {values_sql}
@@ -5222,8 +5223,13 @@ def _fresh_local_held_monitor_orderbooks(
                )
             """,
             params,
-        ).fetchall()
-        for row in snapshot_rows:
+        )
+        # Consume incrementally.  The progress handler may interrupt this
+        # bounded read after some point-lookups have already produced current,
+        # identity-checked books.  ``fetchall()`` discarded those valid rows and
+        # converted one slow lookup into a full-book network fallback.
+        for row in snapshot_cursor:
+            snapshot_rows.append(row)
             try:
                 token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
                 if not _monitor_snapshot_has_held_exit_evidence(
@@ -5382,6 +5388,10 @@ def _fresh_local_held_monitor_orderbooks(
                 "AUXILIARY_DEADLINE_EXPIRED"
             )
         summary["held_monitor_local_orderbook_error"] = str(exc)[:500]
+        if candidates:
+            summary["held_monitor_local_orderbook_partial_progress"] = len(
+                candidates
+            )
         deps.logger.warning(
             "held monitor local orderbook prefetch failed; using network fallback: %s",
             exc,
@@ -7779,6 +7789,8 @@ def execute_monitoring_phase(
         return portfolio_dirty, tracker_dirty
 
     durable_hard_facts = {}
+    hard_fact_evidence_cache: dict[tuple[object, ...], Any] = {}
+    hard_fact_positions_classified = 0
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
 
     for position_index, pos in enumerate(monitor_positions):
@@ -7794,12 +7806,14 @@ def execute_monitoring_phase(
         if not _day0_hard_fact_position_eligible(pos) or city is None:
             continue
         try:
+            hard_fact_positions_classified += 1
             verdict = evaluate_hard_fact_exit(
                 position=pos,
                 city=city,
                 now=monitor_now_utc,
                 world_conn=conn,
                 durable_only=True,
+                evidence_cache=hard_fact_evidence_cache,
             )
         except Exception as exc:  # noqa: BLE001 - isolate one family from the batch.
             summary["held_monitor_hard_fact_preclass_errors"] = (
@@ -7813,6 +7827,10 @@ def execute_monitoring_phase(
             continue
         if verdict is not None:
             durable_hard_facts[id(pos)] = verdict
+    summary["held_monitor_hard_fact_positions_classified"] = (
+        hard_fact_positions_classified
+    )
+    summary["held_monitor_hard_fact_family_reads"] = len(hard_fact_evidence_cache)
     summary["held_monitor_durable_hard_facts"] = len(durable_hard_facts)
     structural_win_position_ids = frozenset(
         id(pos)

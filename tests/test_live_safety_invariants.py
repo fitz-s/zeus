@@ -13294,6 +13294,84 @@ def test_local_monitor_prefetch_sql_failure_is_fail_soft_and_cleans_handler(
     assert conn.progress_handler_calls[-1][0] is None
 
 
+def test_local_monitor_prefetch_interrupt_preserves_completed_books(monkeypatch):
+    """A deadline after one row keeps that current book for this monitor cut."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="local-partial-progress",
+        condition_id="local-partial-condition",
+        token_id="local-partial-token",
+        direction="buy_yes",
+    )
+    book = {
+        "asset_id": position.token_id,
+        "bids": [{"price": "0.40", "size": "20"}],
+        "asks": [{"price": "0.42", "size": "20"}],
+    }
+    row = (
+        position.token_id,
+        json.dumps(book),
+        "2026-08-29T12:00:00+00:00",
+        1,
+        0,
+        1,
+        json.dumps(
+            {
+                "accepting_orders": True,
+                "child_active": True,
+                "clob_enable_order_book": True,
+                "executable_allowed": True,
+                "reason": "clob_live_accepting_child",
+            }
+        ),
+    )
+
+    class OneRowThenInterrupt:
+        def __iter__(self):
+            yield row
+            raise sqlite3.OperationalError("interrupted")
+
+    class Result:
+        def fetchone(self):
+            return (1,)
+
+    class PartialConnection:
+        def __init__(self):
+            self.progress_handler_calls = []
+
+        def set_progress_handler(self, handler, n):
+            self.progress_handler_calls.append((handler, n))
+
+        def execute(self, sql, _params=()):
+            if "sqlite_master" in sql:
+                return Result()
+            if "executable_market_snapshot_latest" in sql:
+                return OneRowThenInterrupt()
+            raise AssertionError(sql)
+
+    conn = PartialConnection()
+    summary = {}
+    captured_at = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 10.0)
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [position],
+        now_utc=datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+        summary=summary,
+        deps=_monitor_test_deps("local_partial_progress"),
+        deadline_monotonic=20.0,
+        captured_at_out=captured_at,
+    )
+
+    assert books == {position.token_id: book}
+    assert captured_at == [datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)]
+    assert summary["held_monitor_local_orderbook_partial_progress"] == 1
+    assert summary["held_monitor_local_orderbook_error"] == "interrupted"
+    assert conn.progress_handler_calls[-1][0] is None
+
+
 def test_local_monitor_prefetch_import_failure_is_fail_soft_and_cleans_handler(
     monkeypatch,
 ):
@@ -21997,6 +22075,67 @@ def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
     assert "GLOBAL_SELL_DEBT_AWAITS_PRIMARY_REDECISION" in summary[
         "held_monitor_optional_maintenance_defer_reasons"
     ]
+
+
+def test_hard_fact_evidence_cache_reuses_one_family_read(monkeypatch):
+    """Sibling bins share one causal family read without sharing a verdict."""
+    from src.data import day0_oracle_anomaly
+    from src.execution import day0_hard_fact_exit
+
+    city = SimpleNamespace(
+        name="Hong Kong",
+        settlement_source_type="hko",
+        settlement_unit="C",
+        timezone="Asia/Hong_Kong",
+        wu_station="",
+    )
+    positions = [
+        SimpleNamespace(
+            trade_id=f"same-family-{label}",
+            target_date="2026-08-29",
+            direction="buy_yes",
+            temperature_metric="high",
+            bin_label=label,
+        )
+        for label in ("32°C", "33°C")
+    ]
+    reads = []
+    cache = {}
+    now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    world_conn = object()
+
+    monkeypatch.setattr(
+        day0_oracle_anomaly,
+        "is_day0_family_paused",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def read_family(**kwargs):
+        reads.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_wu_hard_fact_evidence",
+        read_family,
+    )
+
+    verdicts = [
+        day0_hard_fact_exit.evaluate_hard_fact_exit(
+            position=position,
+            city=city,
+            now=now,
+            world_conn=world_conn,
+            durable_only=True,
+            evidence_cache=cache,
+        )
+        for position in positions
+    ]
+
+    assert verdicts == [None, None]
+    assert len(reads) == 1
+    assert len(cache) == 1
+    assert reads[0]["world_conn"] is world_conn
 
 
 def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(

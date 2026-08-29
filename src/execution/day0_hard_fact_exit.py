@@ -1571,6 +1571,7 @@ def evaluate_hard_fact_exit(
     now: Optional[datetime] = None,
     world_conn: Any = None,
     durable_only: bool = False,
+    evidence_cache: dict[tuple[object, ...], HardFactEvidence | None] | None = None,
 ) -> Optional[HardFactVerdict]:
     """The lane entry point for one held day0 position. None = no hard fact
     (the estimator-evidence lane proceeds unchanged). Fail-soft everywhere:
@@ -1581,6 +1582,10 @@ def evaluate_hard_fact_exit(
     recovery path so the cold-start restart does not open an independent world
     connection per city. When None, the METAR memo recovery is skipped for cold
     cells; warm memo cells are unaffected.
+
+    ``evidence_cache`` is optional and caller-owned. A monitor cut may share it
+    across sibling bins at one exact decision clock; callers must never persist
+    or reuse it across cuts.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -1617,14 +1622,32 @@ def evaluate_hard_fact_exit(
         if bin_low is None and bin_high is None:
             return None
 
-        evidence = _wu_hard_fact_evidence(
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            now=moment,
-            world_conn=world_conn,
-            durable_only=durable_only,
+        evidence_key = (
+            city_name,
+            target_date,
+            metric,
+            str(getattr(city, "settlement_source_type", "") or "")
+            .strip()
+            .lower(),
+            str(getattr(city, "settlement_unit", "") or "").strip().upper(),
+            str(getattr(city, "timezone", "") or "").strip(),
+            str(getattr(city, "wu_station", "") or "").strip().upper(),
+            moment.isoformat(),
+            bool(durable_only),
         )
+        if evidence_cache is not None and evidence_key in evidence_cache:
+            evidence = evidence_cache[evidence_key]
+        else:
+            evidence = _wu_hard_fact_evidence(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                now=moment,
+                world_conn=world_conn,
+                durable_only=durable_only,
+            )
+            if evidence_cache is not None:
+                evidence_cache[evidence_key] = evidence
         if evidence is None:
             return None
         from src.events.day0_authority import (
