@@ -8708,12 +8708,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     run_edli_continuous_redecision_screen_cycle(
         screen_lock=_edli_redecision_screen_lock,
         # This callback executes from SQLite's progress handler.  It must stay
-        # O(1): canonical debt is maintained by the monitor recovery reader,
-        # and handoff is the monitor's explicit ownership claim.
-        monitor_preempt_requested=lambda: (
-            _held_position_monitor_canonical_debt.is_set()
-            or _held_position_monitor_handoff_pending.is_set()
-        ),
+        # O(1). Canonical cadence debt scopes BUY admission; only an active
+        # monitor handoff owns I/O strongly enough to preempt management of an
+        # already-live maker rest.
+        monitor_preempt_requested=_held_position_monitor_handoff_pending.is_set,
     )
 
 

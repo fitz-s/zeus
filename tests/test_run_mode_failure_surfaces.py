@@ -8689,6 +8689,40 @@ def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch)
     assert calls == ["screen"]
 
 
+def test_redecision_screen_yields_to_monitor_handoff_not_canonical_debt(
+    monkeypatch,
+) -> None:
+    """Existing venue rests keep management time while BUY cadence is scoped."""
+
+    import src.events.reactor as reactor_module
+    import src.main as main_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _name: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_continuous_redecision_screen_cycle",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    main_module._held_position_monitor_canonical_debt.set()
+    main_module._held_position_monitor_handoff_pending.clear()
+    try:
+        main_module._edli_continuous_redecision_screen_cycle()
+        preempt = captured["monitor_preempt_requested"]
+        assert callable(preempt)
+        assert preempt() is False
+        main_module._held_position_monitor_handoff_pending.set()
+        assert preempt() is True
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+
+
 @pytest.mark.parametrize(
     ("reactor_active", "redecision_active", "monitor_active"),
     [
