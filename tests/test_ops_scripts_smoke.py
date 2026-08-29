@@ -4418,6 +4418,8 @@ def _fresh_failed_monitor_handoff(position_ids, **overrides):
         "green": False,
         "open_position_count": len(position_ids),
         "fresh_position_count": 0,
+        "probability_degraded_position_count": 0,
+        "probability_degraded_position_ids": (),
         "future_monitor_event_count": 0,
         "non_monitor_chain_risk_position_count": 0,
         "quote_only_stale_position_count": 0,
@@ -4525,6 +4527,57 @@ def test_deploy_live_loaded_restart_admits_mixed_fresh_repair_handoff(
     assert ok is True
     assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
     assert "fresh_actionable_positions=1" in detail
+
+
+def test_deploy_live_loaded_restart_admits_fresh_probability_and_no_action_mix(
+    monkeypatch, tmp_path
+):
+    """Every current mixed monitor class may hand off to the pending repair."""
+    dl = _load("deploy_live_restart_mixed_probability_repair", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-fresh", "pos-probability", "pos-repair")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        fresh_position_count=1,
+        probability_degraded_position_count=1,
+        probability_degraded_position_ids=("pos-probability",),
+        fresh_failed_monitor_no_action_position_count=1,
+        fresh_failed_monitor_no_action_position_ids=("pos-repair",),
+        fresh_failed_monitor_other_classified_position_ids=("pos-probability",),
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_pre_stop_monitor_handoff_evidence", lambda _db: handoff)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "fresh_actionable_positions=1" in detail
+    assert "probability_degraded_positions=1" in detail
 
 
 def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(

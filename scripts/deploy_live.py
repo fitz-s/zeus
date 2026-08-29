@@ -1552,6 +1552,7 @@ def _fresh_failed_monitor_handoff_shape_valid(
         for field in (
             "open_position_count",
             "fresh_position_count",
+            "probability_degraded_position_count",
             "future_monitor_event_count",
             "non_monitor_chain_risk_position_count",
             "quote_only_stale_position_count",
@@ -1562,6 +1563,7 @@ def _fresh_failed_monitor_handoff_shape_valid(
     handoff_id_fields = tuple(
         handoff.get(field)
         for field in (
+            "probability_degraded_position_ids",
             "fresh_failed_monitor_no_action_position_ids",
             "fresh_failed_monitor_duplicate_position_ids",
             "fresh_failed_monitor_other_classified_position_ids",
@@ -1612,6 +1614,8 @@ def _fresh_failed_monitor_repair_handoff_admission(
     required_handoff_fields = {
         "open_position_count",
         "fresh_position_count",
+        "probability_degraded_position_count",
+        "probability_degraded_position_ids",
         "future_monitor_event_count",
         "non_monitor_chain_risk_position_count",
         "quote_only_stale_position_count",
@@ -1638,10 +1642,15 @@ def _fresh_failed_monitor_repair_handoff_admission(
     if int(handoff.get("open_position_count") or 0) != open_count:
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_open_count_mismatch"
     fresh_count = int(handoff.get("fresh_position_count") or 0)
+    probability_count = int(
+        handoff.get("probability_degraded_position_count") or 0
+    )
     no_action_count = int(
         handoff.get("fresh_failed_monitor_no_action_position_count") or 0
     )
-    if fresh_count + no_action_count != open_count:
+    if handoff.get("fresh_failed_monitor_duplicate_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
+    if fresh_count + probability_count + no_action_count != open_count:
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
     if int(handoff.get("future_monitor_event_count") or 0) != 0:
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:future_monitor_evidence"
@@ -1659,19 +1668,29 @@ def _fresh_failed_monitor_repair_handoff_admission(
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_invalid"
     if handoff.get("fresh_failed_monitor_timestamp_stale_position_ids"):
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_stale"
-    if handoff.get("fresh_failed_monitor_duplicate_position_ids"):
-        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
-    if handoff.get("fresh_failed_monitor_other_classified_position_ids"):
-        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_not_disjoint"
-
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    probability_set = {str(position_id).strip() for position_id in probability_ids}
     no_action_ids = tuple(handoff.get("fresh_failed_monitor_no_action_position_ids") or ())
     no_action_set = {str(position_id).strip() for position_id in no_action_ids}
     if (
-        len(no_action_ids) != no_action_count
+        len(probability_ids) != probability_count
+        or len(probability_set) != probability_count
+        or not probability_set.issubset(expected_set)
+        or len(no_action_ids) != no_action_count
         or len(no_action_set) != no_action_count
         or not no_action_set.issubset(expected_set)
+        or probability_set & no_action_set
     ):
         return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
+    other_ids = tuple(
+        handoff.get("fresh_failed_monitor_other_classified_position_ids") or ()
+    )
+    if (
+        len(other_ids) != probability_count
+        or {str(position_id).strip() for position_id in other_ids}
+        != probability_set
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_not_disjoint"
 
     quote_sidecar = _held_quote_sidecar_current_evidence()
     if quote_sidecar.get("current") is not True:
@@ -1684,6 +1703,7 @@ def _fresh_failed_monitor_repair_handoff_admission(
         True,
         "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED: "
         f"open_positions={open_count} fresh_actionable_positions={fresh_count} "
+        f"probability_degraded_positions={probability_count} "
         "typed_no_action_partition=complete held_quote_sidecar_current=true "
         "restart_permission_only=true",
     )
