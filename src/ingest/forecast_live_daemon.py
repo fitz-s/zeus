@@ -1335,7 +1335,9 @@ def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
     return _replacement_forecast_materialize_lane(
         cfg,
         lane="priority",
-        seed_limit=1,
+        # Seed discovery interleaves Day0 and future work only with a two-item
+        # tranche.  The lane still materializes one request per invocation.
+        seed_limit=2,
     )
 
 

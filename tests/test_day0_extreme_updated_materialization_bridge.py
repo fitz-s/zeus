@@ -2727,8 +2727,8 @@ def test_priority_job_bridges_seed_only_after_request_queue_is_empty(
 
     receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
 
-    assert calls == [0, 1]
-    assert receipt == {"status": "PROCESSED", "seed_limit": 1}
+    assert calls == [0, 2]
+    assert receipt == {"status": "PROCESSED", "seed_limit": 2}
 
 
 def test_materialize_callbacks_return_lane_receipts_and_truthful_status_health(
