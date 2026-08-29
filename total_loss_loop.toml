@@ -3,6 +3,7 @@ schema_version = 3
 poll_ms = 250
 detector_budget_ms = 200
 history_days = 7
+legacy_incident_consolidation_batch_size = 16
 quote_batch_size = 2000
 backfill_budget_ms = 50
 backfill_positions_per_cycle = 8

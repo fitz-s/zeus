@@ -397,6 +397,9 @@ CREATE INDEX IF NOT EXISTS idx_evidence_recovery_hard
     ON incidents(kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_recovery_debt
     ON controller_debt(kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id);
+CREATE INDEX IF NOT EXISTS idx_settled_no_bid_backlog
+    ON incidents(detected_at,incident_id,position_id)
+    WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending');
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
@@ -566,6 +569,26 @@ def _startup_expression_index_contract(
     return normalize(str(catalog[1])) == normalize(expected)
 
 
+def _startup_partial_index_contract(conn: sqlite3.Connection) -> bool:
+    """Verify the exact queue index used by the bounded legacy drain."""
+    _startup_guard()
+    catalog = conn.execute(
+        "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
+        ("idx_settled_no_bid_backlog",),
+    ).fetchone()
+    if catalog is None or str(catalog[0]) != "incidents" or not catalog[1]:
+        return False
+    normalize = lambda value: re.sub(
+        r"\s*,\s*", ",", re.sub(r"\s+", " ", value.strip())
+    ).lower()
+    expected = (
+        "CREATE INDEX idx_settled_no_bid_backlog "
+        "ON incidents(detected_at,incident_id,position_id) "
+        "WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending')"
+    )
+    return normalize(str(catalog[1])) == normalize(expected)
+
+
 def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
     """Verify the existing schema with catalog-only reads before startup DDL."""
     _startup_guard()
@@ -631,6 +654,7 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             name="idx_evidence_recovery_debt",
             expression="kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
         )
+        and _startup_partial_index_contract(conn)
     )
 
 
@@ -808,6 +832,14 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
         ):
             conn.execute(f"DROP INDEX IF EXISTS {name}")
             conn.execute(f"CREATE INDEX {name} ON {table}({expression})")
+    if not _startup_partial_index_contract(conn):
+        conn.execute("DROP INDEX IF EXISTS idx_settled_no_bid_backlog")
+        conn.execute(
+            "CREATE INDEX idx_settled_no_bid_backlog "
+            "ON incidents(detected_at,incident_id,position_id) "
+            "WHERE crossing_kind='no_bid' "
+            "AND status IN ('queued','retry_pending')"
+        )
     return _ClosingConnection(conn)
 
 
@@ -1758,6 +1790,60 @@ def _consolidate_legacy_settlement_incidents(
         )
 
 
+def _consolidate_settled_quote_incident_backlog(
+    mem: sqlite3.Connection,
+    *,
+    limit: int,
+) -> int:
+    """Boundedly drain stale no-bid debt already owned by valid settlement."""
+
+    rows = mem.execute(
+        "SELECT q.incident_id,q.stage,q.status,q.position_id,"
+        "(SELECT s.incident_id FROM incidents AS s "
+        "  WHERE s.position_id=q.position_id "
+        "    AND s.crossing_kind='settlement_full_loss' "
+        "    AND s.status IN ('queued','running','retry_pending','blocked','completed') "
+        "  ORDER BY s.detected_at DESC,s.incident_id DESC LIMIT 1) AS canonical_id "
+        "FROM incidents AS q INDEXED BY idx_settled_no_bid_backlog "
+        "WHERE q.crossing_kind='no_bid' "
+        "AND q.status IN ('queued','retry_pending') "
+        "AND EXISTS (SELECT 1 FROM incidents AS s "
+        "            WHERE s.position_id=q.position_id "
+        "              AND s.crossing_kind='settlement_full_loss' "
+        "              AND s.status IN "
+        "                  ('queued','running','retry_pending','blocked','completed')) "
+        "ORDER BY q.detected_at,q.incident_id LIMIT ?",
+        (max(1, int(limit)),),
+    ).fetchall()
+    stamp = iso()
+    retired = 0
+    for row in rows:
+        incident_id = str(row["incident_id"])
+        canonical_id = str(row["canonical_id"])
+        if not _transition_if_status(
+            mem,
+            incident_id,
+            str(row["stage"]),
+            expected_status=str(row["status"]),
+            reason=f"superseded_by_settlement_full_loss:{canonical_id}",
+            status="observing",
+        ):
+            continue
+        retired += 1
+        mem.execute(
+            "UPDATE controller_debt SET status='resolved',"
+            "reason=?,updated_at=?,next_retry_at=NULL "
+            "WHERE debt_id=? AND kind='evidence_snapshot' "
+            "AND status='retry_pending'",
+            (
+                f"superseded_by_settlement_full_loss:{canonical_id}",
+                stamp,
+                _evidence_debt_id(incident_id),
+            ),
+        )
+    return retired
+
+
 def _revise_settlement_non_loss_incidents(
     mem: sqlite3.Connection,
     trades: sqlite3.Connection,
@@ -2040,6 +2126,13 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
     with _maintenance_connections(cfg, detector_deadline) as (trades, mem):
         _maintenance_guard()
         revalidate_blind_hard_incidents(mem, trades)
+        _maintenance_guard()
+        _consolidate_settled_quote_incident_backlog(
+            mem,
+            limit=int(
+                cfg["loop"].get("legacy_incident_consolidation_batch_size", 16)
+            ),
+        )
         _maintenance_guard()
         positions = tracked_positions(trades, history_days=history_days)
         # Settlement is an independent terminal truth path.  It must run even
