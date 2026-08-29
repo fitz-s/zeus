@@ -9815,6 +9815,7 @@ def _exit_monitor_cycle(
     from src.riskguard.riskguard import get_current_level
 
     urgent_fact = urgent_day0 or urgent_forecast
+    recovery_claim = bool(recovery_full_book)
     absorbed_overdue_families: frozenset[tuple[str, str, str]] = frozenset()
     debt_scope_is_full_book = False
     if (
@@ -9854,7 +9855,6 @@ def _exit_monitor_cycle(
         )
 
     periodic_full_book = target_families is None and not urgent_fact
-    recovery_full_book = bool(recovery_full_book and periodic_full_book)
     if urgent_forecast and (
         _day0_exit_monitor_priority_pending()
         or _day0_held_monitor_preempt_requested.is_set()
@@ -9882,7 +9882,7 @@ def _exit_monitor_cycle(
         # not proof that an urgent owner still exists.  A later periodic pass
         # must therefore yield only to a live attempt; otherwise it immediately
         # becomes the full-book successor instead of creating an ownerless gap.
-        if not recovery_full_book and _periodic_exit_monitor_should_yield(
+        if not recovery_claim and _periodic_exit_monitor_should_yield(
             _urgent_held_monitor_owner_pending()
         ):
             logger.info("periodic exit_monitor yielded to urgent held-family monitor")
@@ -9913,7 +9913,7 @@ def _exit_monitor_cycle(
     # consume the same finite budget so a stalled handoff cannot shift the
     # probability/exit work beyond its advertised cadence.
     claim_budget_seconds = _held_position_monitor_claim_budget_seconds(
-        periodic_full_book=periodic_full_book,
+        periodic_full_book=periodic_full_book or recovery_claim,
     )
     monitor_deadline_monotonic = time.monotonic() + claim_budget_seconds
     def _periodic_preemption_requested_since_claim() -> bool:
@@ -9983,7 +9983,7 @@ def _exit_monitor_cycle(
         # its entire slot and make max_instances=1 skip the next repair tick.
         configured_handoff_timeout = (
             _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            if urgent_fact or recovery_full_book
+            if urgent_fact or recovery_claim
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
         risk_level_at_claim = get_current_level()
@@ -10048,7 +10048,7 @@ def _exit_monitor_cycle(
             return False
         if (
             not urgent_fact
-            and not recovery_full_book
+            and not recovery_claim
             and _periodic_exit_monitor_should_yield(
                 _periodic_preemption_requested_since_claim()
             )
@@ -10083,14 +10083,17 @@ def _exit_monitor_cycle(
             should_preempt_for_urgent_day0 = (
                 _unabsorbed_canonical_monitor_debt_pending
             )
-        elif recovery_full_book:
-            # Recovery already owns every current held-position obligation.
-            # Yielding that full-book claim to a narrower urgent wake creates
-            # an ownerless cadence-debt loop: the urgent lane covers one
-            # family while the durable recovery worker never reaches the
-            # remaining book.  A newer family is already inside this pass's
-            # full-book scope, so it cannot require in-core preemption.
+        elif recovery_claim and target_families is None:
             should_preempt_for_urgent_day0 = lambda: False
+        elif recovery_claim:
+            # Recovery owns the exact canonical overdue set admitted above.
+            # A targeted recovery tranche intentionally excludes already-fresh
+            # families so a bounded claim cannot restart from the same portfolio
+            # prefix forever.  Only debt that appeared outside the admitted set
+            # may preempt it; the next retry reconstructs that larger set.
+            should_preempt_for_urgent_day0 = (
+                _unabsorbed_canonical_monitor_debt_pending
+            )
         else:
             # One urgent held-family attempt may preempt a periodic pass. The
             # next pass ignores the same continuous pressure and completes the
@@ -10218,7 +10221,21 @@ def _held_position_monitor_recovery_worker_main() -> None:
                 or [],
             )
             try:
-                _exit_monitor_cycle(recovery_full_book=True)
+                # Rebuild the exact overdue family set before every attempt.
+                # A full-book retry reprocesses the same fast prefix when the
+                # 29s periodic quantum expires, starving tail positions even
+                # though their predecessors already committed fresh canonical
+                # MONITOR_REFRESHED events.  Targeting only the remaining debt
+                # makes each partial pass monotonically shrink the obligation.
+                # An unreadable/empty scope while debt is known remains a
+                # fail-closed full-book fallback.
+                overdue_families = _canonical_overdue_monitor_families(
+                    require_fresh_inputs=False,
+                )
+                _exit_monitor_cycle(
+                    target_families=overdue_families or None,
+                    recovery_full_book=True,
+                )
             except Exception as exc:  # noqa: BLE001 - durable debt must survive.
                 logger.error(
                     "held-position monitor recovery attempt failed; retrying: %s",
