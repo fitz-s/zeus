@@ -3253,15 +3253,12 @@ def _prioritize_current_money_risk_seed_files(
     if not prefixes:
         return tuple(paths)
     held_by_prefix: dict[str, list[Path]] = {prefix: [] for prefix in prefixes}
-    other: list[Path] = []
     for path in paths:
         prefix = next(
             (candidate for candidate in prefixes if path.name.startswith(candidate)),
             None,
         )
-        if prefix is None:
-            other.append(path)
-        else:
+        if prefix is not None:
             held_by_prefix[prefix].append(path)
 
     # A burst of historical Day0/fusion seeds for one alphabetically early
@@ -3276,12 +3273,12 @@ def _prioritize_current_money_risk_seed_files(
         if (group := held_by_prefix[prefix])
     )
     newest_set = set(newest)
-    held_tail = tuple(
-        path
-        for path in paths
-        if path not in newest_set and path.name.startswith(prefixes)
-    )
-    return (*newest, *held_tail, *other)
+    # Only the one newest witness per current-money family is promoted.  Keep
+    # every remaining seed in the caller's rotated order; regrouping the held
+    # tail ahead of ordinary work regresses the durable cursor and can starve a
+    # fully materializable background family forever.
+    tail = tuple(path for path in paths if path not in newest_set)
+    return (*newest, *tail)
 
 
 def _interleave_current_priority_seed_files(

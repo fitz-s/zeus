@@ -3353,12 +3353,12 @@ def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
     )
     names = (
         "Hong_Kong.2026-08-28.low.20260828T120000Z.json",
+        "Zurich.2026-08-29.high.20260828T170000Z.json",
         "Hong_Kong.2026-08-28.low.20260828T130000Z.json",
         "Hong_Kong.2026-08-28.low.20260828T140000Z.json",
         "Istanbul.2026-08-29.high.20260828T120000Z.json",
         "Istanbul.2026-08-29.high.20260828T150000Z.json",
         "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
-        "Zurich.2026-08-29.high.20260828T170000Z.json",
     )
     paths = tuple(tmp_path / name for name in names)
 
@@ -3372,7 +3372,12 @@ def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
         "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
     ]
     assert set(prioritized) == set(paths)
-    assert prioritized[-1].name == "Zurich.2026-08-29.high.20260828T170000Z.json"
+    assert [path.name for path in prioritized[3:]] == [
+        "Hong_Kong.2026-08-28.low.20260828T120000Z.json",
+        "Zurich.2026-08-29.high.20260828T170000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T130000Z.json",
+        "Istanbul.2026-08-29.high.20260828T120000Z.json",
+    ]
 
 
 def test_complete_global_receipt_scope_maps_exact_queued_families(tmp_path, monkeypatch):
