@@ -5124,21 +5124,41 @@ def _fresh_local_held_monitor_orderbooks(
     params = [part for pair in scope_pairs for part in pair]
     checked_at = now_utc.astimezone(timezone.utc).isoformat()
     params.extend((checked_at, checked_at, checked_at))
+    candidates: dict[str, tuple[datetime, dict]] = {}
+    market_channel_tokens: set[str] = set()
+
+    def _finish_local_books() -> dict[str, dict]:
+        books = {token_id: value[1] for token_id, value in candidates.items()}
+        if captured_at_out is not None and candidates:
+            captured_at_out.append(min(value[0] for value in candidates.values()))
+        summary["held_monitor_orderbooks_market_channel"] = len(
+            market_channel_tokens
+        )
+        return books
+
     progress_handler_installed = False
-    if deadline_monotonic is not None:
-        if time.monotonic() >= float(deadline_monotonic):
-            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
-                "AUXILIARY_DEADLINE_EXPIRED"
-            )
-            return {}
-        set_progress_handler = getattr(conn, "set_progress_handler", None)
-        if callable(set_progress_handler):
-            set_progress_handler(
-                lambda: int(time.monotonic() >= float(deadline_monotonic)),
-                1_000,
-            )
-            progress_handler_installed = True
     try:
+        if deadline_monotonic is not None:
+            if time.monotonic() >= float(deadline_monotonic):
+                summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                    "AUXILIARY_DEADLINE_EXPIRED"
+                )
+                return {}
+            set_progress_handler = getattr(conn, "set_progress_handler", None)
+            if callable(set_progress_handler):
+                set_progress_handler(
+                    lambda: int(time.monotonic() >= float(deadline_monotonic)),
+                    1_000,
+                )
+                progress_handler_installed = True
+        from src.data.market_scanner import (
+            ExecutableSnapshotCaptureError,
+            _top_book_level_decimal,
+        )
+        from src.engine.monitor_refresh import (
+            _monitor_snapshot_has_held_exit_evidence,
+        )
+
         invalidation_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='executable_market_snapshot_invalidations' LIMIT 1"
@@ -5203,16 +5223,6 @@ def _fresh_local_held_monitor_orderbooks(
             """,
             params,
         ).fetchall()
-        candidates: dict[str, tuple[datetime, dict]] = {}
-        market_channel_tokens: set[str] = set()
-        from src.data.market_scanner import (
-            ExecutableSnapshotCaptureError,
-            _top_book_level_decimal,
-        )
-        from src.engine.monitor_refresh import (
-            _monitor_snapshot_has_held_exit_evidence,
-        )
-
         for row in snapshot_rows:
             try:
                 token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
@@ -5237,15 +5247,6 @@ def _fresh_local_held_monitor_orderbooks(
                 captured_at = _parse_utc_timestamp(raw_captured_at)
                 if captured_at is not None:
                     candidates[token_id] = (captured_at, book)
-
-        def _finish_local_books() -> dict[str, dict]:
-            books = {token_id: value[1] for token_id, value in candidates.items()}
-            if captured_at_out is not None and candidates:
-                captured_at_out.append(min(value[0] for value in candidates.values()))
-            summary["held_monitor_orderbooks_market_channel"] = len(
-                market_channel_tokens
-            )
-            return books
 
         snapshot_row_tokens = {str(row[0] or "").strip() for row in snapshot_rows}
         fallback_candidates = [

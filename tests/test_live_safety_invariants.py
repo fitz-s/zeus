@@ -13016,6 +13016,161 @@ def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata
     )
 
 
+def test_local_monitor_prefetch_sql_failure_is_fail_soft_and_cleans_handler(
+    monkeypatch,
+):
+    """A first local SQL failure must not abort the monitor pass."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="local-sql-failure",
+        condition_id="local-sql-failure-condition",
+        token_id="local-sql-failure-token",
+        direction="buy_yes",
+    )
+
+    class FailingConnection:
+        def __init__(self):
+            self.progress_handler_calls = []
+
+        def set_progress_handler(self, handler, n):
+            self.progress_handler_calls.append((handler, n))
+
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("earliest local SQL failure")
+
+    conn = FailingConnection()
+    summary = {}
+    captured_at = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 10.0)
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [position],
+        now_utc=datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+        summary=summary,
+        deps=_monitor_test_deps("local_sql_failure"),
+        deadline_monotonic=20.0,
+        captured_at_out=captured_at,
+    )
+
+    assert books == {}
+    assert captured_at == []
+    assert summary["held_monitor_local_orderbook_error"] == (
+        "earliest local SQL failure"
+    )
+    assert summary["held_monitor_orderbooks_market_channel"] == 0
+    assert [n for _handler, n in conn.progress_handler_calls] == [1000, 0]
+    assert conn.progress_handler_calls[-1][0] is None
+
+
+def test_local_monitor_prefetch_import_failure_is_fail_soft_and_cleans_handler(
+    monkeypatch,
+):
+    """A dependency import failure is isolated under the same handler boundary."""
+    import builtins
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="local-import-failure",
+        condition_id="local-import-failure-condition",
+        token_id="local-import-failure-token",
+        direction="buy_yes",
+    )
+
+    class Connection:
+        def __init__(self):
+            self.progress_handler_calls = []
+
+        def set_progress_handler(self, handler, n):
+            self.progress_handler_calls.append((handler, n))
+
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("SQL must not start after dependency import failure")
+
+    real_import = builtins.__import__
+
+    def fail_market_scanner_import(name, *args, **kwargs):
+        if name == "src.data.market_scanner":
+            raise ImportError("market scanner import failure")
+        return real_import(name, *args, **kwargs)
+
+    conn = Connection()
+    summary = {}
+    monkeypatch.setattr(builtins, "__import__", fail_market_scanner_import)
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 10.0)
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [position],
+        now_utc=datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+        summary=summary,
+        deps=_monitor_test_deps("local_import_failure"),
+        deadline_monotonic=20.0,
+    )
+
+    assert books == {}
+    assert summary["held_monitor_local_orderbook_error"] == (
+        "market scanner import failure"
+    )
+    assert summary["held_monitor_orderbooks_market_channel"] == 0
+    assert [n for _handler, n in conn.progress_handler_calls] == [1000, 0]
+    assert conn.progress_handler_calls[-1][0] is None
+
+
+def test_local_monitor_prefetch_sql_failure_continues_network_admission():
+    """Local DB failure must leave admitted positions eligible for network fallback."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    position = _make_position(
+        trade_id="local-sql-fallback",
+        condition_id="local-sql-fallback-condition",
+        token_id="local-sql-fallback-token",
+        direction="buy_yes",
+    )
+
+    class FailingConnection:
+        def set_progress_handler(self, *_args):
+            pass
+
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("earliest local SQL failure")
+
+    class NetworkClob:
+        def get_orderbook_snapshots(self, token_ids):
+            assert token_ids == [position.token_id]
+            return {
+                position.token_id: {
+                    "asset_id": position.token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+            }
+
+    clob = NetworkClob()
+    summary = {}
+    missing = cycle_runtime._prefetch_held_monitor_orderbooks(
+        FailingConnection(),
+        clob,
+        [position],
+        summary,
+        now_utc=datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+        deps=_monitor_test_deps("local_sql_fallback"),
+    )
+
+    assert missing == frozenset()
+    assert summary["held_monitor_orderbooks_local"] == 0
+    assert summary["held_monitor_orderbooks_network_requested"] == 1
+    assert summary["held_monitor_orderbooks_prefetched"] == 1
+    assert monitor_refresh.prefetched_monitor_orderbook(
+        clob, position.token_id
+    ) is not None
+    monitor_refresh.publish_current_monitor_orderbook_batch(
+        {},
+        captured_at_utc=None,
+    )
+
+
 def test_held_monitor_local_books_publish_original_clock_for_global_sell(
     monkeypatch,
 ):
