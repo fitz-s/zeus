@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused or audited: 2026-08-29
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -5502,6 +5502,194 @@ class TestRequestHashProvenance:
         assert captured["request_hash"] == "sha256:realhash"
         assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
+    def test_provider_hwm_obeys_public_usability_boundary(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        import src.data.openmeteo_model_updates as updates_module
+        from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+        update = OpenMeteoModelUpdate(
+            model="ukmo_global_deterministic_10km",
+            last_run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            last_run_availability_time=datetime(2026, 6, 10, 13, 6, 20, tzinfo=UTC),
+        )
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [update.model])
+        monkeypatch.setattr(
+            updates_module,
+            "fetch_model_updates",
+            lambda *_args, **_kwargs: (update,),
+        )
+
+        before = hv.probe_day0_provider_run_hwm(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 19, tzinfo=UTC),
+            timeout_s=1.0,
+        )
+        at_boundary = hv.probe_day0_provider_run_hwm(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            timeout_s=1.0,
+        )
+
+        assert before == {}
+        assert at_boundary[update.model].run_initialisation_time == (
+            update.last_run_initialisation_time
+        )
+
+    def test_release_due_tracks_persisted_provider_run_identity(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        conn = _conn()
+        hv._ensure_schema(conn)
+        model = "ecmwf_ifs"
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [model])
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+
+        def vector(run_hour: int, captured_minute: int) -> Day0HourlyVector:
+            meta = {
+                "model": model,
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": datetime(
+                    2026, 6, 10, run_hour, 0, tzinfo=UTC
+                ).isoformat(),
+                "provider_source_available_at_utc": datetime(
+                    2026, 6, 10, 12, 10, tzinfo=UTC
+                ).isoformat(),
+            }
+            return replace(
+                _refresh_vector(
+                    _paris(), model, datetime(2026, 6, 10, 8, captured_minute, tzinfo=UTC)
+                ),
+                source_run_meta_json=json.dumps(meta),
+            )
+
+        persist_day0_hourly_vectors(
+            [vector(0, 0)],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:old",
+            now=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+        )
+        assert hv.day0_hourly_release_due_city_dates(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            provider_run_hwm={model: hwm},
+            conn=conn,
+        ) == frozenset({("Paris", "2026-06-10")})
+
+        persist_day0_hourly_vectors(
+            [vector(6, 1)],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:new",
+            now=datetime(2026, 6, 10, 8, 1, tzinfo=UTC),
+        )
+        assert hv.day0_hourly_release_due_city_dates(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            provider_run_hwm={model: hwm},
+            conn=conn,
+        ) == frozenset()
+
+    def test_release_edge_bypasses_interval_but_rejects_old_exact_payload(
+        self, monkeypatch
+    ):
+        import src.data.day0_hourly_vectors as hv
+
+        model = "ecmwf_ifs"
+        clock = {"now": 101.0}
+        attempts = {"fetch": 0, "persist": 0}
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+        old_meta = json.dumps(
+            {
+                "model": model,
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T00:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T06:00:00+00:00",
+            }
+        )
+
+        def fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts["fetch"] += 1
+            return [
+                replace(_refresh_vector(city, model, now), source_run_meta_json=old_meta)
+            ], "sha256:old"
+
+        def persist(*_args, **_kwargs):
+            attempts["persist"] += 1
+            return 1
+
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [model])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", persist)
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
+        hv._LAST_REFRESH_MONOTONIC["Paris|2026-06-10"] = 100.0
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            interval_s=1800.0,
+            quota_critical_cities=1,
+            provider_run_hwm={model: hwm},
+            release_due_city_dates={("Paris", "2026-06-10")},
+            return_stats=True,
+        )
+
+        assert attempts == {"fetch": 1, "persist": 0}
+        assert stats.incomplete_expected_bundles == 1
+        assert stats.unavailable_bundles[0].reason == "DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED"
+
+    @pytest.mark.parametrize(
+        "meta",
+        (
+            {
+                "model": "wrong-model",
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00+00:00",
+            },
+            {
+                "model": "ecmwf_ifs",
+                "provider": "wrong-provider",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00+00:00",
+            },
+            {
+                "model": "ecmwf_ifs",
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00",
+            },
+        ),
+        ids=("wrong-model", "wrong-provider", "offsetless"),
+    )
+    def test_exact_hwm_rejects_cross_identity_and_offsetless_provenance(self, meta):
+        import src.data.day0_hourly_vectors as hv
+
+        model = "ecmwf_ifs"
+        vector = replace(
+            _refresh_vector(
+                _paris(), model, datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC)
+            ),
+            source_run_meta_json=json.dumps(meta),
+        )
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+
+        assert hv._vectors_trailing_provider_hwm(
+            [vector], required_hwm={model: hwm}
+        ) == (model,)
+
     def test_refresh_lock_contention_does_not_throttle_next_attempt(self, monkeypatch):
         """A contended forecasts writer lock must not stall the trading reactor lane."""
         import src.data.day0_hourly_vectors as hv
@@ -6748,6 +6936,92 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 1
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
+
+    def test_provider_release_edge_gives_two_held_slots_and_one_priority_slot(
+        self, monkeypatch
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.events import reactor
+
+        held_cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("Held A", "Held B", "Held C")
+        ]
+        priority_city = SimpleNamespace(name="Priority", timezone="UTC")
+        cities = held_cities + [priority_city]
+        held_families = {
+            (city.name, "2026-06-10", "high") for city in held_cities
+        }
+        priority_family = ("Priority", "2026-06-10", "high")
+        due_scopes = frozenset(
+            (city.name, "2026-06-10") for city in held_cities
+        )
+        captured = {}
+        order_calls = 0
+
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_current_held_position_family_keys",
+            lambda: held_families,
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset({priority_family}),
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "probe_day0_provider_run_hwm",
+            lambda *_args, **_kwargs: {"ecmwf_ifs": object()},
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "day0_hourly_release_due_city_dates",
+            lambda *_args, **_kwargs: due_scopes,
+        )
+
+        def order(_cities, **_kwargs):
+            nonlocal order_calls
+            order_calls += 1
+            return (list(cities), 4 if order_calls == 1 else 3)
+
+        monkeypatch.setattr(reactor, "_edli_order_day0_hourly_refresh_cities", order)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_rotate_day0_hourly_refresh_order",
+            lambda ordered, **_kwargs: list(ordered),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_day0_hourly_refresh_max_cities",
+            lambda **_kwargs: 3,
+        )
+
+        def refresh(ordered, **kwargs):
+            captured["cities"] = [city.name for city in ordered]
+            captured.update(kwargs)
+            return SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=0,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                priority_reserve_exhausted=False,
+                budget_exhausted=False,
+            )
+
+        monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert captured["cities"] == ["Held A", "Held B", "Priority"]
+        assert captured["quota_critical_cities"] == 2
+        assert captured["quota_priority_cities"] == 1
+        assert captured["release_due_city_dates"] == due_scopes
 
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
         # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the

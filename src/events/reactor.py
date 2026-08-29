@@ -6175,7 +6175,11 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     _log = _logging.getLogger("zeus.events.reactor")
     try:
         from src.config import runtime_cities as _rc
-        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+        from src.data.day0_hourly_vectors import (
+            day0_hourly_release_due_city_dates,
+            maybe_refresh_day0_hourly_vectors,
+            probe_day0_provider_run_hwm,
+        )
 
         decision_time = datetime.now(timezone.utc)
         refresh_budget_seconds = _day0_hourly_refresh_budget_seconds()
@@ -6187,6 +6191,51 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             decision_time=decision_time,
             deadline_monotonic=refresh_deadline_monotonic,
         )
+        provider_run_hwm = {}
+        release_due_city_dates = frozenset()
+        try:
+            held_city_names = {str(family[0]).strip() for family in held_families}
+            held_cities = [
+                city
+                for city in cities
+                if str(getattr(city, "name", "") or "").strip() in held_city_names
+            ]
+            hwm_budget_seconds = min(
+                1.0,
+                max(0.0, refresh_deadline_monotonic - time.monotonic()),
+            )
+            if held_cities and hwm_budget_seconds >= 0.25:
+                provider_run_hwm = probe_day0_provider_run_hwm(
+                    held_cities,
+                    decision_time=decision_time,
+                    timeout_s=hwm_budget_seconds,
+                )
+                release_due_city_dates = day0_hourly_release_due_city_dates(
+                    held_cities,
+                    decision_time=decision_time,
+                    provider_run_hwm=provider_run_hwm,
+                )
+                release_due_families = {
+                    family
+                    for family in held_families
+                    if (str(family[0]).strip(), str(family[1]).strip())
+                    in release_due_city_dates
+                }
+                if release_due_families:
+                    priority_probe = _Day0HourlyPriorityProbe(
+                        refresh_due_families=frozenset(
+                            set(priority_probe.refresh_due_families)
+                            | release_due_families
+                        ),
+                        window_starts=priority_probe.window_starts,
+                        proved=priority_probe.proved,
+                    )
+        except Exception as exc:  # noqa: BLE001 -- metadata is scheduling evidence only.
+            provider_run_hwm = {}
+            release_due_city_dates = frozenset()
+            _log.warning(
+                "edli_day0_hourly_refresh: provider-run HWM probe failed: %s", exc
+            )
         try:
             priority_families = _edli_day0_hourly_priority_families(
                 held_families=held_families,
@@ -6320,6 +6369,8 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 (city_name, target_date): window_start
                 for city_name, target_date, window_start in priority_probe.window_starts
             },
+            provider_run_hwm=provider_run_hwm,
+            release_due_city_dates=release_due_city_dates,
             persist_lock_blocking=False,
             return_stats=True,
         )

@@ -518,6 +518,20 @@ class Day0HourlyBundleUnavailable:
     reason: str
 
 
+@dataclass(frozen=True)
+class Day0ProviderRunHwm:
+    """Publicly usable provider-run scheduling witness.
+
+    Metadata may wake an exact vector fetch, but it is never probability
+    evidence. Persisted vector provenance must independently prove the same or
+    a newer provider run before the bundle can be consumed.
+    """
+
+    model: str
+    run_initialisation_time: datetime
+    run_availability_time: datetime
+
+
 def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_MODELS) -> list[str]:
     """Polygon-gated model list for a city (lead 0). Fail-soft to [] on gate errors."""
     try:
@@ -557,6 +571,181 @@ def day0_hourly_models_for_city(city: Any) -> list[str]:
         if normalized and normalized not in out:
             out.append(normalized)
     return out
+
+
+def probe_day0_provider_run_hwm(
+    cities: Iterable[Any],
+    *,
+    decision_time: datetime,
+    timeout_s: float,
+) -> dict[str, Day0ProviderRunHwm]:
+    """Read one coalesced provider-run HWM for the candidate city set."""
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    models = tuple(
+        sorted(
+            {
+                model
+                for city in cities
+                for model in day0_hourly_models_for_city(city)
+                if str(model or "").strip()
+            }
+        )
+    )
+    if not models:
+        return {}
+    from src.data.openmeteo_model_updates import fetch_model_updates
+    from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
+
+    updates = fetch_model_updates(
+        models,
+        timeout_seconds=max(0.25, float(timeout_s)),
+        max_workers=max(1, min(len(models), 8)),
+        priority=True,
+    )
+    now = decision_time.astimezone(UTC)
+    out: dict[str, Day0ProviderRunHwm] = {}
+    for update in updates:
+        model = str(update.model or "").strip()
+        if model not in models:
+            continue
+        if now < source_publicly_usable_at(update.to_source_run_clock()):
+            continue
+        out[model] = Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=update.last_run_initialisation_time.astimezone(UTC),
+            run_availability_time=update.last_run_availability_time.astimezone(UTC),
+        )
+    return out
+
+
+def _provider_run_identity_from_meta(
+    payload: object,
+    *,
+    expected_model: str,
+) -> tuple[datetime, datetime] | None:
+    """Parse exact Open-Meteo provenance without local-time coercion."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    if str(payload.get("model") or "").strip() != expected_model:
+        return None
+    if str(payload.get("provider") or "").strip() != "openmeteo":
+        return None
+    try:
+        run = datetime.fromisoformat(
+            str(payload["provider_source_cycle_time_utc"]).replace("Z", "+00:00")
+        )
+        available = datetime.fromisoformat(
+            str(payload["provider_source_available_at_utc"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        run.tzinfo is None
+        or run.utcoffset() is None
+        or available.tzinfo is None
+        or available.utcoffset() is None
+    ):
+        return None
+    return run.astimezone(UTC), available.astimezone(UTC)
+
+
+def day0_hourly_release_due_city_dates(
+    cities: Iterable[Any],
+    *,
+    decision_time: datetime,
+    provider_run_hwm: Mapping[str, Day0ProviderRunHwm],
+    conn: sqlite3.Connection | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Return city/date scopes whose persisted vectors trail a public run HWM."""
+
+    own_conn = conn is None
+    if own_conn:
+        from src.state.db import get_forecasts_connection_read_only
+
+        conn = get_forecasts_connection_read_only()
+    due: set[tuple[str, str]] = set()
+    try:
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            if not city_name:
+                continue
+            target_date = day0_hourly_target_dates_for_refresh(
+                city=city, decision_time=decision_time
+            )[0]
+            expected_models = day0_hourly_models_for_city(city)
+            required = {
+                model: provider_run_hwm[model]
+                for model in expected_models
+                if model in provider_run_hwm
+            }
+            if not required:
+                continue
+            rows = conn.execute(
+                """
+                SELECT model, source_run_meta_json
+                FROM day0_hourly_vectors
+                WHERE city = ? AND target_date = ?
+                ORDER BY captured_at DESC
+                """,
+                (city_name, target_date),
+            ).fetchall()
+            latest: dict[str, Mapping[str, object]] = {}
+            for row in rows:
+                model = str(row[0] or "").strip()
+                if model in latest or model not in required:
+                    continue
+                try:
+                    payload = json.loads(str(row[1] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = None
+                latest[model] = payload if isinstance(payload, Mapping) else {}
+            for model, hwm in required.items():
+                payload = latest.get(model)
+                actual = _provider_run_identity_from_meta(
+                    payload,
+                    expected_model=model,
+                )
+                if actual is None:
+                    due.add((city_name, target_date))
+                    break
+                if actual < (
+                    hwm.run_initialisation_time,
+                    hwm.run_availability_time,
+                ):
+                    due.add((city_name, target_date))
+                    break
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+    return frozenset(due)
+
+
+def _vectors_trailing_provider_hwm(
+    vectors: Iterable[Day0HourlyVector],
+    *,
+    required_hwm: Mapping[str, Day0ProviderRunHwm],
+) -> tuple[str, ...]:
+    """Identify exact payloads that do not prove their scheduling HWM."""
+
+    by_model = {str(vector.model): vector for vector in vectors}
+    trailing: list[str] = []
+    for model, hwm in required_hwm.items():
+        vector = by_model.get(model)
+        try:
+            payload = json.loads(str(vector.source_run_meta_json or ""))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            trailing.append(model)
+            continue
+        actual = _provider_run_identity_from_meta(payload, expected_model=model)
+        if actual is None:
+            trailing.append(model)
+            continue
+        if actual < (hwm.run_initialisation_time, hwm.run_availability_time):
+            trailing.append(model)
+    return tuple(trailing)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -1546,6 +1735,7 @@ def _refresh_throttled_locked(
     *,
     now_monotonic: float,
     interval_s: float,
+    bypass_interval: bool = False,
 ) -> bool:
     """Return whether refresh is throttled while ``_REFRESH_LOCK`` is held."""
 
@@ -1554,6 +1744,8 @@ def _refresh_throttled_locked(
         if now_monotonic < retry_not_before:
             return True
         _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+    if bypass_interval:
+        return False
     last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
     return last is not None and now_monotonic - last < float(interval_s)
 
@@ -1570,6 +1762,8 @@ def maybe_refresh_day0_hourly_vectors(
     quota_priority_cities: int = 0,
     allow_priority_recovery: bool = False,
     remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
+    provider_run_hwm: Mapping[str, Day0ProviderRunHwm] | None = None,
+    release_due_city_dates: Iterable[tuple[str, str]] = (),
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
 ) -> int | Day0HourlyRefreshStats:
@@ -1680,6 +1874,10 @@ def maybe_refresh_day0_hourly_vectors(
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
+    release_due_scopes = frozenset(
+        (str(city).strip(), str(target_date).strip())
+        for city, target_date in release_due_city_dates
+    )
     for city_index, city in enumerate(cities):
         if checked >= max(0, int(max_cities)):
             break
@@ -1702,6 +1900,14 @@ def maybe_refresh_day0_hourly_vectors(
             models = day0_hourly_models_for_city(city)
             if not models:
                 continue
+            required_hwm = {
+                model: provider_run_hwm[model]
+                for model in models
+                if provider_run_hwm is not None and model in provider_run_hwm
+            }
+            release_due = (
+                (name, target_dates[0]) in release_due_scopes and bool(required_hwm)
+            )
             critical_city_count = max(0, int(quota_critical_cities))
             priority_city_count = max(0, int(quota_priority_cities))
             if city_index < critical_city_count:
@@ -1745,6 +1951,7 @@ def maybe_refresh_day0_hourly_vectors(
                     refresh_key,
                     now_monotonic=now_monotonic,
                     interval_s=interval_s,
+                    bypass_interval=release_due,
                 ):
                     skipped_throttle += 1
                     continue
@@ -1771,6 +1978,7 @@ def maybe_refresh_day0_hourly_vectors(
                         refresh_key,
                         now_monotonic=now_monotonic,
                         interval_s=interval_s,
+                        bypass_interval=release_due,
                     ):
                         skipped_throttle += 1
                         continue
@@ -1825,6 +2033,23 @@ def maybe_refresh_day0_hourly_vectors(
                     available_models=vector_models,
                     missing_models=missing_models,
                     reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
+                )
+                continue
+            trailing_hwm_models = (
+                _vectors_trailing_provider_hwm(vectors, required_hwm=required_hwm)
+                if release_due
+                else ()
+            )
+            if trailing_hwm_models:
+                mark_incomplete(
+                    refresh_key=refresh_key,
+                    quota_lane=quota_lane,
+                    name=name,
+                    target_dates=target_dates,
+                    expected_models=expected_models,
+                    available_models=vector_models,
+                    missing_models=trailing_hwm_models,
+                    reason="DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED",
                 )
                 continue
 
