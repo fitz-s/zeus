@@ -1,5 +1,6 @@
-# Created: 2026-08-25
-# Last reused or audited: 2026-08-27
+# Lifecycle: created=2026-08-25; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Purpose: Prove decision-log inline retention bounds both scan work and deletes while preserving progress and anchors.
+# Reuse: Run after changing decision_log inline retention, cursor progress, or artifact persistence.
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 13 (bounded-by-construction storage redesign) -- coverage for
 #   src/state/decision_chain.py::_inline_expire_decision_log, piggybacked in
@@ -37,6 +38,14 @@ TIER0_DDL = """
 CREATE TABLE tier0_candidate_set_provenance (
     row_id INTEGER PRIMARY KEY AUTOINCREMENT,
     selection_epoch_identity TEXT NOT NULL
+)
+"""
+
+ZEUS_META_DDL = """
+CREATE TABLE zeus_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -155,6 +164,46 @@ def test_expire_walks_backward_from_cutoff_not_oldest_history() -> None:
         "SELECT timestamp FROM decision_log WHERE mode = 'exit_monitor'"
     ).fetchall()
     assert remaining == [(expired[-1],)]
+
+
+def test_sparse_mode_scan_is_bounded_and_cursor_reaches_older_target() -> None:
+    conn = _decision_log_conn()
+    conn.execute(ZEUS_META_DDL)
+    target_ts = _iso(20)
+    unrelated_ts = _iso(8)
+    _seed(conn, mode="exit_monitor", ts=target_ts)
+    for _ in range(2_000):
+        _seed(conn, mode="other_mode", ts=unrelated_ts)
+
+    _inline_expire_decision_log(conn, "exit_monitor")
+
+    # A fixed scan budget must stop before the sparse target instead of
+    # traversing every unrelated row while the money-path transaction is open.
+    assert _count(conn, "exit_monitor") == 1
+    cursor_row = conn.execute(
+        "SELECT value FROM zeus_meta "
+        "WHERE key = 'decision_log.inline_expire_cursor.v1:exit_monitor'"
+    ).fetchone()
+    assert cursor_row is not None
+
+    # The durable per-mode cursor continues the bounded walk across calls.
+    for _ in range(4):
+        _inline_expire_decision_log(conn, "exit_monitor")
+    assert _count(conn, "exit_monitor") == 0
+
+
+def test_malformed_cursor_resets_without_blocking_expiry() -> None:
+    conn = _decision_log_conn()
+    conn.execute(ZEUS_META_DDL)
+    conn.execute(
+        "INSERT INTO zeus_meta(key, value) VALUES (?, ?)",
+        ("decision_log.inline_expire_cursor.v1:exit_monitor", "[]"),
+    )
+    _seed(conn, mode="exit_monitor", ts=_iso(10))
+
+    _inline_expire_decision_log(conn, "exit_monitor")
+
+    assert _count(conn, "exit_monitor") == 0
 
 
 def test_store_artifact_piggybacks_expiry() -> None:
