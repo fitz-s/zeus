@@ -400,6 +400,10 @@ CREATE INDEX IF NOT EXISTS idx_evidence_recovery_debt
 CREATE INDEX IF NOT EXISTS idx_settled_no_bid_backlog
     ON incidents(detected_at,incident_id,position_id)
     WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending');
+CREATE INDEX IF NOT EXISTS idx_hard_revalidation_queue
+    ON incidents(incident_id)
+    WHERE kind='hard' AND stage='blind'
+      AND status IN ('queued','retry_pending');
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
@@ -569,23 +573,27 @@ def _startup_expression_index_contract(
     return normalize(str(catalog[1])) == normalize(expected)
 
 
-def _startup_partial_index_contract(conn: sqlite3.Connection) -> bool:
-    """Verify the exact queue index used by the bounded legacy drain."""
+def _startup_partial_index_contract(
+    conn: sqlite3.Connection,
+    *,
+    name: str = "idx_settled_no_bid_backlog",
+    expected: str = (
+        "CREATE INDEX idx_settled_no_bid_backlog "
+        "ON incidents(detected_at,incident_id,position_id) "
+        "WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending')"
+    ),
+) -> bool:
+    """Verify one exact partial index used by a bounded queue."""
     _startup_guard()
     catalog = conn.execute(
         "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
-        ("idx_settled_no_bid_backlog",),
+        (name,),
     ).fetchone()
     if catalog is None or str(catalog[0]) != "incidents" or not catalog[1]:
         return False
     normalize = lambda value: re.sub(
         r"\s*,\s*", ",", re.sub(r"\s+", " ", value.strip())
     ).lower()
-    expected = (
-        "CREATE INDEX idx_settled_no_bid_backlog "
-        "ON incidents(detected_at,incident_id,position_id) "
-        "WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending')"
-    )
     return normalize(str(catalog[1])) == normalize(expected)
 
 
@@ -655,6 +663,15 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             expression="kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
         )
         and _startup_partial_index_contract(conn)
+        and _startup_partial_index_contract(
+            conn,
+            name="idx_hard_revalidation_queue",
+            expected=(
+                "CREATE INDEX idx_hard_revalidation_queue ON incidents(incident_id) "
+                "WHERE kind='hard' AND stage='blind' "
+                "AND status IN ('queued','retry_pending')"
+            ),
+        )
     )
 
 
@@ -840,6 +857,18 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
             "WHERE crossing_kind='no_bid' "
             "AND status IN ('queued','retry_pending')"
         )
+    hard_revalidation_index = (
+        "CREATE INDEX idx_hard_revalidation_queue ON incidents(incident_id) "
+        "WHERE kind='hard' AND stage='blind' "
+        "AND status IN ('queued','retry_pending')"
+    )
+    if not _startup_partial_index_contract(
+        conn,
+        name="idx_hard_revalidation_queue",
+        expected=hard_revalidation_index,
+    ):
+        conn.execute("DROP INDEX IF EXISTS idx_hard_revalidation_queue")
+        conn.execute(hard_revalidation_index)
     return _ClosingConnection(conn)
 
 
@@ -1097,17 +1126,31 @@ def _position_with_exposure(
 def revalidate_blind_hard_incidents(
     mem: sqlite3.Connection,
     trades: sqlite3.Connection,
+    *,
+    limit: int = 4,
 ) -> int:
-    """Retire queued legacy triggers disproved by current detector invariants."""
+    """Fairly recheck a bounded slice of queued legacy hard triggers."""
 
-    rows = mem.execute(
-        "SELECT incident_id,position_id,crossing_evidence_id,crossing_kind,floor_price "
-        "FROM incidents WHERE kind='hard' AND stage='blind' "
-        "AND status IN ('queued','retry_pending')"
-    ).fetchall()
+    cursor = meta_get(mem, "hard_revalidation_cursor", "")
+    query = (
+        "SELECT incident_id,position_id,"
+        "crossing_evidence_id,crossing_kind,floor_price "
+        "FROM incidents INDEXED BY idx_hard_revalidation_queue "
+        "WHERE kind='hard' AND stage='blind' "
+        "AND status IN ('queued','retry_pending') AND incident_id>? "
+        "ORDER BY incident_id LIMIT ?"
+    )
+    rows = mem.execute(query, (cursor, max(1, int(limit)))).fetchall()
+    if not rows and cursor:
+        cursor = ""
+        rows = mem.execute(query, (cursor, max(1, int(limit)))).fetchall()
+    if rows:
+        meta_set(mem, "hard_revalidation_cursor", str(rows[-1]["incident_id"]))
     retired = 0
     for row in rows:
+        _maintenance_guard()
         position = _position_with_exposure(trades, str(row["position_id"]))
+        _maintenance_guard()
         quote_row = trades.execute(
             "SELECT * FROM execution_feasibility_evidence WHERE evidence_id=?",
             (row["crossing_evidence_id"],),
@@ -2125,13 +2168,20 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
     created: list[str] = []
     with _maintenance_connections(cfg, detector_deadline) as (trades, mem):
         _maintenance_guard()
-        revalidate_blind_hard_incidents(mem, trades)
-        _maintenance_guard()
         _consolidate_settled_quote_incident_backlog(
             mem,
             limit=int(
                 cfg["loop"].get("legacy_incident_consolidation_batch_size", 16)
             ),
+        )
+        # This bounded debt retirement must survive later expensive read-side
+        # maintenance hitting its deadline; it does not alter trading truth.
+        mem.commit()
+        _maintenance_guard()
+        revalidate_blind_hard_incidents(
+            mem,
+            trades,
+            limit=int(cfg["loop"].get("hard_revalidation_batch_size", 4)),
         )
         _maintenance_guard()
         positions = tracked_positions(trades, history_days=history_days)

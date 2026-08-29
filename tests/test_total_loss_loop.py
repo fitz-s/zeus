@@ -628,6 +628,91 @@ def test_settled_no_bid_backlog_index_contract_and_query_plan(cfg: dict) -> None
     )
 
 
+def test_blind_hard_revalidation_is_bounded_and_cursor_fair(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        for index in range(3):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,?,?,?,'no_bid','yes-token','sell_yes',"
+                ".05,?,1,'queued','blind',?)",
+                (
+                    f"hard-{index}",
+                    "hard",
+                    f"position-{index}",
+                    f"quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+        seen: list[str] = []
+        monkeypatch.setattr(
+            loop,
+            "_position_with_exposure",
+            lambda _trades, position_id: seen.append(position_id) or None,
+        )
+        plan = mem.execute(
+            "EXPLAIN QUERY PLAN SELECT incident_id,position_id,crossing_evidence_id,"
+            "crossing_kind,floor_price FROM incidents "
+            "INDEXED BY idx_hard_revalidation_queue "
+            "WHERE kind='hard' AND stage='blind' "
+            "AND status IN ('queued','retry_pending') AND incident_id>? "
+            "ORDER BY incident_id LIMIT ?",
+            ("", 2),
+        ).fetchall()
+        assert any(
+            "USING INDEX idx_hard_revalidation_queue (incident_id>?)" in str(row[3])
+            for row in plan
+        )
+        assert not any("TEMP B-TREE" in str(row[3]) for row in plan)
+        with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen == ["position-0", "position-1"]
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen == ["position-0", "position-1", "position-2"]
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen[-2:] == ["position-0", "position-1"]
+
+
+def test_settled_no_bid_drain_commits_before_later_maintenance_timeout(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('stale-no-bid','hard','p1','quote','no_bid','yes-token','sell_yes',.05,?,"
+            "1,'retry_pending','blind',?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("interrupted: maintenance budget")
+        ),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="maintenance budget"):
+        loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='stale-no-bid'"
+        ).fetchone()[0] == "observing"
+
+
 def test_settlement_identity_survives_projection_and_payload_enrichment(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
