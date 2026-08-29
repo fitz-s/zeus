@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -8482,6 +8482,41 @@ def test_live_trading_process_absent_blocks_running_main_during_deploy_restart(
     assert result.detail == "src.main is still running"
     assert result.evidence["restart_in_progress"] is True
     assert result.evidence["restart_recovery_obligation"] is None
+
+
+def test_live_trading_process_running_requires_exactly_one_main(monkeypatch):
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._live_trading_process_state_check("running")
+
+    assert result.ok is True
+    assert result.name == "live_trading_process_running"
+    monkeypatch.setattr(
+        preflight,
+        "_live_main_processes",
+        lambda: ["123 python -m src.main", "456 python -m src.main"],
+    )
+    assert preflight._live_trading_process_state_check("running").ok is False
+
+
+def test_process_state_only_evaluation_does_not_read_settings(monkeypatch):
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+    monkeypatch.setattr(
+        preflight,
+        "_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("full preflight must not run")),
+    )
+
+    result = preflight.evaluate(
+        expected_live_process_state="absent",
+        process_state_only=True,
+    )
+
+    assert result["ok"] is True
+    assert result["expected_live_process_state"] == "absent"
+    assert [check["name"] for check in result["checks"]] == [
+        "live_trading_process_absent"
+    ]
 
 
 def test_monitor_cadence_restart_evidence_blocks_stale_main_during_deploy_restart(

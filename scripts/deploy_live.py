@@ -139,6 +139,17 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+RESTART_WORLD_MIGRATION_TARGETS = (
+    ("world", "202607_drop_world_collateral_unsettled_ghost"),
+    ("world_active_redecision_projection", "202608_edli_active_redecision_projection"),
+    (
+        "world_active_redecision_backfill_notnull",
+        "202608_edli_active_redecision_projection_receipt_notnull",
+    ),
+)
+RESTART_TRADE_MIGRATION_TARGETS = (
+    ("trade", "202607_cas_reservation_ledger"),
+)
 LIVE_RESTART_LOCK_FILENAME = "deploy-live-restart.lock"
 LIVE_TRADING_PREREQUISITE_LABELS = tuple(
     DAEMONS[key]
@@ -2497,7 +2508,12 @@ def _gate(allow_dirty: bool, allow_unpushed: bool = False) -> tuple[bool, list[s
     return True, blockers
 
 
-def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
+def _run_restart_preflight_if_needed(
+    labels: list[str],
+    *,
+    expected_live_process_state: str = "absent",
+    process_state_only: bool = False,
+) -> tuple[bool, str]:
     """Run the live-money preflight before booting the trading daemon.
 
     ``--allow-dirty`` is only a git-surface override. It must not bypass current
@@ -2510,7 +2526,15 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    cmd = [py, "scripts/check_live_restart_preflight.py", "--json"]
+    cmd = [
+        py,
+        "scripts/check_live_restart_preflight.py",
+        "--json",
+        "--expected-live-process-state",
+        expected_live_process_state,
+    ]
+    if process_state_only:
+        cmd.append("--process-state-only")
     env = _live_trading_subprocess_env()
     env["ZEUS_LIVE_RESTART_IN_PROGRESS"] = "1"
     try:
@@ -2532,6 +2556,13 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
             return False, f"live restart preflight returned invalid JSON: {exc}"
         if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
             return False, "live restart preflight returned invalid attestation shape"
+        reported_process_state = payload.get("expected_live_process_state")
+        if reported_process_state is None and expected_live_process_state == "absent":
+            reported_process_state = "absent"
+        if reported_process_state != expected_live_process_state:
+            return False, "live restart preflight process-state attestation mismatch"
+        if process_state_only:
+            return True, f"live process-state witness passed: {expected_live_process_state}"
         price_band = next(
             (
                 check
@@ -2554,6 +2585,70 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
         return True, "live restart preflight passed"
     tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+
+
+def _restart_runtime_db_paths() -> tuple[Path, Path]:
+    """Resolve the exact world/trade DBs used by the loaded LaunchAgent."""
+
+    env = _live_trading_subprocess_env()
+    live_repo = Path(_require_live_repo()).expanduser().resolve()
+
+    def resolve_from_live(value: str | os.PathLike[str]) -> Path:
+        path = Path(value).expanduser()
+        return (path if path.is_absolute() else live_repo / path).resolve()
+
+    state_override = env.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR") or env.get(
+        "ZEUS_STATE_DIR"
+    )
+    if state_override:
+        state_dir = resolve_from_live(state_override)
+    elif env.get("ZEUS_PRIMARY_ROOT"):
+        state_dir = resolve_from_live(env["ZEUS_PRIMARY_ROOT"]) / "state"
+    else:
+        state_dir = live_repo / "state"
+    world_override = env.get("ZEUS_WORLD_DB")
+    trade_override = env.get("ZEUS_TRADE_DB")
+    world_db = (
+        resolve_from_live(world_override)
+        if world_override
+        else (state_dir / "zeus-world.db").resolve()
+    )
+    trade_db = (
+        resolve_from_live(trade_override)
+        if trade_override
+        else (state_dir / "zeus_trades.db").resolve()
+    )
+    return world_db, trade_db
+
+
+def _restart_migration_targets_current() -> tuple[bool, str]:
+    """Prove process-absent migrations are already recorded in live DBs."""
+
+    try:
+        world_db, trade_db = _restart_runtime_db_paths()
+        evidence = []
+        for db_path, targets in (
+            (world_db, RESTART_WORLD_MIGRATION_TARGETS),
+            (trade_db, RESTART_TRADE_MIGRATION_TARGETS),
+        ):
+            if not db_path.is_file():
+                return False, f"restart migration DB missing: {db_path}"
+            uri = f"file:{db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                applied = {
+                    str(row[0])
+                    for row in conn.execute("SELECT name FROM _migrations_applied")
+                }
+            finally:
+                conn.close()
+            missing = [target for _key, target in targets if target not in applied]
+            if missing:
+                return False, f"restart migrations pending in {db_path}: {missing}"
+            evidence.append(f"{db_path}:{len(targets)}")
+        return True, "restart migration ledgers current: " + ", ".join(evidence)
+    except Exception as exc:  # noqa: BLE001 -- fast path must fail closed.
+        return False, f"restart migration ledger proof failed: {type(exc).__name__}: {exc}"
 
 
 def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
@@ -2654,6 +2749,8 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         import time
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
+            RESTART_TRADE_MIGRATION_TARGETS,
+            RESTART_WORLD_MIGRATION_TARGETS,
             _assert_restart_trade_schema_ready,
             _ensure_restart_world_schemas,
         )
@@ -2671,21 +2768,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         world_conn = get_world_connection(write_class='live')
         try:
             _ensure_restart_world_schemas(world_conn)
-            applied['world'] = apply_migrations(
-                world_conn,
-                target='202607_drop_world_collateral_unsettled_ghost',
-                db_identity='world',
-            )
-            applied['world_active_redecision_projection'] = apply_migrations(
-                world_conn,
-                target='202608_edli_active_redecision_projection',
-                db_identity='world',
-            )
-            applied['world_active_redecision_backfill_notnull'] = apply_migrations(
-                world_conn,
-                target='202608_edli_active_redecision_projection_receipt_notnull',
-                db_identity='world',
-            )
+            for result_key, target in RESTART_WORLD_MIGRATION_TARGETS:
+                applied[result_key] = apply_migrations(
+                    world_conn,
+                    target=target,
+                    db_identity='world',
+                )
             world_conn.commit()
         finally:
             world_conn.close()
@@ -2727,11 +2815,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
 
         trade_conn = get_trade_connection(write_class='live')
         try:
-            applied['trade'] = apply_migrations(
-                trade_conn,
-                target='202607_cas_reservation_ledger',
-                db_identity='trade',
-            )
+            for result_key, target in RESTART_TRADE_MIGRATION_TARGETS:
+                applied[result_key] = apply_migrations(
+                    trade_conn,
+                    target=target,
+                    db_identity='trade',
+                )
             _assert_restart_trade_schema_ready(trade_conn)
         finally:
             trade_conn.close()
@@ -3190,6 +3279,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         label for label in non_live_labels if label not in post_live_labels
     ]
     prerequisite_launch_started_at = datetime.now(timezone.utc)
+    continuous_monitor_cutover = False
     for label in preflight_prerequisite_labels:
         ok, detail = _launch_or_restart_label(label)
         if ok:
@@ -3221,6 +3311,23 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             return 1
         print(prerequisite_detail)
 
+        if live_was_loaded_before:
+            migrations_current, migration_detail = _restart_migration_targets_current()
+            print(migration_detail)
+            if migrations_current:
+                warm_ok, warm_detail = _run_restart_preflight_if_needed(
+                    labels,
+                    expected_live_process_state="running",
+                )
+                if not warm_ok:
+                    print(
+                        "REFUSING to stop live-trading — warm restart preflight is not green:"
+                    )
+                    print(warm_detail)
+                    return 1
+                print(warm_detail)
+                continuous_monitor_cutover = True
+
         # Keep the currently loaded order daemon monitoring held capital while
         # new-code prerequisites become ready.  Stopping it before sidecar
         # reload/identity waits created multi-minute MONITOR_REFRESHED blackouts
@@ -3238,6 +3345,20 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 print(handoff_detail)
                 return 1
             print(f"pre-stop {handoff_detail}")
+            if continuous_monitor_cutover:
+                running_ok, running_detail = _run_restart_preflight_if_needed(
+                    labels,
+                    expected_live_process_state="running",
+                    process_state_only=True,
+                )
+                print(running_detail)
+                if not running_ok:
+                    print(
+                        "REFUSING to stop live-trading — exact one-main witness "
+                        "failed after the fresh capital handoff",
+                        file=sys.stderr,
+                    )
+                    return 1
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
@@ -3251,8 +3372,27 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             else:
                 print(detail, file=sys.stderr)
                 return 1
+        if continuous_monitor_cutover:
+            absent_ok, absent_detail = _run_restart_preflight_if_needed(
+                labels,
+                expected_live_process_state="absent",
+                process_state_only=True,
+            )
+            print(absent_detail)
+            if not absent_ok:
+                print(
+                    "REFUSING to bootstrap live-trading — exact zero-main witness failed; "
+                    "entry pause remains armed and no second main will be launched",
+                    file=sys.stderr,
+                )
+                return 1
 
-    if includes_live_trading:
+    if continuous_monitor_cutover:
+        recovery_ok, recovery_detail = (
+            True,
+            "live restart recovery skipped: migration ledgers and warm preflight current",
+        )
+    elif includes_live_trading:
         recovery_ok, recovery_detail = (
             _run_restart_recovery_with_quiesced_prerequisites(
                 labels,
@@ -3279,7 +3419,13 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         return 1
     print(recovery_detail)
 
-    preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
+    if continuous_monitor_cutover:
+        preflight_ok, preflight_detail = (
+            True,
+            "live restart preflight satisfied by warm full attestation and zero-main witness",
+        )
+    else:
+        preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)

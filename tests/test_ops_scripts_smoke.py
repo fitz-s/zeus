@@ -2475,10 +2475,16 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "restart recovery passed" in detail
     assert calls
     assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
-    assert "applied['world'] = apply_migrations(" in calls[0][2]
+    assert "RESTART_WORLD_MIGRATION_TARGETS" in calls[0][2]
+    assert "RESTART_TRADE_MIGRATION_TARGETS" in calls[0][2]
+    assert "for result_key, target in RESTART_WORLD_MIGRATION_TARGETS" in calls[0][2]
+    assert "for result_key, target in RESTART_TRADE_MIGRATION_TARGETS" in calls[0][2]
     assert "world_ghost_cleanup" not in calls[0][2]
-    assert "target='202608_edli_active_redecision_projection'" in calls[0][2]
-    assert "target='202608_edli_active_redecision_projection_receipt_notnull'" in calls[0][2]
+    assert [target for _key, target in dl.RESTART_WORLD_MIGRATION_TARGETS] == [
+        "202607_drop_world_collateral_unsettled_ghost",
+        "202608_edli_active_redecision_projection",
+        "202608_edli_active_redecision_projection_receipt_notnull",
+    ]
     assert "get_world_connection_read_only" in calls[0][2]
     assert "PRAGMA table_info(opportunity_event_processing_type_backfill)" in calls[0][2]
     assert "assert_active_projection_ready" in calls[0][2]
@@ -2488,7 +2494,9 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
     assert "_assert_restart_trade_schema_ready(trade_conn)" in calls[0][2]
     assert "init_schema_trade_only" not in calls[0][2]
-    assert calls[0][2].count("target='202607_cas_reservation_ledger'") == 1
+    assert dl.RESTART_TRADE_MIGRATION_TARGETS == (
+        ("trade", "202607_cas_reservation_ledger"),
+    )
     assert calls[0][2].count("_assert_restart_trade_schema_ready(trade_conn)") == 1
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
@@ -2506,18 +2514,16 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "bridge_deadline_monotonic = time.monotonic() + 15.0" in calls[0][2]
     assert "summary['edli_trade_fact_bridge_deferred'] = True" in calls[0][2]
     recovery_script = calls[0][2]
-    assert recovery_script.index("target='202608_edli_active_redecision_projection'") < (
-        recovery_script.index(
-            "target='202608_edli_active_redecision_projection_receipt_notnull'"
-        )
+    assert recovery_script.index(
+        "for result_key, target in RESTART_WORLD_MIGRATION_TARGETS"
     ) < recovery_script.index("world_conn.commit()") < recovery_script.index(
         "PRAGMA table_info(opportunity_event_processing_type_backfill)"
     )
     assert recovery_script.index(
-        "target='202607_cas_reservation_ledger'"
-    ) < recovery_script.index("_assert_restart_trade_schema_ready(trade_conn)") < recovery_script.index(
-        "reconcile_unresolved_commands"
-    )
+        "for result_key, target in RESTART_TRADE_MIGRATION_TARGETS"
+    ) < recovery_script.index(
+        "_assert_restart_trade_schema_ready(trade_conn)"
+    ) < recovery_script.index("reconcile_unresolved_commands")
     import inspect
 
     assert "init_schema_trade_only" not in inspect.getsource(
@@ -5974,6 +5980,225 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     ]
     assert pause_expected_shas == ["c" * 40]
     assert "live restart preflight passed" in capsys.readouterr().out
+
+
+def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
+    dl = _load("deploy_live_continuous_monitor_cutover", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "continuous handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (True, "pause armed"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (True, "migrations current"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **_kwargs: (
+            calls.append(("prerequisite", tuple(labels))) or (True, "ready")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_loaded_live_restart_handoff",
+        lambda labels: (calls.append(("handoff", tuple(labels))) or (True, "fresh")),
+    )
+
+    def preflight(labels, **kwargs):
+        calls.append(
+            (
+                "preflight",
+                kwargs.get("expected_live_process_state", "absent"),
+                kwargs.get("process_state_only", False),
+            )
+        )
+        return True, "preflight passed"
+
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", preflight)
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_recovery_with_quiesced_prerequisites",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current migration fast path must skip quiesced recovery")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, "launched")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, "stopped")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **_kwargs: (calls.append(("runtime",)) or (True, "fresh")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (calls.append(("monitor",)) or (True, "monitor")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_edli_queue_progress",
+        lambda **_kwargs: (calls.append(("queue",)) or (True, "queue")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_resume_entries_after_verified_live_restart_if_needed",
+        lambda _labels: (calls.append(("resume",)) or (True, "resumed")),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 0
+
+    warm = calls.index(("preflight", "running", False))
+    handoff = next(i for i, call in enumerate(calls) if call[0] == "handoff")
+    one_main = calls.index(("preflight", "running", True))
+    stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
+    zero_main = calls.index(("preflight", "absent", True))
+    launch_main = calls.index(("launch", dl.LIVE_TRADING_LABEL))
+    assert warm < handoff < one_main < stop_main < zero_main < launch_main
+
+
+def test_deploy_live_failed_zero_main_witness_never_bootstraps_second_main(
+    monkeypatch,
+):
+    dl = _load("deploy_live_zero_main_fail_closed", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (True, "pause armed"),
+    )
+    monkeypatch.setattr(dl, "_restart_migration_targets_current", lambda: (True, "current"))
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda *_args, **_kwargs: (True, "ready"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_loaded_live_restart_handoff",
+        lambda *_args, **_kwargs: (True, "fresh"),
+    )
+
+    def preflight(_labels, **kwargs):
+        state = kwargs.get("expected_live_process_state", "absent")
+        calls.append(("preflight", state))
+        return (state == "running", "witness")
+
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", preflight)
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, "launched")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, "stopped")),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
+    assert ("preflight", "absent") in calls[stop_main + 1 :]
+    assert ("launch", dl.LIVE_TRADING_LABEL) not in calls
+
+
+def test_restart_migration_ledger_uses_primary_root_not_checkout_state(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_migration_primary_root", "deploy_live.py")
+    live_repo = tmp_path / "checkout"
+    primary_root = tmp_path / "runtime"
+    (live_repo / "state").mkdir(parents=True)
+    (primary_root / "state").mkdir(parents=True)
+    monkeypatch.setattr(dl, "LIVE_REPO", str(live_repo))
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {"ZEUS_PRIMARY_ROOT": str(primary_root)},
+    )
+
+    for filename, targets in (
+        ("zeus-world.db", dl.RESTART_WORLD_MIGRATION_TARGETS),
+        ("zeus_trades.db", dl.RESTART_TRADE_MIGRATION_TARGETS),
+    ):
+        conn = sqlite3.connect(primary_root / "state" / filename)
+        conn.execute(
+            "CREATE TABLE _migrations_applied (name TEXT PRIMARY KEY, applied_at TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO _migrations_applied VALUES (?, 'now')",
+            [(target,) for _key, target in targets],
+        )
+        conn.commit()
+        conn.close()
+
+    ok, detail = dl._restart_migration_targets_current()
+
+    assert ok is True
+    assert str(primary_root / "state") in detail
+
+
+def test_restart_runtime_relative_overrides_resolve_from_live_repo(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_relative_runtime_paths", "deploy_live.py")
+    live_repo = tmp_path / "checkout"
+    live_repo.mkdir()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(live_repo))
+
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {"ZEUS_STATE_DIR": "runtime-state"},
+    )
+    assert dl._restart_runtime_db_paths() == (
+        (live_repo / "runtime-state" / "zeus-world.db").resolve(),
+        (live_repo / "runtime-state" / "zeus_trades.db").resolve(),
+    )
+
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {
+            "ZEUS_WORLD_DB": "db/world.sqlite",
+            "ZEUS_TRADE_DB": "db/trade.sqlite",
+        },
+    )
+    assert dl._restart_runtime_db_paths() == (
+        (live_repo / "db" / "world.sqlite").resolve(),
+        (live_repo / "db" / "trade.sqlite").resolve(),
+    )
 
 
 def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
