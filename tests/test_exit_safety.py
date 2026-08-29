@@ -7451,6 +7451,37 @@ def test_exit_snapshot_helpers_fail_closed_on_malformed_decimal(conn, monkeypatc
     )
 
 
+def test_latest_min_order_rejects_expired_head_without_scanning_older_fresh_snapshot(conn):
+    """Freshness never changes which immutable snapshot is the latest fact."""
+    from src.execution import exit_lifecycle
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-min-order-older-fresh",
+        captured_at=_NOW - timedelta(minutes=2),
+        freshness_deadline=_NOW + timedelta(minutes=10),
+        min_order_size="7",
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-min-order-newer-expired",
+        captured_at=_NOW - timedelta(minutes=1),
+        freshness_deadline=_NOW - timedelta(seconds=30),
+        min_order_size="5",
+    )
+
+    assert (
+        exit_lifecycle._latest_fresh_snapshot_min_order_for_token(
+            YES_TOKEN,
+            conn=conn,
+            now=_NOW,
+        )
+        is None
+    )
+
+
 def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position

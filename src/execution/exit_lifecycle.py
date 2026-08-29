@@ -4215,6 +4215,7 @@ def _latest_fresh_snapshot_min_order_for_token(
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Decimal | None:
     """Return current min size from one fresh, non-invalidated token snapshot.
 
@@ -4230,40 +4231,56 @@ def _latest_fresh_snapshot_min_order_for_token(
     clean_token_id = str(token_id or "").strip()
     if not clean_token_id:
         return None
-    checked_at = (now or _utcnow()).astimezone(timezone.utc)
-    saved = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            """
-            SELECT snapshot_id
-              FROM executable_market_snapshots
-             WHERE selected_outcome_token_id = ?
-               AND freshness_deadline IS NOT NULL
-               AND datetime(freshness_deadline) >= datetime(?)
-             ORDER BY captured_at DESC, snapshot_id DESC
-             LIMIT 1
-            """,
-            (clean_token_id, checked_at.isoformat()),
-        ).fetchone()
-    except sqlite3.Error:
+    checked_at_raw = now or _utcnow()
+    if checked_at_raw.tzinfo is None:
         return None
-    finally:
-        conn.row_factory = saved
-    if row is None:
-        return None
+    checked_at = checked_at_raw.astimezone(timezone.utc)
+    deadline = (
+        _held_monitor_preparation_deadline(conn, deadline_monotonic)
+        if deadline_monotonic is not None
+        else nullcontext(lambda: None)
+    )
     try:
-        from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+        with deadline as ensure_live:
+            ensure_live()
+            saved = conn.row_factory
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    """
+                    SELECT snapshot_id
+                      FROM executable_market_snapshot_latest
+                     WHERE selected_outcome_token_id = ?
+                     ORDER BY captured_at DESC, snapshot_id DESC
+                     LIMIT 1
+                    """,
+                    (clean_token_id,),
+                ).fetchone()
+            finally:
+                conn.row_factory = saved
+            ensure_live()
+            if row is None:
+                return None
 
-        snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
-        if (
-            snapshot is None
-            or snapshot.selected_outcome_token_id != clean_token_id
-            or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
-        ):
-            return None
-        return _positive_decimal(snapshot.min_order_size)
-    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+            from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+            snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
+            ensure_live()
+            freshness_deadline = getattr(snapshot, "freshness_deadline", None)
+            if isinstance(freshness_deadline, str):
+                freshness_deadline = _parse_iso(freshness_deadline)
+            if (
+                snapshot is None
+                or snapshot.selected_outcome_token_id != clean_token_id
+                or freshness_deadline is None
+                or freshness_deadline.tzinfo is None
+                or freshness_deadline.astimezone(timezone.utc) < checked_at
+                or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
+            ):
+                return None
+            ensure_live()
+            return _positive_decimal(snapshot.min_order_size)
+    except (sqlite3.Error, TimeoutError, InvalidOperation, TypeError, ValueError):
         return None
 
 
@@ -4272,6 +4289,7 @@ def _latest_fresh_snapshot_min_order(
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Decimal | None:
     """min_order_size of the current executable snapshot for the exit token."""
 
@@ -4279,6 +4297,7 @@ def _latest_fresh_snapshot_min_order(
         _exit_token_id(position),
         conn=conn,
         now=now,
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -4298,6 +4317,7 @@ def _is_non_executable_dust_hold(
     *,
     conn: sqlite3.Connection | None = None,
     current_min_order_size: object = None,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """True for dust/min-size holds that redecision cannot make executable."""
 
@@ -4311,7 +4331,11 @@ def _is_non_executable_dust_hold(
     # Historical reason/error text is never current venue authority.
     fresh_min = _positive_decimal(current_min_order_size)
     if fresh_min is None:
-        fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
+        fresh_min = _latest_fresh_snapshot_min_order(
+            position,
+            conn=conn,
+            deadline_monotonic=deadline_monotonic,
+        )
     if fresh_min is None:
         return False
     shares = _positive_decimal(getattr(position, "effective_shares", None))
@@ -4466,6 +4490,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     conn: sqlite3.Connection | None = None,
     current_min_order_size: object = None,
     legacy_favorable_bid_authorized: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Release a still-held exhausted exit attempt back to live redecision.
 
@@ -4493,6 +4518,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
         position,
         conn=conn,
         current_min_order_size=current_min_order_size,
+        deadline_monotonic=deadline_monotonic,
     ):
         return False
     chain_shares = _positive_decimal(getattr(position, "chain_shares", None))

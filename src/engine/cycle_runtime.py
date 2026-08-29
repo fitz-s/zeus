@@ -8450,13 +8450,21 @@ def execute_monitoring_phase(
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
                     )
-                elif _is_non_executable_dust_hold(pos, conn=conn):
+                elif _is_non_executable_dust_hold(
+                    pos,
+                    conn=conn,
+                    deadline_monotonic=position_deadline,
+                ):
                     pending_exit_monitor_only = True
                     monitoring_non_executable_dust = True
                     summary["monitor_pending_exit_dust_redecisions"] = (
                         summary.get("monitor_pending_exit_dust_redecisions", 0) + 1
                     )
-                elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
+                elif release_backoff_exhausted_pending_exit_for_redecision(
+                    pos,
+                    conn=conn,
+                    deadline_monotonic=position_deadline,
+                ):
                     portfolio_dirty = True
                     summary["monitor_released_backoff_exhausted_for_redecision"] = (
                         summary.get("monitor_released_backoff_exhausted_for_redecision", 0) + 1
@@ -9747,6 +9755,7 @@ def execute_monitoring_phase(
                             if hasattr(deps, "_utcnow")
                             else datetime.now(timezone.utc)
                         ),
+                        deadline_monotonic=position_deadline,
                     )
                 below_share_precision = held_shares > 0 and sellable_shares <= 0
                 below_min_order = (
