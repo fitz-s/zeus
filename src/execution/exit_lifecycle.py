@@ -13521,33 +13521,15 @@ def _full_book_monitor_completed_canonical_coverage(
         for value in summary.get("held_monitor_discharged_position_ids", ()) or ()
         if str(value).strip()
     }
-    no_action_authority_ids = {
-        str(value).strip()
-        for value in summary.get(
-            "held_monitor_no_action_authority_position_ids",
-            (),
-        )
-        or ()
-        if str(value).strip()
-    }
-    non_executable_dust_ids = {
-        str(value).strip()
-        for value in summary.get(
-            "held_monitor_non_executable_dust_position_ids",
-            (),
-        )
-        or ()
-        if str(value).strip()
-    }
-    # A current fresh venue minimum can prove one exact residual impossible to
-    # express as a SELL.  That position keeps its independent health alarm and
-    # recurring monitor, but it cannot make unrelated families inherit an
-    # unresettable full-book debt.  SCOPE: canonical no-action rows that are
-    # also current-proven dust. DRAIN: the normal recurring monitor and
-    # settlement continue for that position. RESET: a changed current minimum
-    # omits the dust identity and restores ordinary action-authority debt.
-    unresolved_no_action_ids = no_action_authority_ids - non_executable_dust_ids
-    completed_ids = (canonical_ids - unresolved_no_action_ids) | discharged_ids
+    # Canonical coverage means that every admitted position produced a durable
+    # current-cycle redecision, including an explicit DATA_DEGRADED/no-action
+    # verdict.  Action authority is a separate fact: missing fresh probability
+    # must keep its source-health and entry gates closed, but it must not turn a
+    # completed full-book scan into process-global cadence debt.  Otherwise one
+    # degraded family drives the one-second recovery worker indefinitely and
+    # delays fresh q/book decisions for every healthy position.  The ordinary
+    # recurring pass re-evaluates the degraded position when authority returns.
+    completed_ids = canonical_ids | discharged_ids
     return (
         int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
         and candidate_ids.issubset(completed_ids)

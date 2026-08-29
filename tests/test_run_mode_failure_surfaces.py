@@ -11487,7 +11487,7 @@ def test_full_book_monitor_success_requires_complete_canonical_coverage() -> Non
         },
         open_position_count=4,
     )
-    assert not _full_book_monitor_completed_canonical_coverage(
+    assert _full_book_monitor_completed_canonical_coverage(
         {
             "monitors": 4,
             "held_monitor_candidates": 4,
