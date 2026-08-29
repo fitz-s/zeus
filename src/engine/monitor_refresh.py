@@ -316,12 +316,16 @@ def _day0_materialization_visibility_retry_deadline(
 def _day0_primary_snapshot_read_deadline(
     deadline_monotonic: float | None,
 ) -> float:
-    """Bound the primary authority read without borrowing the retry budget."""
+    """Bound the primary read while reserving the visibility-retry budget."""
     primary_deadline = (
         time.monotonic() + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
     )
     if deadline_monotonic is not None:
-        primary_deadline = min(primary_deadline, deadline_monotonic)
+        primary_deadline = min(
+            primary_deadline,
+            float(deadline_monotonic)
+            - _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS,
+        )
     return primary_deadline
 
 
@@ -6090,15 +6094,14 @@ def _refresh_current_global_day0_probability(
             effective_deadline = _day0_materialization_visibility_retry_deadline(
                 deadline_monotonic
             )
-            while time.monotonic() < effective_deadline:
-                remaining = effective_deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+            remaining = effective_deadline - time.monotonic()
+            if remaining > 0:
                 time.sleep(
                     min(_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS, remaining)
                 )
-                if time.monotonic() >= effective_deadline:
-                    break
+            if time.monotonic() < effective_deadline:
+                # The builder owns its forecasts+world read-only pair.  Calling it
+                # again deliberately abandons the failed SQLite snapshot.
                 try:
                     snapshot = _build_current_global_day0_family_snapshot(
                         position,
@@ -6110,8 +6113,6 @@ def _refresh_current_global_day0_probability(
                     )
                 except Exception as retry_exc:
                     exc = retry_exc
-                    if not _is_day0_materialization_visibility_gap(exc):
-                        break
                 else:
                     _cnt_inc(
                         "monitor_day0_materialization_visibility_retry_recovered_total"

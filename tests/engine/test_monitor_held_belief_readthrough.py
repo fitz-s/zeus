@@ -983,8 +983,8 @@ def test_readthrough_sqlite_work_is_interrupted_at_monitor_deadline(
     assert time.monotonic() - started < 1.0
 
 
-def test_day0_visibility_retry_recovers_raw_hwm_after_250ms(monkeypatch):
-    """A matching posterior published within the short budget restores fresh q."""
+def test_day0_visibility_retry_recovers_new_snapshot_after_one_poll(monkeypatch):
+    """One fresh builder retry recovers a successor committed within 100ms."""
     import src.engine.monitor_refresh as mr
 
     clock = [10.0]
@@ -996,7 +996,7 @@ def test_day0_visibility_retry_recovers_raw_hwm_after_250ms(monkeypatch):
         nonlocal attempts
         attempts += 1
         build_deadlines.append(deadline_monotonic)
-        if clock[0] < 10.25:
+        if clock[0] < 10.05:
             raise ValueError("GLOBAL_CURRENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM")
         return snapshot
 
@@ -1023,13 +1023,13 @@ def test_day0_visibility_retry_recovers_raw_hwm_after_250ms(monkeypatch):
     assert held_prob == pytest.approx(0.30)
     assert refresh_pos is not None
     assert is_fresh is True
-    assert attempts == 4
-    assert build_deadlines == pytest.approx([11.0, 10.35, 10.35, 10.35])
-    assert clock[0] == pytest.approx(10.3)
+    assert attempts == 2
+    assert build_deadlines == pytest.approx([10.65, 10.35])
+    assert clock[0] == pytest.approx(10.1)
 
 
-def test_day0_primary_snapshot_read_does_not_use_visibility_retry_budget(monkeypatch):
-    """A normal primary authority read may outlive the publish-retry window."""
+def test_day0_primary_snapshot_read_reserves_visibility_retry_budget(monkeypatch):
+    """Primary authority read leaves the full retry window below outer expiry."""
     import src.engine.monitor_refresh as mr
 
     clock = [10.0]
@@ -1055,12 +1055,34 @@ def test_day0_primary_snapshot_read_does_not_use_visibility_retry_budget(monkeyp
     held_prob, _refresh_pos, is_fresh = mr._refresh_current_global_day0_probability(
         _pos(),
         trade_conn=object(),
-        deadline_monotonic=20.0,
+        deadline_monotonic=15.1,
     )
 
     assert held_prob == pytest.approx(0.30)
     assert is_fresh is True
-    assert build_deadlines == pytest.approx([15.0])
+    assert build_deadlines == pytest.approx([14.75])
+
+
+def test_day0_visibility_retry_zero_remaining_budget_fails_closed(monkeypatch):
+    """No outer budget means neither a snapshot read nor a retry may borrow time."""
+    import src.engine.monitor_refresh as mr
+
+    attempts = []
+
+    def build(*_args, deadline_monotonic, **_kwargs):
+        attempts.append(deadline_monotonic)
+        raise mr._Day0SnapshotReadDeadlineExceeded("primary read expired")
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_build_current_global_day0_family_snapshot", build)
+    monkeypatch.setattr(mr.time, "monotonic", lambda: 10.0)
+
+    with pytest.raises(mr._Day0SnapshotReadDeadlineExceeded):
+        mr._refresh_current_global_day0_probability(
+            _pos(), trade_conn=object(), deadline_monotonic=10.0
+        )
+
+    assert attempts == [pytest.approx(9.65)]
 
 
 def _day0_event_connection() -> sqlite3.Connection:
@@ -2433,9 +2455,9 @@ def test_day0_visibility_retry_fails_closed_when_event_never_publishes(monkeypat
             deadline_monotonic=95.0,
         )
 
-    assert attempts == 4
+    assert attempts == 2
     assert clock[0] == pytest.approx(
-        20.0 + mr._DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS
+        20.0 + mr._DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS
     )
 
 
