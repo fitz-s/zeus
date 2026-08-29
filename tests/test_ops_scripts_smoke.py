@@ -366,6 +366,99 @@ def test_restart_preflight_terminal_fak_debt_missing_surface_fails_closed(
     conn.close()
 
 
+def test_restart_preflight_skips_entry_repair_scan_for_aligned_open_orders():
+    preflight = _load(
+        "preflight_aligned_entry_repair_scan",
+        "check_live_restart_preflight.py",
+    )
+
+    assert preflight._resting_entry_projection_repair_needed(
+        [
+            {"intent_kind": "ENTRY", "position_phase": "active"},
+            {"intent_kind": "EXIT", "position_phase": "pending_exit"},
+        ]
+    ) is False
+    assert preflight._resting_entry_projection_repair_needed(
+        [{"intent_kind": "ENTRY", "position_phase": None}]
+    ) is True
+
+
+def test_restart_preflight_exit_retry_scan_is_scoped_to_pending_positions(
+    monkeypatch,
+):
+    preflight = _load(
+        "preflight_pending_exit_retry_scope",
+        "check_live_restart_preflight.py",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            exit_retry_count INTEGER,
+            next_exit_retry_at TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            venue_status TEXT,
+            occurred_at TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'pos-command', 'pending_exit', 2, '2026-08-29T17:00:00+00:00'
+        );
+        INSERT INTO position_current VALUES (
+            'pos-event', 'pending_exit', 3, '2026-08-29T17:05:00+00:00'
+        );
+        INSERT INTO position_current VALUES (
+            'historical', 'settled', 9, '2026-08-29T17:10:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+            'cmd-rejected', 'pos-command', 'EXIT', 'REJECTED', '',
+            '2026-08-29T16:50:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+            'cmd-historical', 'historical', 'EXIT', 'REJECTED', '',
+            '2026-08-29T16:55:00+00:00'
+        );
+        INSERT INTO position_events VALUES (
+            'evt-rejected', 'pos-event', 1, 'EXIT_ORDER_REJECTED',
+            'backoff_exhausted', '2026-08-29T16:51:00+00:00'
+        );
+        INSERT INTO position_events VALUES (
+            'evt-historical', 'historical', 99, 'EXIT_ORDER_REJECTED',
+            'backoff_exhausted', '2026-08-29T16:56:00+00:00'
+        );
+        """
+    )
+
+    @contextlib.contextmanager
+    def _connected():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _connected)
+    result = preflight._exit_retry_resumable_by_position()
+
+    assert set(result) == {"pos-command", "pos-event"}
+    assert result["pos-command"]["command_id"] == "cmd-rejected"
+    assert result["pos-event"]["restart_resolution"] == (
+        "global_redecision_pre_submit_resume"
+    )
+    conn.close()
+
+
 def test_zeus_status_failsoft_on_missing_db_file(tmp_path, capsys):
     """A nonexistent DB path -> ERR for that section, others still render."""
     zs = _load("zeus_status_smoke2", "zeus_status.py")
