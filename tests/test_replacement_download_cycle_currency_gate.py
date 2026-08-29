@@ -1281,8 +1281,9 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     output_dir = tmp_path / "raw"
     raw_dir = output_dir / AVAILABLE_CYCLE.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True)
+    sibling_target_date = "2026-06-09"
     sibling_path = raw_dir / (
-        f"openmeteo_Dallas_2026-06-10_{sibling_metric}_20260609T000000Z.json"
+        f"openmeteo_Dallas_{sibling_target_date}_{sibling_metric}_20260609T000000Z.json"
     )
     sibling_path.write_text(json.dumps(_anchor_payload()) + "\n")
     captured_at = "2026-06-09T13:59:45+00:00"
@@ -1318,7 +1319,7 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
             json.dumps(
                 {
                     "city": "Dallas",
-                    "target_date": "2026-06-10",
+                    "target_date": sibling_target_date,
                     "metric": sibling_metric,
                     "openmeteo_endpoint": "standard_api_meta_stamped",
                     "run_authority": "provider_meta_declared",
@@ -1352,7 +1353,8 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     low = conn.execute(
         "SELECT data_version, source_cycle_time, artifact_path, sha256, "
         "json_extract(artifact_metadata_json, '$.metric'), "
-        "json_extract(artifact_metadata_json, '$.raw_metric_sibling_reuse') "
+        "json_extract(artifact_metadata_json, '$.raw_metric_sibling_reuse'), "
+        "json_extract(artifact_metadata_json, '$.raw_target_date_sibling_reuse') "
         "FROM raw_forecast_artifacts WHERE data_version = ?",
         (wanted_data_version,),
     ).fetchone()
@@ -1364,7 +1366,7 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
         f"_{wanted_metric}_20260609T000000Z.json"
     )
     assert low[3] == hashlib.sha256(Path(low[2]).read_bytes()).hexdigest()
-    assert low[4:] == (wanted_metric, sibling_metric)
+    assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
 
 
 def test_canonical_reuse_refuses_and_repairs_semantically_wrong_precision_sidecar(

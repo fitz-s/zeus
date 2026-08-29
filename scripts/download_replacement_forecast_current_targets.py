@@ -676,19 +676,21 @@ def _canonical_sibling_payload_reuse(
     """Reuse one verified hourly payload for the missing HIGH/LOW twin.
 
     Open-Meteo serves one run-pinned hourly ``temperature_2m`` payload per
-    city/date. HIGH and LOW are distinct downstream data versions, but their
-    raw bytes are identical; a provider quota must not strand one metric after
-    its sibling was already captured. SCOPE is one city/date/cycle sibling.
-    DRAIN is the normal manifest loop below. RESET is an exact metric artifact,
+    city/run. HIGH and LOW are distinct downstream data versions, but the same
+    payload can cover several target dates and both metrics; a provider quota
+    must not strand another materializable date/metric after capture. SCOPE is
+    one city/cycle payload plus an explicitly verified target date. DRAIN is
+    the normal manifest loop below. RESET is an exact date/metric artifact,
     which then moves the family into ``_canonical_current_target_reuse``.
     """
 
     if not forecast_db.exists() or not targets:
         return {}
-    wanted = {
-        (str(row.city), str(row.target_date)): str(row.temperature_metric)
-        for row in targets
-    }
+    wanted_by_city: dict[str, list[tuple[str, str]]] = {}
+    for target in targets:
+        wanted_by_city.setdefault(str(target.city), []).append(
+            (str(target.target_date), str(target.temperature_metric))
+        )
     cycle_iso = cycle.astimezone(UTC).isoformat()
     try:
         conn = _connect(forecast_db)
@@ -733,11 +735,7 @@ def _canonical_sibling_payload_reuse(
     for row in rows:
         try:
             metadata = json.loads(str(row["artifact_metadata_json"] or "{}"))
-            key = (
-                str(metadata.get("city") or ""),
-                str(metadata.get("target_date") or ""),
-            )
-            wanted_metric = wanted.get(key)
+            city = str(metadata.get("city") or "")
             sibling_metric = str(metadata.get("metric") or "")
             row_metric = (
                 "high"
@@ -746,13 +744,8 @@ def _canonical_sibling_payload_reuse(
                 if str(row["data_version"]) == OPENMETEO_LOW_DATA_VERSION
                 else ""
             )
-            if (
-                wanted_metric is None
-                or {wanted_metric, sibling_metric} != {"high", "low"}
-                or sibling_metric != row_metric
-                or sibling_metric == wanted_metric
-                or key in reused
-            ):
+            city_targets = wanted_by_city.get(city, ())
+            if not city_targets or sibling_metric != row_metric:
                 continue
             artifact_path = Path(str(row["artifact_path"]))
             raw = artifact_path.read_bytes()
@@ -762,13 +755,8 @@ def _canonical_sibling_payload_reuse(
             ):
                 continue
             payload = json.loads(raw)
-            city_config = cities_by_name.get(key[0])
-            if city_config is None or not _current_target_payload_materializable(
-                payload,
-                city_timezone=city_config.timezone,
-                target_date=key[1],
-                cycle=cycle,
-            ):
+            city_config = cities_by_name.get(city)
+            if city_config is None:
                 continue
             captured_at = datetime.fromisoformat(
                 str(row["captured_at"]).replace("Z", "+00:00")
@@ -779,7 +767,23 @@ def _canonical_sibling_payload_reuse(
                 if name not in excluded_metadata
             }
             provenance["raw_metric_sibling_reuse"] = sibling_metric
-            reused[key] = (payload, provenance, captured_at)
+            provenance["raw_target_date_sibling_reuse"] = str(
+                metadata.get("target_date") or ""
+            )
+            for target_date, wanted_metric in city_targets:
+                key = (city, target_date)
+                if (
+                    key in reused
+                    or {wanted_metric, sibling_metric} != {"high", "low"}
+                    or not _current_target_payload_materializable(
+                        payload,
+                        city_timezone=city_config.timezone,
+                        target_date=target_date,
+                        cycle=cycle,
+                    )
+                ):
+                    continue
+                reused[key] = (payload, dict(provenance), captured_at)
         except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             continue
     return reused
