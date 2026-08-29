@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-29
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -2922,8 +2922,8 @@ def test_monitoring_phase_releases_writer_before_retry_quote_and_exit_io(
     conn.close()
 
 
-def test_refresh_position_reads_adjacent_clob_before_quote_writer(monkeypatch):
-    """Stale-q toxicity I/O must finish before monitor quote persistence starts."""
+def test_refresh_position_finishes_read_only_work_before_quote_writer(monkeypatch):
+    """CLOB I/O and edge reads must finish before monitor quote persistence."""
     from src.engine import monitor_refresh
 
     conn = sqlite3.connect(":memory:")
@@ -2967,7 +2967,7 @@ def test_refresh_position_reads_adjacent_clob_before_quote_writer(monkeypatch):
         return False
 
     def persist_quote(current_conn, _position, _quote):
-        assert events == ["adjacent_clob_io"]
+        assert events == ["adjacent_clob_io", "velocity_read"]
         current_conn.execute(
             "INSERT INTO monitor_quote_probe(stage) VALUES ('quote')"
         )
@@ -2979,15 +2979,17 @@ def test_refresh_position_reads_adjacent_clob_before_quote_writer(monkeypatch):
         adjacent_book,
     )
     monkeypatch.setattr(monitor_refresh, "_persist_monitor_quote", persist_quote)
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_causal_market_velocity_1h",
-        lambda *_args, **_kwargs: 0.0,
-    )
+
+    def market_velocity(*_args, **_kwargs):
+        assert conn.in_transaction is False
+        events.append("velocity_read")
+        return 0.0
+
+    monkeypatch.setattr(monitor_refresh, "_causal_market_velocity_1h", market_velocity)
 
     monitor_refresh.refresh_position(conn, object(), pos)
 
-    assert events == ["adjacent_clob_io", "quote_write"]
+    assert events == ["adjacent_clob_io", "velocity_read", "quote_write"]
     assert conn.in_transaction is True
     conn.rollback()
     conn.close()

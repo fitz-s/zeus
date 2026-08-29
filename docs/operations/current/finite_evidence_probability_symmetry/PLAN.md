@@ -24,6 +24,22 @@ Status: active
   live restart后跨至少两个固定五分钟边界不得再出现collateral writer timeout，同时
   held coverage、decision receipts与venue事实继续推进。
 
+### 2026-08-29 live follow-up — quote writer不得覆盖read-only edge/CI计算
+
+- **实时反例：** 首次修复部署后，`writer-lock`仍连续占用，price-channel在已取得协调gate
+  后报SQLite `database is locked`；SIGUSR1栈同时显示单个held monitor在
+  `_causal_market_velocity_1h`等read-only阶段持续运行。source order证明
+  `refresh_position`在这些read-only计算之前已执行`_persist_monitor_quote`，而caller只在
+  整个函数返回后commit，因此TRADE write transaction仍覆盖后续edge/CI工作。
+- **修复：** 把quote persistence移动到所有CLOB、probability、velocity和CI计算完成之后；
+  caller现有return-boundary立即commit，再进入retry quote或venue I/O。q、price、exit law与
+  canonical payload不变。
+- **SCOPE / DRAIN / RESET：** scope是单一held position的一次quote evidence transaction；
+  drain是函数末端write及caller的显式commit；reset是下一monitor cycle的fresh q/book。
+- **验收：** antibody要求adjacent CLOB和velocity read观察`in_transaction=False`，quote
+  write最后才开启transaction；targeted monitor tests、compile、planning-lock通过，live
+  restart后writer backlog、held coverage与collateral cadence恢复。
+
 ## 2026-08-24 — screen cancel obligation dispatch lease
 
 - **Design:** screen persists only a versioned exact command/order obligation; recovery selects only that marker, claims it with `CANCEL_DISPATCH_STARTED` in one `BEGIN IMMEDIATE` transaction, and performs no DB I/O across venue I/O. The claim carries obligation id, owner boot UUID/pid, generation, attempt id, and expiry. A stale claimant cannot finalize; expired claims require a fresh point-order witness before reclaim. Post-venue ACK/unknown uses a separate bounded reserve.

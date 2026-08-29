@@ -7061,11 +7061,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             held_best_ask=pos.last_monitor_best_ask,
         )
 
-    # Probability refresh may persist a world-owned Day0 observation fact, and
-    # stale-q toxicity may fetch an adjacent CLOB book. Start trade-owned quote
-    # evidence only after both complete so TRADE never spans WORLD or CLOB I/O.
-    _persist_monitor_quote(conn, pos, quote)
-
     divergence_score = _compute_divergence_score(
         current_p_posterior, current_p_market, available=probability_authority_available
     )
@@ -7204,6 +7199,12 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
         ci_lower = current_forward_edge - ci_half_width
         ci_upper = current_forward_edge + ci_half_width
+
+    # Probability refresh may persist a world-owned Day0 observation fact, and
+    # stale-q toxicity may fetch an adjacent CLOB book. The remaining edge/CI
+    # work is read-only but can be expensive, so persist quote evidence only
+    # after all of it; the caller commits immediately on return before venue I/O.
+    _persist_monitor_quote(conn, pos, quote)
 
     return EdgeContext(
         p_raw=np.array([]),
