@@ -1201,6 +1201,11 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         *fresh_failed_restart_positions,
         *fresh_failed_settlement_positions,
     ]
+    settlement_recoverable_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in fresh_failed_settlement_positions
+        if str(item.get("position_id") or "").strip()
+    )
     probability_ids = tuple(
         str(item.get("position_id") or "").strip()
         for item in probability_positions
@@ -1302,6 +1307,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         if (now - parsed.astimezone(timezone.utc)).total_seconds() > (
             LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS
         ):
+            stale_classified_ids.append(position_id)
             stale_fresh_failed_timestamp_ids.append(position_id)
     identity_complete = (
         len(monitored_ids) == open_count
@@ -1336,6 +1342,8 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
         "restart_blocking_position_ids": restart_blocking_ids,
+        "settlement_recoverable_position_count": len(settlement_recoverable_ids),
+        "settlement_recoverable_position_ids": settlement_recoverable_ids,
         "fresh_failed_monitor_no_action_position_count": len(fresh_failed_ids),
         "fresh_failed_monitor_no_action_position_ids": fresh_failed_ids,
         "fresh_failed_monitor_duplicate_position_ids": fresh_failed_duplicate_ids,
@@ -1426,6 +1434,8 @@ def _stuck_monitor_recovery_admission(
         "probability_degraded_position_ids",
         "restart_blocking_position_count",
         "restart_blocking_position_ids",
+        "settlement_recoverable_position_count",
+        "settlement_recoverable_position_ids",
         "stale_classified_position_ids",
         "missing_monitor_timestamp_position_ids",
         "invalid_monitor_timestamp_position_ids",
@@ -1458,7 +1468,15 @@ def _stuck_monitor_recovery_admission(
     probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
     restart_ids = tuple(handoff.get("restart_blocking_position_ids") or ())
     quote_only_ids = tuple(handoff.get("quote_only_stale_position_ids") or ())
-    classified_ids = (*probability_ids, *restart_ids, *quote_only_ids)
+    settlement_ids = tuple(
+        handoff.get("settlement_recoverable_position_ids") or ()
+    )
+    classified_ids = (
+        *probability_ids,
+        *restart_ids,
+        *quote_only_ids,
+        *settlement_ids,
+    )
     classified_set = {str(position_id).strip() for position_id in classified_ids}
     if (
         len(probability_ids)
@@ -1467,12 +1485,20 @@ def _stuck_monitor_recovery_admission(
         != int(handoff.get("restart_blocking_position_count") or 0)
         or len(quote_only_ids)
         != int(handoff.get("quote_only_stale_position_count") or 0)
+        or len(settlement_ids)
+        != int(handoff.get("settlement_recoverable_position_count") or 0)
         or not all(str(position_id).strip() for position_id in classified_ids)
         or set(str(position_id).strip() for position_id in probability_ids)
         & set(str(position_id).strip() for position_id in restart_ids)
         or set(str(position_id).strip() for position_id in probability_ids)
         & set(str(position_id).strip() for position_id in quote_only_ids)
         or set(str(position_id).strip() for position_id in restart_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
+        & set(str(position_id).strip() for position_id in probability_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
+        & set(str(position_id).strip() for position_id in restart_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
         & set(str(position_id).strip() for position_id in quote_only_ids)
         or len(classified_ids) != open_count
         or len(classified_set) != open_count
@@ -1495,6 +1521,7 @@ def _stuck_monitor_recovery_admission(
         "STUCK_MONITOR_RECOVERY_ADMITTED: "
         f"open_positions={open_count} fresh_positions=0 "
         f"quote_only_stale_positions={len(quote_only_ids)} "
+        f"settlement_recoverable_positions={len(settlement_ids)} "
         f"monitor_stale_bound_seconds={LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS} "
         "held_quote_sidecar_current=true",
     )

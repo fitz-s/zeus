@@ -4405,12 +4405,49 @@ def _stuck_monitor_handoff(position_ids, **overrides):
         "probability_degraded_position_ids": (position_ids[0],),
         "restart_blocking_position_count": len(position_ids) - 1,
         "restart_blocking_position_ids": tuple(position_ids[1:]),
+        "settlement_recoverable_position_count": 0,
+        "settlement_recoverable_position_ids": (),
         "stale_classified_position_ids": tuple(position_ids),
         "missing_monitor_timestamp_position_ids": (),
         "invalid_monitor_timestamp_position_ids": (),
     }
     handoff.update(overrides)
     return handoff
+
+
+def test_deploy_live_stuck_monitor_admits_stale_settlement_recoverable_position(
+    monkeypatch, tmp_path
+):
+    """Closed-market dust stays classified without becoming a global restart veto."""
+    dl = _load("deploy_live_restart_stale_settlement_recoverable", "deploy_live.py")
+    position_ids = ("pos-probability", "pos-monitor", "pos-settlement")
+    handoff = _stuck_monitor_handoff(
+        position_ids,
+        restart_blocking_position_count=1,
+        restart_blocking_position_ids=("pos-monitor",),
+        settlement_recoverable_position_count=1,
+        settlement_recoverable_position_ids=("pos-settlement",),
+        stale_classified_position_ids=position_ids,
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": len(position_ids),
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert ok is True
+    assert "settlement_recoverable_positions=1" in detail
 
 
 def _fresh_failed_monitor_handoff(position_ids, **overrides):
