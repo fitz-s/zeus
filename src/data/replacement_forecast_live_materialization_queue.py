@@ -1290,6 +1290,48 @@ def _cycle_advance_never_priced_scopes(
     return frozenset(fam_scopes - priced_scopes)
 
 
+def _never_priced_enqueued_seed_families(
+    forecast_db: Path | str | None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return current enqueued families with no live replacement posterior."""
+
+    if forecast_db is None:
+        return frozenset()
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return frozenset()
+    try:
+        conn = _queue_read_only_connection(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT e.city, e.target_date, LOWER(e.metric)
+                FROM cycle_advance_enqueues AS e
+                WHERE e.seed_file IS NOT NULL
+                  AND TRIM(e.seed_file) != ''
+                  AND date(e.target_date) >= date('now')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM forecast_posteriors AS p
+                      WHERE p.source_id = ?
+                        AND p.runtime_layer = 'live'
+                        AND p.city = e.city
+                        AND p.target_date = e.target_date
+                        AND p.temperature_metric = LOWER(e.metric)
+                  )
+                """,
+                (SOURCE_ID,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (_ClaimReadDeadlineExceeded, sqlite3.Error, OSError):
+        return frozenset()
+    return frozenset(
+        (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+        for row in rows
+    )
+
+
 def _current_money_risk_scopes(
     fam_scopes: frozenset[tuple[str, str, str]],
     *,
@@ -3277,7 +3319,7 @@ def _prioritize_current_money_risk_seed_files(
     paths: Sequence[Path],
     families: frozenset[tuple[str, str, str]],
 ) -> tuple[Path, ...]:
-    """Put each exposed family's newest seed inside the bounded inspection window."""
+    """Put one newest witness per exposed family source cycle in the window."""
 
     prefixes = tuple(sorted(_current_money_risk_seed_prefixes(families)))
     if not prefixes:
@@ -3291,24 +3333,45 @@ def _prioritize_current_money_risk_seed_files(
         if prefix is not None:
             held_by_prefix[prefix].append(path)
 
-    # A burst of historical Day0/fusion seeds for one alphabetically early
-    # family must not consume the entire bounded inspection tranche.  Seed
-    # filenames carry their UTC creation stamp, so the lexicographically newest
-    # member is the current producer candidate for that exact family.  Put one
-    # such candidate per exposed family first; retain every older seed in its
-    # prior rotated order so durable cleanup and cursor fairness remain intact.
-    newest = tuple(
-        max(group, key=lambda path: path.name)
-        for prefix in prefixes
-        if (group := held_by_prefix[prefix])
-    )
-    newest_set = set(newest)
-    # Only the one newest witness per current-money family is promoted.  Keep
-    # every remaining seed in the caller's rotated order; regrouping the held
-    # tail ahead of ordinary work regresses the durable cursor and can starve a
-    # fully materializable background family forever.
-    tail = tuple(path for path in paths if path not in newest_set)
-    return (*newest, *tail)
+    # A newer deterministic carrier may wait for same-cycle ENS while the prior
+    # carrier is already executable.  Promoting only the latest filename lets
+    # the waiting seed hide that current q indefinitely.  Keep one newest seed
+    # per distinct carrier cycle in the bounded window; duplicate publishers for
+    # the same cycle still collapse to one witness.  Unreadable/nonexistent test
+    # paths retain the previous newest-file fallback.
+    promoted: list[Path] = []
+    for prefix in prefixes:
+        group = held_by_prefix[prefix]
+        if not group:
+            continue
+        newest_by_cycle: dict[str, Path] = {}
+        for path in group:
+            payload = _load_request_payload_for_coalescing(path)
+            cycle = (
+                str(payload.get("source_cycle_time") or "").strip()
+                if payload is not None
+                else ""
+            )
+            if not cycle:
+                continue
+            current = newest_by_cycle.get(cycle)
+            if current is None or path.name > current.name:
+                newest_by_cycle[cycle] = path
+        if newest_by_cycle:
+            promoted.extend(
+                sorted(
+                    newest_by_cycle.values(),
+                    key=lambda path: path.name,
+                    reverse=True,
+                )
+            )
+        else:
+            promoted.append(max(group, key=lambda path: path.name))
+    promoted_set = set(promoted)
+    # Keep every remaining seed in the caller's rotated order; regrouping the
+    # family tail regresses the durable cursor and can starve unrelated work.
+    tail = tuple(path for path in paths if path not in promoted_set)
+    return (*promoted, *tail)
 
 
 def _interleave_current_priority_seed_files(
@@ -3527,7 +3590,10 @@ def _prepare_seed_requests(
     current_global_scope = _current_global_auction_scope_families(
         rotated_raw_snapshot
     )
-    current_priority_scope = current_money_risk | current_global_scope
+    never_priced_scope = _never_priced_enqueued_seed_families(forecast_db)
+    current_priority_scope = (
+        current_money_risk | current_global_scope | never_priced_scope
+    )
     prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
         rotated_raw_snapshot,
         current_priority_scope,

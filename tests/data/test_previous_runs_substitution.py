@@ -1086,6 +1086,43 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
     assert sort_key_tokyo < sort_key_paris
 
 
+def test_never_priced_enqueued_seed_families_reads_canonical_scope(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            seed_file TEXT
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            runtime_layer TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        );
+        INSERT INTO cycle_advance_enqueues VALUES
+            ('Hong Kong', '2099-08-31', 'HIGH', 'hong-kong.json'),
+            ('Istanbul', '2099-08-31', 'low', 'istanbul.json');
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, 'live', 'Istanbul', '2099-08-31', 'low')",
+        (queue_mod.SOURCE_ID,),
+    )
+    conn.commit()
+    conn.close()
+
+    assert queue_mod._never_priced_enqueued_seed_families(forecast_db) == frozenset(
+        {("Hong Kong", "2099-08-31", "high")}
+    )
+
+
 def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path) -> None:
     """Claim-time chain exposure outranks discovery even when its enqueue snapshot said no hold."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -3484,6 +3521,41 @@ def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
     ]
 
 
+def test_current_money_seed_window_keeps_one_witness_per_source_cycle(tmp_path):
+    """An ENS-waiting carrier cannot hide the prior executable carrier."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    family = ("Hong Kong", "2026-08-31", "high")
+    seed_paths = tuple(
+        tmp_path / name
+        for name in (
+            "Hong_Kong.2026-08-31.high.20260829T130000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T140000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T140100Z.json",
+        )
+    )
+    for path, cycle in zip(
+        seed_paths,
+        (
+            "2026-08-29T06:00:00+00:00",
+            "2026-08-29T12:00:00+00:00",
+            "2026-08-29T12:00:00+00:00",
+        ),
+        strict=True,
+    ):
+        path.write_text(
+            json.dumps({"source_cycle_time": cycle}), encoding="utf-8"
+        )
+    ordinary = tmp_path / "Istanbul.2026-08-31.high.20260829T135000Z.json"
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(
+        (*seed_paths, ordinary), frozenset({family})
+    )
+
+    assert prioritized[:2] == (seed_paths[2], seed_paths[0])
+    assert prioritized[2:] == (seed_paths[1], ordinary)
+
+
 def test_complete_global_receipt_scope_maps_exact_queued_families(tmp_path, monkeypatch):
     """A schema-22 full cut maps family ids back to current queue identities."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -5269,7 +5341,7 @@ def test_current_capital_seed_precedes_backlog_before_bounded_inspection(
     assert not held.exists()
     assert all(path.exists() for path in backlog)
     assert (request_dir / held.name).exists()
-    assert len(loaded) <= queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS
+    assert len(loaded) <= queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS + 1
 
 
 def test_processed_seed_publishes_one_zero_copy_family_cache(tmp_path) -> None:
