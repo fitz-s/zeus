@@ -3133,6 +3133,44 @@ def _remove_empty_claim_batch(batch_path: Path) -> None:
         pass
 
 
+def _remove_orphan_request_stage_receipts(
+    request_path: Path,
+    *,
+    inspection_limit: int = 512,
+) -> int:
+    """Drain non-authoritative request telemetry after its request moved.
+
+    SCOPE: at most ``inspection_limit`` ``*.json.stage`` entries in the pending
+    request directory whose exact ``*.json`` authority body is absent. DRAIN:
+    every flocked queue claim removes another bounded tranche. RESET: a stage
+    paired with a live request is retained; once the request moves, a later
+    claim removes only the orphan telemetry.
+    """
+
+    if inspection_limit <= 0 or not request_path.exists():
+        return 0
+    removed = 0
+    inspected = 0
+    suffix = _MATERIALIZATION_STAGE_RECEIPT_SUFFIX
+    for stage_receipt in request_path.glob(f"*.json{suffix}"):
+        if inspected >= inspection_limit:
+            break
+        inspected += 1
+        request_file = stage_receipt.with_name(
+            stage_receipt.name[: -len(suffix)]
+        )
+        if request_file.is_file():
+            continue
+        try:
+            stage_receipt.unlink()
+        except FileNotFoundError:
+            continue
+        removed += 1
+    if removed:
+        _fsync_directory(request_path)
+    return removed
+
+
 def _recover_stale_claims(
     *,
     request_path: Path,
@@ -3965,6 +4003,9 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     lane: str = MATERIALIZATION_LANE_ALL,
 ) -> _MaterializationQueueClaim:
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    orphan_stage_removed_count = _remove_orphan_request_stage_receipts(
+        request_path
+    )
     active_keys, recovered_count, unknown_active_batches = _recover_stale_claims(
         request_path=request_path,
         inflight_path=inflight_path,
@@ -4033,6 +4074,10 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         ]
     if recovered_count:
         seed_reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED")
+    if orphan_stage_removed_count:
+        seed_reasons.append(
+            "REPLACEMENT_LIVE_MATERIALIZATION_ORPHAN_REQUEST_STAGE_DRAINED"
+        )
 
     request_files = (
         tuple(path for path in request_path.glob("*.json") if path.is_file())

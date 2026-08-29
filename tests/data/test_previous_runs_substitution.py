@@ -4089,6 +4089,44 @@ def test_empty_claim_batch_removes_orphan_stage_receipt(tmp_path):
     assert not batch.exists()
 
 
+def test_request_stage_cleanup_removes_only_orphan_telemetry(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    live = requests / "Moscow.2026-08-30.high.json"
+    live.write_text('{"city":"Moscow"}', encoding="utf-8")
+    live_stage = requests / f"{live.name}.stage"
+    live_stage.write_text('{"stage":"write_verify"}', encoding="utf-8")
+    orphan = requests / "Taipei.2026-08-30.high.json.stage"
+    orphan.write_text('{"stage":"open_read_snapshot"}', encoding="utf-8")
+
+    removed = queue_mod._remove_orphan_request_stage_receipts(requests)
+
+    assert removed == 1
+    assert live.exists()
+    assert live_stage.exists()
+    assert not orphan.exists()
+
+
+def test_request_stage_cleanup_is_bounded(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    for index in range(3):
+        (requests / f"orphan-{index}.json.stage").write_text(
+            '{"stage":"open_read_snapshot"}',
+            encoding="utf-8",
+        )
+
+    removed = queue_mod._remove_orphan_request_stage_receipts(
+        requests,
+        inspection_limit=2,
+    )
+
+    assert removed == 2
+    assert len(tuple(requests.glob("*.json.stage"))) == 1
+
+
 def test_fresh_malformed_request_never_claims_or_blocks_unrelated_held_priority(
     tmp_path, monkeypatch
 ):
