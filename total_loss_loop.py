@@ -1226,6 +1226,8 @@ def _observe_quote(
     position: Mapping[str, Any],
     quote: Mapping[str, Any],
     floor: float,
+    *,
+    historical_backfill: bool = False,
 ) -> str | None:
     position_id = str(position["position_id"])
     evidence_id = str(quote["evidence_id"])
@@ -1248,6 +1250,11 @@ def _observe_quote(
     previous_at = parse_time(str(previous[1])) if previous else None
     seen_time = parse_time(seen_at)
     out_of_order = previous_at is not None and seen_time is not None and seen_time < previous_at
+    # A historical no-bid row older than durable live state cannot start a new
+    # causal episode. Replaying it would manufacture one incident per evidence
+    # row while intentionally preserving the newer quote state.
+    if historical_backfill and out_of_order and no_bid:
+        return None
     no_bid_episode: sqlite3.Row | None = None
     if no_bid:
         no_bid_episode = mem.execute(
@@ -2117,7 +2124,9 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
         for quote in quote_rows:
             _maintenance_guard()
             for position in by_token.get(str(quote["token_id"]), []):
-                ident = _observe_quote(mem, position, quote, floor)
+                ident = _observe_quote(
+                    mem, position, quote, floor, historical_backfill=True
+                )
                 if ident:
                     created.append(ident)
         if quote_rows:

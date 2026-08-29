@@ -321,6 +321,86 @@ def test_crossing_below_floor_creates_one_hard_incident(cfg: dict) -> None:
     assert second == []
 
 
+def _tracked_position(cfg: dict, position_id: str = "p1") -> dict:
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        return loop.tracked_positions(trades, history_days=365)[position_id]
+
+
+def test_historical_out_of_order_no_bid_does_not_amplify_newer_durable_state(
+    cfg: dict,
+) -> None:
+    _position(cfg)
+    position = _tracked_position(cfg)
+    with loop.memory(cfg) as mem:
+        loop._observe_quote(
+            mem,
+            position,
+            {
+                "evidence_id": "newer",
+                "quote_seen_at": "2026-08-22T09:00:10+00:00",
+                "best_bid_before": 0.20,
+            },
+            0.05,
+        )
+        for index in range(100):
+            assert loop._observe_quote(
+                mem,
+                position,
+                {
+                    "evidence_id": f"older-no-bid-{index}",
+                    "quote_seen_at": f"2026-08-22T08:59:{index % 60:02d}+00:00",
+                    "best_bid_before": None,
+                    "depth_before_json": json.dumps({"bids": [], "asks": []}),
+                },
+                0.05,
+                historical_backfill=True,
+            ) is None
+        mem.commit()
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE position_id='p1' AND crossing_kind='no_bid'"
+        ).fetchone()[0] == 0
+        state = mem.execute(
+            "SELECT evidence_id,quote_seen_at FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == ("newer", "2026-08-22T09:00:10+00:00")
+
+
+def test_historical_backfill_without_durable_state_discovers_and_advances_no_bid(
+    cfg: dict,
+) -> None:
+    _position(cfg)
+    position = _tracked_position(cfg)
+    quote = {
+        "evidence_id": "first-historical-no-bid",
+        "quote_seen_at": "2026-08-22T09:00:01+00:00",
+        "best_bid_before": None,
+        "depth_before_json": json.dumps({"bids": [], "asks": []}),
+    }
+    with loop.memory(cfg) as mem:
+        incident_id = loop._observe_quote(
+            mem, position, quote, 0.05, historical_backfill=True
+        )
+        repeated_id = loop._observe_quote(
+            mem, position, quote, 0.05, historical_backfill=True
+        )
+        mem.commit()
+        incident = mem.execute(
+            "SELECT crossing_evidence_id,crossing_kind FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        state = mem.execute(
+            "SELECT evidence_id,quote_seen_at,best_bid FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert incident_id
+    assert repeated_id == incident_id
+    assert tuple(incident) == ("first-historical-no-bid", "no_bid")
+    assert tuple(state) == (
+        "first-historical-no-bid",
+        "2026-08-22T09:00:01+00:00",
+        None,
+    )
+
+
 def test_settlement_full_loss_is_idempotent_and_keeps_floor_fields_null(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
