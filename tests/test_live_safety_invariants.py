@@ -21901,9 +21901,10 @@ def test_auxiliary_retry_sql_deadline_preserves_primary_refresh(monkeypatch):
     assert conn.busy_ms == 5_000
 
 
-def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh(
+def test_local_orderbook_prefetch_cap_preserves_network_and_primary_refresh(
     monkeypatch,
 ):
+    """Optional full-book warming owns one second, not the batch auxiliary tranche."""
     from src.engine import cycle_runtime
 
     position = _make_position(trade_id="primary-after-local-prefetch")
@@ -21913,16 +21914,19 @@ def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh
         clock=clock,
         position=position,
     )
+    prefetch_calls = []
 
-    def local_prefetch(*_args, deadline_monotonic, **_kwargs):
-        assert deadline_monotonic == pytest.approx(1.0)
-        clock[0] = deadline_monotonic
-        return {}
+    def prefetch(*_args, local_only=False, deadline_monotonic, **_kwargs):
+        prefetch_calls.append((local_only, deadline_monotonic))
+        if local_only:
+            clock[0] = deadline_monotonic
+            return frozenset({position.token_id})
+        return frozenset()
 
     monkeypatch.setattr(
         cycle_runtime,
-        "_fresh_local_held_monitor_orderbooks",
-        local_prefetch,
+        "_prefetch_held_monitor_orderbooks",
+        prefetch,
     )
     summary = {"monitors": 0, "exits": 0}
 
@@ -21935,12 +21939,14 @@ def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh
         summary,
         deps=_monitor_test_deps("test_primary_after_local_prefetch"),
         run_exit_preflight=False,
-        held_position_monitor_budget_seconds=6.0,
+        held_position_monitor_budget_seconds=29.0,
     )
 
+    assert prefetch_calls == [
+        (True, pytest.approx(1.0)),
+        (False, pytest.approx(19.0)),
+    ]
     assert evaluations == [position.trade_id]
-    assert summary["held_monitor_orderbook_prefetch_bypassed"] is True
-    assert summary["held_monitor_optional_maintenance_deferred"] >= 1
     assert summary["held_monitor_primary_belief_read_started"] == 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
 

@@ -6826,6 +6826,7 @@ def execute_monitoring_phase(
         _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
         HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+        HELD_MONITOR_QUOTE_READ_MAX_SECONDS,
         HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
@@ -7831,6 +7832,10 @@ def execute_monitoring_phase(
         len(monitor_positions) - len(quote_positions)
     )
     local_prefetch: dict = {}
+    local_prefetch_deadline = min(
+        auxiliary_deadline,
+        time.monotonic() + HELD_MONITOR_QUOTE_READ_MAX_SECONDS,
+    )
     network_book_tokens = _prefetch_held_monitor_orderbooks(
         conn,
         clob,
@@ -7840,7 +7845,7 @@ def execute_monitoring_phase(
         deps=deps,
         local_only=True,
         mark_unfetched_attempted=False,
-        deadline_monotonic=auxiliary_deadline,
+        deadline_monotonic=local_prefetch_deadline,
     )
     summary.update(local_prefetch)
     if time.monotonic() >= auxiliary_deadline:
