@@ -1356,6 +1356,9 @@ RISK_COMPONENT_ORDER: tuple[str, ...] = (
     "collateral_identity",
     "portfolio_consistency",
     "unresolved_exposure",
+    "probability_semantics",
+    "storage_capacity",
+    "host_power",
 )
 
 
@@ -6902,6 +6905,8 @@ def _tick_once() -> RiskLevel:
             "portfolio_consistency": portfolio_consistency_level,
             "unresolved_exposure": unresolved_exposure_level,
             "probability_semantics": probability_semantics_level,
+            "storage_capacity": storage_capacity_level,
+            "host_power": host_power_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -6932,6 +6937,19 @@ def _tick_once() -> RiskLevel:
                 f"superseded={probability_semantics_binding.get('superseded_count')} "
                 f"missing={probability_semantics_binding.get('missing_count')} "
                 f"mixed={probability_semantics_binding.get('mixed_count')}"
+            ),
+            "storage_capacity": (
+                f"status={storage_capacity.get('status')} "
+                f"reason={storage_capacity.get('reason')} "
+                f"free_bytes={storage_capacity.get('free_bytes')} "
+                f"free_ratio={storage_capacity.get('free_ratio')}"
+            ),
+            "host_power": (
+                f"status={host_power.get('status')} "
+                f"reason={host_power.get('reason')} "
+                f"power_source={host_power.get('power_source')} "
+                f"battery_percent={host_power.get('battery_percent')} "
+                f"remaining_minutes={host_power.get('remaining_minutes')}"
             ),
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)

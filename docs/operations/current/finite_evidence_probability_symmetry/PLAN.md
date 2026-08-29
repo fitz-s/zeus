@@ -4,6 +4,22 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-29 — RiskGuard总level必须打印真实host/storage driver
+
+- **实时反例：** canonical `risk_state`以`host_power_level=ORANGE`记录Battery Power 17%、
+  runway 21分钟，且其余Brier/settlement/execution/probability/storage组件均GREEN；全局
+  entry因此正确reduce-only。但daemon日志的component map漏掉`host_power`和
+  `storage_capacity`，错误打印`overall=ORANGE driven_by=none`，使正EV proof-only BUY与
+  live CASH之间的真实gate不可见。
+- **修复：** 将`overall_level()`已经消费的`probability_semantics`、`storage_capacity`和
+  `host_power`全部纳入`RISK_COMPONENT_ORDER`、per-tick level map及detail。风险阈值、
+  entry/exit行为、q、price、Kelly和venue path不变。
+- **SCOPE / DRAIN / RESET：** scope仅为RiskGuard每60秒的解释性log；drain是下一次tick；
+  reset是AC power或runway恢复后现有host-power law自动回GREEN，日志同步显示真实driver。
+- **验收：** structural antibody要求breakdown集合与`overall_level()`输入完全一致，并单独
+  证明host-power ORANGE打印`driven_by=host_power`；targeted tests、compile、diff与
+  planning-lock通过，部署后以当前risk row和下一次daemon tick复核。
+
 ## 2026-08-29 — held monitor不得跨CLOB/venue I/O占用canonical writer
 
 - **实时反例：** `exit_monitor`在固定五分钟边界持续运行时，collateral writer与
