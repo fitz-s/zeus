@@ -1187,16 +1187,19 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     # ``collect_monitor_cadence_evidence`` gives this category only to the
     # canonical closed-market hold shape. It remains restart-only evidence;
     # settlement/exit authority is unchanged.
-    fresh_failed_closed_market_positions = [
+    fresh_failed_settlement_positions = [
         item
         for item in list(cadence.get("settlement_recoverable_positions") or [])
         if isinstance(item, dict)
         and item.get("cadence_source")
-        == "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT"
+        in {
+            "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+        }
     ]
     fresh_failed_positions = [
         *fresh_failed_restart_positions,
-        *fresh_failed_closed_market_positions,
+        *fresh_failed_settlement_positions,
     ]
     probability_ids = tuple(
         str(item.get("position_id") or "").strip()

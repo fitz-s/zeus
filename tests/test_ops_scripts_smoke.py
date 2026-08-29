@@ -4619,6 +4619,44 @@ def test_deploy_live_pre_stop_handoff_classifies_current_closed_market_no_action
     assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
 
 
+def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_terminal_subprecision_dust", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-dust"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 0,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-dust",
+                "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-dust",)
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+
+
 def test_deploy_live_fresh_failed_handoff_rejects_closed_market_restart_duplicate(
     monkeypatch, tmp_path
 ):
