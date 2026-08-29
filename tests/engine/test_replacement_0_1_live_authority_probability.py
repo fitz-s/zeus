@@ -862,6 +862,31 @@ def test_global_provisional_day0_uses_physical_source_identity(
                 **prepare_kwargs,
             )
         physical_fact[key] = original
+
+    bundle.provenance_json["day0_provisional_observation"][
+        "observation_time"
+    ] = "2026-06-09T09:30:00+00:00"
+    returned_b["_edli_global_day0_binding"] = {
+        "probability_conditioning_observation_time": (
+            "2026-06-09T09:30:00+00:00"
+        ),
+        "current_observation_time": physical_fact["observation_time"],
+        "conditioning_clock_lag_seconds": 1800.0,
+        "conditioning_clock_role": "same_extreme_newer_observation_clock",
+    }
+    adapter._prepare_current_global_probability_family(event, **prepare_kwargs)
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+    ):
+        adapter._prepare_current_global_probability_family(
+            event,
+            **{
+                **prepare_kwargs,
+                "probability_use": adapter._CurrentProbabilityUse.ENTRY,
+            },
+        )
     forecast.close()
     observations.close()
 

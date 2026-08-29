@@ -37876,11 +37876,17 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
-            if probability_conditioning_is_provisional:
+            if probability_conditioning_is_provisional and entry_authority:
                 # The provisional replacement posterior is conditioned on the
                 # physical Day0 source clock.  Keep the settlement-channel
                 # fact above for final/settlement authority; only the fast
                 # residual route is identified by its statistical fact.
+                # Held/reduce-only redecision validates after
+                # ``_global_day0_execution_payload`` has bound a same-extreme
+                # clock advance.  Rejecting it here would require exact clock
+                # equality before that typed binding exists and would strand a
+                # position whenever the observation clock advances without a
+                # new extreme.
                 provisional_identity_fact = (
                     provisional_day0_fact
                     if fast_residual_conditioning is not None
