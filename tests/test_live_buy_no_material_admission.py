@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Prove material-bin BUY_NO admission uses native side uncertainty without weakening live gates.
 # Reuse: Re-audit replacement bound identity, receipt plumbing, and legacy-source behavior before relying on it.
 # Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
@@ -918,6 +918,48 @@ def test_receipt_gate_binds_global_current_certificate_to_exact_receipt() -> Non
         "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:"
         "global_condition_id_mismatch"
     )
+
+
+def test_receipt_gate_keeps_replacement_parent_after_execution_bundle_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _admission(**kwargs: object) -> None:
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "src.events.reactor.live_buy_no_conservative_evidence_rejection_reason",
+        _admission,
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=True,
+        event_id="event-current",
+        direction="buy_no",
+        q_live=0.65,
+        q_lcb_5pct=0.62,
+        c_fee_adjusted=0.32,
+        trade_score=0.30,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="family-current",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=3.2,
+        kelly_cost_basis_id="cost-current",
+        final_intent_id="intent-current",
+        side_effect_status="SUBMITTED",
+        proof_accepted=True,
+        decision_proof_bundle=("execution-certificate",),
+        replacement_no_bound_certificate=_REPLACEMENT_NO_CERT,
+        replacement_no_bound_expected=_REPLACEMENT_NO_EXPECTED,
+    )
+
+    assert _receipt_money_path_blocker(receipt, ReactorConfig()) == (None, "")
+    assert seen["replacement_no_bound_expected"] == _REPLACEMENT_NO_EXPECTED
 
 
 def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:

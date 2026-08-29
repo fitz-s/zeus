@@ -3827,6 +3827,7 @@ class _CandidateProof:
     settlement_coverage_status: str | None = None
     replacement_calibration_credential: dict[str, Any] | None = None
     replacement_no_bound_certificate: dict[str, Any] | None = None
+    replacement_no_bound_expected: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
     # probability_authority from the evidence dict
     # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
@@ -20184,6 +20185,9 @@ def _build_event_bound_no_submit_receipt_core(
             "replacement_no_bound_certificate": _json_finite(
                 proof.replacement_no_bound_certificate
             ),
+            "replacement_no_bound_expected": _json_finite(
+                proof.replacement_no_bound_expected
+            ),
             "probability_semantics_revision": (
                 proof.probability_semantics_revision
             ),
@@ -20768,6 +20772,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         replacement_no_bound_certificate=(
             raw_receipt.get("replacement_no_bound_certificate")
             if isinstance(raw_receipt.get("replacement_no_bound_certificate"), dict)
+            else None
+        ),
+        replacement_no_bound_expected=(
+            raw_receipt.get("replacement_no_bound_expected")
+            if isinstance(raw_receipt.get("replacement_no_bound_expected"), dict)
             else None
         ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
@@ -31297,6 +31306,7 @@ def _generate_candidate_proofs(
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
                     replacement_no_bound_certificate=replacement_no_bound_certificate,
+                    replacement_no_bound_expected=replacement_no_bound_expected,
                     # H2_E2E: carry posterior_id + probability_authority from the
                     # probability evidence dict. Present only on the replacement_0_1
                     # path; None (absent key) on canonical. posterior_id is emitted

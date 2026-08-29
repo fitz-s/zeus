@@ -710,6 +710,15 @@ class EventSubmissionReceipt:
     # settlement shrink only lowers that raw bound. None on canonical/legacy/YES
     # receipts; the admission helper revalidates every scalar and identity hash.
     replacement_no_bound_certificate: dict[str, Any] | None = None
+    # Exact source-parent expectation already verified when the candidate proof
+    # was built. Keep it separate from ``decision_proof_bundle`` because live
+    # submission replaces that bundle with execution certificates before the
+    # reactor performs its redundant receipt-level admission check.
+    replacement_no_bound_expected: dict[str, Any] | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
     # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
     # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
@@ -4849,10 +4858,20 @@ def _receipt_money_path_blocker(
         # The buy_no stanza below STAYS — its same_bin_yes_posterior /
         # settlement_coverage_status come from a distinct receipt-provenance path.
         proof_bundle = receipt.decision_proof_bundle
-        replacement_expected = replacement_no_bound_expected_from_parents(
-            getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
-            getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
-        )
+        replacement_expected = receipt.replacement_no_bound_expected
+        if replacement_expected is None:
+            replacement_expected = replacement_no_bound_expected_from_parents(
+                getattr(
+                    getattr(proof_bundle, "forecast_authority", None),
+                    "payload",
+                    None,
+                ),
+                getattr(
+                    getattr(proof_bundle, "candidate_evidence", None),
+                    "payload",
+                    None,
+                ),
+            )
         global_actuation = receipt.global_actuation
         global_candidate = getattr(
             getattr(global_actuation, "decision", None),
