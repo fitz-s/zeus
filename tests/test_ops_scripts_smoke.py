@@ -15,6 +15,7 @@ import io
 import json
 import plistlib
 import sqlite3
+import subprocess
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -2538,6 +2539,99 @@ def test_deploy_live_trading_restart_accepts_price_band_attestation(monkeypatch,
 
     assert ok is True
     assert detail == "live restart preflight passed"
+
+
+def test_deploy_live_warm_preflight_defers_only_monitor_cadence_to_handoff(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_warm_monitor_handoff", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    monitor_blocker = {
+        "name": "monitor_cadence_restart_evidence",
+        "ok": False,
+        "restart_blocking": True,
+    }
+    payload = {
+        "ok": False,
+        "expected_live_process_state": "running",
+        "checks": [
+            {
+                "name": "absolute_live_unit_price_band",
+                "ok": True,
+                "restart_blocking": True,
+            },
+            monitor_blocker,
+        ],
+        "blockers": [monitor_blocker],
+    }
+
+    monkeypatch.setattr(
+        dl.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, json.dumps(payload), ""
+        ),
+    )
+
+    ok, detail = dl._run_restart_preflight_if_needed(
+        [dl.LIVE_TRADING_LABEL],
+        expected_live_process_state="running",
+        defer_running_monitor_cadence=True,
+    )
+
+    assert ok is True
+    assert "handoff remains mandatory immediately before stop" in detail
+
+
+def test_deploy_live_warm_preflight_never_defers_another_blocker(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_warm_other_blocker", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    blockers = [
+        {
+            "name": "monitor_cadence_restart_evidence",
+            "ok": False,
+            "restart_blocking": True,
+        },
+        {
+            "name": "collateral_snapshot_freshness",
+            "ok": False,
+            "restart_blocking": True,
+        },
+    ]
+    payload = {
+        "ok": False,
+        "expected_live_process_state": "running",
+        "checks": [
+            {
+                "name": "absolute_live_unit_price_band",
+                "ok": True,
+                "restart_blocking": True,
+            },
+            *blockers,
+        ],
+        "blockers": blockers,
+    }
+
+    monkeypatch.setattr(
+        dl.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, json.dumps(payload), ""
+        ),
+    )
+
+    ok, detail = dl._run_restart_preflight_if_needed(
+        [dl.LIVE_TRADING_LABEL],
+        expected_live_process_state="running",
+        defer_running_monitor_cadence=True,
+    )
+
+    assert ok is False
+    assert "preflight failed" in detail
 
 
 def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
@@ -6116,6 +6210,7 @@ def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypat
                 "preflight",
                 kwargs.get("expected_live_process_state", "absent"),
                 kwargs.get("process_state_only", False),
+                kwargs.get("defer_running_monitor_cadence", False),
             )
         )
         return True, "preflight passed"
@@ -6162,11 +6257,11 @@ def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypat
 
     assert dl.main(["restart", "live-trading"]) == 0
 
-    warm = calls.index(("preflight", "running", False))
+    warm = calls.index(("preflight", "running", False, True))
     handoff = next(i for i, call in enumerate(calls) if call[0] == "handoff")
-    one_main = calls.index(("preflight", "running", True))
+    one_main = calls.index(("preflight", "running", True, False))
     stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
-    zero_main = calls.index(("preflight", "absent", True))
+    zero_main = calls.index(("preflight", "absent", True, False))
     launch_main = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert warm < handoff < one_main < stop_main < zero_main < launch_main
 

@@ -2513,6 +2513,7 @@ def _run_restart_preflight_if_needed(
     *,
     expected_live_process_state: str = "absent",
     process_state_only: bool = False,
+    defer_running_monitor_cadence: bool = False,
 ) -> tuple[bool, str]:
     """Run the live-money preflight before booting the trading daemon.
 
@@ -2549,40 +2550,70 @@ def _run_restart_preflight_if_needed(
     except Exception as exc:  # noqa: BLE001
         return False, f"live restart preflight could not run: {exc}"
     output = (res.stdout or res.stderr or "").strip()
-    if res.returncode == 0:
-        try:
-            payload = json.loads(output)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if res.returncode == 0:
             return False, f"live restart preflight returned invalid JSON: {exc}"
-        if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
-            return False, "live restart preflight returned invalid attestation shape"
-        reported_process_state = payload.get("expected_live_process_state")
-        if reported_process_state is None and expected_live_process_state == "absent":
-            reported_process_state = "absent"
-        if reported_process_state != expected_live_process_state:
-            return False, "live restart preflight process-state attestation mismatch"
-        if process_state_only:
+        tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+        return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
+        if res.returncode != 0:
+            tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+            return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+        return False, "live restart preflight returned invalid attestation shape"
+    reported_process_state = payload.get("expected_live_process_state")
+    if reported_process_state is None and expected_live_process_state == "absent":
+        reported_process_state = "absent"
+    if reported_process_state != expected_live_process_state:
+        return False, "live restart preflight process-state attestation mismatch"
+    if process_state_only:
+        if res.returncode == 0 and payload.get("ok") is True:
             return True, f"live process-state witness passed: {expected_live_process_state}"
-        price_band = next(
-            (
-                check
-                for check in payload["checks"]
-                if isinstance(check, dict)
-                if check.get("name") == "absolute_live_unit_price_band"
-            ),
-            None,
+        tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+        return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+    price_band = next(
+        (
+            check
+            for check in payload["checks"]
+            if isinstance(check, dict)
+            if check.get("name") == "absolute_live_unit_price_band"
+        ),
+        None,
+    )
+    if not isinstance(price_band, dict):
+        return False, (
+            "live restart preflight omitted required "
+            "absolute_live_unit_price_band attestation"
         )
-        if not isinstance(price_band, dict):
-            return False, (
-                "live restart preflight omitted required "
-                "absolute_live_unit_price_band attestation"
-            )
-        if price_band.get("ok") is not True or price_band.get("restart_blocking") is not True:
-            return False, (
-                "live restart preflight absolute_live_unit_price_band attestation "
-                f"is not restart-blocking PASS: {price_band}"
-            )
+    if price_band.get("ok") is not True or price_band.get("restart_blocking") is not True:
+        return False, (
+            "live restart preflight absolute_live_unit_price_band attestation "
+            f"is not restart-blocking PASS: {price_band}"
+        )
+    if res.returncode == 0 and payload.get("ok") is True:
         return True, "live restart preflight passed"
+    blockers = payload.get("blockers")
+    monitor_only = (
+        defer_running_monitor_cadence
+        and expected_live_process_state == "running"
+        and res.returncode != 0
+        and payload.get("ok") is False
+        and isinstance(blockers, list)
+        and bool(blockers)
+        and all(
+            isinstance(blocker, dict)
+            and blocker.get("name") == "monitor_cadence_restart_evidence"
+            and blocker.get("restart_blocking") is True
+            for blocker in blockers
+        )
+    )
+    if monitor_only:
+        return (
+            True,
+            "warm preflight passed except monitor cadence; exact current-capital "
+            "handoff remains mandatory immediately before stop",
+        )
     tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
 
@@ -3318,6 +3349,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 warm_ok, warm_detail = _run_restart_preflight_if_needed(
                     labels,
                     expected_live_process_state="running",
+                    defer_running_monitor_cadence=True,
                 )
                 if not warm_ok:
                     print(
