@@ -8723,6 +8723,63 @@ def test_monitor_handoff_counts_positive_dust_below_share_precision(
     conn.close()
 
 
+def test_monitor_restart_classifies_terminal_partial_exit_subprecision_dust(
+    tmp_path,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'terminal-subprecision-dust', 'day0_window', 'Hong Kong', ?, 'high',
+            'Will the highest temperature in Hong Kong be 32°C?',
+            'buy_no', 0.005554, 0.005554, 'filled',
+            'PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED',
+            0, NULL, 0.0003, 1, NULL, 0, ?
+        )
+        """,
+        (now.date().isoformat(), now.isoformat()),
+    )
+    _insert_monitor_events(
+        conn,
+        position_id="terminal-subprecision-dust",
+        monitor_at=now,
+        payload={
+            "last_monitor_prob": 0.0003,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price": None,
+            "last_monitor_market_price_is_fresh": False,
+        },
+    )
+    conn.row_factory = sqlite3.Row
+
+    evidence = collect_monitor_cadence_evidence(
+        conn,
+        now=now,
+        max_age_seconds=180.0,
+        monitor_refreshed_only=True,
+        require_fresh_inputs=True,
+    )
+
+    assert evidence["open_position_count"] == 1
+    assert evidence["stale_or_missing_position_count"] == 0
+    assert evidence["settlement_recoverable_position_count"] == 1
+    recovered = evidence["settlement_recoverable_positions"][0]
+    assert recovered["position_id"] == "terminal-subprecision-dust"
+    assert recovered["closed_market_validation"] == "sell_share_precision_dust"
+    conn.close()
+
+
 def test_monitor_cadence_restart_evidence_reports_voided_chain_risk_as_reconciliation_risk(
     monkeypatch, tmp_path
 ):

@@ -97,6 +97,22 @@ def collect_monitor_cadence_evidence(
     review_managed: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
+        if _position_is_terminal_subprecision_dust_held_to_settlement(position):
+            settlement_recoverable.append(
+                {
+                    "position_id": position["position_id"],
+                    "phase": position["phase"],
+                    "chain_state": position["chain_state"],
+                    "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                    "closed_market_validation": "sell_share_precision_dust",
+                    "restart_resolution": "settlement_harvester_or_chain_size_change",
+                }
+            )
+            # The venue cannot represent a SELL below one share quantum.  Keep
+            # the positive residual in the monitor identity, but do not make a
+            # permanently unavailable book a restart debt after the terminal
+            # partial-exit fact has removed every live order.
+            continue
         if _position_is_min_order_dust_held_to_settlement(position):
             settlement_recoverable.append(
                 {
@@ -749,6 +765,29 @@ _MIN_ORDER_DUST_RE = re.compile(
     r"(?P<size>[0-9]+(?:\.[0-9]+)?)\s+is below snapshot min_order_size\s+"
     r"(?P<minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
 )
+
+_SELL_SHARE_QUANTUM = Decimal("0.01")
+
+
+def _position_is_terminal_subprecision_dust_held_to_settlement(
+    position: dict[str, object],
+) -> bool:
+    """Recognize a terminal partial-exit remainder that cannot form a SELL."""
+
+    if str(position.get("order_status") or "") != "filled":
+        return False
+    if (
+        str(position.get("exit_reason") or "")
+        != "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED"
+    ):
+        return False
+    if bool(position.get("exposure_unknown")):
+        return False
+    exposure = max(
+        Decimal(str(position.get("shares") or 0)),
+        Decimal(str(position.get("chain_shares") or 0)),
+    )
+    return Decimal("0") < exposure < _SELL_SHARE_QUANTUM
 
 
 def _position_is_min_order_dust_held_to_settlement(position: dict[str, object]) -> bool:
