@@ -713,6 +713,90 @@ def test_settled_no_bid_drain_commits_before_later_maintenance_timeout(
         ).fetchone()[0] == "observing"
 
 
+def test_saturated_settled_no_bid_drain_defers_heavier_maintenance(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["legacy_incident_consolidation_batch_size"] = 1
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        for index in range(2):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,'hard','p1',?,'no_bid','yes-token',"
+                "'sell_yes',.05,?,1,'retry_pending','blind',?)",
+                (
+                    f"stale-{index}",
+                    f"quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: pytest.fail("heavier maintenance must defer"),
+    )
+    outcome = loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert outcome.postcommit_deferred is True
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE crossing_kind='no_bid' "
+            "AND status='retry_pending'"
+        ).fetchone()[0] == 1
+
+
+def test_saturated_drain_fairness_preserves_terminal_detection_progress(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["legacy_incident_consolidation_batch_size"] = 1
+    cfg["loop"]["legacy_consolidation_fairness_interval"] = 2
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        for index in range(2):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,'hard','p1',?,'no_bid','yes-token',"
+                "'sell_yes',.05,?,1,'retry_pending','blind',?)",
+                (
+                    f"fair-{index}",
+                    f"fair-quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+    first = loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert first.postcommit_deferred is True
+    reached: list[bool] = []
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: reached.append(True) or (_ for _ in ()).throw(
+            sqlite3.OperationalError("interrupted: fairness witness")
+        ),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="fairness witness"):
+        loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert reached == [True]
+
+
 def test_settlement_identity_survives_projection_and_payload_enrichment(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

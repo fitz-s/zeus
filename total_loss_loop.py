@@ -2168,21 +2168,35 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
     created: list[str] = []
     with _maintenance_connections(cfg, detector_deadline) as (trades, mem):
         _maintenance_guard()
-        _consolidate_settled_quote_incident_backlog(
-            mem,
-            limit=int(
-                cfg["loop"].get("legacy_incident_consolidation_batch_size", 16)
-            ),
+        consolidation_batch = max(
+            1, int(cfg["loop"].get("legacy_incident_consolidation_batch_size", 16))
         )
+        consolidated = _consolidate_settled_quote_incident_backlog(
+            mem,
+            limit=consolidation_batch,
+        )
+        saturated_cycles = 0
+        if consolidated >= consolidation_batch:
+            saturated_cycles = int(
+                meta_get(mem, "legacy_consolidation_saturated_cycles", "0")
+            ) + 1
+        meta_set(mem, "legacy_consolidation_saturated_cycles", saturated_cycles)
         # This bounded debt retirement must survive later expensive read-side
         # maintenance hitting its deadline; it does not alter trading truth.
         mem.commit()
+        fairness_interval = max(
+            1,
+            int(cfg["loop"].get("legacy_consolidation_fairness_interval", 16)),
+        )
+        if saturated_cycles and saturated_cycles % fairness_interval:
+            return _MaintenanceOutcome([], postcommit_deferred=True)
         _maintenance_guard()
         revalidate_blind_hard_incidents(
             mem,
             trades,
             limit=int(cfg["loop"].get("hard_revalidation_batch_size", 4)),
         )
+        mem.commit()
         _maintenance_guard()
         positions = tracked_positions(trades, history_days=history_days)
         # Settlement is an independent terminal truth path.  It must run even

@@ -4,6 +4,7 @@ poll_ms = 250
 detector_budget_ms = 200
 history_days = 7
 legacy_incident_consolidation_batch_size = 256
+legacy_consolidation_fairness_interval = 16
 hard_revalidation_batch_size = 4
 quote_batch_size = 2000
 backfill_budget_ms = 50
