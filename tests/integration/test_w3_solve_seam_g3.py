@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -29660,9 +29661,47 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
     times = iter((decision_at, wealth_at, book_at, selection_at))
     wealth_checks = []
     stages = []
+    bounded_reads = []
+    trade_conn = sqlite3.connect(":memory:")
+
+    real_bounded_work_sqlite = global_batch_runtime.bounded_work_sqlite
+
+    @contextmanager
+    def recording_bounded_work_sqlite(
+        conn,
+        work_context,
+        *,
+        stage,
+        shared_connection=False,
+        keep_independent_connection_open=False,
+    ):
+        bounded_reads.append((stage, shared_connection))
+        with real_bounded_work_sqlite(
+            conn,
+            work_context,
+            stage=stage,
+            shared_connection=shared_connection,
+            keep_independent_connection_open=keep_independent_connection_open,
+        ) as read_conn:
+            yield read_conn
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "bounded_work_sqlite",
+        recording_bounded_work_sqlite,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "probe_inflight_buy_ambiguity",
+        lambda _conn: False,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (),
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -29705,7 +29744,7 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
         decision_time=decision_at,
         world_conn=object(),
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade_conn,
         payload_reader=lambda current: json.loads(current.payload_json),
         prepare_event=lambda current, _at: EventSubmissionReceipt(
             False,
@@ -29718,17 +29757,22 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
         venue_submit_count=lambda: 0,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: next(times),
-        current_book_epoch_provider=lambda probabilities, _at: stages.append("book")
+        portfolio_state_provider=lambda: SimpleNamespace(positions=()),
+        current_book_epoch_provider=lambda probabilities, _at, *_: stages.append("book")
         or (
             probabilities,
             _global_test_book("book", price="0.40", captured_at=book_at),
         ),
+        work_context=universe.WorkContext(deadline_monotonic=None),
     )
 
     assert wealth_checks == [wealth_at]
     assert stages == ["wealth", "book"]
+    assert ("scope:trade_obligations", True) in bounded_reads
+    assert ("wealth_capture", False) in bounded_reads
     assert result.winner_event_id is None
     assert set(result.receipts) == {event.event_id}
+    trade_conn.close()
 
 
 def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):

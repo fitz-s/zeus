@@ -7602,10 +7602,12 @@ def process_current_global_batch(
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
 
         def capture_selection_wealth():
+            # Wealth does not key frozen state by connection identity.  Give it
+            # one independent read transaction so monitor I/O on the shared
+            # canonical handle cannot consume the auction's entire deadline.
             with bounded_read(
                 trade_conn,
                 "wealth_capture",
-                shared_connection=True,
             ) as wealth_conn:
                 state = (
                     portfolio_state_provider() if portfolio_state_provider else None
