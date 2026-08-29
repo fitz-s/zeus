@@ -1325,6 +1325,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             fresh_count
             + probability_degraded_count
             + reauction_handoff_count
+            + len(settlement_recoverable_ids)
             == open_count
         )
     )

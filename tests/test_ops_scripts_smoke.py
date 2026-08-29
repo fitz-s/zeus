@@ -4705,7 +4705,9 @@ def test_deploy_live_pre_stop_handoff_classifies_current_closed_market_no_action
 
     handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
 
+    assert handoff["green"] is True
     assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-closed",)
+    assert handoff["settlement_recoverable_position_ids"] == ("pos-closed",)
     assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
 
 
