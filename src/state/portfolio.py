@@ -152,6 +152,8 @@ _DECISION_SCOPED_VALIDATIONS: frozenset[str] = frozenset({
     "sell_reversal",
     "hold",
     "evidence_unavailable_third_state",
+    "flash_crash_persistent_market_evidence",
+    "flash_crash_trigger",
     "red_force_exit",
     "dt2_red_force_exit_sweep_actuated",
     "settlement_preimage_lock:impossible",
@@ -666,10 +668,9 @@ class Position:
 
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
-    # BUG#127: consecutive monitor cycles an adverse flash-crash-magnitude
-    # market velocity has persisted. Drives the persistence path of
-    # flash_crash_should_fire(); reset to 0 the moment velocity recovers above
-    # the arming threshold. Carried across cycles like neg_edge_count.
+    # BUG#127: consecutive causal quote samples whose one-hour velocity crossed
+    # the deep catastrophe bound. Re-derived by monitor_refresh from persisted
+    # token_price_log on every claim; never inferred from object lifetime.
     flash_crash_count: int = 0
     last_monitor_prob: float = 0.0
     last_monitor_prob_is_fresh: bool = False
@@ -1028,11 +1029,15 @@ class Position:
         The verdict is the unified PR-1 optimal stop (COLLISION.md C3, ΔJ≡0):
         SELL ⟺ net liquidation proceeds L(x) beat the posterior-mean hold value h·q,
         evaluated over the bid-depth breakpoints by predicted_bin_law.exit_decision.
-        There is no per-direction branch, no repeated-cycle (neg_edge_count)
-        confirmation, no divergence / velocity / flash-crash / vig trigger, and no
-        near-settlement price floor: a near-certain winner holds because its bid
-        sits below q≈1, and a reversed bin sells because the bid beats q. The
-        entry price / cost basis is sunk and never enters the verdict.
+        There is no per-direction branch, repeated negative-edge confirmation,
+        shallow divergence panic, vig trigger, or near-settlement price floor: a
+        near-certain winner holds because its bid sits below q≈1, and a reversed
+        bin sells because the bid beats q.  The sole market-path override is a
+        fresh, executable, persistent deep catastrophe: it protects capital when
+        the held-token book has collapsed by the configured amount across
+        multiple causal quote samples while the probability source has not
+        caught up.  The entry price / cost basis is sunk and never enters either
+        verdict.
 
         Precedence is the law's: RiskGuard RED force-exits in every phase (the
         Day0 exemption is removed — DT#2 RED is orthogonal to observation phase);
@@ -1049,6 +1054,36 @@ class Position:
         q_mean, evidence_ok = self._held_side_point_with_confidence(exit_context)
         lock = self._settlement_preimage_lock(exit_context)
         bid_breakpoints = self._exit_bid_breakpoints(exit_context, held_shares)
+
+        # Market path is evidence, not a stop-loss.  A single adverse tick and
+        # every shallow divergence remain governed by the posterior-mean stop
+        # below.  Only a fresh, executable, causally persistent deep collapse can
+        # override HOLD/EVIDENCE_UNAVAILABLE.  Deliberately pass
+        # has_probability_authority=False: the helper's shallow belief-confirmed
+        # branch is not part of the live law, and the current divergence score is
+        # not a causal probability witness.  A settlement-preimage GUARANTEED
+        # lock remains stronger than market path evidence.
+        velocity = exit_context.market_velocity_1h
+        fresh_market_path_evidence = (
+            exit_context.current_market_price_is_fresh
+            and ExitContext._is_finite(exit_context.best_bid)
+            and ExitContext._is_finite(velocity)
+        )
+        if (
+            not fresh_market_path_evidence
+            or float(velocity) > flash_crash_catastrophe_velocity()
+        ):
+            self.flash_crash_count = 0
+        persistent_market_catastrophe = (
+            lock is not LockState.GUARANTEED
+            and fresh_market_path_evidence
+            and flash_crash_should_fire(
+                market_velocity_1h=float(velocity),
+                divergence_score=0.0,
+                has_probability_authority=False,
+                flash_crash_count=self.flash_crash_count,
+            )
+        )
 
         verdict = predicted_bin_law.exit_decision(
             held_shares=held_shares,
@@ -1079,16 +1114,6 @@ class Position:
                 selected_method=method,
                 applied_validations=list(self.applied_validations),
             )
-        if verdict.action is ExitAction.EVIDENCE_UNAVAILABLE:
-            applied.append("evidence_unavailable_third_state")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "EVIDENCE_UNAVAILABLE",
-                trigger="EVIDENCE_UNAVAILABLE",
-                selected_method=method,
-                applied_validations=list(self.applied_validations),
-            )
         if verdict.action is ExitAction.SELL_REVERSAL:
             applied.append("sell_reversal")
             self.applied_validations = _dedupe_validations(applied)
@@ -1096,6 +1121,33 @@ class Position:
                 True,
                 "SELL_REVERSAL",
                 trigger="SELL_REVERSAL",
+                selected_method=method,
+                applied_validations=list(self.applied_validations),
+            )
+        if persistent_market_catastrophe:
+            self.exit_market_velocity_1h = float(velocity)
+            applied.append("flash_crash_persistent_market_evidence")
+            applied.append("flash_crash_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                (
+                    "FLASH_CRASH_PANIC "
+                    f"(velocity={float(velocity):.2f}/hr, "
+                    f"causal_quotes={self.flash_crash_count})"
+                ),
+                urgency="immediate",
+                trigger="FLASH_CRASH_PANIC",
+                selected_method=method,
+                applied_validations=list(self.applied_validations),
+            )
+        if verdict.action is ExitAction.EVIDENCE_UNAVAILABLE:
+            applied.append("evidence_unavailable_third_state")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "EVIDENCE_UNAVAILABLE",
+                trigger="EVIDENCE_UNAVAILABLE",
                 selected_method=method,
                 applied_validations=list(self.applied_validations),
             )
@@ -3544,7 +3596,7 @@ def flash_crash_should_fire(
           divergence has reached the soft-divergence threshold (the belief moved in
           the SAME adverse direction as the price), OR
       (b) PERSISTENT CATASTROPHE — the adverse velocity has persisted for at least
-          ``flash_crash_confirmations()`` consecutive monitor cycles AND its
+          ``flash_crash_confirmations()`` consecutive causal quote samples AND its
           magnitude exceeds the deep catastrophe bound
           ``flash_crash_catastrophe_velocity()`` (a genuine sustained crash that we
           must escape even when the probability refresh is degraded).

@@ -2494,7 +2494,7 @@ class MonitorRiskAuthority:
 
 @dataclass(frozen=True)
 class ProtectiveSellExecutionAuthority:
-    """Immutable RED/hard-fact authority for one fresh FAK reduce-only SELL."""
+    """Immutable protective authority for one fresh FAK reduce-only SELL."""
 
     kind: str
     position_id: str
@@ -2508,7 +2508,11 @@ class ProtectiveSellExecutionAuthority:
     authority_identity: str
 
     def __post_init__(self) -> None:
-        if self.kind not in {"RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD"}:
+        if self.kind not in {
+            "RED_FORCE_EXIT",
+            "DAY0_HARD_FACT_BIN_DEAD",
+            "FLASH_CRASH_PANIC",
+        }:
             raise ValueError("protective sell kind invalid")
         if not all((
             self.position_id,
@@ -2640,7 +2644,7 @@ def _protective_sell_execution_authority_error(
 
 
 def _protective_sell_semantic_receipt(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     *,
     position_id: str,
     token_id: str,
@@ -2649,6 +2653,100 @@ def _protective_sell_semantic_receipt(
     event_id: str | None = None,
 ) -> tuple[str, str] | None:
     """Bind a protective order to exact canonical semantic exit evidence."""
+    if conn is None:
+        return None
+    if kind == "FLASH_CRASH_PANIC":
+        try:
+            row = conn.execute(
+                """SELECT event_id, sequence_no, source_module, env,
+                          phase_after, payload_json
+                     FROM position_events
+                    WHERE position_id=? AND event_type='MONITOR_REFRESHED'
+                      AND (? IS NULL OR event_id=?)
+                    ORDER BY sequence_no DESC LIMIT 1""",
+                (position_id, event_id, event_id),
+            ).fetchone()
+            current = conn.execute(
+                """SELECT phase, direction, token_id, no_token_id, shares,
+                          chain_shares, chain_state
+                     FROM position_current WHERE position_id=? LIMIT 1""",
+                (position_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None or current is None:
+            return None
+        try:
+            payload_text = str(row["payload_json"] or "")
+            payload = json.loads(payload_text)
+            requested = _positive_decimal(shares)
+            canonical_shares = _positive_decimal(
+                current["chain_shares"]
+                if current["chain_shares"] not in (None, "")
+                else current["shares"]
+            )
+            monitor_bid = _positive_decimal(payload.get("last_monitor_best_bid"))
+            velocity = float(payload.get("market_velocity_1h"))
+            confirmations = int(payload.get("flash_crash_count") or 0)
+            from src.state.portfolio import (
+                flash_crash_catastrophe_velocity,
+                flash_crash_confirmations,
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        direction = str(current["direction"] or "")
+        canonical_token = str(
+            current["token_id"]
+            if direction == "buy_yes"
+            else current["no_token_id"]
+        )
+        validations = {
+            str(value)
+            for value in (payload.get("applied_validations") or [])
+        }
+        if (
+            str(row["source_module"] or "") != "src.engine.cycle_runtime"
+            or str(row["env"] or "") != "live"
+            or str(row["phase_after"] or "") in _RED_TERMINAL_PHASES
+            or str(current["phase"] or "") in _RED_TERMINAL_PHASES
+            or canonical_token != token_id
+            or requested is None
+            or canonical_shares is None
+            or requested > canonical_shares
+            or payload.get("exit_decision_should_exit") is not True
+            or payload.get("exit_decision_trigger") != "FLASH_CRASH_PANIC"
+            or payload.get("held_sell_full_depth_action_authority") is not True
+            or payload.get("last_monitor_market_price_is_fresh") is not True
+            or monitor_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= monitor_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+            or not math.isfinite(velocity)
+            or velocity > float(flash_crash_catastrophe_velocity())
+            or confirmations < int(flash_crash_confirmations())
+            or not {
+                "flash_crash_persistent_market_evidence",
+                "flash_crash_trigger",
+            }.issubset(validations)
+        ):
+            return None
+        try:
+            terminal = conn.execute(
+                """SELECT 1 FROM position_events
+                    WHERE position_id=? AND sequence_no>? AND phase_after IN (
+                        'economically_closed','settled','voided','admin_closed'
+                    ) LIMIT 1""",
+                (position_id, int(row["sequence_no"])),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if terminal is not None:
+            return None
+        return (
+            str(row["event_id"]),
+            hashlib.sha256(payload_text.encode()).hexdigest(),
+        )
+
     try:
         row = conn.execute(
             """SELECT event_id, sequence_no, source_module, env, decision_id,
@@ -7444,6 +7542,22 @@ def _execute_live_exit(
             now=_utcnow(),
         )
     )
+    market_catastrophe_candidate = bool(
+        live_non_red
+        and str(exit_intent.reason or "").startswith("FLASH_CRASH_PANIC")
+    )
+    if market_catastrophe_candidate and _protective_sell_semantic_receipt(
+        conn,
+        position_id=str(position.trade_id),
+        token_id=str(token_id),
+        shares=float(exit_intent.shares),
+        kind="FLASH_CRASH_PANIC",
+    ) is None:
+        # SCOPE: only this unproved catastrophe SELL. DRAIN: a canonical
+        # MONITOR_REFRESHED carrying the exact causal market evidence supplies
+        # authority on the next monitor claim. RESET: no latch or lifecycle
+        # mutation exists; a valid receipt passes this pre-intent boundary.
+        return "exit_blocked: flash_crash_semantic_authority_invalid"
     global_authorized = False
     branchwise_authorized = False
     continuing_existing_exit = bool(
@@ -7452,6 +7566,7 @@ def _execute_live_exit(
     if (
         live_non_red
         and not hard_fact_authorized
+        and not market_catastrophe_candidate
     ):
         branchwise_candidate = (
             str(exit_intent.reason or "").strip()
@@ -7581,6 +7696,8 @@ def _execute_live_exit(
         if is_red_force_exit
         else "DAY0_HARD_FACT_BIN_DEAD"
         if hard_fact_authorized
+        else "FLASH_CRASH_PANIC"
+        if market_catastrophe_candidate
         else ""
     )
     protective_bid = _positive_decimal(
@@ -7655,7 +7772,7 @@ def _execute_live_exit(
                 branchwise_sell_authority,
                 snapshot_context=snapshot_context,
             )
-        elif hard_fact_authorized or continuing_existing_exit:
+        elif protective_sell_authority is not None or continuing_existing_exit:
             authority_error = None
         else:
             authority_error = "hard_fact_sell_authority_invalid"
@@ -7954,7 +8071,10 @@ def _execute_live_exit(
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     if live_non_red and continuing_existing_exit and not (
-        global_authorized or branchwise_authorized or hard_fact_authorized
+        global_authorized
+        or branchwise_authorized
+        or hard_fact_authorized
+        or protective_sell_authority is not None
     ):
         logger.warning(
             "EXIT_REPLACEMENT_BLOCKED_FRESH_CAPITAL_AUTHORITY trade_id=%s",

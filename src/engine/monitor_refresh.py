@@ -83,7 +83,11 @@ from src.signal.day0_window import (
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes
 from src.observability.counters import increment as _cnt_inc
 from src.state.chain_reconciliation import resolve_position_metric
-from src.state.portfolio import Position
+from src.state.portfolio import (
+    Position,
+    flash_crash_catastrophe_velocity,
+    flash_crash_confirmations,
+)
 from src.strategy.market_fusion import (
     MODEL_ONLY_POSTERIOR_MODE,
     compute_alpha,
@@ -120,6 +124,7 @@ _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR = (
 )
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
+_FLASH_CRASH_CONFIRMATION_MAX_GAP_SECONDS = 120.0
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
 HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
@@ -1163,19 +1168,25 @@ def _causal_market_velocity_1h(
     current_price: float,
     observed_at: str | None,
 ) -> float:
-    """Return the held-token price change from the latest causal 1h baseline."""
+    """Return change from a causal one-hour baseline with bounded staleness."""
     if conn is None or not observed_at:
         return 0.0
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=timezone.utc)
-        cutoff = (as_of.astimezone(timezone.utc) - timedelta(hours=1)).isoformat()
+        as_of = as_of.astimezone(timezone.utc)
+        cutoff = (as_of - timedelta(hours=1)).isoformat()
+        oldest_baseline = (as_of - timedelta(hours=2)).isoformat()
         row = conn.execute(
             """
             SELECT price
               FROM token_price_log
              WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) >= julianday(?)
                AND COALESCE(
                        julianday(NULLIF(source_timestamp, '')),
                        julianday(timestamp)
@@ -1187,7 +1198,7 @@ def _causal_market_velocity_1h(
                       id DESC
              LIMIT 1
             """,
-            (str(token_id), cutoff),
+            (str(token_id), oldest_baseline, cutoff),
         ).fetchone()
         if row is None:
             return 0.0
@@ -1198,6 +1209,93 @@ def _causal_market_velocity_1h(
         return now_price - old_price
     except (TypeError, ValueError, sqlite3.Error):
         return 0.0
+
+
+def _causal_deep_market_catastrophe_confirmations(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    current_price: float,
+    observed_at: str | None,
+) -> int:
+    """Count consecutive causal deep-collapse quotes ending at ``observed_at``.
+
+    Held positions are reconstructed from canonical DB truth on every monitor
+    claim, so an in-memory counter cannot prove persistence across claims.  This
+    derives the confirmation count from the persisted token-price timeline
+    instead.  The current quote is counted once; earlier samples must have a
+    distinct evidence timestamp, be strictly causal, and independently cross
+    the same deep one-hour velocity bound.
+    """
+    if conn is None or not observed_at or not token_id:
+        return 0
+    try:
+        as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        as_of = as_of.astimezone(timezone.utc)
+        required = max(1, int(flash_crash_confirmations()))
+        samples: list[tuple[float, str]] = [(float(current_price), as_of.isoformat())]
+        confirmation_start = (
+            as_of - timedelta(seconds=_FLASH_CRASH_CONFIRMATION_MAX_GAP_SECONDS)
+        ).isoformat()
+        rows = conn.execute(
+            """
+            SELECT price,
+                   COALESCE(NULLIF(source_timestamp, ''), timestamp) AS evidence_at
+              FROM token_price_log
+             WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) >= julianday(?)
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) < julianday(?)
+             ORDER BY COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) DESC,
+                      id DESC
+             LIMIT ?
+            """,
+            (
+                str(token_id),
+                confirmation_start,
+                as_of.isoformat(),
+                required * 8,
+            ),
+        ).fetchall()
+        seen_times = {as_of.isoformat()}
+        for row in rows:
+            evidence_at = str(row["evidence_at"] or "")
+            if not evidence_at or evidence_at in seen_times:
+                continue
+            seen_times.add(evidence_at)
+            samples.append((float(row["price"]), evidence_at))
+            if len(samples) >= required:
+                break
+
+        # SCOPE: this held token's market-path exit authority only. DRAIN: the
+        # live quote channel appends another causal sample and the recurring
+        # monitor re-evaluates it. RESET: no latch exists; every decision
+        # recomputes this bounded window and a gap/recovery returns zero/one.
+        count = 0
+        threshold = float(flash_crash_catastrophe_velocity())
+        for price, sample_at in samples:
+            velocity = _causal_market_velocity_1h(
+                conn,
+                token_id=token_id,
+                current_price=price,
+                observed_at=sample_at,
+            )
+            if velocity > threshold:
+                break
+            count += 1
+        return count
+    except (TypeError, ValueError, sqlite3.Error):
+        return 0
 
 
 def _model_only_native_posterior(p_native: float) -> float:
@@ -7075,6 +7173,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             current_price=current_p_market,
             observed_at=getattr(quote, "source_timestamp", None),
         )
+        pos.flash_crash_count = _causal_deep_market_catastrophe_confirmations(
+            conn,
+            token_id=tid,
+            current_price=current_p_market,
+            observed_at=getattr(quote, "source_timestamp", None),
+        )
+    else:
+        pos.flash_crash_count = 0
 
     # Wrap into verified EdgeContext
     current_forward_edge = (

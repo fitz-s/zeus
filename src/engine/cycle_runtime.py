@@ -3474,6 +3474,12 @@ def _emit_monitor_refreshed_canonical_if_available(
                             False,
                         )
                     )
+                    payload["flash_crash_count"] = int(
+                        getattr(pos, "flash_crash_count", 0) or 0
+                    )
+                    payload["market_velocity_1h"] = float(
+                        getattr(pos, "exit_market_velocity_1h", 0.0) or 0.0
+                    )
                     monitor_lineage = getattr(
                         pos,
                         "_held_sell_reauction_monitor_lineage",
@@ -3804,6 +3810,9 @@ _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
     "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+    # Persistent deep market-path evidence is independent of the lagging q.
+    # Sending it back through the q-based auction would erase that authority.
+    "FLASH_CRASH_PANIC",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05

@@ -2640,6 +2640,280 @@ class TestExecutor:
             snapshot_hash=snapshot.executable_snapshot_hash,
         ) == "protective_sell_semantic_authority_superseded"
 
+    def test_flash_catastrophe_executes_protective_fak_through_venue_command(
+        self, monkeypatch
+    ):
+        """A canonical catastrophe decision survives every live SELL boundary."""
+        from src.execution.exit_lifecycle import execute_exit
+        from src.state.portfolio import (
+            ExitContext,
+            flash_crash_catastrophe_velocity,
+            flash_crash_confirmations,
+        )
+
+        token_id = "yes-token-flash-catastrophe-e2e"
+        _ensure_snapshot(
+            _TEST_CONN,
+            token_id=token_id,
+            condition_id="condition-flash-catastrophe-e2e",
+            direction="sell_yes",
+            final_limit_price=Decimal("0.19"),
+            snapshot_top_bid=Decimal("0.19"),
+            snapshot_top_ask=Decimal("0.21"),
+        )
+        position = Position(
+            trade_id="trade-flash-catastrophe-e2e",
+            market_id="condition-flash-catastrophe-e2e",
+            condition_id="condition-flash-catastrophe-e2e",
+            city="Test City",
+            cluster="Test Cluster",
+            target_date="2026-08-29",
+            bin_label="30C",
+            direction="buy_yes",
+            size_usd=5.0,
+            entry_price=0.50,
+            p_posterior=0.55,
+            edge=0.05,
+            shares=10.0,
+            chain_shares=10.0,
+            cost_basis_usd=5.0,
+            state="holding",
+            chain_state="synced",
+            token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            unit="C",
+            env="live",
+            strategy_key="forecast_qkernel_entry",
+        )
+        _TEST_CONN.execute(
+            """INSERT INTO position_current(
+                   position_id, phase, direction, token_id, no_token_id,
+                   shares, chain_shares, chain_state, updated_at,
+                   temperature_metric, condition_id
+               ) VALUES (?, 'active', 'buy_yes', ?, ?, 10, 10,
+                         'synced', ?, 'high', ?)""",
+            (
+                position.trade_id,
+                token_id,
+                position.no_token_id,
+                _NOW.isoformat(),
+                position.condition_id,
+            ),
+        )
+        monitor_payload = {
+            "exit_decision_should_exit": True,
+            "exit_decision_trigger": "FLASH_CRASH_PANIC",
+            "held_sell_full_depth_action_authority": True,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.20,
+            "market_velocity_1h": flash_crash_catastrophe_velocity() - 0.01,
+            "flash_crash_count": flash_crash_confirmations(),
+            "applied_validations": [
+                "flash_crash_persistent_market_evidence",
+                "flash_crash_trigger",
+            ],
+        }
+        _TEST_CONN.execute(
+            """INSERT INTO position_events(
+                   event_id, position_id, event_version, sequence_no,
+                   event_type, occurred_at, phase_before, phase_after,
+                   source_module, env, payload_json
+               ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'active',
+                         'active', 'src.engine.cycle_runtime', 'live', ?)""",
+            (
+                "event-flash-catastrophe-monitor",
+                position.trade_id,
+                _NOW.isoformat(),
+                json.dumps(monitor_payload, sort_keys=True),
+            ),
+        )
+        _TEST_CONN.commit()
+
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id="flash-catastrophe-e2e-order",
+                )
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda *_args, **_kwargs: "GTC",
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda *_args, **_kwargs: {"component": "collateral_refresh", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda *_args, **_kwargs: {"component": "collateral_sell", "allowed": True},
+        )
+        from src.execution import executor as executor_module
+
+        monkeypatch.setattr(
+            "src.execution.exit_lifecycle.execute_exit_order",
+            lambda intent, **kwargs: executor_module.execute_exit_order(
+                intent,
+                conn=_TEST_CONN,
+                **kwargs,
+            ),
+        )
+
+        class Clob:
+            @staticmethod
+            def get_order_status(_order_id):
+                return {"status": "OPEN"}
+
+        outcome = execute_exit(
+            PortfolioState(positions=[position]),
+            position,
+            ExitContext(
+                fresh_prob=None,
+                fresh_prob_is_fresh=False,
+                current_market_price=0.20,
+                current_market_price_is_fresh=True,
+                best_bid=0.20,
+                best_ask=0.22,
+                market_vig=1.0,
+                hours_to_settlement=12.0,
+                position_state="holding",
+                day0_active=False,
+                whale_toxicity=False,
+                exit_reason=(
+                    "FLASH_CRASH_PANIC "
+                    f"(velocity={flash_crash_catastrophe_velocity() - 0.01:.3f}, "
+                    f"causal_quotes={flash_crash_confirmations()})"
+                ),
+            ),
+            clob=Clob(),
+            conn=_TEST_CONN,
+        )
+
+        command = _TEST_CONN.execute(
+            """SELECT state, side, price, venue_order_id
+                 FROM venue_commands
+                WHERE position_id = ? AND intent_kind = 'EXIT'
+                ORDER BY created_at DESC
+                LIMIT 1""",
+            (position.trade_id,),
+        ).fetchone()
+        assert outcome.startswith(("sell_order_placed:", "sell_pending:")), outcome
+        assert captured == {
+            "token_id": token_id,
+            "price": pytest.approx(0.19),
+            "size": pytest.approx(10.0),
+            "side": "SELL",
+            "order_type": "FAK",
+        }
+        assert command is not None
+        assert command["state"] == "ACKED"
+        assert command["side"] == "SELL"
+        assert command["price"] == pytest.approx(0.19)
+        assert command["venue_order_id"] == "flash-catastrophe-e2e-order"
+        assert _TEST_CONN.execute(
+            """SELECT COUNT(*) FROM position_events
+                WHERE position_id = ? AND event_type = 'EXIT_INTENT'""",
+            (position.trade_id,),
+        ).fetchone()[0] == 1
+
+    def test_unproved_flash_catastrophe_cannot_mutate_exit_lifecycle(self):
+        from src.execution.exit_lifecycle import execute_exit
+        from src.state.portfolio import ExitContext
+
+        position = Position(
+            trade_id="trade-unproved-flash-catastrophe",
+            market_id="condition-unproved-flash-catastrophe",
+            condition_id="condition-unproved-flash-catastrophe",
+            city="Test City",
+            cluster="Test Cluster",
+            target_date="2026-08-29",
+            bin_label="30C",
+            direction="buy_yes",
+            size_usd=5.0,
+            entry_price=0.50,
+            p_posterior=0.55,
+            edge=0.05,
+            shares=10.0,
+            chain_shares=10.0,
+            cost_basis_usd=5.0,
+            state="holding",
+            chain_state="synced",
+            token_id="yes-token-unproved-flash",
+            no_token_id="no-token-unproved-flash",
+            unit="C",
+            env="live",
+            strategy_key="forecast_qkernel_entry",
+        )
+        _TEST_CONN.execute(
+            """INSERT INTO position_current(
+                   position_id, phase, direction, token_id, no_token_id,
+                   shares, chain_shares, chain_state, updated_at,
+                   temperature_metric, condition_id
+               ) VALUES (?, 'active', 'buy_yes', ?, ?, 10, 10,
+                         'synced', ?, 'high', ?)""",
+            (
+                position.trade_id,
+                position.token_id,
+                position.no_token_id,
+                _NOW.isoformat(),
+                position.condition_id,
+            ),
+        )
+        _TEST_CONN.commit()
+
+        outcome = execute_exit(
+            PortfolioState(positions=[position]),
+            position,
+            ExitContext(
+                fresh_prob=None,
+                fresh_prob_is_fresh=False,
+                current_market_price=0.20,
+                current_market_price_is_fresh=True,
+                best_bid=0.20,
+                best_ask=0.22,
+                market_vig=1.0,
+                hours_to_settlement=12.0,
+                position_state="holding",
+                day0_active=False,
+                whale_toxicity=False,
+                exit_reason="FLASH_CRASH_PANIC (unproved)",
+            ),
+            clob=SimpleNamespace(),
+            conn=_TEST_CONN,
+        )
+
+        current = _TEST_CONN.execute(
+            "SELECT phase FROM position_current WHERE position_id=?",
+            (position.trade_id,),
+        ).fetchone()
+        assert outcome == "exit_blocked: flash_crash_semantic_authority_invalid"
+        assert position.state == "holding"
+        assert current["phase"] == "active"
+        assert _TEST_CONN.execute(
+            """SELECT COUNT(*) FROM position_events
+                WHERE position_id=? AND event_type='EXIT_INTENT'""",
+            (position.trade_id,),
+        ).fetchone()[0] == 0
+
     def test_untyped_protective_fak_is_rejected_before_persistence(self, monkeypatch):
         from src.state.snapshot_repo import get_snapshot
 
