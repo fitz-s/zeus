@@ -5789,21 +5789,27 @@ def test_deploy_live_absent_daemon_bootstrap_restores_monitoring_with_exposure(
     assert "absent-daemon recovery" in detail
 
 
-def test_deploy_live_command_refuses_before_entry_pause_when_capital_is_open(
+def test_deploy_live_command_arms_entry_pause_before_capital_handoff_gate(
     monkeypatch, capsys
 ):
     dl = _load("deploy_live_restart_refusal_order", "deploy_live.py")
+    calls = []
     monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
     monkeypatch.setattr(
         dl,
         "_loaded_live_restart_obligation_gate",
-        lambda *_args, **_kwargs: (False, "open_positions=1"),
+        lambda *_args, **_kwargs: (
+            calls.append("handoff") or (False, "open_positions=1")
+        ),
     )
     monkeypatch.setattr(
         dl,
-        "_pause_entries_with_stuck_live_recovery",
-        lambda *_args, **_kwargs: pytest.fail("pause must not run before refusal"),
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **kwargs: (
+            calls.append(("pause", kwargs["expected_sha"])) or (True, "pause armed")
+        ),
     )
 
     rc = dl._cmd_restart_locked(
@@ -5815,7 +5821,45 @@ def test_deploy_live_command_refuses_before_entry_pause_when_capital_is_open(
     )
 
     assert rc == 1
+    assert calls == [("pause", "a" * 40), "handoff"]
     assert "continuous monitoring" in capsys.readouterr().out
+
+
+def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
+    monkeypatch, capsys
+):
+    dl = _load("deploy_live_restart_pause_failure_order", "deploy_live.py")
+    monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "b" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (False, "database is locked"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: pytest.fail("handoff must follow a durable pause"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda *_args, **_kwargs: pytest.fail("pause failure must not stop live main"),
+    )
+
+    rc = dl._cmd_restart_locked(
+        types.SimpleNamespace(
+            daemon="live-trading",
+            allow_dirty=False,
+            allow_unpushed=False,
+        )
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "entry pause guard is not armed" in output
+    assert "database is locked" in output
 
 
 def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(
@@ -6201,6 +6245,16 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
 
     monkeypatch.setattr(dl, "head_sha", _head_sha)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
 
     def _stop(label):
         calls.append(("stop", label))
@@ -6534,6 +6588,16 @@ def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
+    monkeypatch.setattr(
+        dl,
         "_pause_entries_for_live_restart_if_needed",
         lambda labels, **_kwargs: (True, "pause armed"),
     )
@@ -6598,6 +6662,16 @@ def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
     )
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
@@ -6921,6 +6995,16 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
+    monkeypatch.setattr(
+        dl,
         "_pause_entries_for_live_restart_if_needed",
         lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
@@ -7028,6 +7112,16 @@ def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",

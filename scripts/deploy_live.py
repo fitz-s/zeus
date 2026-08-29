@@ -3325,6 +3325,23 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
+
+    # Arm the durable entry guard while the loaded main still monitors held
+    # capital.  The obligation gate below requires this witness, so checking it
+    # first creates a circular refusal.  Do not use the writer-stuck recovery
+    # helper here: its stop fallback is only safe after a fresh capital handoff
+    # has already been proven.
+    pause_ok, pause_detail = _pause_entries_for_live_restart_if_needed(
+        labels,
+        expected_sha=expected_live_sha,
+    )
+    if not pause_ok:
+        print("REFUSING to restart — live entry pause guard is not armed:")
+        print(pause_detail)
+        return 1
+    print(pause_detail)
+
     obligation_ok, obligation_detail = _loaded_live_restart_obligation_gate(
         labels,
         live_was_loaded=live_was_loaded_before,
@@ -3334,18 +3351,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         print(obligation_detail)
         return 1
     print(obligation_detail)
-    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
-
-    pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
-        labels,
-        live_was_loaded=live_was_loaded_before,
-        expected_sha=expected_live_sha,
-    )
-    if not pause_ok:
-        print("REFUSING to restart — live entry pause guard is not armed:")
-        print(pause_detail)
-        return 1
-    print(pause_detail)
 
     launched_after: datetime | None = None
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
