@@ -12620,6 +12620,63 @@ class TestRecoveryResolutionTable:
         assert payload["rest_then_cross_escalated_after_rest"] is True
         assert payload["rest_then_cross_escalation_source"] == "terminal_no_fill"
 
+    def test_terminal_no_fill_capital_pass_defers_redecision_until_after_commit(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """Forecast work cannot roll back an already-proven capital release."""
+        from src.execution import command_recovery
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+        )
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_emit_terminal_no_fill_redecision_from_recovery",
+            lambda *args, **kwargs: pytest.fail(
+                "bounded capital pass must not run forecast redecision in its transaction"
+            ),
+        )
+
+        summary = reconcile_terminal_order_facts(
+            conn,
+            collect_continuations=True,
+            emit_immediate_redecision=False,
+        )
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert "immediate_redecision_events" not in summary
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
@@ -12694,6 +12751,76 @@ class TestRecoveryResolutionTable:
 
         assert summary["projection"]["advanced"] == 1
         assert _get_state(conn, "cmd-001") == "EXPIRED"
+
+    def test_restart_preflight_folds_durable_terminal_fact_before_point_read(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Deploy recovery must not require REST for an ingested cancel fact."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "restart-durable-terminal-fact.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-001")
+        _seed_pending_entry_projection(seed)
+        _append_order_fact(
+            seed,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        client = MagicMock(
+            spec_set=[
+                "get_account_truth",
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+            ]
+        )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
+        )
+        client.get_order.side_effect = pytest.fail
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope="restart_preflight",
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        )
+
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "CANCELLED"
+        finally:
+            verified.close()
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert summary["terminal_no_fill_continuations"][0]["command_id"] == "cmd-001"
+        client.get_order.assert_not_called()
 
     def test_live_tick_primes_acked_order_before_projection_creates_terminal_candidate(
         self,

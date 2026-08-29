@@ -11649,6 +11649,7 @@ def reconcile_terminal_order_facts(
     *,
     collect_continuations: bool = False,
     command_ids: frozenset[str] | None = None,
+    emit_immediate_redecision: bool = True,
 ) -> dict:
     """Close entry commands whose latest venue fact proves no resting remainder."""
 
@@ -11797,20 +11798,21 @@ def reconcile_terminal_order_facts(
                     occurred_at=occurred_at,
                 )
                 continuation = _terminal_no_fill_continuation_from_row(row)
-                try:
-                    emitted = _emit_terminal_no_fill_redecision_from_recovery(
-                        conn,
-                        continuation=continuation,
-                        occurred_at=occurred_at,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "recovery: terminal no-fill immediate redecision emit failed "
-                        "for command %s; leaving summary continuation fallback: %s",
-                        command_id,
-                        exc,
-                    )
-                    emitted = 0
+                emitted = 0
+                if emit_immediate_redecision:
+                    try:
+                        emitted = _emit_terminal_no_fill_redecision_from_recovery(
+                            conn,
+                            continuation=continuation,
+                            occurred_at=occurred_at,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "recovery: terminal no-fill immediate redecision emit failed "
+                            "for command %s; leaving summary continuation fallback: %s",
+                            command_id,
+                            exc,
+                        )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -29752,6 +29754,12 @@ def _reconcile_passes_short_conn(
                     lambda conn: reconcile_terminal_order_facts(
                         conn,
                         collect_continuations=True,
+                        # SCOPE: this exact already-terminal command/fact pair.
+                        # DRAIN: commit command/projection truth under the
+                        # dedicated capital deadline before any forecast work.
+                        # RESET: the returned continuation is emitted by main's
+                        # post-recovery redecision bridge after the DB commit.
+                        emit_immediate_redecision=False,
                     ),
                     conn_factory=terminal_fact_conn_factory,
                     label="recovery.terminal_order_facts_fast",
@@ -30527,10 +30535,16 @@ def _reconcile_passes_short_conn(
         )
 
     if scope == "restart_preflight":
+        # Consume already-durable terminal venue truth before account/network
+        # snapshot work. SCOPE is the exact command/order fact identity. DRAIN
+        # is this preflight DB pass. RESET is CANCEL_ACKED/EXPIRED plus the
+        # returned continuation; main redecides the family after restart.
         _db_pass(
             "terminal_order_facts",
             reconcile_terminal_order_facts,
             "terminal_order_facts",
+            collect_continuations=True,
+            emit_immediate_redecision=False,
         )
 
     if scope == "live_tick":
@@ -30902,6 +30916,13 @@ def _reconcile_passes_short_conn(
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
         )
+        terminal_order_facts = summary.get("terminal_order_facts")
+        if isinstance(terminal_order_facts, dict):
+            terminal_continuations = list(
+                terminal_order_facts.get("continuations") or []
+            )
+            if terminal_continuations:
+                summary["terminal_no_fill_continuations"] = terminal_continuations
         summary["scope"] = scope
         summary["restart_preflight_narrow"] = True
         return
