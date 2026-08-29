@@ -1338,13 +1338,17 @@ def run_persisted_cancels_for_expired_rests(
 
         if event_type == "CANCEL_ACKED":
             stats["cancelled"] += 1
-            if deadline_monotonic is None or time.monotonic() < deadline_monotonic:
-                _reconcile_terminal_no_fill_after_cancel_ack(
+            # The venue side effect is already durable.  Terminal no-fill
+            # projection and obligation release are its atomic follow-through,
+            # not optional work that may be skipped because the screen budget
+            # expired while the venue answered.  The helper is DB-only, bounded
+            # by its own lock retries, and remains idempotent for recovery.
+            _reconcile_terminal_no_fill_after_cancel_ack(
                 conn_factory,
                 command_id=command_id,
                 order_id=order_id,
                 close_connections=close_connections,
-                )
+            )
             if collect_cancelled is not None:
                 collect_cancelled.append(entry)
         else:

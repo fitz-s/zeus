@@ -27795,6 +27795,7 @@ def _recovery_apply_conn_factory(
     *,
     scope: str,
     deadline_monotonic: float | None = None,
+    monitor_preemptible: bool = True,
 ):
     bounded_scope = scope in {"live_tick", "restart_preflight"} or (
         scope == "full" and deadline_monotonic is not None
@@ -27824,7 +27825,9 @@ def _recovery_apply_conn_factory(
                 def _apply_progress_cancelled() -> int:
                     if time.monotonic() >= deadline_monotonic:
                         return 1
-                    if pending_monitor((DBIdentity.TRADE,)):
+                    if monitor_preemptible and pending_monitor(
+                        (DBIdentity.TRADE,)
+                    ):
                         _RECOVERY_MONITOR_PREEMPTION.pending = True
                         return 1
                     return 0
@@ -29580,6 +29583,13 @@ def _reconcile_passes_short_conn(
                 priority_factory,
                 scope="live_tick",
                 deadline_monotonic=deadline_monotonic,
+                # These passes own already-terminal venue/fill truth and are
+                # bounded by their dedicated capital deadline.  Once their
+                # RECOVERY_CRITICAL lease is acquired, let that short atomic
+                # projection/release finish instead of repeatedly aborting it
+                # for a continuously queued monitor writer.  Acquisition still
+                # yields to a monitor that already owns the coordinator gate.
+                monitor_preemptible=False,
             )
 
         identity_submit_deferred = 0

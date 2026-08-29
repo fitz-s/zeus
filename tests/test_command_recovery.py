@@ -1989,6 +1989,47 @@ def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
         conn.close()
 
 
+def test_exact_capital_apply_ignores_monitor_preemption_but_keeps_deadline(monkeypatch):
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+
+    class Coordinator:
+        @staticmethod
+        def has_pending_monitor_waiter(_dbs):
+            return True
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: Coordinator(),
+    )
+
+    def _factory(**_kwargs):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE rows (value INTEGER)")
+        conn.executemany(
+            "INSERT INTO rows VALUES (?)",
+            ((i,) for i in range(200)),
+        )
+        return conn
+
+    _factory.supports_nonblocking_flocks = True
+    exact_capital_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="live_tick",
+        deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        monitor_preemptible=False,
+    )
+
+    with exact_capital_factory() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM rows first, rows second, rows third"
+        ).fetchone()[0] == 8_000_000
+    assert not bool(
+        getattr(command_recovery._RECOVERY_MONITOR_PREEMPTION, "pending", False)
+    )
+
+
 def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
     from src.execution import command_recovery
 

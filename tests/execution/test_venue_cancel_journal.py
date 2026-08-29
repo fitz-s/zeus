@@ -1173,6 +1173,45 @@ class _PointOrderClob(_FakeClob):
 
 
 class TestPersistedRestCancel:
+    def test_cancel_ack_runs_terminal_reducer_after_screen_deadline(self, monkeypatch):
+        from src.execution import venue_cancel_journal
+
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        now = [0.0]
+        deadline = 10.0
+        real_append = venue_cancel_journal._append_cancel_journal_event
+        reducer_calls = []
+
+        def append_then_expire(*args, **kwargs):
+            result = real_append(*args, **kwargs)
+            if kwargs.get("event_type") == "CANCEL_ACKED":
+                now[0] = deadline + 1.0
+            return result
+
+        monkeypatch.setattr(venue_cancel_journal.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            venue_cancel_journal,
+            "_append_cancel_journal_event",
+            append_then_expire,
+        )
+        monkeypatch.setattr(
+            venue_cancel_journal,
+            "_reconcile_terminal_no_fill_after_cancel_ack",
+            lambda *_args, **kwargs: reducer_calls.append(kwargs["command_id"]),
+        )
+
+        stats = run_persisted_cancels_for_expired_rests(
+            [_entry("c1", "o1")],
+            _FakeClob(),
+            conn_factory=lambda: conn,
+            close_connections=False,
+            deadline_monotonic=deadline,
+        )
+
+        assert stats["cancelled"] == 1
+        assert reducer_calls == ["c1"]
+
     def test_current_zero_or_executable_fill_keeps_normal_cancel_path(self):
         for matched_size in ("0", "5", "8"):
             conn = _db()
