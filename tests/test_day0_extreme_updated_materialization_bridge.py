@@ -3954,6 +3954,30 @@ def test_day0_extreme_bridge_fails_closed_for_zero_observation_state(
     ) is False
 
 
+def test_cycle_advance_accepts_typed_zero_observation_revision_identity() -> None:
+    """A model-cycle seed can carry proven empty Day0 truth without fake extrema."""
+
+    payload = {
+        "day0_observation_state": "zero_target_date_observations",
+    }
+
+    assert cycle_advance._day0_revision_identity_is_complete(
+        payload,
+        conditioning_identity=None,
+    ) is True
+    assert cycle_advance._day0_revision_identity_is_complete(
+        {"day0_observation_state": "unknown"},
+        conditioning_identity=None,
+    ) is False
+    assert cycle_advance._day0_revision_identity_is_complete(
+        {
+            "day0_observation_state": "zero_target_date_observations",
+            "day0_observed_extreme_c": 20.0,
+        },
+        conditioning_identity=None,
+    ) is False
+
+
 def test_day0_extreme_bridge_config_lookup_failure_is_failsoft(monkeypatch) -> None:
     def _raise():
         raise RuntimeError("boom")

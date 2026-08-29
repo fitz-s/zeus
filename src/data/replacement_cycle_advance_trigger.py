@@ -54,6 +54,9 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.replacement_pipeline_files import (
+    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+)
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
@@ -293,6 +296,25 @@ def _day0_conditioning_identity(
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _day0_revision_identity_is_complete(
+    payload: Mapping[str, object],
+    *,
+    conditioning_identity: str | None,
+) -> bool:
+    """Accept either an observed-extreme identity or typed empty Day0 truth."""
+
+    if not payload:
+        return True
+    observation_state = str(payload.get("day0_observation_state") or "").strip()
+    if observation_state:
+        return (
+            observation_state
+            == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+            and payload.get("day0_observed_extreme_c") is None
+        )
+    return conditioning_identity is not None
 
 
 def _active_day0_provisional_or_conditioning(
@@ -1760,7 +1782,10 @@ def enqueue_cycle_advance_reseeds(
                 observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                 unit=day0_payload.get("day0_observed_extreme_unit"),
             )
-            if day0_payload and day0_identity is None:
+            if not _day0_revision_identity_is_complete(
+                day0_payload,
+                conditioning_identity=day0_identity,
+            ):
                 report["day0_identity_incomplete"] = int(
                     report["day0_identity_incomplete"]
                 ) + 1
