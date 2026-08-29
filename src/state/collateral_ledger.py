@@ -55,7 +55,7 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = (
 )
 COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
 DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS = 30_000
-_COLLATERAL_WRITE_LEASE_DEADLINE_MS = 250
+_COLLATERAL_WRITE_LEASE_DEADLINE_MS = 2_000
 _COLLATERAL_WRITE_LEASE_MAX_HOLD_MS = 250
 
 COLLATERAL_LEDGER_SCHEMA = """
@@ -1003,8 +1003,8 @@ class CollateralLedger:
             write=True,
             owner="collateral_snapshot_persist",
             # Current wealth is monitor authority for every global comparison.
-            # Register it ahead of STANDARD churn; the same 250ms deadline and
-            # hold limit keep this one-row DML path bounded and fail closed.
+            # Register it ahead of STANDARD churn. Acquisition may wait across
+            # adjacent monitor tranches, while the one-row DML hold stays 250ms.
             priority="monitor",
         ) as conn:
             if conn is None:

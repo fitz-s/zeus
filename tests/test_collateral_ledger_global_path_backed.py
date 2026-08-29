@@ -1,5 +1,5 @@
 # Created: 2026-05-13
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-29
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
 #                  + 2026-06-17 path-backed short-connection live repair
@@ -233,6 +233,7 @@ def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from src.state import collateral_ledger as collateral_module
     from src.state import db as state_db
     from src.state import write_coordinator as coordinator_module
     from src.state.write_coordinator import (
@@ -286,7 +287,10 @@ def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
     try:
         with pytest.raises(WriteLeaseTimeout):
             ledger.refresh(Adapter())
-        assert time.monotonic() - started < 0.6
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.6
+        assert collateral_module._COLLATERAL_WRITE_LEASE_DEADLINE_MS == 2_000
+        assert collateral_module._COLLATERAL_WRITE_LEASE_MAX_HOLD_MS == 250
         assert events[0] == "network_read"
         assert events[-1] == "collateral_snapshot_persist"
     finally:

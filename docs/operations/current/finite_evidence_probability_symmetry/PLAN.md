@@ -40,6 +40,18 @@ Status: active
   write最后才开启transaction；targeted monitor tests、compile、planning-lock通过，live
   restart后writer backlog、held coverage与collateral cadence恢复。
 
+### 2026-08-29 live follow-up — collateral wait与hold budget分离
+
+- **实时反例：** quote-writer缩短后backlog明显下降，但21个held monitor的短写tranche仍可让
+  `collateral_snapshot_persist`在250ms acquisition deadline内错过writer；它的一行DML尚未
+  开始就失败，current wealth truth因此每30秒出现空洞。
+- **修复：** acquisition deadline提高到2秒以跨越相邻monitor tranches；获得lease后的
+  max-hold继续严格保持250ms。网络capture仍在lease之前，q、price、Kelly与订单法不变。
+- **SCOPE / DRAIN / RESET：** scope仅为一条collateral snapshot写入；drain是现有30秒
+  cadence及2秒bounded wait；reset是成功的一行commit，raw incumbent超过2秒仍fail closed。
+- **验收：** raw `BEGIN IMMEDIATE` incumbent抗体证明等待落在1.5–2.8秒且仍超时，不把
+  max-hold放宽；targeted collateral test、compile、planning-lock与live cadence通过。
+
 ## 2026-08-24 — screen cancel obligation dispatch lease
 
 - **Design:** screen persists only a versioned exact command/order obligation; recovery selects only that marker, claims it with `CANCEL_DISPATCH_STARTED` in one `BEGIN IMMEDIATE` transaction, and performs no DB I/O across venue I/O. The claim carries obligation id, owner boot UUID/pid, generation, attempt id, and expiry. A stale claimant cannot finalize; expired claims require a fresh point-order witness before reclaim. Post-venue ACK/unknown uses a separate bounded reserve.
