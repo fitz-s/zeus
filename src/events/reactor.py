@@ -7984,21 +7984,21 @@ def _global_auction_monitor_cancellation_probe(
         ):
             cancelled_this_cycle = True
             return True
-        if completion_starts_without_monitor_debt:
-            # SCOPE: this already-reserved generic economic cut, admitted only
-            # while canonical monitor debt is absent at cut start. DRAIN: one
-            # bounded current BUY/SELL/HOLD/CASH comparison completes while a
-            # later ordinary periodic successor waits; exact SELL, Day0, fill,
-            # and submit-time q/book gates remain independent vetoes. RESET:
-            # the terminal cut clears completion debt, while any deferred cut
-            # retains it and the next generation re-samples monitor debt.
-            return False
         debt_pending = False
         if monitor_debt_pending is not None:
             try:
                 debt_pending = bool(monitor_debt_pending())
             except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
                 debt_pending = False
+        if completion_starts_without_monitor_debt and not debt_pending:
+            # SCOPE: this already-reserved generic economic cut, admitted only
+            # while durable monitor debt remains absent. DRAIN: one bounded
+            # current BUY/SELL/HOLD/CASH comparison completes while a merely
+            # claimed periodic successor waits. A handoff timeout upgrades that
+            # wait to durable debt and preempts this replayable cut at its next
+            # checkpoint. RESET: the monitor handoff clears debt; the retained
+            # completion token then owns the next current global cut.
+            return False
         if exact_executable_held_completion:
             # The exact request owns one bounded rebind turn.  Its historical
             # witness never reaches the venue: the adapter still requires a

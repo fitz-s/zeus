@@ -18496,7 +18496,7 @@ def test_global_scope_reports_a_held_family_without_probability_carrier(
     assert missing == [("Held", "2026-07-08", "high")]
 
 
-def test_reserved_completion_auction_ignores_scheduler_monitor_debt(
+def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
     monkeypatch,
 ):
     from src.events import reactor
@@ -18554,20 +18554,23 @@ def test_reserved_completion_auction_ignores_scheduler_monitor_debt(
     )
     started = time.monotonic()
     try:
-        scope = universe.scan_current_global_auction_scope(
-            world_conn=world_conn,
-            forecasts_conn=forecasts_conn,
-            decision_at_utc=_dt.datetime(
-                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
-            ),
-            cancelled=cancellation_probe,
-        )
+        with pytest.raises(
+            universe.GlobalAuctionScopeCancelled,
+            match="GLOBAL_SELECTION_CANCELLED",
+        ):
+            universe.scan_current_global_auction_scope(
+                world_conn=world_conn,
+                forecasts_conn=forecasts_conn,
+                decision_at_utc=_dt.datetime(
+                    2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+                ),
+                cancelled=cancellation_probe,
+            )
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
     assert due_at_start is True
     assert monitor_debt.is_set()
-    assert scope.events == (available,)
     assert time.monotonic() - started < 1.0
     calls_before_probe = prior_handler_calls
     forecasts_conn.execute(

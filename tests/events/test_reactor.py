@@ -7165,8 +7165,8 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_late_periodic_successor_waits_for_fresh_reserved_completion():
-    """A fresh reserved cut completes instead of phase-locking every 30 seconds."""
+def test_late_durable_monitor_debt_preempts_reserved_completion():
+    """A reserved cut yields once its waiting monitor misses the handoff."""
     from src.events import reactor
 
     monitor_claimed = [False]
@@ -7181,8 +7181,9 @@ def test_late_periodic_successor_waits_for_fresh_reserved_completion():
         )
         assert generic_cancelled() is False
         monitor_claimed[0] = True
-        monitor_debt[0] = True
         assert generic_cancelled() is False
+        monitor_debt[0] = True
+        assert generic_cancelled() is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
 
         _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
