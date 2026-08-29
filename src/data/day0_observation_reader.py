@@ -204,20 +204,48 @@ _OBSERVATION_FACT_TIME_SQL = """
 """
 
 
+def _hko_observation_table_ref(conn: sqlite3.Connection) -> str:
+    """Resolve HKO observations to canonical attached-world truth first."""
+
+    schemas = {str(row[1]) for row in conn.execute("PRAGMA database_list")}
+    for schema in ("world", "main", "forecasts"):
+        if schema not in schemas:
+            continue
+        present = conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master "
+            "WHERE type = 'table' AND name = 'observation_instants'"
+        ).fetchone()
+        if present is not None:
+            return (
+                "observation_instants"
+                if schema == "main"
+                else f"{schema}.observation_instants"
+            )
+    raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
+
+
 def _hko_official_snapshot_rows(
     conn: sqlite3.Connection,
     *,
     start_date: date,
     end_date: date,
     decision_time: datetime,
+    table_ref: str | None = None,
 ) -> tuple[tuple[date, datetime, float, float], ...]:
     """Read causal HKO since-midnight snapshot pairs for one bounded window."""
 
     if decision_time.tzinfo is None:
         raise ValueError("HKO_PROVISIONAL_REVISION_DECISION_TIME_NAIVE")
+    table_ref = table_ref or _hko_observation_table_ref(conn)
+    schema = table_ref.removesuffix(".observation_instants")
+    pragma = (
+        "PRAGMA table_info(observation_instants)"
+        if schema == table_ref
+        else f"PRAGMA {schema}.table_info(observation_instants)"
+    )
     columns = {
         str(row[1])
-        for row in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
+        for row in conn.execute(pragma).fetchall()
     }
     required = {
         "target_date",
@@ -240,7 +268,7 @@ def _hko_official_snapshot_rows(
                CAST(json_extract(
                     provenance_json, '$.official_running_low_c'
                ) AS REAL) AS running_low_c
-          FROM observation_instants
+          FROM {table_ref}
          WHERE city = 'Hong Kong'
            AND target_date BETWEEN ? AND ?
            AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
@@ -297,15 +325,17 @@ def _hko_rollover_reset_confirmation_present(
     *,
     target_date: date,
     decision_time: datetime,
+    table_ref: str | None = None,
 ) -> bool:
     """Return whether a causal canonical row proves a cold-start pair change."""
 
     decision_utc = decision_time.astimezone(timezone.utc).isoformat()
+    table_ref = table_ref or _hko_observation_table_ref(conn)
     return (
         conn.execute(
             f"""
             SELECT 1
-              FROM observation_instants
+              FROM {table_ref}
              WHERE city = 'Hong Kong'
                AND target_date = ?
                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
@@ -437,11 +467,13 @@ def hko_rollover_carryover_status(
     """Classify whether HKO has demonstrably reset into the target date."""
 
     target = date.fromisoformat(str(target_date))
+    table_ref = _hko_observation_table_ref(conn)
     rows = _hko_official_snapshot_rows(
         conn,
         start_date=target - timedelta(days=1),
         end_date=target,
         decision_time=decision_time,
+        table_ref=table_ref,
     )
     previous = tuple(row for row in rows if row[0] == target - timedelta(days=1))
     current_pairs = [row[2:] for row in rows if row[0] == target]
@@ -467,6 +499,7 @@ def hko_rollover_carryover_status(
         conn,
         target_date=target,
         decision_time=decision_time,
+        table_ref=table_ref,
     ):
         return "RESET_CONFIRMED"
     return (
