@@ -3484,6 +3484,92 @@ def test_global_scope_queue_identity_enters_priority_below_held(monkeypatch, tmp
     assert background.name not in priority_names
 
 
+def test_priority_seed_tranche_preserves_held_and_global_scope(tmp_path, monkeypatch):
+    """Two-slot priority work cannot let held refreshes starve global q truth."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_family = ("Istanbul", "2026-08-29", "high")
+    held_second_family = ("Moscow", "2026-08-29", "high")
+    global_family = ("Jinan", "2026-08-29", "low")
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+
+    def write_seed(path: Path, family: tuple[str, str, str]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    **_minimal_seed(upgrade=False),
+                    "city": family[0],
+                    "target_date": family[1],
+                    "temperature_metric": family[2],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    held_first = seed_dir / "Istanbul.2026-08-29.high.current.json"
+    held_second = seed_dir / "Moscow.2026-08-29.high.current.json"
+    global_path = seed_dir / "Jinan.2026-08-29.low.current.json"
+    write_seed(held_first, held_family)
+    write_seed(held_second, held_second_family)
+    write_seed(global_path, global_family)
+    held = frozenset({held_family, held_second_family})
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: held)
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_global_auction_scope_families",
+        lambda _paths: held | frozenset({global_family}),
+    )
+    monkeypatch.setattr(
+        queue_mod, "_current_probability_debt_families", lambda **_kwargs: frozenset()
+    )
+    monkeypatch.setattr(queue_mod, "_seed_source_cycle_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not failed
+    assert len(processed) == 2
+    assert {path.name for path in request_dir.glob("*.json")} == {
+        held_first.name,
+        global_path.name,
+    }
+    assert held_second.exists()
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

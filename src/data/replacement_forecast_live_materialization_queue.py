@@ -3284,6 +3284,42 @@ def _prioritize_current_money_risk_seed_files(
     return (*newest, *held_tail, *other)
 
 
+def _interleave_current_priority_seed_files(
+    paths: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None],
+    *,
+    current_money_risk: frozenset[tuple[str, str, str]],
+    current_global_scope: frozenset[tuple[str, str, str]],
+    limit: int,
+) -> tuple[Path, ...]:
+    """Reserve one bounded priority slot for current global selection truth."""
+
+    ordered = tuple(paths)
+    if limit < 2:
+        return ordered
+    global_only = current_global_scope - current_money_risk
+    held = next(
+        (
+            path
+            for path in ordered
+            if _request_family_scope(payloads.get(path)) in current_money_risk
+        ),
+        None,
+    )
+    global_path = next(
+        (
+            path
+            for path in ordered
+            if _request_family_scope(payloads.get(path)) in global_only
+        ),
+        None,
+    )
+    if held is None or global_path is None:
+        return ordered
+    selected = {held, global_path}
+    return (held, global_path, *(path for path in ordered if path not in selected))
+
+
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
     """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
     try:
@@ -3519,6 +3555,14 @@ def _prepare_seed_requests(
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
+    if lane == MATERIALIZATION_LANE_PRIORITY:
+        seeds = _interleave_current_priority_seed_files(
+            seeds,
+            seed_payloads,
+            current_money_risk=current_money_risk,
+            current_global_scope=current_global_scope,
+            limit=actionable_limit,
+        )
     actionable_count = 0
     inspected_count = 0
     indeterminate_count = 0
