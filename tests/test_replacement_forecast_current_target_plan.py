@@ -394,6 +394,70 @@ def test_day0_observation_without_import_clock_is_not_live_visible() -> None:
     conn.close()
 
 
+def test_day0_fact_prefers_attached_canonical_world_over_empty_main_ghost(
+    tmp_path: Path,
+) -> None:
+    """A forecasts ghost table cannot shadow canonical attached world truth."""
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT, provenance_json TEXT
+        )
+        """
+    )
+    world.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Istanbul",
+            "2026-08-29",
+            "ogimet_metar_ltfm",
+            "LTFM",
+            "C",
+            "2026-08-29T10:17:12+00:00",
+            "2026-08-29T12:00:00+03:00",
+            "2026-08-29T09:00:00+00:00",
+            23.0,
+            18.0,
+            "VERIFIED",
+            1,
+            "OK",
+            "historical_hourly",
+            "METAR LTFM",
+            "{}",
+        ),
+    )
+    world.commit()
+    world.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE observation_instants (city TEXT, target_date TEXT)"
+    )
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Istanbul",
+        target_date="2026-08-29",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 29, 10, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 23.0
+    assert fact["observation_source"] == "ogimet_metar_ltfm"
+    conn.close()
+
+
 def test_day0_global_fact_uses_provider_report_time_and_rejects_lookahead() -> None:
     """RELATIONSHIP: canonical WU row -> global Day0 monitor fact clock."""
 

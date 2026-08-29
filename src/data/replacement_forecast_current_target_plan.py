@@ -228,8 +228,30 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _world_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
+    """Resolve world-owned truth before any same-named main ghost table."""
+
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    if "world" in attached:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master "
+            "WHERE type IN ('table', 'view') AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if row is not None:
+            return f"world.{table_name}"
+    return table_name if table_name in _table_names(conn) else None
+
+
 def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if "." in table_name:
+        schema, bare_name = table_name.split(".", 1)
+        pragma = f"PRAGMA {schema}.table_info({bare_name})"
+    else:
+        pragma = f"PRAGMA table_info({table_name})"
+    return {str(row["name"]) for row in conn.execute(pragma).fetchall()}
 
 
 def _raw_artifact_metadata_column(columns: set[str]) -> str | None:
@@ -799,13 +821,11 @@ def _latest_authorized_day0_fact(
     # A committed DAY0_EXTREME_UPDATED event remains a separate candidate
     # below.  Ledger rows retain their own source-issued and fetched clocks;
     # an older event availability must not rewrite either one.
-    if "observation_instants" in _table_names(conn):
+    observation_instants_ref = _world_table_ref(conn, "observation_instants")
+    if observation_instants_ref is not None:
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
-        instant_columns = {
-            str(column[1])
-            for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
-        }
+        instant_columns = _columns(conn, observation_instants_ref)
         observation_fact_time_sql = (
             _OBSERVATION_FACT_TIME_SQL
             if "provenance_json" in instant_columns
@@ -897,7 +917,7 @@ def _latest_authorized_day0_fact(
                        {optional_column('imported_at')},
                        {optional_column('raw_response')},
                        {optional_column('provenance_json')}
-                  FROM observation_instants
+                  FROM {observation_instants_ref}
                  WHERE city = ?
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
@@ -989,20 +1009,26 @@ def _latest_authorized_day0_fact(
                 }
             )
 
-    if "opportunity_events" in _table_names(conn):
+    opportunity_events_ref = _world_table_ref(conn, "opportunity_events")
+    if opportunity_events_ref is not None:
+        opportunity_events_schema = (
+            opportunity_events_ref.split(".", 1)[0]
+            if "." in opportunity_events_ref
+            else "main"
+        )
         day0_family_index = (
             conn.execute(
-                "SELECT 1 FROM sqlite_master "
+                f"SELECT 1 FROM {opportunity_events_schema}.sqlite_master "
                 "WHERE type = 'index' "
                 "AND name = 'idx_opportunity_events_day0_family_extreme'"
             ).fetchone()
             is not None
         )
         event_table = (
-            "opportunity_events INDEXED BY "
+            f"{opportunity_events_ref} INDEXED BY "
             "idx_opportunity_events_day0_family_extreme"
             if day0_family_index
-            else "opportunity_events"
+            else opportunity_events_ref
         )
         event_rows = conn.execute(
             f"""
@@ -1177,7 +1203,8 @@ def _latest_authorized_day0_fact(
     # settled-history agreement against the other two facts, the day0
     # belief can read the ledger alone and the widening branch retires — not
     # yet, this only adds a third fact.
-    if "observation_prints" in _table_names(conn) and city_obj is not None:
+    observation_prints_ref = _world_table_ref(conn, "observation_prints")
+    if observation_prints_ref is not None and city_obj is not None:
         try:
             tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
             target_day = date.fromisoformat(str(target_date)[:10])
@@ -1222,7 +1249,7 @@ def _latest_authorized_day0_fact(
                     f"""
                     SELECT source_channel, publish_ts_utc, value_native, unit,
                            station_id, raw_report, fetched_at_utc
-                      FROM observation_prints
+                      FROM {observation_prints_ref}
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
                        AND julianday(publish_ts_utc) >= julianday(?)
