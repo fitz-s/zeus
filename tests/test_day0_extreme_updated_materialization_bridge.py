@@ -2728,6 +2728,49 @@ def test_priority_job_uses_one_seed_bridge_call_when_queue_is_empty(
     assert receipt == {"status": "NO_REQUESTS", "seed_limit": 2}
 
 
+def test_priority_request_tranche_reserves_global_q_slot(tmp_path) -> None:
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    held = tmp_path / "held.json"
+    held_sibling = tmp_path / "held-sibling.json"
+    global_q = tmp_path / "global.json"
+    background = tmp_path / "background.json"
+    held_scope = ("Istanbul", "2026-08-29", "high")
+    global_scope = ("Taipei", "2026-08-31", "low")
+    payloads = {
+        held: {
+            "city": held_scope[0],
+            "target_date": held_scope[1],
+            "temperature_metric": held_scope[2],
+        },
+        held_sibling: {
+            "city": held_scope[0],
+            "target_date": held_scope[1],
+            "temperature_metric": held_scope[2],
+        },
+        global_q: {
+            "city": global_scope[0],
+            "target_date": global_scope[1],
+            "temperature_metric": global_scope[2],
+        },
+        background: {
+            "city": "London",
+            "target_date": "2026-09-01",
+            "temperature_metric": "high",
+        },
+    }
+
+    ordered = queue._interleave_current_priority_request_files(
+        (held, held_sibling, global_q, background),
+        payloads,
+        current_money_risk=frozenset({held_scope}),
+        current_global_scope=frozenset({held_scope, global_scope}),
+        limit=2,
+    )
+
+    assert ordered[:2] == (held, global_q)
+
+
 def test_materialize_callbacks_return_lane_receipts_and_truthful_status_health(
     monkeypatch, tmp_path
 ) -> None:

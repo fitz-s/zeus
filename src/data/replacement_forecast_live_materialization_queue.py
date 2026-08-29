@@ -2789,7 +2789,27 @@ def _build_request_claim_read_plan(
             superseded=(),
             unknown_inflight_batches=tuple(sorted(unknown_inflight_batches)),
         )
-    priority, priority_names = _priority_map_with_names(forecast_db, request_files)
+    request_payloads = {
+        path: _load_request_payload_for_coalescing(path)
+        for path in request_files
+    }
+    current_money_risk = (
+        _current_money_risk_families()
+        if lane == MATERIALIZATION_LANE_PRIORITY
+        else None
+    )
+    current_global_scope = (
+        _current_global_auction_scope_families(request_files)
+        if lane == MATERIALIZATION_LANE_PRIORITY
+        else None
+    )
+    priority, priority_names = _priority_map_with_names(
+        forecast_db,
+        request_files,
+        request_payloads,
+        current_money_risk=current_money_risk,
+        current_global_scope=current_global_scope,
+    )
     requests = tuple(
         sorted(
             (
@@ -2807,7 +2827,7 @@ def _build_request_claim_read_plan(
     timeout_retry_deferred = 0
     identity_deferred = 0
     for path in remaining:
-        payload = _load_request_payload_for_coalescing(path)
+        payload = request_payloads.get(path)
         if payload is None or _claim_identity_witness(payload) is None:
             # SCOPE: this unreadable queued filename only. DRAIN: the producer
             # repairs/replaces it or an operator quarantines it. RESET: a later
@@ -2824,6 +2844,16 @@ def _build_request_claim_read_plan(
             inflight_deferred += 1
             continue
         claimable.append(path)
+    if lane == MATERIALIZATION_LANE_PRIORITY:
+        claimable = list(
+            _interleave_current_priority_request_files(
+                claimable,
+                request_payloads,
+                current_money_risk=current_money_risk or frozenset(),
+                current_global_scope=current_global_scope or frozenset(),
+                limit=limit,
+            )
+        )
     selected = tuple(claimable[:limit])
     identity_targets = selected or requests[:limit]
     selected_identity_keys = frozenset().union(
@@ -3498,6 +3528,42 @@ def _interleave_current_priority_seed_files(
     return (held, global_path, *(path for path in ordered if path not in selected))
 
 
+def _interleave_current_priority_request_files(
+    paths: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None],
+    *,
+    current_money_risk: frozenset[tuple[str, str, str]],
+    current_global_scope: frozenset[tuple[str, str, str]],
+    limit: int,
+) -> tuple[Path, ...]:
+    """Reserve one request slot for global q while protecting held capital."""
+
+    ordered = tuple(paths)
+    if limit < 2:
+        return ordered
+    global_only = current_global_scope - current_money_risk
+    held = next(
+        (
+            path
+            for path in ordered
+            if _request_family_scope(payloads.get(path)) in current_money_risk
+        ),
+        None,
+    )
+    global_path = next(
+        (
+            path
+            for path in ordered
+            if _request_family_scope(payloads.get(path)) in global_only
+        ),
+        None,
+    )
+    if held is None or global_path is None:
+        return ordered
+    selected = {held, global_path}
+    return (held, global_path, *(path for path in ordered if path not in selected))
+
+
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
     """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
     try:
@@ -4102,9 +4168,26 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             discovery_report=discovery_report,
         )
 
+    request_payloads = {
+        path: _load_request_payload_for_coalescing(path)
+        for path in request_files
+    }
+    current_money_risk = (
+        _current_money_risk_families()
+        if lane == MATERIALIZATION_LANE_PRIORITY
+        else None
+    )
+    current_global_scope = (
+        _current_global_auction_scope_families(request_files)
+        if lane == MATERIALIZATION_LANE_PRIORITY
+        else None
+    )
     priority, priority_names = _priority_map_with_names(
         forecast_db,
         request_files,
+        request_payloads,
+        current_money_risk=current_money_risk,
+        current_global_scope=current_global_scope,
     )
     identity_deferred = 0
     requests = tuple(
@@ -4117,7 +4200,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
                     priority_names=priority_names,
                     lane=lane,
                 )
-                and (payload := _load_request_payload_for_coalescing(path)) is not None
+                and (payload := request_payloads.get(path)) is not None
                 and _claim_identity_witness(payload) is not None
             ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
@@ -4128,7 +4211,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         for path in request_files
         if _lane_matches(path=path, priority_names=priority_names, lane=lane)
         and (
-            (payload := _load_request_payload_for_coalescing(path)) is None
+            (payload := request_payloads.get(path)) is None
             or _claim_identity_witness(payload) is None
         )
     )
@@ -4141,7 +4224,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     timeout_retry_deferred = 0
     now = time.time()
     for path in requests:
-        payload = _load_request_payload_for_coalescing(path)
+        payload = request_payloads.get(path)
         _base, _attempt, retry_at = _timeout_retry_state(path)
         # Every retry remains ineligible until its durable retry_at.  A held
         # Day0 observation-advance timeout is written with a one-second delay
@@ -4155,6 +4238,16 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             inflight_deferred += 1
         else:
             claimable.append(path)
+    if lane == MATERIALIZATION_LANE_PRIORITY:
+        claimable = list(
+            _interleave_current_priority_request_files(
+                claimable,
+                request_payloads,
+                current_money_risk=current_money_risk or frozenset(),
+                current_global_scope=current_global_scope or frozenset(),
+                limit=limit,
+            )
+        )
     selected = tuple(claimable[:limit])
     batch_path = (
         _new_claim_batch(inflight_path, selected)
