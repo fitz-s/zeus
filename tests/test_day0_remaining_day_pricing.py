@@ -3642,6 +3642,48 @@ class TestRemainingDayMembers:
             "aviationweather_metar",
         )
 
+    def test_current_temperature_prefers_attached_world_over_empty_main_ghost(
+        self, monkeypatch, tmp_path
+    ):
+        """A forecasts ghost cannot hide the canonical current-state ledger."""
+        import src.engine.event_reactor_adapter as era
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        world_path = tmp_path / "world.db"
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        append_print(
+            world,
+            city="Paris",
+            station_id="LFPG",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-10T13:30:00+00:00",
+            value_native=23.0,
+            unit="C",
+            fetched_at_utc="2026-06-10T13:34:00+00:00",
+            raw_report="METAR LFPG 101330Z 23010KT 23/12",
+        )
+        world.commit()
+        world.close()
+
+        conn = _conn()
+        ensure_table(conn)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+
+        current = era._latest_day0_current_temperature_native(
+            world_conn=conn,
+            family=self._family(),
+            decision_time=datetime(2026, 6, 10, 13, 40, tzinfo=UTC),
+        )
+        conn.close()
+
+        assert current == (
+            23.0,
+            datetime(2026, 6, 10, 13, 30, tzinfo=UTC),
+            "aviationweather_metar",
+        )
+
     def test_ogimet_hourly_latest_report_reaches_current_temperature_authority(
         self, monkeypatch
     ):

@@ -43703,8 +43703,17 @@ def _latest_day0_current_temperature_native(
     the current level needed to condition the remaining forecast path.
     """
 
+    attached = {
+        str(row[1])
+        for row in world_conn.execute("PRAGMA database_list").fetchall()
+    }
+    observation_prints_ref = "observation_prints"
+    table_schema = "main"
+    if "world" in attached:
+        observation_prints_ref = "world.observation_prints"
+        table_schema = "world"
     table = world_conn.execute(
-        "SELECT 1 FROM sqlite_master "
+        f"SELECT 1 FROM {table_schema}.sqlite_master "
         "WHERE type = 'table' AND name = 'observation_prints'"
     ).fetchone()
     if table is None:
@@ -43746,7 +43755,7 @@ def _latest_day0_current_temperature_native(
         f"""
         SELECT publish_ts_utc, value_native, unit, station_id, source_channel,
                raw_report, fetched_at_utc
-          FROM observation_prints
+          FROM {observation_prints_ref}
          WHERE city = ?
            AND source_channel IN ({placeholders})
            AND publish_ts_utc >= ?
