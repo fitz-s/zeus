@@ -1660,7 +1660,9 @@ def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch)
     assert pauses == ["control_plane_command_drain_failed"]
 
 
-def test_main_monitor_cadence_debt_blocks_buy_and_preempts_ordinary_reactor(monkeypatch):
+def test_main_monitor_cadence_debt_blocks_buy_without_preempting_ordinary_reactor(
+    monkeypatch,
+):
     import src.events.reactor as reactor_module
     import src.main as main
 
@@ -1707,10 +1709,10 @@ def test_main_monitor_cadence_debt_blocks_buy_and_preempts_ordinary_reactor(monk
     )
     monitor_pending = captured["held_position_monitor_pending"]
     assert callable(monitor_pending)
-    assert monitor_pending() is True
+    assert monitor_pending() is False
     monitor_debt_pending = captured["held_position_monitor_debt_pending"]
     assert callable(monitor_debt_pending)
-    assert monitor_debt_pending() is True
+    assert monitor_debt_pending() is False
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
@@ -6914,7 +6916,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["held_position_monitor_pending"]() is False
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
-        assert captured["held_position_monitor_pending"]() is False
+        assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_successor_pending.set()
         assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_fairness_debt.set()

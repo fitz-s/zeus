@@ -4935,20 +4935,20 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_successor_pending.is_set()
-                or _held_position_monitor_canonical_debt.is_set()
                 or _held_position_monitor_handoff_pending.is_set()
             )
         ),
         held_position_monitor_debt_pending=(
-            # SCOPE: any ordinary global cut while canonical held-monitor
-            # coverage is overdue.  DRAIN: the cut exits at its next SQLite
-            # checkpoint, releases its snapshots and active lock, then the
-            # monitor owns the next tranche.  RESET: current canonical monitor
-            # evidence clears the debt.  A family BUY block is not sufficient:
-            # it cannot let a broad auction retain the monitor's writer lane.
+            # SCOPE: only an actual monitor handoff or unpaid periodic fairness
+            # turn may stop an ordinary global cut. Canonical stale evidence is
+            # already projected into exact BUY-family blocks above; treating it
+            # as global cooperative preemption lets one unavailable Day0 family
+            # freeze SELL/HOLD/CASH and every unrelated fresh family forever.
+            # DRAIN: the claimed monitor enters its core run or pays the one
+            # fairness turn. RESET: those process-local events clear on handoff;
+            # canonical family debt remains fail-closed until fresh evidence.
             lambda: (
                 _periodic_held_position_monitor_fairness_debt.is_set()
-                or _held_position_monitor_canonical_debt.is_set()
                 or _held_position_monitor_handoff_pending.is_set()
             )
         ),

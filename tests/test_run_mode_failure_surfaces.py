@@ -12146,7 +12146,7 @@ def test_reactor_poll_defers_ordinary_work_after_exact_debt_read(monkeypatch) ->
     assert reads == []
 
 
-def test_reactor_wrapper_preexisting_canonical_debt_preempts_ordinary_cut(
+def test_reactor_wrapper_preexisting_canonical_debt_scopes_buy_without_preemption(
     monkeypatch,
 ) -> None:
     import src.events.reactor as reactor_module
@@ -12209,11 +12209,11 @@ def test_reactor_wrapper_preexisting_canonical_debt_preempts_ordinary_cut(
 
     def run_cycle(**kwargs) -> bool:
         observed.update(kwargs)
-        # Canonical debt that predates the reactor cycle must enter both
-        # cooperative preemption probes. A family BUY block alone cannot make a
-        # broad ordinary auction release its snapshots/active lock.
-        assert kwargs["held_position_monitor_pending"]() is True
-        assert kwargs["held_position_monitor_debt_pending"]() is True
+        # Canonical debt is already an exact family BUY block.  With no actual
+        # handoff or fairness turn, it must not preempt unrelated fresh-family
+        # comparison or held SELL/HOLD/CASH.
+        assert kwargs["held_position_monitor_pending"]() is False
+        assert kwargs["held_position_monitor_debt_pending"]() is False
         return True
 
     monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
