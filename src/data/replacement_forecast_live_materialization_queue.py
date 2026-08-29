@@ -1195,6 +1195,30 @@ def _seed_source_cycle_boundary(
                 metric=str(seed.get("temperature_metric")),
                 decision_time=datetime.now(timezone.utc),
             )
+            baseline_cycle = None
+            baseline_source_run_id = str(
+                seed.get("baseline_source_run_id") or ""
+            ).strip()
+            if baseline_source_run_id:
+                try:
+                    baseline_row = conn.execute(
+                        """
+                        SELECT source_cycle_time
+                        FROM source_run
+                        WHERE source_run_id = ?
+                          AND status = 'SUCCESS'
+                        LIMIT 1
+                        """,
+                        (baseline_source_run_id,),
+                    ).fetchone()
+                except sqlite3.Error:
+                    baseline_row = None
+                if baseline_row is not None:
+                    baseline_cycle = _parse_utc_iso(
+                        baseline_row["source_cycle_time"]
+                        if hasattr(baseline_row, "keys")
+                        else baseline_row[0]
+                    )
         finally:
             conn.close()
     except _ClaimReadDeadlineExceeded:
@@ -1206,6 +1230,12 @@ def _seed_source_cycle_boundary(
         current_cycle = _parse_utc_iso(current_raw)
         if current_cycle is not None and request_cycle < current_cycle:
             return "current_posterior", current_cycle.isoformat()
+    if (
+        latest_ensemble_cycle is not None
+        and baseline_cycle is not None
+        and baseline_cycle < latest_ensemble_cycle
+    ):
+        return "baseline_input_hwm", latest_ensemble_cycle.isoformat()
     if latest_ensemble_cycle is not None and request_cycle < latest_ensemble_cycle:
         return "current_ensemble_hwm", latest_ensemble_cycle.isoformat()
     if latest_ensemble_cycle is not None and request_cycle > latest_ensemble_cycle:
@@ -3650,7 +3680,8 @@ def _prepare_seed_requests(
                 regression_basis, current_cycle = cycle_boundary
                 reason_code = (
                     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
-                    if regression_basis == "current_ensemble_hwm"
+                    if regression_basis
+                    in {"current_ensemble_hwm", "baseline_input_hwm"}
                     else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
                 )
                 moved = _move_request(seed_json, processed_path)
@@ -4473,7 +4504,8 @@ def _process_claimed_materialization_batch(
             regression_basis, current_cycle = cycle_boundary
             reason_code = (
                 "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
-                if regression_basis == "current_ensemble_hwm"
+                if regression_basis
+                in {"current_ensemble_hwm", "baseline_input_hwm"}
                 else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
             )
             receipt = _record_latest_terminal_request(

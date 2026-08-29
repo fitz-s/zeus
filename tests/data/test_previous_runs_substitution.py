@@ -1877,6 +1877,110 @@ def test_request_drain_skips_cycle_below_current_ensemble_hwm_before_subprocess(
     }
 
 
+def test_request_drain_skips_stale_baseline_below_current_ensemble_hwm(
+    tmp_path, monkeypatch
+) -> None:
+    """A current carrier cannot conceal an older superseded ENS shape."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT,
+            runtime_layer TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, source_id, city, target_date,
+                temperature_metric, computed_at
+            );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT, status TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Tel Aviv",
+            "2026-08-31",
+            "high",
+            "2026-08-29T06:00:00+00:00",
+            "2026-08-29T13:44:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO source_run VALUES (?, ?, 'SUCCESS')",
+        ("baseline:00z", "2026-08-29T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    from src.data import replacement_input_hwm
+
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: datetime(
+            2026, 8, 29, 6, tzinfo=timezone.utc
+        ),
+    )
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Tel Aviv",
+        "target_date": "2026-08-31",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-29T06:00:00+00:00",
+        "computed_at": "2026-08-29T12:17:27+00:00",
+        "baseline_source_run_id": "baseline:00z",
+        "openmeteo_source_run_id": "anchor:06z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    (request_dir / "stale-baseline.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert spawned == []
+    receipt = next((tmp_path / "superseded_latest").glob("*.json"))
+    evidence = json.loads(receipt.read_text(encoding="utf-8"))
+    assert evidence["reason_codes"] == [
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+    ]
+    assert evidence["result_evidence"]["regression_basis"] == (
+        "baseline_input_hwm"
+    )
+
+
 def test_request_drain_defers_cycle_ahead_of_current_ensemble_hwm_before_subprocess(
     tmp_path,
 ) -> None:
