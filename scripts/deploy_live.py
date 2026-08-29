@@ -173,6 +173,9 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS", "90")
 )
+LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS", "90")
+)
 LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS", "90")
 )
@@ -485,6 +488,48 @@ def _wait_for_prerequisite_code_identity(
         if time.monotonic() >= deadline:
             return False, "sidecar code identity did not verify after restart: " + "; ".join(last_pending)
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
+def _current_prerequisite_code_identity_labels(
+    labels: list[str],
+    *,
+    expected_sha: str,
+    now: datetime | None = None,
+) -> set[str]:
+    """Return loaded sidecars that already prove the requested code identity.
+
+    SCOPE is one heartbeat-governed prerequisite label. DRAIN retains that
+    healthy process instead of flushing its quote/forecast cache during a
+    retry. RESET is any unload, SHA mismatch, invalid/future timestamp, or age
+    beyond ``LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS``; that label then follows
+    the ordinary bootout/bootstrap path.
+    """
+
+    observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    state_dir = Path(_require_live_repo()) / "state"
+    expected = str(expected_sha or "").strip()
+    reusable: set[str] = set()
+    for label in labels:
+        heartbeat = PREREQUISITE_CODE_HEARTBEATS.get(label)
+        if heartbeat is None or not _launchctl_service_loaded(label):
+            continue
+        filename, time_keys = heartbeat
+        payload = _load_json(state_dir / filename)
+        observed = str(payload.get("git_head") or "").strip()
+        observed_at = next(
+            (
+                parsed
+                for key in time_keys
+                if (parsed := _parse_iso_utc(payload.get(key))) is not None
+            ),
+            None,
+        )
+        if not _git_head_matches(expected, observed) or observed_at is None:
+            continue
+        age_seconds = (observed_now - observed_at).total_seconds()
+        if 0.0 <= age_seconds <= LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS:
+            reusable.add(label)
+    return reusable
 
 
 def _wait_for_live_runtime_fresh(
@@ -3365,9 +3410,16 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     preflight_prerequisite_labels = [
         label for label in non_live_labels if label not in post_live_labels
     ]
+    reusable_prerequisite_labels = _current_prerequisite_code_identity_labels(
+        preflight_prerequisite_labels,
+        expected_sha=expected_live_sha,
+    )
     prerequisite_launch_started_at = datetime.now(timezone.utc)
     continuous_monitor_cutover = False
     for label in preflight_prerequisite_labels:
+        if label in reusable_prerequisite_labels:
+            print(f"retained current prerequisite {label}: loaded SHA and heartbeat verified")
+            continue
         ok, detail = _launch_or_restart_label(label)
         if ok:
             print(detail)

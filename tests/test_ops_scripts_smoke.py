@@ -2981,6 +2981,44 @@ def test_deploy_live_prerequisite_code_identity_rejects_stale_sha(monkeypatch, t
     assert "did not verify" in detail
 
 
+def test_deploy_live_reuses_only_loaded_fresh_exact_sha_prerequisites(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_prerequisite_identity_reuse", "deploy_live.py")
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "d" * 40
+    price = dl.DAEMONS["price-channel-ingest"]
+    forecast = dl.DAEMONS["forecast-live"]
+    (state / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected[:9],
+                "alive_at": (now - timedelta(seconds=30)).isoformat(),
+            }
+        )
+    )
+    (state / "forecast-live-heartbeat.json").write_text(
+        json.dumps(
+            {
+                "git_head": "e" * 40,
+                "written_at": now.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: label == price)
+
+    reusable = dl._current_prerequisite_code_identity_labels(
+        [price, forecast],
+        expected_sha=expected,
+        now=now,
+    )
+
+    assert reusable == {price}
+
+
 def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
     dl = _load("deploy_live_preflight_skip", "deploy_live.py")
 
