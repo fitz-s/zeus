@@ -34061,6 +34061,7 @@ def _assert_provisional_day0_replacement_bundle(
 
     identity_payload = payload
     identity_value_is_celsius = False
+    equivalent_conditioning_time: str | None = None
     binding = payload.get("_edli_global_day0_binding")
     if isinstance(binding, Mapping):
         statistical_conditioning = binding.get(
@@ -34074,13 +34075,64 @@ def _assert_provisional_day0_replacement_bundle(
             # witness contradict itself during local-proof reconstruction.
             identity_payload = statistical_conditioning
             identity_value_is_celsius = True
+        elif any(
+            key in binding
+            for key in (
+                "probability_conditioning_observation_time",
+                "current_observation_time",
+                "conditioning_clock_lag_seconds",
+                "conditioning_clock_role",
+            )
+        ):
+            conditioning_time = str(
+                binding.get("probability_conditioning_observation_time") or ""
+            ).strip()
+            current_time = str(
+                binding.get("current_observation_time") or ""
+            ).strip()
+            role = str(binding.get("conditioning_clock_role") or "").strip()
+            conditioning_at = _parse_utc(conditioning_time)
+            current_at = _parse_utc(current_time)
+            payload_at = _parse_utc(identity_payload.get("observation_time"))
+            try:
+                lag_seconds = float(binding["conditioning_clock_lag_seconds"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH"
+                ) from None
+            direction = {
+                "same_extreme_newer_observation_clock": 1.0,
+                "same_extreme_conditioning_ahead_of_reader_clock": -1.0,
+            }.get(role)
+            if (
+                conditioning_at is None
+                or current_at is None
+                or payload_at is None
+                or current_at != payload_at
+                or direction is None
+                or not math.isfinite(lag_seconds)
+                or lag_seconds <= 0.0
+                or not math.isclose(
+                    (current_at - conditioning_at).total_seconds(),
+                    direction * lag_seconds,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH"
+                )
+            equivalent_conditioning_time = conditioning_time
     expected_source = str(
         identity_payload.get("settlement_source")
         or identity_payload.get("observation_source")
         or identity_payload.get("source")
         or ""
     ).strip()
-    expected_time = str(identity_payload.get("observation_time") or "").strip()
+    expected_time = (
+        equivalent_conditioning_time
+        or str(identity_payload.get("observation_time") or "").strip()
+    )
     metric = str(
         identity_payload.get("metric")
         or identity_payload.get("temperature_metric")

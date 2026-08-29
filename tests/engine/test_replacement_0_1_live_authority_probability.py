@@ -907,6 +907,58 @@ def test_provisional_identity_uses_statistical_conditioning_not_settlement_bound
         adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
 
 
+def test_provisional_identity_accepts_validated_held_equivalent_clock() -> None:
+    bundle = SimpleNamespace(
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "source": "aviationweather_metar",
+                "observation_time": "2026-08-29T11:20:00+00:00",
+                "observed_extreme_c": 33.0,
+                "support_truncation": False,
+            }
+        }
+    )
+    payload = {
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-08-29T11:50:00+00:00",
+        "high_so_far": 33.0,
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "probability_conditioning_observation_time": (
+                "2026-08-29T11:20:00+00:00"
+            ),
+            "current_observation_time": "2026-08-29T11:50:00+00:00",
+            "conditioning_clock_lag_seconds": 1800.0,
+            "conditioning_clock_role": "same_extreme_newer_observation_clock",
+        },
+    }
+
+    adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+    invalid_payloads = []
+    for path, value in (
+        (("high_so_far",), 34.0),
+        (("settlement_source",), "aviationweather_other"),
+        (("observation_time",), "2026-08-29T12:00:00+00:00"),
+        (("_edli_global_day0_binding", "conditioning_clock_lag_seconds"), 1200.0),
+        (("_edli_global_day0_binding", "conditioning_clock_role"), "unchecked"),
+    ):
+        candidate = json.loads(json.dumps(payload))
+        target = candidate
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        invalid_payloads.append(candidate)
+    for candidate in invalid_payloads:
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        ):
+            adapter._assert_provisional_day0_replacement_bundle(bundle, candidate)
+
+
 def test_provisional_local_proof_preserves_global_statistical_conditioning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
