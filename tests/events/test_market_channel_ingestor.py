@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-08
+# Last reused/audited: 2026-08-30
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; bounded TRADE writer micro-batch hotfix.
 from __future__ import annotations
 
@@ -735,6 +735,105 @@ def test_selective_audit_token_appends_bba_without_depth() -> None:
         "SELECT token_id,direction,best_bid_before,depth_before_json "
         "FROM execution_feasibility_evidence"
     ).fetchall() == [("token-1", "buy_yes", 0.04, None)]
+
+
+def test_selective_audit_coalescer_skips_ask_only_depth_history() -> None:
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        append_evidence_token_ids=lambda: {"token-1"},
+        coalescer=EventCoalescer(max_market_keys=8),
+    )
+
+    def flush_book(
+        *,
+        bid: str,
+        bid_size: str,
+        ask: str,
+        seen_at: str,
+    ) -> None:
+        ingestor.handle_message(
+            {
+                "event_type": "book",
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "timestamp": seen_at,
+                "bids": [{"price": bid, "size": bid_size}],
+                "asks": [{"price": ask, "size": "10"}],
+                "hash": f"book-{seen_at}",
+            },
+            received_at=seen_at,
+        )
+        ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+
+    flush_book(
+        bid="0.48",
+        bid_size="10",
+        ask="0.52",
+        seen_at="2026-08-30T10:00:00+00:00",
+    )
+    flush_book(
+        bid="0.48",
+        bid_size="10",
+        ask="0.51",
+        seen_at="2026-08-30T10:00:01+00:00",
+    )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT best_ask_before FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] == 0.51
+
+    flush_book(
+        bid="0.48",
+        bid_size="11",
+        ask="0.51",
+        seen_at="2026-08-30T10:00:02+00:00",
+    )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == 2
+
+
+def test_selective_audit_coalescer_appends_first_row_after_token_becomes_audited() -> None:
+    conn, writer = _conn_writer()
+    audit_tokens: set[str] = set()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        append_evidence_token_ids=lambda: set(audit_tokens),
+        coalescer=EventCoalescer(max_market_keys=8),
+    )
+    book = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+    }
+
+    ingestor.handle_message(
+        {**book, "timestamp": "2026-08-30T10:00:00+00:00", "hash": "not-audited"},
+        received_at="2026-08-30T10:00:00+00:00",
+    )
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+    audit_tokens.add("token-1")
+    ingestor.handle_message(
+        {**book, "timestamp": "2026-08-30T10:00:01+00:00", "hash": "first-audited"},
+        received_at="2026-08-30T10:00:01+00:00",
+    )
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+
+    assert conn.execute(
+        "SELECT token_id,direction FROM execution_feasibility_evidence"
+    ).fetchall() == [("token-1", "buy_yes")]
 
 
 def test_buffered_older_delta_cannot_regress_seeded_quote():
