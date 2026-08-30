@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from types import SimpleNamespace
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Collection, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.state.db import (
@@ -2667,6 +2667,7 @@ def _reconcile_recorded_exit_fill_projections(
     conn: sqlite3.Connection,
     *,
     observed_at: datetime,
+    command_ids: Collection[str] | None = None,
 ) -> dict[str, int]:
     """Project recorded exit fills into lifecycle state.
 
@@ -2680,6 +2681,24 @@ def _reconcile_recorded_exit_fill_projections(
     """
 
     summary = {"scanned": 0, "projected": 0, "stayed": 0, "errors": 0}
+    exact_command_ids = tuple(
+        dict.fromkeys(
+            str(command_id).strip()
+            for command_id in (command_ids or ())
+            if str(command_id).strip()
+        )
+    )
+    if command_ids is not None and not exact_command_ids:
+        return summary
+    command_filter_sql = ""
+    command_filter_params: tuple[str, ...] = ()
+    if exact_command_ids:
+        command_filter_sql = (
+            " AND cmd.command_id IN ("
+            + ",".join("?" for _ in exact_command_ids)
+            + ")"
+        )
+        command_filter_params = exact_command_ids
     rows = conn.execute(
         "WITH " + _canonical_trade_fact_cte() + """
         SELECT
@@ -2716,8 +2735,10 @@ def _reconcile_recorded_exit_fill_projections(
            AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
            AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
+        """ + command_filter_sql + """
          ORDER BY tf.observed_at, tf.trade_fact_id
-        """
+        """,
+        command_filter_params,
     ).fetchall()
     latest_by_command: dict[str, sqlite3.Row] = {}
     for row in rows:
@@ -2771,10 +2792,15 @@ def reconcile_recorded_exit_fill_projections(
     conn: sqlite3.Connection,
     *,
     observed_at: datetime | str | None = None,
+    command_ids: Collection[str] | None = None,
 ) -> dict[str, int]:
     """Repair confirmed EXIT sell fills without running entry maker-fill scans."""
 
-    return _reconcile_recorded_exit_fill_projections(conn, observed_at=_coerce_dt(observed_at))
+    return _reconcile_recorded_exit_fill_projections(
+        conn,
+        observed_at=_coerce_dt(observed_at),
+        command_ids=command_ids,
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:

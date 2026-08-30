@@ -2077,6 +2077,7 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         return conn
 
     def _project_exit(_conn, **_kwargs):
+        assert _kwargs["command_ids"] == ("cmd-current-exit",)
         calls.append("recorded_exit_fill_projection_fast")
         return {"scanned": 1, "projected": 1, "stayed": 0, "errors": 0}
 
@@ -2091,6 +2092,11 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         command_recovery,
         "_recorded_exit_fill_projection_candidates",
         lambda _conn: True,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_filled_exit_projection_blocker_command_ids",
+        lambda _conn: ("cmd-current-exit",),
     )
     monkeypatch.setattr(
         command_recovery._exchange_reconcile,
@@ -34738,8 +34744,11 @@ def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
 def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
     from src.execution.command_recovery import (
         _recorded_exit_fill_projection_candidates,
+        _terminal_filled_exit_projection_blocker_command_ids,
         capital_blocking_command_count,
-        reconcile_exit_pending_projections,
+    )
+    from src.execution.exchange_reconcile import (
+        reconcile_recorded_exit_fill_projections,
     )
 
     _insert(
@@ -34801,10 +34810,16 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
     )
 
     assert capital_blocking_command_count(conn) == 1
+    assert _terminal_filled_exit_projection_blocker_command_ids(conn) == (
+        "cmd-capital-exit",
+    )
     assert _recorded_exit_fill_projection_candidates(conn)
-    assert reconcile_exit_pending_projections(conn) == {
+    assert reconcile_recorded_exit_fill_projections(
+        conn,
+        command_ids=("cmd-capital-exit",),
+    ) == {
         "scanned": 1,
-        "advanced": 1,
+        "projected": 1,
         "stayed": 0,
         "errors": 0,
     }

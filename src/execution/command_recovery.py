@@ -28416,10 +28416,10 @@ def _terminal_filled_entry_projection_blocker_count(
     return int(row[0] or 0) if row is not None else 0
 
 
-def _terminal_filled_exit_projection_blocker_count(
+def _terminal_filled_exit_projection_blocker_command_ids(
     conn: sqlite3.Connection,
-) -> int:
-    """Count recent terminal EXIT fills not yet booked as released capital."""
+) -> tuple[str, ...]:
+    """Return recent terminal EXIT commands not yet booked as released capital."""
 
     required = {
         "venue_commands",
@@ -28429,7 +28429,7 @@ def _terminal_filled_exit_projection_blocker_count(
         "execution_fact",
     }
     if not all(_table_exists(conn, table) for table in required):
-        return 0
+        return ()
     # SCOPE: one recent terminal FILLED full EXIT/SELL command with authenticated
     # positive fill truth but incomplete command-bound economic-close truth. A
     # completed partial capital reduction leaves a smaller live position and is
@@ -28437,9 +28437,9 @@ def _terminal_filled_exit_projection_blocker_count(
     # DRAIN: scheduled command recovery receives current-capital priority and
     # runs exit_pending_projections. RESET: economically_closed position truth,
     # EXIT_ORDER_FILLED, and a positive exit execution_fact all bind the command.
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT COUNT(*)
+        SELECT cmd.command_id
           FROM venue_commands cmd
          WHERE cmd.intent_kind = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
@@ -28524,8 +28524,16 @@ def _terminal_filled_exit_projection_blocker_count(
            )
         """,
         (f"-{_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS} seconds",),
-    ).fetchone()
-    return int(row[0] or 0) if row is not None else 0
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows if str(row[0] or "").strip())
+
+
+def _terminal_filled_exit_projection_blocker_count(
+    conn: sqlite3.Connection,
+) -> int:
+    """Count recent terminal EXIT fills not yet booked as released capital."""
+
+    return len(_terminal_filled_exit_projection_blocker_command_ids(conn))
 
 
 def capital_blocking_command_scope(
@@ -29618,8 +29626,11 @@ def _reconcile_passes_short_conn(
             identity_submit_candidates, identity_submit_deferred = (
                 _identity_bound_submitting_candidates(conn)
             )
-            exit_fill_projection_open = _recorded_exit_fill_projection_candidates(
-                conn
+            exit_fill_projection_command_ids = (
+                _terminal_filled_exit_projection_blocker_command_ids(conn)
+            )
+            exit_fill_projection_open = bool(exit_fill_projection_command_ids) or (
+                _recorded_exit_fill_projection_candidates(conn)
             )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
@@ -29731,6 +29742,7 @@ def _reconcile_passes_short_conn(
                     lambda conn: _exchange_reconcile.reconcile_recorded_exit_fill_projections(
                         conn,
                         observed_at=started_at,
+                        command_ids=exit_fill_projection_command_ids or None,
                     ),
                     conn_factory=exit_fill_conn_factory,
                     label="recovery.recorded_exit_fill_projection_fast",
