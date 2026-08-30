@@ -1748,6 +1748,39 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         openmeteo_source_cycle_time = _to_utc(request.openmeteo_anchor.source_cycle_time, field_name="openmeteo_source_cycle_time")
         if openmeteo_source_cycle_time != request_source_cycle_time:
             reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH")
+    target_window = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=request.target_date,
+    )
+    precision_metadata = getattr(
+        request.openmeteo_precision_guard,
+        "metadata",
+        None,
+    )
+    if (
+        request.openmeteo_anchor.target_local_date != request.target_date
+        or (
+            precision_metadata is not None
+            and (
+                str(precision_metadata.city).strip() != request.city
+                or str(precision_metadata.timezone_name).strip()
+                != request.city_timezone
+                or str(precision_metadata.target_local_date)
+                != request.target_date.isoformat()
+                or _to_utc(
+                    precision_metadata.local_day_start_utc,
+                    field_name="precision_local_day_start_utc",
+                )
+                != target_window.start_utc
+                or _to_utc(
+                    precision_metadata.local_day_end_utc,
+                    field_name="precision_local_day_end_utc",
+                )
+                != target_window.end_utc
+            )
+        )
+    ):
+        reasons.append("REPLACEMENT_MATERIALIZATION_OM9_TARGET_SCOPE_MISMATCH")
     expected_om9_count = _expected_om9_hourly_count(
         city_timezone=request.city_timezone,
         target_date=request.target_date,

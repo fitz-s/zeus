@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-01
+# Last reused/audited: 2026-08-30
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
 # Purpose: Protect validated request generation for replacement live materialization.
 # Reuse: Run before changing queue input contract or live simple-switch request production.
@@ -123,6 +123,39 @@ def test_request_builder_outputs_materializer_ready_json(tmp_path) -> None:
     assert request["precision_metadata_json"] == str(tmp_path / "precision_metadata.json")
     assert request["anchor_weight"] == 0.80
     assert request["anchor_sigma_c"] == 3.00
+
+
+def test_shared_precision_metadata_rebinds_to_each_materialization_target(
+    tmp_path,
+) -> None:
+    seed = _write_inputs(tmp_path)
+    precision_path = tmp_path / "precision_metadata.json"
+    precision = json.loads(precision_path.read_text(encoding="utf-8"))
+    precision.update(
+        target_local_date="2026-06-06",
+        local_day_start_utc="2026-06-05T16:00:00+00:00",
+        local_day_end_utc="2026-06-06T16:00:00+00:00",
+    )
+    precision_path.write_text(json.dumps(precision), encoding="utf-8")
+
+    built = build_replacement_forecast_materialization_request(
+        seed,
+        base_dir=tmp_path,
+    )
+    assert built.ok is True
+    request = build_materialize_request_dataclass(
+        built.request,
+        base_dir=tmp_path,
+    )
+
+    metadata = request.openmeteo_precision_guard.metadata
+    assert metadata.target_local_date.isoformat() == "2026-06-07"
+    assert metadata.local_day_start_utc.isoformat() == (
+        "2026-06-06T16:00:00+00:00"
+    )
+    assert metadata.local_day_end_utc.isoformat() == (
+        "2026-06-07T16:00:00+00:00"
+    )
 
 
 def test_request_builder_blocks_incomplete_om9_localday_coverage(tmp_path) -> None:

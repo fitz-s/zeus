@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Last reused/audited: 2026-08-30
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -322,6 +322,20 @@ def _request(
         day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
         day0_observation_state=day0_observation_state,
     )
+
+
+def test_prewrite_blocks_precision_metadata_from_another_target_day() -> None:
+    stale_precision = _precision_guard(
+        target_local_date=date(2026, 6, 6),
+        local_day_start_utc=datetime(2026, 6, 5, 16, tzinfo=UTC),
+        local_day_end_utc=datetime(2026, 6, 6, 16, tzinfo=UTC),
+    )
+
+    reasons = materializer_mod._prewrite_block_reasons(
+        _request(openmeteo_precision_guard=stale_precision)
+    )
+
+    assert "REPLACEMENT_MATERIALIZATION_OM9_TARGET_SCOPE_MISMATCH" in reasons
 
 
 def _day0_owner_witness(
