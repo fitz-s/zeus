@@ -6947,8 +6947,14 @@ def refresh_exact_zero_position(
     )
 
 
-def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
-    """Fetch fresh market price and recompute P_posterior for a held position.
+def refresh_position(
+    conn,
+    clob: PolymarketClient,
+    pos: Position,
+    *,
+    refresh_quote: bool = True,
+) -> EdgeContext:
+    """Recompute held q and optionally fetch its executable market price.
 
     Blueprint v2 §7 Layer 1: uses same method as entry (p_raw_vector with MC noise).
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
@@ -6997,7 +7003,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # 1. Refresh held-token quote
     market_refreshed = False
-    quote = monitor_quote_refresh(conn, clob, pos)
+    quote = monitor_quote_refresh(conn, clob, pos) if refresh_quote else None
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask

@@ -3764,13 +3764,13 @@ def _record_monitor_data_degraded_attempt(
     return True
 
 
-def _stamp_durable_hard_fact_probability_without_book(
+def _refresh_monitor_probability_without_book(
     conn,
     clob,
     pos,
     hard_fact,
 ) -> bool:
-    """Preserve an exact held-side q when only executable book truth is absent."""
+    """Refresh held-side q without turning an absent book into action authority."""
 
     action = getattr(hard_fact, "action", None)
     try:
@@ -3783,15 +3783,17 @@ def _stamp_durable_hard_fact_probability_without_book(
 
             refresh_exact_one_position(pos)
         else:
-            return False
+            from src.engine.monitor_refresh import refresh_position
+
+            refresh_position(conn, clob, pos, refresh_quote=False)
     except Exception as exc:  # noqa: BLE001 - isolate one held family from the batch.
         logger.warning(
-            "held monitor hard-fact probability stamp failed for %s: %s",
+            "held monitor q-only refresh failed for %s: %s",
             getattr(pos, "trade_id", "?"),
             exc,
         )
         return False
-    return True
+    return bool(getattr(pos, "last_monitor_prob_is_fresh", False))
 
 
 def _append_held_monitor_coverage_position_id(
@@ -8642,24 +8644,31 @@ def execute_monitoring_phase(
             if (
                 id(pos) in budget_reserved_position_ids
                 and id(pos) not in degraded_attempt_position_ids
-                and _record_monitor_data_degraded_attempt(
+            ):
+                probability_refreshed = False
+                if _release_monitor_write_lock_boundary(
+                    conn,
+                    summary,
+                    deps,
+                    boundary="before_q_only_refresh_after_orderbook_batch_gap",
+                    deadline_monotonic=position_deadline,
+                ):
+                    probability_refreshed = _refresh_monitor_probability_without_book(
+                        conn,
+                        clob,
+                        pos,
+                        durable_hard_facts.get(id(pos)),
+                    )
+                if _record_monitor_data_degraded_attempt(
                     conn,
                     pos,
                     artifact=artifact,
                     deps=deps,
                     summary=summary,
                     stage="orderbook_batch_unavailable",
-                    preserve_current_attempt_axes=(
-                        _stamp_durable_hard_fact_probability_without_book(
-                            conn,
-                            clob,
-                            pos,
-                            durable_hard_facts.get(id(pos)),
-                        )
-                    ),
-                )
-            ):
-                degraded_attempt_position_ids.add(id(pos))
+                    preserve_current_attempt_axes=probability_refreshed,
+                ):
+                    degraded_attempt_position_ids.add(id(pos))
             continue
         if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
             if network_prefetch_started:
@@ -8687,24 +8696,33 @@ def execute_monitoring_phase(
                 if (
                     id(pos) in budget_reserved_position_ids
                     and id(pos) not in degraded_attempt_position_ids
-                    and _record_monitor_data_degraded_attempt(
+                ):
+                    probability_refreshed = False
+                    if _release_monitor_write_lock_boundary(
+                        conn,
+                        summary,
+                        deps,
+                        boundary="before_q_only_refresh_after_orderbook_gap",
+                        deadline_monotonic=position_deadline,
+                    ):
+                        probability_refreshed = (
+                            _refresh_monitor_probability_without_book(
+                                conn,
+                                clob,
+                                pos,
+                                durable_hard_facts.get(id(pos)),
+                            )
+                        )
+                    if _record_monitor_data_degraded_attempt(
                         conn,
                         pos,
                         artifact=artifact,
                         deps=deps,
                         summary=summary,
                         stage="orderbook_unavailable",
-                        preserve_current_attempt_axes=(
-                            _stamp_durable_hard_fact_probability_without_book(
-                                conn,
-                                clob,
-                                pos,
-                                durable_hard_facts.get(id(pos)),
-                            )
-                        ),
-                    )
-                ):
-                    degraded_attempt_position_ids.add(id(pos))
+                        preserve_current_attempt_axes=probability_refreshed,
+                    ):
+                        degraded_attempt_position_ids.add(id(pos))
                 continue
             is_durable_debt_network_attempt = (
                 durable_debt_position_id == id(pos)

@@ -21135,7 +21135,7 @@ def test_orderbook_gap_preserves_exact_hard_fact_probability_only(monkeypatch):
         source="durable_observation_instants",
     )
 
-    assert cycle_runtime._stamp_durable_hard_fact_probability_without_book(
+    assert cycle_runtime._refresh_monitor_probability_without_book(
         None,
         object(),
         position,
@@ -21181,6 +21181,46 @@ def test_orderbook_gap_preserves_exact_hard_fact_probability_only(monkeypatch):
     assert "monitor_attempt_current_probability_preserved" in (
         position.applied_validations
     )
+
+
+def test_statistical_probability_refresh_does_not_require_orderbook(monkeypatch):
+    """A q-only refresh never calls CLOB and never claims a fresh book."""
+    from src.engine import monitor_refresh
+
+    position = _make_position(
+        trade_id="statistical-q-without-book",
+        token_id="",
+        no_token_id="",
+    )
+    monkeypatch.setitem(
+        monitor_refresh.cities_by_name,
+        position.city,
+        SimpleNamespace(name=position.city),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_quote_refresh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("q-only refresh must not call CLOB")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_probability_refresh",
+        lambda *_args, **_kwargs: (0.67, position, True),
+    )
+
+    edge_context = monitor_refresh.refresh_position(
+        None,
+        object(),
+        position,
+        refresh_quote=False,
+    )
+
+    assert edge_context.p_posterior == pytest.approx(0.67)
+    assert position.last_monitor_prob == pytest.approx(0.67)
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is False
 
 
 def test_monitor_cadence_rejects_fresh_axes_without_completed_decision():
