@@ -3600,7 +3600,7 @@ def test_probability_debt_precedes_broader_priority_scopes_before_window(tmp_pat
 
 
 def test_priority_raw_window_reserves_global_only_family_before_bound(tmp_path):
-    """Held queue volume cannot hide current global selection work."""
+    """Held volume and an ENS-waiting carrier cannot hide global ready work."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     held_families = frozenset(
@@ -3616,12 +3616,30 @@ def test_priority_raw_window_reserves_global_only_family_before_bound(tmp_path):
             "20260830T030000Z",
         )
     )
-    global_path = (
+    global_waiting = (
         tmp_path / "Hong_Kong.2026-08-31.high.20260830T010000Z.json"
+    )
+    global_ready = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260829T230000Z.json"
+    )
+    global_duplicate = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260829T220000Z.json"
+    )
+    global_waiting.write_text(
+        json.dumps({"source_cycle_time": "2026-08-30T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    global_ready.write_text(
+        json.dumps({"source_cycle_time": "2026-08-29T18:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    global_duplicate.write_text(
+        json.dumps({"source_cycle_time": "2026-08-30T00:00:00+00:00"}),
+        encoding="utf-8",
     )
 
     interleaved = queue_mod._interleave_current_priority_seed_files_by_name(
-        (*held, global_path),
+        (*held, global_waiting, global_duplicate, global_ready),
         current_money_risk=held_families,
         current_global_scope=frozenset({*held_families, global_family}),
         limit=2,
@@ -3629,11 +3647,11 @@ def test_priority_raw_window_reserves_global_only_family_before_bound(tmp_path):
     window = queue_mod._bounded_seed_inspection_window(
         interleaved,
         current_priority_scope=frozenset({*held_families, global_family}),
-        inspection_cap=2,
+        inspection_cap=3,
         lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
-    assert window == (held[0], global_path)
+    assert window == (held[0], global_waiting, global_ready)
 
 
 def test_day0_seed_older_than_current_posterior_observation_is_regression(

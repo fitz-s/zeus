@@ -3567,18 +3567,40 @@ def _interleave_current_priority_seed_files_by_name(
         ),
         None,
     )
-    global_path = next(
+    global_match = next(
         (
-            path
+            (path, prefix)
             for path in ordered
-            if any(path.name.startswith(prefix) for prefix in global_only_prefixes)
+            for prefix in global_only_prefixes
+            if path.name.startswith(prefix)
         ),
         None,
     )
-    if held is None or global_path is None:
+    if held is None or global_match is None:
         return ordered
-    selected = {held, global_path}
-    return (held, global_path, *(path for path in ordered if path not in selected))
+    global_path, global_prefix = global_match
+    global_witnesses: list[Path] = []
+    seen_cycles: set[str] = set()
+    for path in ordered:
+        if not path.name.startswith(global_prefix):
+            continue
+        payload = _load_request_payload_for_coalescing(path)
+        cycle = str((payload or {}).get("source_cycle_time") or "").strip()
+        if cycle and cycle in seen_cycles:
+            continue
+        global_witnesses.append(path)
+        if cycle:
+            seen_cycles.add(cycle)
+        if len(global_witnesses) >= 2:
+            break
+    if not global_witnesses:
+        global_witnesses.append(global_path)
+    selected = {held, *global_witnesses}
+    return (
+        held,
+        *global_witnesses,
+        *(path for path in ordered if path not in selected),
+    )
 
 
 def _deprioritize_current_money_risk_seed_files(
