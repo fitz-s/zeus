@@ -1524,11 +1524,16 @@ def _current_global_auction_scope_families(
 def _current_probability_debt_families(
     *,
     trade_db: Path | str | None = None,
+    held: frozenset[tuple[str, str, str]] | None = None,
 ) -> frozenset[tuple[str, str, str]]:
     """Return current-capital families whose held probability is not fresh."""
 
-    held = _current_money_risk_families(trade_db=trade_db)
-    if not held:
+    held_families = (
+        _current_money_risk_families(trade_db=trade_db)
+        if held is None
+        else held
+    )
+    if not held_families:
         return frozenset()
     try:
         from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
@@ -1559,7 +1564,7 @@ def _current_probability_debt_families(
         (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
         for row in rows
     )
-    return held & stale
+    return held_families & stale
 
 
 def _request_family_scope(
@@ -3471,6 +3476,30 @@ def _prioritize_current_money_risk_seed_files(
     return (*promoted, *tail)
 
 
+def _prioritize_seed_files_by_capital_tier(
+    paths: Sequence[Path],
+    *,
+    never_priced_scope: frozenset[tuple[str, str, str]],
+    current_global_scope: frozenset[tuple[str, str, str]],
+    current_money_risk: frozenset[tuple[str, str, str]],
+    current_probability_debt: frozenset[tuple[str, str, str]],
+) -> tuple[Path, ...]:
+    """Keep the strongest capital tier inside the bounded seed window."""
+
+    ordered = tuple(paths)
+    # Each pass moves its scope to the front, so apply weakest to strongest.
+    # The underlying helper still retains one newest witness per source cycle:
+    # an ENS-waiting carrier cannot hide the prior executable carrier.
+    for scope in (
+        never_priced_scope,
+        current_global_scope,
+        current_money_risk,
+        current_probability_debt,
+    ):
+        ordered = _prioritize_current_money_risk_seed_files(ordered, scope)
+    return ordered
+
+
 def _deprioritize_current_money_risk_seed_files(
     paths: Sequence[Path],
     families: frozenset[tuple[str, str, str]],
@@ -3773,6 +3802,11 @@ def _prepare_seed_requests(
         _read_day0_enqueue_ownership_cursor(cursor_path),
     )
     current_money_risk = _current_money_risk_families()
+    current_probability_debt = (
+        _current_probability_debt_families(held=current_money_risk)
+        if lane == MATERIALIZATION_LANE_PRIORITY
+        else frozenset()
+    )
     current_global_scope = _current_global_auction_scope_families(
         rotated_raw_snapshot
     )
@@ -3780,17 +3814,24 @@ def _prepare_seed_requests(
     current_priority_scope = (
         current_money_risk | current_global_scope | never_priced_scope
     )
-    prioritized_raw_snapshot = (
-        _deprioritize_current_money_risk_seed_files(
+    if lane == MATERIALIZATION_LANE_BACKGROUND:
+        prioritized_raw_snapshot = _deprioritize_current_money_risk_seed_files(
             rotated_raw_snapshot,
             current_priority_scope,
         )
-        if lane == MATERIALIZATION_LANE_BACKGROUND
-        else _prioritize_current_money_risk_seed_files(
+    elif lane == MATERIALIZATION_LANE_PRIORITY:
+        prioritized_raw_snapshot = _prioritize_seed_files_by_capital_tier(
+            rotated_raw_snapshot,
+            never_priced_scope=never_priced_scope,
+            current_global_scope=current_global_scope,
+            current_money_risk=current_money_risk,
+            current_probability_debt=current_probability_debt,
+        )
+    else:
+        prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
             rotated_raw_snapshot,
             current_priority_scope,
         )
-    )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
     # make deterministic progress across passes without unbounded queue-lock I/O.

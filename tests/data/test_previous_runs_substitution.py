@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-24
+# Last reused or audited: 2026-08-30
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -3554,6 +3554,49 @@ def test_current_money_seed_window_keeps_one_witness_per_source_cycle(tmp_path):
 
     assert prioritized[:2] == (seed_paths[2], seed_paths[0])
     assert prioritized[2:] == (seed_paths[1], ordinary)
+
+
+def test_probability_debt_precedes_broader_priority_scopes_before_window(tmp_path):
+    """A broad global scope cannot push a stale held q outside the raw bound."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    debt_family = ("Istanbul", "2026-08-30", "high")
+    held_family = ("Moscow", "2026-08-30", "high")
+    global_family = ("Taipei", "2026-09-01", "high")
+    never_family = ("Zurich", "2026-09-01", "low")
+    paths = tuple(
+        tmp_path / name
+        for name in (
+            "Zurich.2026-09-01.low.20260830T050000Z.json",
+            "Taipei.2026-09-01.high.20260830T050000Z.json",
+            "Moscow.2026-08-30.high.20260830T050000Z.json",
+            "Istanbul.2026-08-30.high.20260830T050000Z.json",
+        )
+    )
+    for path in paths:
+        path.write_text(
+            json.dumps({"source_cycle_time": "2026-08-29T18:00:00+00:00"}),
+            encoding="utf-8",
+        )
+
+    prioritized = queue_mod._prioritize_seed_files_by_capital_tier(
+        paths,
+        never_priced_scope=frozenset({never_family}),
+        current_global_scope=frozenset({global_family}),
+        current_money_risk=frozenset({held_family, debt_family}),
+        current_probability_debt=frozenset({debt_family}),
+    )
+    window = queue_mod._bounded_seed_inspection_window(
+        prioritized,
+        current_priority_scope=frozenset(
+            {debt_family, held_family, global_family, never_family}
+        ),
+        inspection_cap=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert prioritized == (paths[3], paths[2], paths[1], paths[0])
+    assert paths[3] in window
 
 
 def test_current_money_seed_window_follows_rotated_cursor_order(tmp_path):
