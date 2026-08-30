@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-05-17; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused/audited: 2026-08-29
+# Lifecycle: created=2026-05-17; last_reviewed=2026-08-29; last_reused=2026-08-29
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -1049,6 +1049,50 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
 
     assert orphan_fill["allowed"] is False
     assert orphan_fill["existing_command_id"] == "cmd-orphan-fill"
+
+
+def test_executor_certified_increment_accepts_materialized_partial_fill(mem_db):
+    """A terminal command's positive partial fill is current endowment."""
+
+    _insert_position(
+        mem_db,
+        "partial-position",
+        "active",
+        token_id=TOKEN_X,
+        direction="buy_yes",
+        shares=14.999588,
+        cost_basis_usd=4.04988876,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-partial-materialized', 'partial-position', ?, 'ENTRY', 'BUY',
+                   'order-partial-materialized', 'FILLED',
+                   '2026-08-29T22:20:43+00:00', '2026-08-29T22:30:27+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('partial-position:entry:cmd-partial-materialized',
+                   'partial-position', 'cmd-partial-materialized', 'entry',
+                   '2026-08-29T22:30:27+00:00', '2026-08-29T22:20:43+00:00',
+                   0.27, 14.999588, 'partial', 'PARTIAL')"""
+    )
+    mem_db.commit()
+
+    allowed = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert allowed["allowed"] is True
+    assert allowed["reason"] == "allowed_reconciled_position_increment"
+    assert allowed["increment_position_id"] == "partial-position"
 
 
 def test_certified_increment_uses_fills_when_projection_cost_differs(mem_db):

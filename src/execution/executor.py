@@ -2755,7 +2755,7 @@ def _entry_duplicate_same_token_component(
                              WHERE command_id = ?
                                AND position_id = ?
                                AND lower(COALESCE(order_role, '')) = 'entry'
-                               AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+                               AND lower(COALESCE(terminal_exec_status, '')) IN ('filled', 'partial')
                                AND filled_at IS NOT NULL
                                AND fill_price > 0
                                AND shares > 0
