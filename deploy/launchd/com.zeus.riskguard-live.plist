@@ -35,6 +35,8 @@
 		<string>live</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
 		<string>ZEUS_REPO_PLACEHOLDER</string>
+		<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key>
+		<string>2</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>

@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-30 — RiskGuard direct bankroll refresh必须继承CLOB signature identity
+- **部署反例:** authority-q revision hotfix重启RiskGuard后，warm collateral snapshot超过180秒；RiskGuard direct wallet fallback因其LaunchAgent缺少`POLYMARKET_CLOB_V2_SIGNATURE_TYPE`而拒绝构造authenticated CLOB adapter，连续fail-closed为`DATA_DEGRADED`。live restart preflight只检查live-trading、price-channel、post-trade-capital和venue-heartbeat，未覆盖同样调用CLOB bankroll reader的RiskGuard，导致启动前配置证明与实际依赖图断层。
+- **修复:** riskguard-live template显式声明signature type `2`；preflight的CLOB sidecar集合加入`riskguard-live`，以后缺失/unsupported值会在停止main之前阻断。安装仍通过`install_launchd_plist.py`的parse/substitute/lint/atomic-write路径，deploy reload确保launchd不保留旧环境。
+- **SCOPE / DRAIN / RESET:** scope仅是RiskGuard authenticated collateral read capability与restart config proof，不改变wallet value、risk threshold、order authority或signature secret。drain为direct chain/venue collateral refresh写入fresh canonical ledger；reset为下一RiskGuard tick读取fresh ledger并恢复正常risk action bookkeeping。配置缺失继续fail closed。
+- **验收:** plist lint、signature preflight antibodies和script compile/ruff通过；live必须证明RiskGuard不再报signature-type missing、collateral age回到180秒内、旧v2 strategy action正常expired，随后restart preflight通过并加载current SHA。
+
 ### 2026-08-30 — acting-q law变更必须切断旧selector capital cohort
 - **实时反例:** 当前`forecast_qkernel_entry` gate引用11个独立city-date clusters，market/model e-value为`15.086506`，但其中部分actual fills由已删除的`market_anchored_correction`把replacement posterior q改写后成交。`4ae10eb79`已恢复live auction只用authority q，却继续沿用`global_single_order_posterior_mean_expected_growth_v2`；RiskGuard因此把旧market-corrected action q与新direct authority q混入同一cohort，并用旧law rejection全局封锁新law。
 - **修复:** current global selector revision升级为`global_single_order_authority_q_expected_growth_v3`。auction receipt、decision certificate、shadow grader、RiskGuard和strict evaluator继续共享同一常量；旧v2证据仍可审计但不再actuate v3 gate。没有删除RiskGuard、没有改变q/EV/Kelly/price/depth/submit gate，也没有把missing history变成pass。

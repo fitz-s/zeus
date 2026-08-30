@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -4741,6 +4743,22 @@ def test_clob_signature_type_config_blocks_missing_sidecar_value(monkeypatch, tm
         item["label"] == "venue-heartbeat" and item["present"] is False
         for item in result.evidence["items"]
     )
+
+
+def test_riskguard_direct_bankroll_reader_has_signature_type_launch_contract():
+    assert "riskguard-live" in preflight.CLOB_SIGNATURE_TYPE_SIDECAR_LABELS
+    plist_path = (
+        preflight.ROOT
+        / "deploy"
+        / "launchd"
+        / "com.zeus.riskguard-live.plist"
+    )
+    with plist_path.open("rb") as handle:
+        payload = plistlib.load(handle)
+
+    assert payload["EnvironmentVariables"][
+        "POLYMARKET_CLOB_V2_SIGNATURE_TYPE"
+    ] == "2"
 
 
 def test_harvester_live_enabled_uses_live_plist_not_shell_env(monkeypatch, tmp_path):

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-08-29
+# Last reused or audited: 2026-08-30
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -54,6 +54,7 @@ LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.l
 CLOB_SIGNATURE_TYPE_SIDECAR_LABELS = (
     "price-channel-ingest",
     "post-trade-capital",
+    "riskguard-live",
     "venue-heartbeat",
 )
 
