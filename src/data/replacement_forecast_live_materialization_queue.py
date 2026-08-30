@@ -562,7 +562,7 @@ def _run_materialization_batch(
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
 
 _CURRENT_LIVE_POSTERIOR_CYCLE_SQL = """
-    SELECT source_cycle_time
+    SELECT source_cycle_time, computed_at, provenance_json
     FROM forecast_posteriors
          INDEXED BY idx_forecast_posteriors_runtime_layer_target
     WHERE runtime_layer = 'live'
@@ -1230,6 +1230,49 @@ def _seed_source_cycle_boundary(
         current_cycle = _parse_utc_iso(current_raw)
         if current_cycle is not None and request_cycle < current_cycle:
             return "current_posterior", current_cycle.isoformat()
+        try:
+            provenance = json.loads(
+                str(row["provenance_json"] if hasattr(row, "keys") else row[2])
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provenance = None
+        if isinstance(provenance, Mapping):
+            from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+                _active_day0_provisional_or_conditioning,
+            )
+
+            conditioning = _active_day0_provisional_or_conditioning(provenance)
+            seed_observed_at = _parse_utc_iso(
+                seed.get("day0_observed_extreme_observation_time")
+            )
+            current_observed_at = (
+                _parse_utc_iso(conditioning.get("observation_time"))
+                if isinstance(conditioning, Mapping)
+                else None
+            )
+            current_computed_at = _parse_utc_iso(
+                row["computed_at"] if hasattr(row, "keys") else row[1]
+            )
+            seed_computed_at = _parse_utc_iso(seed.get("computed_at"))
+            same_clock_older_correction = bool(
+                seed_observed_at is not None
+                and current_observed_at is not None
+                and seed_observed_at == current_observed_at
+                and isinstance(conditioning, Mapping)
+                and not _day0_seed_matches_conditioning(seed, conditioning)
+                and seed_computed_at is not None
+                and current_computed_at is not None
+                and seed_computed_at <= current_computed_at
+            )
+            if (
+                seed_observed_at is not None
+                and current_observed_at is not None
+                and (
+                    seed_observed_at < current_observed_at
+                    or same_clock_older_correction
+                )
+            ):
+                return "current_day0_observation", current_observed_at.isoformat()
     if (
         latest_ensemble_cycle is not None
         and baseline_cycle is not None
@@ -3978,12 +4021,21 @@ def _prepare_seed_requests(
                 continue
             if cycle_boundary is not None:
                 regression_basis, current_cycle = cycle_boundary
-                reason_code = (
-                    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
-                    if regression_basis
-                    in {"current_ensemble_hwm", "baseline_input_hwm"}
-                    else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
-                )
+                if regression_basis == "current_day0_observation":
+                    reason_code = (
+                        "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_REGRESSION"
+                    )
+                elif regression_basis in {
+                    "current_ensemble_hwm",
+                    "baseline_input_hwm",
+                }:
+                    reason_code = (
+                        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                    )
+                else:
+                    reason_code = (
+                        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
+                    )
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
                     moved,
@@ -4836,12 +4888,19 @@ def _process_claimed_materialization_batch(
             continue
         if request_payload is not None and cycle_boundary is not None:
             regression_basis, current_cycle = cycle_boundary
-            reason_code = (
-                "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
-                if regression_basis
-                in {"current_ensemble_hwm", "baseline_input_hwm"}
-                else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
-            )
+            if regression_basis == "current_day0_observation":
+                reason_code = (
+                    "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_REGRESSION"
+                )
+            elif regression_basis in {
+                "current_ensemble_hwm",
+                "baseline_input_hwm",
+            }:
+                reason_code = (
+                    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                )
+            else:
+                reason_code = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,

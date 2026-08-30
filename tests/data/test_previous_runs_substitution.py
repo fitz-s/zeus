@@ -3599,6 +3599,91 @@ def test_probability_debt_precedes_broader_priority_scopes_before_window(tmp_pat
     assert paths[3] in window
 
 
+def test_day0_seed_older_than_current_posterior_observation_is_regression(
+    tmp_path, monkeypatch
+):
+    """An old same-cycle transition cannot overwrite a newer Day0 frontier."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            runtime_layer TEXT,
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT,
+            provenance_json TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "live",
+            queue_mod.SOURCE_ID,
+            "Istanbul",
+            "2026-08-30",
+            "high",
+            "2026-08-29T18:00:00+00:00",
+            "2026-08-30T06:25:12+00:00",
+            json.dumps(
+                {
+                    "day0_provisional_observation": {
+                        "active": True,
+                        "metric": "high",
+                        "source": "aviationweather_metar",
+                        "observation_time": "2026-08-30T06:20:00+00:00",
+                        "observed_extreme_c": 24.0,
+                        "unit": "C",
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: None,
+    )
+
+    boundary = queue_mod._seed_source_cycle_boundary(
+        forecast_db=db_path,
+        seed={
+            "city": "Istanbul",
+            "target_date": "2026-08-30",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-29T18:00:00+00:00",
+            "computed_at": "2026-08-30T06:21:25+00:00",
+            "baseline_source_run_id": "",
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": (
+                "2026-08-30T05:50:00+00:00"
+            ),
+            "day0_observed_extreme_c": 23.0,
+            "day0_observed_extreme_unit": "C",
+        },
+    )
+
+    assert boundary == (
+        "current_day0_observation",
+        "2026-08-30T06:20:00+00:00",
+    )
+
+
 def test_current_money_seed_window_follows_rotated_cursor_order(tmp_path):
     """A bounded priority window advances with the durable seed cursor."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
