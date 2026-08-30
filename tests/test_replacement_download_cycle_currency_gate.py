@@ -1369,6 +1369,99 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
 
 
+def test_current_cycle_wave_fetches_identical_city_run_once_and_fans_out_dates() -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    first_key = ("Dallas", "2026-06-10")
+    second_key = ("Dallas", "2026-06-11")
+    request = dl.build_anchor_request(
+        latitude=32.8998,
+        longitude=-97.0403,
+        run=AVAILABLE_CYCLE,
+        timezone_name="America/Chicago",
+        forecast_hours=120,
+        past_hours=dl.CURRENT_RUN_CONTEXT_HOURS,
+    )
+    requests = {first_key: request, second_key: request}
+
+    representatives, fanout = dl._dedupe_pending_anchor_requests(requests)
+    payload = {
+        "utc_offset_seconds": -18000,
+        "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {
+            "time": ["2026-06-10T12:00", "2026-06-11T12:00"],
+            "temperature_2m": [30.0, 31.0],
+        },
+    }
+    fetched = {
+        first_key: (
+            payload,
+            {"run_authority": "run_pinned_single_runs"},
+            AVAILABLE_CYCLE,
+        )
+    }
+    expanded = dl._fan_out_anchor_payloads(
+        fetched,
+        requests=requests,
+        fanout=fanout,
+    )
+
+    assert representatives == {first_key: request}
+    assert fanout == {first_key: (first_key, second_key)}
+    assert set(expanded) == {first_key, second_key}
+    assert all(
+        row[1]["request_payload_fanout_count"] == 2
+        for row in expanded.values()
+    )
+
+
+def test_zero_manifest_transport_failure_is_retryable_not_downloaded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        BucketTransportNotAdmissible,
+    )
+
+    target = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=False,
+        missing_openmeteo_manifest=True,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: False)
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BucketTransportNotAdmissible("no verified transport")
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=((target.city, target.target_date, target.temperature_metric),),
+    )
+
+    assert report["written_manifest_count"] == 0
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE"
+
+
 def test_canonical_reuse_refuses_and_repairs_semantically_wrong_precision_sidecar(
     tmp_path: Path,
     monkeypatch,

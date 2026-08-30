@@ -1266,6 +1266,63 @@ def _fetch_run_pinned_anchor_wave(
     return resolved
 
 
+def _dedupe_pending_anchor_requests(
+    requests: dict[tuple[str, str], object],
+) -> tuple[
+    dict[tuple[str, str], object],
+    dict[tuple[str, str], tuple[tuple[str, str], ...]],
+]:
+    """Fetch each identical city/run request once, then fan it out by target date."""
+
+    representative_by_request: dict[object, tuple[str, str]] = {}
+    representatives: dict[tuple[str, str], object] = {}
+    fanout: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for target_key, request in requests.items():
+        representative = representative_by_request.get(request)
+        if representative is None:
+            representative = target_key
+            representative_by_request[request] = representative
+            representatives[representative] = request
+            fanout[representative] = []
+        fanout[representative].append(target_key)
+    return representatives, {
+        representative: tuple(target_keys)
+        for representative, target_keys in fanout.items()
+    }
+
+
+def _fan_out_anchor_payloads(
+    resolved: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
+    *,
+    requests: dict[tuple[str, str], object],
+    fanout: dict[tuple[str, str], tuple[tuple[str, str], ...]],
+) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
+    expanded: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
+    for representative, target_keys in fanout.items():
+        fetched = resolved.get(representative)
+        if fetched is None:
+            continue
+        payload, provenance, captured_at = fetched
+        request = requests[representative]
+        for target_key in target_keys:
+            if not _current_target_payload_materializable(
+                payload,
+                city_timezone=request.timezone_name,
+                target_date=target_key[1],
+                cycle=request.run,
+            ):
+                continue
+            expanded[target_key] = (
+                payload,
+                {
+                    **provenance,
+                    "request_payload_fanout_count": len(target_keys),
+                },
+                captured_at,
+            )
+    return expanded
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -1381,6 +1438,7 @@ def download_current_target_raw_inputs(
         "openmeteo_transport_fetch_count": 0,
         "openmeteo_model_meta_fetch_count": 0,
         "openmeteo_wave_payload_count": 0,
+        "openmeteo_intra_wave_fanout_count": 0,
         "openmeteo_single_runs_location_batch_count": 0,
     }
     deadline_monotonic = (
@@ -1449,6 +1507,9 @@ def download_current_target_raw_inputs(
                 past_hours=CURRENT_RUN_CONTEXT_HOURS,
             ),
         )
+    representative_requests, request_fanout = _dedupe_pending_anchor_requests(
+        pending_requests
+    )
 
     openmeteo_client = httpx.Client()
     first_request = next(iter(pending_requests.values()), None)
@@ -1484,8 +1545,8 @@ def download_current_target_raw_inputs(
         and len(pending_requests) > 1
     ):
         try:
-            wave_resolved = _fetch_run_pinned_anchor_wave(
-                pending_requests,
+            fetched_wave = _fetch_run_pinned_anchor_wave(
+                representative_requests,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
@@ -1501,9 +1562,17 @@ def download_current_target_raw_inputs(
                 raise
             single_runs_wave_failure = exc
         else:
+            wave_resolved = _fan_out_anchor_payloads(
+                fetched_wave,
+                requests=pending_requests,
+                fanout=request_fanout,
+            )
             resolved_payloads.update(wave_resolved)
-            downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
-            downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+            downloaded["openmeteo_transport_fetch_count"] = len(fetched_wave)
+            downloaded["openmeteo_wave_payload_count"] = len(fetched_wave)
+            downloaded["openmeteo_intra_wave_fanout_count"] = max(
+                0, len(wave_resolved) - len(fetched_wave)
+            )
         downloaded["openmeteo_single_runs_location_batch_count"] = 1
 
     if (
@@ -1512,8 +1581,8 @@ def download_current_target_raw_inputs(
         and (not single_runs_public or single_runs_wave_failure is not None)
     ):
         try:
-            wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
-                pending_requests,
+            fetched_wave, representative_failures = _fetch_meta_stamped_anchor_wave(
+                representative_requests,
                 max_workers=fetch_workers,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
@@ -1524,7 +1593,19 @@ def download_current_target_raw_inputs(
         except Exception as exc:
             meta_wave_failures = {key: exc for key in pending_requests}
             wave_resolved = {}
+            fetched_wave = {}
             downloaded["openmeteo_model_meta_fetch_count"] = 1
+        else:
+            wave_resolved = _fan_out_anchor_payloads(
+                fetched_wave,
+                requests=pending_requests,
+                fanout=request_fanout,
+            )
+            meta_wave_failures = {
+                target_key: error
+                for representative, error in representative_failures.items()
+                for target_key in request_fanout.get(representative, (representative,))
+            }
         if single_runs_wave_failure is not None:
             reason = (
                 f"{type(single_runs_wave_failure).__name__}: "
@@ -1539,8 +1620,11 @@ def download_current_target_raw_inputs(
                 for key, (payload, provenance, captured_at) in wave_resolved.items()
             }
         resolved_payloads.update(wave_resolved)
-        downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
-        downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+        downloaded["openmeteo_transport_fetch_count"] = len(fetched_wave)
+        downloaded["openmeteo_wave_payload_count"] = len(fetched_wave)
+        downloaded["openmeteo_intra_wave_fanout_count"] = max(
+            0, len(wave_resolved) - len(fetched_wave)
+        )
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketPointReaderPool
 
@@ -1770,6 +1854,8 @@ def download_current_target_raw_inputs(
         "status": (
             "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
             if timeboxed_incomplete
+            else "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE"
+            if targets and not manifests and not canonical_reuse
             else "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
         ),
         "cycle": cycle.isoformat(),
