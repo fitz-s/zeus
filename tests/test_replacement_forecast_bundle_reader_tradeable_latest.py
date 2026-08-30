@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-30
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md; 2026-08-19
 #   market-relative capital evidence retirement of stale ENS live authority.
 """Relationship tests for readiness-bound replacement posterior selection.
@@ -523,6 +523,33 @@ def test_reader_live_eligible_q_mode_set_mirrors_live_gate() -> None:
     from src.engine import event_reactor_adapter as adapter
 
     assert reader._REPLACEMENT_Q_MODE_LIVE_ELIGIBLE == adapter._REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
+
+
+def test_live_grade_rejects_precision_metadata_for_another_target_day() -> None:
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    provenance = _provenance(q_mode=_FUSED_FULL)
+    provenance["openmeteo_precision_guard"] = {
+        "metadata": {
+            "city": "Shanghai",
+            "timezone_name": "Asia/Shanghai",
+            "target_local_date": "2026-06-06",
+            "local_day_start_utc": "2026-06-05T16:00:00+00:00",
+            "local_day_end_utc": "2026-06-06T16:00:00+00:00",
+        }
+    }
+
+    assert reader._live_grade_provenance(
+        {
+            "runtime_layer": "live",
+            "city": "Shanghai",
+            "target_date": "2026-06-07",
+            "q_lcb_json": "{}",
+            "q_ucb_json": "{}",
+            "provenance_json": json.dumps(provenance),
+        },
+        authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+    ) is None
 
 
 def test_diagnostic_bounded_row_is_not_live_readable() -> None:

@@ -12,9 +12,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping
+from zoneinfo import ZoneInfoNotFoundError
 
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
     current_evidence_shape_has_entry_authority,
@@ -596,6 +598,40 @@ def _live_grade_provenance(
     if not row_map.get("q_ucb_json"):
         return None
     provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    precision_guard = provenance.get("openmeteo_precision_guard")
+    precision_metadata = (
+        precision_guard.get("metadata")
+        if isinstance(precision_guard, Mapping)
+        else None
+    )
+    if isinstance(precision_metadata, Mapping):
+        city = str(row_map.get("city") or "").strip()
+        target_date = str(row_map.get("target_date") or "").strip()
+        timezone_name = str(precision_metadata.get("timezone_name") or "").strip()
+        try:
+            target_window = compute_target_local_day_window_utc(
+                city_timezone=timezone_name,
+                target_local_date=date.fromisoformat(target_date),
+            )
+            precision_scope_matches = (
+                str(precision_metadata.get("city") or "").strip() == city
+                and str(precision_metadata.get("target_local_date") or "").strip()
+                == target_date
+                and _parse_utc(
+                    str(precision_metadata.get("local_day_start_utc") or ""),
+                    field_name="precision_local_day_start_utc",
+                )
+                == target_window.start_utc
+                and _parse_utc(
+                    str(precision_metadata.get("local_day_end_utc") or ""),
+                    field_name="precision_local_day_end_utc",
+                )
+                == target_window.end_utc
+            )
+        except (TypeError, ValueError, ZoneInfoNotFoundError):
+            precision_scope_matches = False
+        if not precision_scope_matches:
+            return None
     mode = provenance.get("replacement_q_mode")
     if not isinstance(mode, str) or not mode:
         return None
