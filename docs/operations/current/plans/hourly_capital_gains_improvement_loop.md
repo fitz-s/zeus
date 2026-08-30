@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-30 — acting-q law变更必须切断旧selector capital cohort
+- **实时反例:** 当前`forecast_qkernel_entry` gate引用11个独立city-date clusters，market/model e-value为`15.086506`，但其中部分actual fills由已删除的`market_anchored_correction`把replacement posterior q改写后成交。`4ae10eb79`已恢复live auction只用authority q，却继续沿用`global_single_order_posterior_mean_expected_growth_v2`；RiskGuard因此把旧market-corrected action q与新direct authority q混入同一cohort，并用旧law rejection全局封锁新law。
+- **修复:** current global selector revision升级为`global_single_order_authority_q_expected_growth_v3`。auction receipt、decision certificate、shadow grader、RiskGuard和strict evaluator继续共享同一常量；旧v2证据仍可审计但不再actuate v3 gate。没有删除RiskGuard、没有改变q/EV/Kelly/price/depth/submit gate，也没有把missing history变成pass。
+- **SCOPE / DRAIN / RESET:** scope仅是exact global selection/acting-probability law identity。drain由新v3 receipt、fill、exit、settlement和shadow counterfactual积累同revision证据；reset由现有market-relative alpha与capital probation按v3重新评估。旧v2 rejected cohort永久留在v2，不得重新解释为v3 proof。
+- **验收:** antibody固定现场v2 rejection（11 clusters、e-value 15.086506）并证明它不能生成current v3 rejection gate；RiskGuard+strict evaluator tests通过。部署后必须先看到active risk action从v2 rejection过期、最新global receipt写v3，再独立检查新order/fill/settlement与strict capital evaluator；恢复候选或一个fill不是资本利得证明。
+
 ### 2026-08-22 B142 — supporting clock例外必须原子穿过current-observation seam
 - **实时反例:** B140加载后的首个完整production auction覆盖174 families、82 eligible、1869 candidates；旧`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`降为0，但16个family随即在下一层变成`GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH`。说明age gate已修，调用者却仍以ENTRY身份禁止same-extreme clock advance，supporting carrier与current observation ledger之间形成第二个非原子断层。
 - **修复:** 对同一个current-local-day global remaining-path ENTRY布尔authority，同时允许stale supporting age与same-extreme conditioning clock advance。action state始终取current named source，carrier clock lag进入binding；remaining-path builder仍必须产生current simplex。任何extreme值、unit、named source、station、decision-time causality、topology或submit JIT content不一致继续拒绝；direct source-clock action route保持严格。Day0 semantics升v8。

@@ -6542,6 +6542,41 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}"
         ) in reason
 
+    def test_market_corrected_selector_cannot_gate_current_replacement_q_law(self):
+        current_probability_revision = (
+            riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        )
+        assert riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION == (
+            "global_single_order_authority_q_expected_growth_v3"
+        )
+        historical_rejection = {
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        "global_single_order_posterior_mean_expected_growth_v2"
+                    ),
+                    "probability_semantics_revisions": [
+                        current_probability_revision
+                    ],
+                    "model_over_market_evalue": 0.066284,
+                    "market_over_model_evalue": 15.086506,
+                    "independent_cluster_count": 11,
+                    "validated": False,
+                    "rejected": True,
+                }
+            ]
+        }
+
+        assert riskguard_module._market_relative_alpha_rejection_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": current_probability_revision,
+            },
+            historical_rejection,
+            required_evalue=10.0,
+        ) == (None, ())
+
     def test_day0_shadow_joins_only_later_verified_exact_condition(self, tmp_path):
         from src.events.day0_authority import (
             DAY0_PROBABILITY_SEMANTICS_REVISION,
