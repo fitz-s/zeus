@@ -753,7 +753,17 @@ def test_active_exact_request_keeps_transition_fenced(
     def _build(_conn, **build_kwargs):
         path = Path(build_kwargs["seed_file"])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "city": build_kwargs["city"],
+                    "target_date": build_kwargs["target_date"],
+                    "temperature_metric": build_kwargs["metric"],
+                    "source_cycle_time": build_kwargs["source_cycle_time"],
+                }
+            ),
+            encoding="utf-8",
+        )
         return path
 
     monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
@@ -768,6 +778,35 @@ def test_active_exact_request_keeps_transition_fenced(
     assert duplicate["seeds_enqueued"] == 0
     assert duplicate["already_enqueued"] == 1
     assert request.is_file()
+
+
+def test_wrong_cycle_seed_does_not_fence_exact_transition(tmp_path: Path) -> None:
+    """A marker cannot treat another carrier cycle as active exact work."""
+
+    seed = tmp_path / "queue" / "seeds" / "Seoul.2026-07-25.high.seed.json"
+    seed.parent.mkdir(parents=True)
+    payload = {
+        "city": "Seoul",
+        "target_date": "2026-07-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-24T18:00:00+00:00",
+    }
+    seed.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert trigger._finalized_seed_has_active_queue_work(
+        str(seed),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        source_cycle_iso="2026-07-24T12:00:00+00:00",
+    ) is False
+    assert trigger._finalized_seed_has_active_queue_work(
+        str(seed),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        source_cycle_iso="2026-07-24T18:00:00+00:00",
+    ) is True
 
 
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:

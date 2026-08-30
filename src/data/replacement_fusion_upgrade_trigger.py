@@ -936,7 +936,13 @@ def _reserve_enqueues(
             (_PUBLISH_PENDING_PREFIX, _RESERVATION_PREFIX)
         ):
             continue
-        queue_state = _finalized_seed_has_active_queue_work(marker_value)
+        queue_state = _finalized_seed_has_active_queue_work(
+            marker_value,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            source_cycle_iso=source_cycle_iso,
+        )
         if queue_state is False:
             reclaimable_markers[transition_key] = marker_value
     try:
@@ -1078,7 +1084,14 @@ def _reserve_enqueues(
     return reservation, tuple(reserved)
 
 
-def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
+def _finalized_seed_has_active_queue_work(
+    seed_file: str,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+) -> bool | None:
     """Return True/False for exact queue work; None when fencing is uncertain."""
     marker = str(seed_file or "").strip()
     if not marker:
@@ -1086,6 +1099,31 @@ def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
     path = Path(marker)
     if path.parent.name != "seeds":
         return None
+
+    def matches_transition(candidate: Path) -> bool | None:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            cycle = datetime.fromisoformat(
+                str(payload.get("source_cycle_time") or "").replace(
+                    "Z", "+00:00"
+                )
+            )
+            expected_cycle = datetime.fromisoformat(
+                str(source_cycle_iso).replace("Z", "+00:00")
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if cycle.tzinfo is None:
+            cycle = cycle.replace(tzinfo=UTC)
+        if expected_cycle.tzinfo is None:
+            expected_cycle = expected_cycle.replace(tzinfo=UTC)
+        return (
+            str(payload.get("city") or "").strip() == city
+            and str(payload.get("target_date") or "").strip() == target_date
+            and str(payload.get("temperature_metric") or "").strip() == metric
+            and cycle.astimezone(UTC) == expected_cycle.astimezone(UTC)
+        )
+
     queue_root = path.parent.parent
     try:
         from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
@@ -1096,16 +1134,20 @@ def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
         with _queue_lock(queue_root / ".materialization_queue.lock") as acquired:
             if not acquired:
                 return None
-            if path.is_file() or (queue_root / "requests" / path.name).is_file():
-                return True
+            if path.is_file():
+                return matches_transition(path)
+            request = queue_root / "requests" / path.name
+            if request.is_file():
+                return matches_transition(request)
             inflight = queue_root / "inflight"
             try:
                 batches = tuple(inflight.iterdir())
             except FileNotFoundError:
                 batches = ()
             for batch in batches:
-                if batch.is_dir() and (batch / path.name).is_file():
-                    return True
+                candidate = batch / path.name
+                if batch.is_dir() and candidate.is_file():
+                    return matches_transition(candidate)
             indexed_receipt = _seed_terminal_receipt_index_path(path)
             if indexed_receipt is not None and indexed_receipt.is_file():
                 try:
