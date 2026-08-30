@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-30
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -230,17 +230,21 @@ def _rotate_current_target_rows(
     *,
     cycle: datetime,
     state_path: Path | None = None,
+    pinned_prefix_count: int = 0,
 ) -> tuple[list[object], int, int, int, _RotationStateToken]:
     ordered = list(rows)
+    pinned_count = min(max(0, int(pinned_prefix_count)), len(ordered))
+    pinned = ordered[:pinned_count]
+    rotating = ordered[pinned_count:]
     cycle_key = cycle.astimezone(UTC).isoformat()
-    if not ordered:
+    if not rotating:
         if state_path is None:
-            return ordered, 0, 0, 0, (None, None)
+            return pinned, 0, 0, 0, (None, None)
         _, generation, state_token = _read_rotation_state(
             state_path,
             cycle_key=cycle_key,
         )
-        return ordered, 0, 0, generation, state_token
+        return pinned, 0, 0, generation, state_token
     with _CURRENT_TARGET_ROTATION_LOCK:
         persisted_start = 0
         generation = 0
@@ -257,13 +261,13 @@ def _rotate_current_target_rows(
             persisted_start
             if state_path is not None
             else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
-        ) % len(ordered)
+        ) % len(rotating)
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
     return (
-        ordered[start:] + ordered[:start],
+        pinned + rotating[start:] + rotating[:start],
         start,
-        len(ordered),
+        len(rotating),
         generation,
         state_token,
     )
@@ -1396,6 +1400,18 @@ def download_current_target_raw_inputs(
         _rows,
         held_family_priority,
     )
+    held_priority_row_count = sum(
+        _current_target_family_key(row) in held_family_priority
+        for row in _rows
+    )
+    # Pin existing exposure only when the configured slice can still carry at
+    # least one ordinary family.  A smaller slice keeps the old full-universe
+    # rotation so priority cannot turn into permanent background starvation.
+    priority_row_count = (
+        held_priority_row_count
+        if limit is None or held_priority_row_count < int(limit)
+        else 0
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     rotation_state_path = _current_target_rotation_state_path(
         output_dir,
@@ -1412,6 +1428,7 @@ def download_current_target_raw_inputs(
         _rows,
         cycle=cycle,
         state_path=rotation_state_path,
+        pinned_prefix_count=priority_row_count,
     )
     targets = rotated_rows[:limit] if limit is not None else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
@@ -1834,7 +1851,8 @@ def download_current_target_raw_inputs(
         if conn is not None:
             conn.close()
 
-    unscheduled_target_count = max(0, rotation_row_count - len(targets))
+    total_row_count = priority_row_count + rotation_row_count
+    unscheduled_target_count = max(0, total_row_count - len(targets))
     incomplete_target_set = (
         timeboxed_incomplete
         or len(manifests) + len(canonical_reuse) < len(targets)
@@ -1843,7 +1861,10 @@ def download_current_target_raw_inputs(
     rotation_next_start, rotation_cas_applied = _advance_current_target_rotation(
         cycle=cycle,
         row_count=rotation_row_count,
-        attempted_count=processed_target_count,
+        attempted_count=max(
+            0,
+            processed_target_count - min(priority_row_count, len(targets)),
+        ),
         incomplete=incomplete_target_set,
         state_path=rotation_state_path,
         expected_generation=rotation_generation,

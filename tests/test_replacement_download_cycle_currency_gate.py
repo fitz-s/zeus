@@ -1,6 +1,6 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-21
-# Lifecycle: created=2026-06-09; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused or audited: 2026-08-30
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
@@ -116,11 +116,12 @@ def test_current_target_download_prioritizes_held_families_before_alphabetic() -
     rotated, start, rotating_count, generation, _ = dl._rotate_current_target_rows(
         ordered,
         cycle=AVAILABLE_CYCLE.replace(hour=4),
+        pinned_prefix_count=2,
     )
 
     assert [row.city for row in ordered] == ["Wellington", "Dallas", "Amsterdam"]
     assert start == 0
-    assert rotating_count == 3
+    assert rotating_count == 1
     assert generation == 0
     assert [row.city for row in rotated] == ["Wellington", "Dallas", "Amsterdam"]
 
@@ -170,7 +171,7 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
 
 
-def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
+def test_durable_rotation_keeps_held_prefix_while_rotating_ordinary_lane(
     tmp_path: Path,
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
@@ -190,6 +191,7 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         ordered,
         cycle=cycle,
         state_path=state_path,
+        pinned_prefix_count=1,
     )
     assert first[0].city == "Dallas"
     next_start, applied = dl._advance_current_target_rotation(
@@ -209,10 +211,11 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         ordered,
         cycle=cycle,
         state_path=state_path,
+        pinned_prefix_count=1,
     )
 
     assert start == 1
-    assert after_restart[0].city == "Amsterdam"
+    assert [row.city for row in after_restart] == ["Dallas", "Ankara", "Amsterdam"]
 
 
 def test_rotation_cursor_normalizes_when_same_cycle_universe_shrinks(
