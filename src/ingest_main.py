@@ -521,7 +521,7 @@ def _obs_tick_day0_family_admission(
     *,
     decision_time: datetime,
 ):
-    """Resolve only the NOAA/Ogimet local-day scopes this source tick can publish."""
+    """Resolve WU/NOAA local-day scopes this observation tick can publish."""
 
     from src.config import runtime_cities_by_name
 
@@ -529,7 +529,9 @@ def _obs_tick_day0_family_admission(
     scopes: list[tuple[str, str]] = []
     for city_name in city_names:
         city = cities.get(str(city_name))
-        if city is None or str(getattr(city, "settlement_source_type", "")) != "noaa":
+        if city is None or str(
+            getattr(city, "settlement_source_type", "")
+        ) not in {"wu_icao", "noaa"}:
             continue
         try:
             local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
