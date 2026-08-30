@@ -1091,10 +1091,10 @@ def _durable_fast_tail_hard_fact_evidence(
 
     if world_conn is None or metric not in {"high", "low"}:
         return None
-    if (
+    source_type = (
         str(getattr(city, "settlement_source_type", "") or "").strip().lower()
-        != "wu_icao"
-    ):
+    )
+    if source_type not in {"wu_icao", "noaa"}:
         return None
     city_name = str(getattr(city, "name", "") or "").strip()
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
@@ -1115,7 +1115,11 @@ def _durable_fast_tail_hard_fact_evidence(
         source = fast_obs_source_for_city(city)
         if source is None or source.source_id != FAST_OBS_SOURCE_ID:
             return None
-        margin = _metar_kill_margin_units(city_name, unit)
+        margin = (
+            float(source.margin_units)
+            if source_type == "noaa"
+            else _metar_kill_margin_units(city_name, unit)
+        )
         if margin is None or not math.isfinite(float(margin)) or margin < 0.0:
             return None
         target = date.fromisoformat(str(target_date)[:10])
@@ -1289,7 +1293,7 @@ def _durable_fast_tail_hard_fact_evidence(
         )
         if (
             payload.get("settlement_source") != source.source_id
-            or payload.get("settlement_source_type") != "wu_icao"
+            or payload.get("settlement_source_type") != source_type
             or str(payload.get("station_id") or "").strip().upper() != station
             or payload.get("source_authorized_status") != "AUTHORIZED"
             or payload.get("source_match_status") != "MATCH"
@@ -1598,12 +1602,14 @@ def evaluate_hard_fact_exit(
         # product. Neither the hourly WU API nor a same-station METAR print is
         # settlement finality for that product; both stay in the statistical
         # redecision lane.
-        if (
+        source_type = (
             str(getattr(city, "settlement_source_type", "") or "")
             .strip()
             .lower()
-            == "wu_icao"
-        ):
+        )
+        if source_type == "wu_icao":
+            return None
+        if source_type != "noaa":
             return None
 
         from src.data.day0_oracle_anomaly import is_day0_family_paused
@@ -1638,13 +1644,12 @@ def evaluate_hard_fact_exit(
         if evidence_cache is not None and evidence_key in evidence_cache:
             evidence = evidence_cache[evidence_key]
         else:
-            evidence = _wu_hard_fact_evidence(
+            evidence = _durable_fast_tail_hard_fact_evidence(
                 city=city,
                 target_date=target_date,
                 metric=metric,
                 now=moment,
                 world_conn=world_conn,
-                durable_only=durable_only,
             )
             if evidence_cache is not None:
                 evidence_cache[evidence_key] = evidence
