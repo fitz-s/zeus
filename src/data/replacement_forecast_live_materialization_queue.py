@@ -3492,6 +3492,38 @@ def _deprioritize_current_money_risk_seed_files(
     return (*background, *priority)
 
 
+def _bounded_seed_inspection_window(
+    paths: Sequence[Path],
+    *,
+    current_priority_scope: frozenset[tuple[str, str, str]],
+    inspection_cap: int,
+    lane: str,
+) -> tuple[Path, ...]:
+    """Keep current truth fast without making its blocked prefix a queue mutex."""
+
+    ordered = tuple(paths)
+    window = list(ordered[:inspection_cap])
+    if (
+        lane != MATERIALIZATION_LANE_PRIORITY
+        or inspection_cap < 2
+        or len(ordered) <= inspection_cap
+        or not current_priority_scope
+    ):
+        return tuple(window)
+    prefixes = _current_money_risk_seed_prefixes(current_priority_scope)
+    non_current = next(
+        (
+            path
+            for path in ordered[inspection_cap:]
+            if not any(path.name.startswith(prefix) for prefix in prefixes)
+        ),
+        None,
+    )
+    if non_current is not None:
+        window[-1] = non_current
+    return tuple(window)
+
+
 def _interleave_current_priority_seed_files(
     paths: Sequence[Path],
     payloads: Mapping[Path, Mapping[str, object] | None],
@@ -3767,7 +3799,12 @@ def _prepare_seed_requests(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
     )
-    raw_window = prioritized_raw_snapshot[:inspection_cap]
+    raw_window = _bounded_seed_inspection_window(
+        prioritized_raw_snapshot,
+        current_priority_scope=current_priority_scope,
+        inspection_cap=inspection_cap,
+        lane=lane,
+    )
     (
         coalesced_window,
         superseded_seeds,

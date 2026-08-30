@@ -3602,6 +3602,115 @@ def test_background_seed_window_starts_outside_current_priority_scope(tmp_path):
     assert ordered == (broad, held_a, held_b)
 
 
+def test_priority_seed_window_drains_ready_tail_past_ens_waiting_scope(
+    tmp_path, monkeypatch
+):
+    """ENS-waiting current families cannot consume every priority inspection."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+    current_families = frozenset(
+        (f"Current {index}", "2026-08-31", "high") for index in range(8)
+    )
+
+    def write_seed(path: Path, family: tuple[str, str, str]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    **_minimal_seed(upgrade=False),
+                    "city": family[0],
+                    "target_date": family[1],
+                    "temperature_metric": family[2],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    for family in current_families:
+        write_seed(
+            seed_dir
+            / (
+                f"{family[0].replace(' ', '_')}.{family[1]}.{family[2]}.json"
+            ),
+            family,
+        )
+    ready_family = ("Ready Tail", "2026-08-29", "low")
+    ready = seed_dir / "Ready_Tail.2026-08-29.low.json"
+    write_seed(ready, ready_family)
+
+    monkeypatch.setattr(
+        queue_mod, "_current_money_risk_families", lambda: current_families
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_global_auction_scope_families",
+        lambda _paths: current_families,
+    )
+    monkeypatch.setattr(
+        queue_mod, "_never_priced_enqueued_seed_families", lambda _db: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_priority_map_with_names",
+        lambda _db, paths, *_args, **_kwargs: (
+            {path.name: (0, path.name) for path in paths},
+            {path.name for path in paths},
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_seed_source_cycle_boundary",
+        lambda *, seed, **_kwargs: (
+            None
+            if seed["city"] == ready_family[0]
+            else ("awaiting_current_ensemble_hwm", "2026-08-29T18:00:00+00:00")
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert (request_dir / ready.name).is_file()
+    assert not ready.exists()
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" in reasons
+
+
 def test_priority_seed_inspection_stays_bounded_by_actionable_tranche(
     tmp_path, monkeypatch
 ):
