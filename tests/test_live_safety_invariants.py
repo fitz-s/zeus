@@ -21114,6 +21114,75 @@ def test_monitor_deadline_preserves_current_axes_without_decision_authority(monk
     assert summary["monitors"] == 1
 
 
+def test_orderbook_gap_preserves_exact_hard_fact_probability_only(monkeypatch):
+    """A missing book cannot revoke independent absorbing probability truth."""
+    from src.engine import cycle_runtime
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    position = _make_position(trade_id="hard-fact-q-survives-book-gap")
+    position.last_monitor_prob = 0.73
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.23
+    position.last_monitor_market_price = 0.50
+    position.last_monitor_market_price_is_fresh = True
+    position.last_monitor_best_bid = 0.49
+    position.last_monitor_best_ask = 0.51
+    verdict = HardFactVerdict(
+        action="EXIT_DEAD_BIN",
+        reason="current observed extreme killed held bin",
+        metric="high",
+        rounded_extreme=36.0,
+        source="durable_observation_instants",
+    )
+
+    assert cycle_runtime._stamp_durable_hard_fact_probability_without_book(
+        None,
+        object(),
+        position,
+        verdict,
+    ) is True
+    assert position.last_monitor_prob == 0.0
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is False
+
+    emitted = []
+    results = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0}
+
+    assert cycle_runtime._record_monitor_data_degraded_attempt(
+        None,
+        position,
+        artifact=artifact,
+        deps=_monitor_test_deps("test_hard_fact_q_survives_book_gap"),
+        summary=summary,
+        stage="orderbook_unavailable",
+        preserve_current_attempt_axes=True,
+    ) is True
+    assert position.last_monitor_prob == 0.0
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price is None
+    assert position.last_monitor_market_price_is_fresh is False
+    assert position.last_monitor_edge is None
+    assert results[0].fresh_prob == 0.0
+    assert results[0].fresh_edge is None
+    assert emitted[0]["decision_unavailable_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:ORDERBOOK_UNAVAILABLE"
+    )
+    assert "monitor_attempt_current_probability_preserved" in (
+        position.applied_validations
+    )
+
+
 def test_monitor_cadence_rejects_fresh_axes_without_completed_decision():
     """Fresh q/book cannot turn a deadline event into a completed redecision."""
     from src.ops.monitor_cadence import _monitor_event_fresh_input_issue

@@ -3764,6 +3764,36 @@ def _record_monitor_data_degraded_attempt(
     return True
 
 
+def _stamp_durable_hard_fact_probability_without_book(
+    conn,
+    clob,
+    pos,
+    hard_fact,
+) -> bool:
+    """Preserve an exact held-side q when only executable book truth is absent."""
+
+    action = getattr(hard_fact, "action", None)
+    try:
+        if action == "EXIT_DEAD_BIN":
+            from src.engine.monitor_refresh import refresh_exact_zero_position
+
+            refresh_exact_zero_position(conn, clob, pos, refresh_quote=False)
+        elif action == "HOLD_STRUCTURAL_WIN":
+            from src.engine.monitor_refresh import refresh_exact_one_position
+
+            refresh_exact_one_position(pos)
+        else:
+            return False
+    except Exception as exc:  # noqa: BLE001 - isolate one held family from the batch.
+        logger.warning(
+            "held monitor hard-fact probability stamp failed for %s: %s",
+            getattr(pos, "trade_id", "?"),
+            exc,
+        )
+        return False
+    return True
+
+
 def _append_held_monitor_coverage_position_id(
     summary: dict,
     field: str,
@@ -8619,6 +8649,14 @@ def execute_monitoring_phase(
                     deps=deps,
                     summary=summary,
                     stage="orderbook_batch_unavailable",
+                    preserve_current_attempt_axes=(
+                        _stamp_durable_hard_fact_probability_without_book(
+                            conn,
+                            clob,
+                            pos,
+                            durable_hard_facts.get(id(pos)),
+                        )
+                    ),
                 )
             ):
                 degraded_attempt_position_ids.add(id(pos))
@@ -8656,6 +8694,14 @@ def execute_monitoring_phase(
                         deps=deps,
                         summary=summary,
                         stage="orderbook_unavailable",
+                        preserve_current_attempt_axes=(
+                            _stamp_durable_hard_fact_probability_without_book(
+                                conn,
+                                clob,
+                                pos,
+                                durable_hard_facts.get(id(pos)),
+                            )
+                        ),
                     )
                 ):
                     degraded_attempt_position_ids.add(id(pos))
