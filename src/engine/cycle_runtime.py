@@ -3810,9 +3810,6 @@ _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
     "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
-    # Persistent deep market-path evidence is independent of the lagging q.
-    # Sending it back through the q-based auction would erase that authority.
-    "FLASH_CRASH_PANIC",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05

@@ -25,7 +25,6 @@ from src.engine.monitor_refresh import (
     _causal_market_velocity_1h,
 )
 from src.engine.cycle_runtime import _global_auction_owns_statistical_sell
-from src.execution.exit_lifecycle import _protective_sell_semantic_receipt
 from src.state.portfolio import (
     ExitContext,
     Position,
@@ -381,105 +380,9 @@ def test_causal_catastrophe_confirmation_refuses_quote_gap():
     assert count == 1
 
 
-def _protective_semantic_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            direction TEXT,
-            token_id TEXT,
-            no_token_id TEXT,
-            shares REAL,
-            chain_shares REAL,
-            chain_state TEXT
-        );
-        CREATE TABLE position_events (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT,
-            sequence_no INTEGER,
-            event_type TEXT,
-            source_module TEXT,
-            env TEXT,
-            phase_after TEXT,
-            payload_json TEXT
-        );
-        """
-    )
-    conn.execute(
-        """INSERT INTO position_current VALUES (
-               'flash-pos', 'pending_exit', 'buy_yes', 'held-token', 'no-token',
-               10, 10, 'synced'
-           )"""
-    )
-    return conn
-
-
-def test_flash_catastrophe_is_direct_reduce_only_not_q_reauction():
+def test_flash_catastrophe_requires_global_capital_reauction():
     decision = SimpleNamespace(trigger="FLASH_CRASH_PANIC")
-    assert _global_auction_owns_statistical_sell(decision, decision.trigger) is False
-
-
-def test_flash_protective_semantic_receipt_without_canonical_db_fails_closed():
-    assert _protective_sell_semantic_receipt(
-        None,
-        position_id="flash-pos",
-        token_id="held-token",
-        shares=10.0,
-        kind="FLASH_CRASH_PANIC",
-    ) is None
-
-
-def test_flash_protective_semantic_receipt_requires_exact_causal_monitor():
-    import json
-
-    conn = _protective_semantic_connection()
-    payload = {
-        "exit_decision_should_exit": True,
-        "exit_decision_trigger": "FLASH_CRASH_PANIC",
-        "held_sell_full_depth_action_authority": True,
-        "last_monitor_market_price_is_fresh": True,
-        "last_monitor_best_bid": 0.19,
-        "market_velocity_1h": flash_crash_catastrophe_velocity() - 0.01,
-        "flash_crash_count": flash_crash_confirmations(),
-        "applied_validations": [
-            "flash_crash_persistent_market_evidence",
-            "flash_crash_trigger",
-        ],
-    }
-    conn.execute(
-        """INSERT INTO position_events VALUES (
-               'flash-monitor', 'flash-pos', 1, 'MONITOR_REFRESHED',
-               'src.engine.cycle_runtime', 'live', 'active', ?
-           )""",
-        (json.dumps(payload, sort_keys=True),),
-    )
-
-    receipt = _protective_sell_semantic_receipt(
-        conn,
-        position_id="flash-pos",
-        token_id="held-token",
-        shares=10.0,
-        kind="FLASH_CRASH_PANIC",
-    )
-
-    assert receipt is not None
-    assert receipt[0] == "flash-monitor"
-
-    payload["flash_crash_count"] = flash_crash_confirmations() - 1
-    conn.execute(
-        "UPDATE position_events SET payload_json=? WHERE event_id='flash-monitor'",
-        (json.dumps(payload, sort_keys=True),),
-    )
-    assert _protective_sell_semantic_receipt(
-        conn,
-        position_id="flash-pos",
-        token_id="held-token",
-        shares=10.0,
-        kind="FLASH_CRASH_PANIC",
-    ) is None
+    assert _global_auction_owns_statistical_sell(decision, decision.trigger) is True
 
 
 # --- 4. Single-site coherence (Wave 3, 2026-06-03) -----------------------------------

@@ -2640,10 +2640,10 @@ class TestExecutor:
             snapshot_hash=snapshot.executable_snapshot_hash,
         ) == "protective_sell_semantic_authority_superseded"
 
-    def test_flash_catastrophe_executes_protective_fak_through_venue_command(
+    def test_flash_catastrophe_without_global_authority_cannot_reach_venue(
         self, monkeypatch
     ):
-        """A canonical catastrophe decision survives every live SELL boundary."""
+        """Market-path panic is a proposal, never independent SELL authority."""
         from src.execution.exit_lifecycle import execute_exit
         from src.state.portfolio import (
             ExitContext,
@@ -2816,24 +2816,14 @@ class TestExecutor:
                 LIMIT 1""",
             (position.trade_id,),
         ).fetchone()
-        assert outcome.startswith(("sell_order_placed:", "sell_pending:")), outcome
-        assert captured == {
-            "token_id": token_id,
-            "price": pytest.approx(0.19),
-            "size": pytest.approx(10.0),
-            "side": "SELL",
-            "order_type": "FAK",
-        }
-        assert command is not None
-        assert command["state"] == "ACKED"
-        assert command["side"] == "SELL"
-        assert command["price"] == pytest.approx(0.19)
-        assert command["venue_order_id"] == "flash-catastrophe-e2e-order"
+        assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+        assert captured == {}
+        assert command is None
         assert _TEST_CONN.execute(
             """SELECT COUNT(*) FROM position_events
                 WHERE position_id = ? AND event_type = 'EXIT_INTENT'""",
             (position.trade_id,),
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
 
     def test_unproved_flash_catastrophe_cannot_mutate_exit_lifecycle(self):
         from src.execution.exit_lifecycle import execute_exit
@@ -2905,7 +2895,7 @@ class TestExecutor:
             "SELECT phase FROM position_current WHERE position_id=?",
             (position.trade_id,),
         ).fetchone()
-        assert outcome == "exit_blocked: flash_crash_semantic_authority_invalid"
+        assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
         assert position.state == "holding"
         assert current["phase"] == "active"
         assert _TEST_CONN.execute(

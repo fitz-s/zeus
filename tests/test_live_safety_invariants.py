@@ -6937,6 +6937,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     ),
     (
         ("EDGE_REVERSAL", True, True, "delegated", False, False),
+        ("FLASH_CRASH_PANIC", True, True, "delegated", False, False),
         ("EDGE_REVERSAL", True, True, "lineage_upgrade", False, False),
         (
             "EDGE_REVERSAL",
