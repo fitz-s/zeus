@@ -61,6 +61,10 @@ _MANIFEST_CACHE: dict[
     Path,
     dict[Path, tuple[tuple[int, int, int], RawForecastArtifactManifest]],
 ] = {}
+_MANIFEST_INVALID_SIGNATURES: dict[
+    Path,
+    dict[Path, tuple[int, int, int]],
+] = {}
 _MANIFEST_LOADS: dict[Path, threading.Condition] = {}
 _MANIFEST_CACHE_VERSIONS: dict[Path, int] = {}
 
@@ -406,6 +410,7 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
         active = threading.Condition(_MANIFEST_CACHE_LOCK)
         _MANIFEST_LOADS[root] = active
         cached = dict(_MANIFEST_CACHE.get(root, {}))
+        invalid = dict(_MANIFEST_INVALID_SIGNATURES.get(root, {}))
     current: dict[
         Path,
         tuple[tuple[int, int, int], RawForecastArtifactManifest],
@@ -419,6 +424,8 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
             entry = cached.get(path)
             if entry is not None and entry[0] == signature:
                 manifest = entry[1]
+            elif invalid.get(path) == signature:
+                continue
             else:
                 try:
                     manifest = _read_manifest_with_path(path)
@@ -433,6 +440,7 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
                         path,
                         type(exc).__name__,
                     )
+                    invalid[path] = signature
                     continue
                 except UnregisteredRawForecastArtifactIdentityError:
                     # The inventory intentionally retains immutable manifests from retired
@@ -450,12 +458,23 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
                     if field_hashes == {_RETIRED_MANIFEST_FIELD_SHA256}:
                         continue
                     raise
+                invalid.pop(path, None)
             current[path] = (signature, manifest)
+        inventory = set(paths)
+        invalid = {
+            path: signature
+            for path, signature in invalid.items()
+            if path in inventory
+        }
         succeeded = True
     finally:
         with _MANIFEST_CACHE_LOCK:
             if succeeded:
                 _MANIFEST_CACHE[root] = current
+                if invalid:
+                    _MANIFEST_INVALID_SIGNATURES[root] = invalid
+                else:
+                    _MANIFEST_INVALID_SIGNATURES.pop(root, None)
                 _MANIFEST_CACHE_VERSIONS[root] = (
                     _MANIFEST_CACHE_VERSIONS.get(root, 0) + 1
                 )

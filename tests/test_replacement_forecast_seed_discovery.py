@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-30
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -516,6 +516,7 @@ def test_load_manifests_isolates_one_truncated_file_and_retries_after_repair(
     broken_path.write_text("", encoding="utf-8")
     root = raw_dir.resolve()
     discovery._MANIFEST_CACHE.pop(root, None)
+    discovery._MANIFEST_INVALID_SIGNATURES.pop(root, None)
     discovery._MANIFEST_CACHE_VERSIONS.pop(root, None)
 
     loaded = _load_manifests(
@@ -526,6 +527,15 @@ def test_load_manifests_isolates_one_truncated_file_and_retries_after_repair(
     assert len(loaded) == 1
     assert loaded[0].data_version == OPENMETEO_HIGH_DATA_VERSION
     assert "invalid raw forecast manifest isolated" in caplog.text
+
+    caplog.clear()
+    unchanged = _load_manifests(
+        raw_dir,
+        computed_at=datetime(2026, 6, 7, tzinfo=timezone.utc),
+    )
+
+    assert unchanged == loaded
+    assert "invalid raw forecast manifest isolated" not in caplog.text
 
     repaired = json.loads(current_path.read_text(encoding="utf-8"))
     repaired["request_url"] = "https://example.invalid/repaired"
