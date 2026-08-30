@@ -3543,6 +3543,44 @@ def _prioritize_seed_files_by_capital_tier(
     return ordered
 
 
+def _interleave_current_priority_seed_files_by_name(
+    paths: Sequence[Path],
+    *,
+    current_money_risk: frozenset[tuple[str, str, str]],
+    current_global_scope: frozenset[tuple[str, str, str]],
+    limit: int,
+) -> tuple[Path, ...]:
+    """Keep held and global-only work visible before the raw inspection bound."""
+
+    ordered = tuple(paths)
+    if limit < 2:
+        return ordered
+    held_prefixes = _current_money_risk_seed_prefixes(current_money_risk)
+    global_only_prefixes = _current_money_risk_seed_prefixes(
+        current_global_scope - current_money_risk
+    )
+    held = next(
+        (
+            path
+            for path in ordered
+            if any(path.name.startswith(prefix) for prefix in held_prefixes)
+        ),
+        None,
+    )
+    global_path = next(
+        (
+            path
+            for path in ordered
+            if any(path.name.startswith(prefix) for prefix in global_only_prefixes)
+        ),
+        None,
+    )
+    if held is None or global_path is None:
+        return ordered
+    selected = {held, global_path}
+    return (held, global_path, *(path for path in ordered if path not in selected))
+
+
 def _deprioritize_current_money_risk_seed_files(
     paths: Sequence[Path],
     families: frozenset[tuple[str, str, str]],
@@ -3869,6 +3907,12 @@ def _prepare_seed_requests(
             current_global_scope=current_global_scope,
             current_money_risk=current_money_risk,
             current_probability_debt=current_probability_debt,
+        )
+        prioritized_raw_snapshot = _interleave_current_priority_seed_files_by_name(
+            prioritized_raw_snapshot,
+            current_money_risk=current_money_risk,
+            current_global_scope=current_global_scope,
+            limit=max(int(limit), 0),
         )
     else:
         prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(

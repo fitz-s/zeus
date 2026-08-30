@@ -3599,6 +3599,43 @@ def test_probability_debt_precedes_broader_priority_scopes_before_window(tmp_pat
     assert paths[3] in window
 
 
+def test_priority_raw_window_reserves_global_only_family_before_bound(tmp_path):
+    """Held queue volume cannot hide current global selection work."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_families = frozenset(
+        ("Tel Aviv", "2026-08-30", metric) for metric in ("high", "low")
+    )
+    global_family = ("Hong Kong", "2026-08-31", "high")
+    held = tuple(
+        tmp_path / f"Tel_Aviv.2026-08-30.{metric}.{stamp}.json"
+        for metric in ("high", "low")
+        for stamp in (
+            "20260830T010000Z",
+            "20260830T020000Z",
+            "20260830T030000Z",
+        )
+    )
+    global_path = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260830T010000Z.json"
+    )
+
+    interleaved = queue_mod._interleave_current_priority_seed_files_by_name(
+        (*held, global_path),
+        current_money_risk=held_families,
+        current_global_scope=frozenset({*held_families, global_family}),
+        limit=2,
+    )
+    window = queue_mod._bounded_seed_inspection_window(
+        interleaved,
+        current_priority_scope=frozenset({*held_families, global_family}),
+        inspection_cap=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert window == (held[0], global_path)
+
+
 def test_day0_seed_older_than_current_posterior_observation_is_regression(
     tmp_path, monkeypatch
 ):
