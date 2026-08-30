@@ -664,6 +664,10 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         observed.update(kwargs)
         return {"coverage": True}
 
+    def _latest_manifest(*_args, **kwargs):
+        observed["cycle_admissible"] = kwargs["cycle_admissible"]
+        return manifest
+
     output = tmp_path / "staging" / "seed.json"
     built = trigger._build_and_write_upgrade_seed(
         _conn(),
@@ -675,6 +679,7 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         seed_path=tmp_path / "seeds",
         seed_file=output,
         computed_at=computed_at,
+        source_cycle_time=cycle,
         build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
         latest_baseline_coverage=_coverage,
         market_bins=lambda *_args, **_kwargs: (object(),),
@@ -682,7 +687,7 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
             path.parent.mkdir(parents=True, exist_ok=True),
             path.write_text("{}\n", encoding="utf-8"),
         ),
-        latest_manifest=lambda *_args, **_kwargs: manifest,
+        latest_manifest=_latest_manifest,
         manifest_path_value=lambda *_args, **_kwargs: tmp_path / "input.json",
         manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
         resolve_path=lambda path, **_kwargs: path,
@@ -697,6 +702,10 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
     assert built == output
     assert observed["not_after_source_cycle_time"] == cycle
     assert observed["as_of_time"] == computed_at
+    assert observed["cycle_admissible"](manifest)
+    assert not observed["cycle_admissible"](
+        SimpleNamespace(source_cycle_time=cycle + timedelta(hours=6))
+    )
 
 
 def test_consumed_failed_publication_reclaims_same_transition_marker(

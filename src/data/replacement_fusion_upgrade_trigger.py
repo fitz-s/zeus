@@ -1537,6 +1537,7 @@ def enqueue_fusion_upgrade_reseeds(
                     seed_path=seed_path,
                     seed_file=publication.staging_file,
                     computed_at=now,
+                    source_cycle_time=source_cycle_iso,
                     build_seed=build_replacement_forecast_materialization_seed,
                     latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
                     market_bins=market_bins_for_replacement_seed,
@@ -1718,6 +1719,7 @@ def _build_and_write_upgrade_seed(
     seed_path: Path,
     seed_file: Path,
     computed_at: datetime,
+    source_cycle_time: datetime | str,
     build_seed,
     latest_baseline_coverage,
     market_bins,
@@ -1738,6 +1740,18 @@ def _build_and_write_upgrade_seed(
 
     city_cfg = cities_by_name.get(city)
     city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+
+    def cycle_utc(value: datetime | str) -> datetime:
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    expected_cycle = cycle_utc(source_cycle_time)
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -1745,6 +1759,10 @@ def _build_and_write_upgrade_seed(
         city=city,
         target_date=target_date,
         city_timezone=city_timezone,
+        cycle_admissible=lambda manifest: cycle_utc(
+            manifest.source_cycle_time
+        )
+        == expected_cycle,
     )
     if openmeteo is None:
         return None
