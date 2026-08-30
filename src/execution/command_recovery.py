@@ -229,6 +229,13 @@ def _recorded_exit_fill_projection_candidates(conn: sqlite3.Connection) -> bool:
     required = ("venue_trade_facts", "venue_commands", "position_current")
     if not all(_table_exists(conn, table) for table in required):
         return False
+    # An earlier fold may already have written economically_closed and the
+    # EXIT_ORDER_FILLED event before its command-bound execution_fact landed.
+    # That is still current-capital projection debt.  Reuse the exact blocker
+    # law so the fast recovery pass cannot disagree with the handoff gate and
+    # leave one missing fact freezing every unrelated family indefinitely.
+    if _terminal_filled_exit_projection_blocker_count(conn) > 0:
+        return True
     return conn.execute(
         """
         SELECT 1

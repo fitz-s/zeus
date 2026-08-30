@@ -34737,6 +34737,7 @@ def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
 
 def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
     from src.execution.command_recovery import (
+        _recorded_exit_fill_projection_candidates,
         capital_blocking_command_count,
         reconcile_exit_pending_projections,
     )
@@ -34800,6 +34801,7 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
     )
 
     assert capital_blocking_command_count(conn) == 1
+    assert _recorded_exit_fill_projection_candidates(conn)
     assert reconcile_exit_pending_projections(conn) == {
         "scanned": 1,
         "advanced": 1,
@@ -34819,6 +34821,21 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
         "exit_price": pytest.approx(0.40),
     }
     assert capital_blocking_command_count(conn) == 0
+    assert not _recorded_exit_fill_projection_candidates(conn)
+    execution = conn.execute(
+        """
+        SELECT command_id, order_role, terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = 'pos-capital-exit'
+           AND command_id = 'cmd-capital-exit'
+           AND order_role = 'exit'
+        """
+    ).fetchone()
+    assert dict(execution) == {
+        "command_id": "cmd-capital-exit",
+        "order_role": "exit",
+        "terminal_exec_status": "filled",
+    }
 
 
 def test_capital_blocker_excludes_completed_partial_exit_with_live_residual(conn):
