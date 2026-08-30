@@ -7044,7 +7044,7 @@ class TestRequestHashProvenance:
         assert reactor._day0_hourly_refresh_budget_seconds() == 6.0
         assert reactor._day0_hourly_fetch_timeout_seconds() == 4.0
         assert reactor._reactor_day0_hourly_fetch_timeout_seconds() == 4.0
-        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 300.0
+        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 1800.0
 
     def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
         self, monkeypatch
@@ -7075,7 +7075,7 @@ class TestRequestHashProvenance:
         )
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
-        assert captured["interval_s"] == 300.0
+        assert captured["interval_s"] == 1800.0
         assert captured["max_cities"] == 1
         assert captured["quota_critical_cities"] == 0
         assert captured["persist_lock_blocking"] is False

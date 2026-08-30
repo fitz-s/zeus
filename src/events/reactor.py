@@ -10824,12 +10824,17 @@ def _edli_prune_pending_working_set(
 def _reactor_day0_hourly_refresh_interval_seconds() -> float:
     raw = os.environ.get(
         "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS",
-        "300.0",
+        # Current observations recondition the already-persisted trajectories
+        # without another provider request.  The source-clock HWM lane also
+        # bypasses its interval when a new model run is published, so a
+        # five-minute blind refetch of the same run only burns the finite API
+        # budget needed by held capital later in the local day.
+        "1800.0",
     )
     try:
         return max(1.0, float(raw))
     except (TypeError, ValueError):
-        return 300.0
+        return 1800.0
 
 def _reactor_day0_hourly_refresh_budget_seconds() -> float:
     raw = os.environ.get(
