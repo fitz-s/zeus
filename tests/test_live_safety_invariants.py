@@ -6938,6 +6938,14 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     (
         ("EDGE_REVERSAL", True, True, "delegated", False, False),
         ("EDGE_REVERSAL", True, True, "lineage_upgrade", False, False),
+        (
+            "EDGE_REVERSAL",
+            True,
+            True,
+            "incomplete_coverage_lineage",
+            False,
+            False,
+        ),
         ("EDGE_REVERSAL", False, True, "blocked", False, False),
         ("EDGE_REVERSAL", False, False, "request_failed", False, False),
         ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False, False),
@@ -7176,8 +7184,16 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
                 reason="test-coverage",
                 coverage=SimpleNamespace(
-                    selection_epoch_identity="epoch-current",
-                    sell_book_witness_identity="book-current",
+                    selection_epoch_identity=(
+                        ""
+                        if outcome == "incomplete_coverage_lineage"
+                        else "epoch-current"
+                    ),
+                    sell_book_witness_identity=(
+                        ""
+                        if outcome == "incomplete_coverage_lineage"
+                        else "book-current"
+                    ),
                 ),
                 decision_log_id=77,
             )
@@ -7379,6 +7395,16 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert request["generation"] == "generation-incomplete-lineage"
         assert request["scope_identity"] == "scope-incomplete-lineage"
         assert event_order == ["canonical_monitor_refreshed", "publish"]
+    elif outcome == "incomplete_coverage_lineage":
+        assert summary["monitor_statistical_sell_full_family_preparation_requested"] == 1
+        assert summary["exits"] == 0
+        assert results[0].exit_reason == "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+        assert len(auction_completion_requests) == 1
+        assert "held_token_id" not in auction_completion_requests[0]
+        assert published_requests == []
+        assert reserved_requests == []
+        assert execute_calls == []
+        assert event_order == ["canonical_monitor_refreshed"]
     elif outcome in {"dust", "sub_precision"}:
         assert summary["monitor_statistical_sell_dust_holds"] == 1
         assert summary["exits"] == 0
@@ -7491,6 +7517,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert same_turn_reauction_drain_attempts == [pos.trade_id]
     if outcome not in {
         "blocked",
+        "incomplete_coverage_lineage",
         "request_failed",
         "dust",
         "lineage_upgrade",

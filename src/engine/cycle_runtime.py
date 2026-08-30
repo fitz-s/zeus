@@ -9928,6 +9928,16 @@ def execute_monitoring_phase(
                     if coverage_result is not None:
                         global_holding_coverage = coverage_result
             coverage_lineage = getattr(global_holding_coverage, "coverage", None)
+            coverage_lineage_complete = bool(
+                coverage_lineage is not None
+                and all(
+                    str(getattr(coverage_lineage, field, "") or "").strip()
+                    for field in (
+                        "selection_epoch_identity",
+                        "sell_book_witness_identity",
+                    )
+                )
+            )
             setattr(
                 pos,
                 "_held_sell_reauction_monitor_lineage",
@@ -9979,7 +9989,7 @@ def execute_monitoring_phase(
                 statistical_sell_requires_global
                 and (
                     not probability_content_identity
-                    or global_holding_coverage.coverage is None
+                    or not coverage_lineage_complete
                 )
             )
             if needs_full_family_preparation:
