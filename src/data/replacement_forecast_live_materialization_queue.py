@@ -1897,6 +1897,7 @@ def _cycle_advance_seed_priority_map(
             if priority_names is not None and (
                 fam_scope in current_money_risk
                 or fam_scope in current_global_scope
+                or fam_scope in never_priced_scopes
                 or name in day0_identity_by_name
             ):
                 # The Day0 conditioning identity is part of the durable request
@@ -3933,7 +3934,7 @@ def _prepare_seed_requests(
         prioritized_raw_snapshot = _interleave_current_priority_seed_files_by_name(
             prioritized_raw_snapshot,
             current_money_risk=current_money_risk,
-            current_global_scope=current_global_scope,
+            current_global_scope=current_global_scope | never_priced_scope,
             limit=max(int(limit), 0),
         )
     else:
@@ -3977,6 +3978,13 @@ def _prepare_seed_requests(
         current_money_risk=current_money_risk,
         current_global_scope=current_global_scope,
     )
+    # Background excludes this scope above, so every first-price seed must
+    # acquire priority ownership before the lane filter.
+    priority_names.update(
+        path.name
+        for path in coalesced_window
+        if _request_family_scope(seed_payloads.get(path)) in never_priced_scope
+    )
     seeds = tuple(
         sorted(
             (
@@ -3996,7 +4004,7 @@ def _prepare_seed_requests(
             seeds,
             seed_payloads,
             current_money_risk=current_money_risk,
-            current_global_scope=current_global_scope,
+            current_global_scope=current_global_scope | never_priced_scope,
             limit=actionable_limit,
         )
     actionable_count = 0

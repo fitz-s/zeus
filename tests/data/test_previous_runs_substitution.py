@@ -1076,10 +1076,16 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
         encoding="utf-8",
     )
 
-    priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, tokyo))
+    priority_names: set[str] = set()
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (paris, tokyo),
+        priority_names=priority_names,
+    )
 
     assert priority[tokyo.name][0] == -2
     assert priority[paris.name][0] == 0
+    assert priority_names == {tokyo.name}
     assert priority[tokyo.name] < priority[paris.name]
     sort_key_tokyo = queue_mod._cycle_advance_file_sort_key(tokyo, priority)
     sort_key_paris = queue_mod._cycle_advance_file_sort_key(paris, priority)
@@ -4062,8 +4068,11 @@ def test_global_scope_queue_identity_enters_priority_below_held(monkeypatch, tmp
     assert background.name not in priority_names
 
 
-def test_priority_seed_tranche_preserves_held_and_global_scope(tmp_path, monkeypatch):
-    """Two-slot priority work cannot let held refreshes starve global q truth."""
+@pytest.mark.parametrize("unheld_owner", ("global", "never_priced"))
+def test_priority_seed_tranche_preserves_held_and_unheld_truth(
+    tmp_path, monkeypatch, unheld_owner
+):
+    """Two-slot priority work cannot orphan global or first-price q truth."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     held_family = ("Istanbul", "2026-08-29", "high")
@@ -4098,7 +4107,20 @@ def test_priority_seed_tranche_preserves_held_and_global_scope(tmp_path, monkeyp
     monkeypatch.setattr(
         queue_mod,
         "_current_global_auction_scope_families",
-        lambda _paths: held | frozenset({global_family}),
+        lambda _paths: (
+            held | frozenset({global_family})
+            if unheld_owner == "global"
+            else held
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_never_priced_enqueued_seed_families",
+        lambda _db: (
+            frozenset({global_family})
+            if unheld_owner == "never_priced"
+            else frozenset()
+        ),
     )
     monkeypatch.setattr(
         queue_mod, "_current_probability_debt_families", lambda **_kwargs: frozenset()
