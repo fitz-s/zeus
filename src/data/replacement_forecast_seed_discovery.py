@@ -591,6 +591,23 @@ def _latest_manifest(
     ]
     if not candidates:
         return None
+    # A meta-stamped payload may physically cover several target days while its
+    # precision artifact remains scoped to the manifest's declared day.  When
+    # an exact target-day manifest exists, it must outrank a later-captured
+    # horizon sibling; otherwise the request pairs the right hourly horizon
+    # with precision metadata for the wrong local day.
+    exact_target_candidates = [
+        manifest
+        for manifest in candidates
+        if isinstance(manifest.product_metadata.get("target_dates"), list)
+        and target_date
+        in {
+            str(value).strip()
+            for value in manifest.product_metadata["target_dates"]
+        }
+    ]
+    if exact_target_candidates:
+        candidates = exact_target_candidates
     # PRIMARY selection key: does the payload ACTUALLY cover the wanted local day? A
     # partial-horizon capture admitted only by its (mislabeled) declared forecast_hours sorts
     # BELOW any sibling that genuinely covers the day, so the fresher-but-broken neighbor can

@@ -1157,6 +1157,77 @@ def test_meta_stamped_current_target_horizon_admits_covered_later_day(tmp_path: 
     assert selected is fresh_manifest
 
 
+def test_latest_manifest_prefers_exact_target_scope_over_newer_horizon_sibling(
+    tmp_path: Path,
+) -> None:
+    """A multi-day payload cannot lend another day's precision metadata."""
+
+    raw_dir = tmp_path / "raw"
+    payload = {
+        "hourly": {
+            "time": ["2026-06-21T00:00", "2026-06-21T12:00"],
+            "temperature_2m": [20.0, 25.0],
+        }
+    }
+    wrong_payload = _write_file(raw_dir / "wrong_day.json", payload)
+    exact_payload = _write_file(raw_dir / "exact_day.json", payload)
+    wrong_precision = _write_file(raw_dir / "wrong_precision.json", {})
+    exact_precision = _write_file(raw_dir / "exact_precision.json", {})
+
+    def manifest(
+        artifact: Path,
+        precision: Path,
+        *,
+        declared_date: str,
+        available_at: str,
+    ) -> RawForecastArtifactManifest:
+        return RawForecastArtifactManifest.from_file(
+            artifact,
+            source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            source_cycle_time="2026-06-20T18:00:00+00:00",
+            source_available_at=available_at,
+            captured_at=available_at,
+            request_url="https://example.invalid/openmeteo",
+            request_params={"run": "2026-06-20T18:00", "forecast_hours": 120},
+            product_metadata={
+                "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                "openmeteo_endpoint": "standard_api_meta_stamped",
+                "city": "Paris",
+                "city_timezone": "Europe/Paris",
+                "target_dates": [declared_date],
+                "forecast_hours": 120,
+                "openmeteo_payload_json": str(artifact),
+                "precision_metadata_json": str(precision),
+            },
+        )
+
+    newer_wrong_scope = manifest(
+        wrong_payload,
+        wrong_precision,
+        declared_date="2026-06-20",
+        available_at="2026-06-21T01:00:00+00:00",
+    )
+    older_exact_scope = manifest(
+        exact_payload,
+        exact_precision,
+        declared_date="2026-06-21",
+        available_at="2026-06-21T00:30:00+00:00",
+    )
+
+    selected = _latest_manifest(
+        (newer_wrong_scope, older_exact_scope),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Paris",
+        target_date="2026-06-21",
+        city_timezone="Europe/Paris",
+    )
+
+    assert selected is older_exact_scope
+
+
 def test_latest_manifest_rejects_horizon_admitted_payload_without_target_day_samples(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     payload = _write_file(
