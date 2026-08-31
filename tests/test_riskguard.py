@@ -6156,6 +6156,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
         curve = {
             "status": status,
             "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "selection_revision_bound": True,
             "open_position_count": open_count,
             "realized_position_count": realized_count,
             "blocked_position_count": blocked_count,
@@ -6202,6 +6206,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             {
                 "status": status,
                 "probability_semantics_revision": revision,
+                "global_selection_revision": (
+                    riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
+                "selection_revision_bound": True,
                 "open_position_count": open_count,
                 "realized_position_count": realized_count,
                 "blocked_position_count": blocked_count,
@@ -6226,6 +6234,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             {
                 "status": "nonpositive",
                 "probability_semantics_revision": revision,
+                "global_selection_revision": (
+                    riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
+                "selection_revision_bound": True,
                 "open_position_count": 12,
                 "realized_position_count": 15,
                 "blocked_position_count": 0,
@@ -6251,6 +6263,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         base_curve = {
             "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "selection_revision_bound": True,
             "blocked_position_count": 0,
         }
 
@@ -6265,6 +6281,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "net_realized_pnl_usd": 0.0,
             },
         ) == (None, ())
+
         assert riskguard_module._day0_revision_probation_gate_reason(
             binding,
             {"cohorts": []},
@@ -6303,6 +6320,30 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "net_realized_pnl_usd": -1.067124,
             },
         ) == (None, ())
+
+    def test_unbound_old_selection_capital_cannot_gate_current_revision(self):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+
+        reason = riskguard_module._qkernel_revision_probation_gate_reason(
+            {
+                "status": "ok",
+                "licensed_revisions": [revision],
+                "current_count": 83,
+            },
+            {"cohorts": []},
+            {
+                "status": "capital_truth_degraded",
+                "probability_semantics_revision": revision,
+                "global_selection_revision": "superseded_selector",
+                "selection_revision_bound": False,
+                "open_position_count": 1,
+                "realized_position_count": 83,
+                "blocked_position_count": 1,
+                "net_realized_pnl_usd": -6.78467,
+            },
+        )
+
+        assert reason == (None, ())
 
     def test_validated_day0_revision_removes_probation_bound(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION

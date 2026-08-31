@@ -3153,6 +3153,11 @@ def _live_realized_capital_curve(
             if strategy_key == "day0_nowcast_entry"
             else CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        # This raw curve spans every selector that used the current probability
+        # semantics. Exact current-selector binding is performed separately from
+        # immutable entry certificates by _bind_actual_global_capital_evidence.
+        "selection_revision_bound": False,
         "window_days": window_days,
         "evaluated_at": evaluated_at.isoformat(),
         "filled_position_count": 0,
@@ -4563,14 +4568,15 @@ def _revision_probation_gate_reason(
 ) -> tuple[str | None, tuple[str, ...]]:
     """Bound an unproven probability revision by realized capital truth.
 
-    SCOPE: only the exact current strategy probability revision. DRAIN: existing
-    monitor/exit/settlement lanes close realized positions while the no-money
-    counterfactual lane keeps accumulating exact-selector evidence. RESET:
-    validated same-revision capital evidence removes the bound; before
-    validation, entry stays open unless realized truth is degraded or a
+    SCOPE: only the exact current strategy probability revision under the exact
+    current global selection revision. DRAIN: existing monitor/exit/settlement
+    lanes close realized positions while the no-money counterfactual lane keeps
+    accumulating exact-selector evidence. RESET: validated same-revision
+    capital evidence removes the bound; before validation, entry stays open
+    unless selection-revision-bound realized truth is degraded or a
     minimum-sample cohort (>= _PROBATION_MIN_REALIZED_SAMPLE realized closes)
-    is net-nonpositive. A new probability revision starts its own empty
-    probation cohort.
+    is net-nonpositive. A new probability or global selection revision starts
+    its own empty probation cohort.
 
     2026-08-28 operator directive (continuous decision throughput): the former
     in-flight arm counted every pre-existing open position as "the one
@@ -4595,6 +4601,22 @@ def _revision_probation_gate_reason(
     if not curve_revision or curve_revision not in unproven_revisions:
         return None, ()
     revision = curve_revision
+
+    # A probability revision can span several materially different selection
+    # laws.  Old selector losses and an unbound open-position accounting dispute
+    # are observability facts, but neither is evidence about the current global
+    # expected-growth selector.  SCOPE: only a curve explicitly bound to the
+    # current selection revision may gate this revision. DRAIN: actual fills and
+    # proof receipts bind on their immutable entry certificates. RESET: the
+    # first exact-bound curve re-enables ordinary degraded/nonpositive probation
+    # checks below. Explicit current-law alpha rejection remains independently
+    # enforced by _market_relative_alpha_rejection_gate_reason.
+    if (
+        capital_curve.get("selection_revision_bound") is not True
+        or str(capital_curve.get("global_selection_revision") or "").strip()
+        != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ):
+        return None, ()
 
     status = str(capital_curve.get("status") or "").strip()
     try:
