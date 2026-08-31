@@ -21958,6 +21958,14 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
 ) -> dict | None:
     if not command:
         return None
+    command_id = str(command.get("command_id") or "")
+    _, latest_payload = _latest_event_payload(_command_events(conn, command_id))
+    from src.execution.executor import _is_polymarket_invalid_amount_400_message
+
+    if not _is_polymarket_invalid_amount_400_message(
+        str(latest_payload.get("exception_message") or "")
+    ):
+        return None
     predicates, predicate_failures = _invalid_amount_400_predicates(conn, command)
     if predicate_failures:
         return None
@@ -22011,6 +22019,9 @@ def _terminalize_submit_unknown_geoblock_403_if_proven(
     envelope = _command_envelope(conn, final_envelope_id)
     exception_message = str(latest_payload.get("exception_message") or "")
     from src.venue.polymarket_v2_adapter import _is_polymarket_geoblock_403_error
+
+    if not _is_polymarket_geoblock_403_error(RuntimeError(exception_message)):
+        return None
 
     command_order_id = str(command.get("venue_order_id") or "").strip()
     envelope_order_id = str(envelope.get("order_id") or "").strip()

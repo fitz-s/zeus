@@ -36978,6 +36978,46 @@ def test_full_priming_isolates_priority_unknown_from_historical_orders(
     assert kwargs["account_truth_deadline_seconds"] == 30.0
 
 
+def test_unrelated_submit_error_skips_deterministic_rejection_fact_scans(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    events = [{
+        "event_type": "SUBMIT_TIMEOUT_UNKNOWN",
+        "payload_json": json.dumps({
+            "exception_message": (
+                "PolyApiException[status_code=503, "
+                "error_message={'error': 'trading is disabled'}]"
+            ),
+        }),
+    }]
+    monkeypatch.setattr(
+        command_recovery,
+        "_command_events",
+        lambda _conn, _command_id: events,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_count_position_rows_for_command",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unrelated submit errors must not scan position history"
+        ),
+    )
+    command = {"command_id": "cmd-trading-disabled"}
+
+    assert command_recovery._terminalize_submit_unknown_geoblock_403_if_proven(
+        object(),
+        command,
+        occurred_at="2026-08-31T00:00:00+00:00",
+    ) is None
+    assert command_recovery._terminalize_submit_unknown_invalid_amount_400_if_proven(
+        object(),
+        command,
+        occurred_at="2026-08-31T00:00:00+00:00",
+    ) is None
+
+
 def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecision(
     conn,
     mock_client,
