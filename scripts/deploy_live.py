@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-29
+# Last reused/audited: 2026-08-31
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -1230,8 +1230,9 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         if str(item.get("issue") or "") in FRESH_FAILED_MONITOR_NO_ACTION_ISSUES
     ]
     # ``collect_monitor_cadence_evidence`` gives this category only to the
-    # canonical closed-market hold shape. It remains restart-only evidence;
-    # settlement/exit authority is unchanged.
+    # canonical closed-market hold shape or an exact backoff-exhausted dust
+    # receipt. It remains restart-only evidence; settlement/exit authority is
+    # unchanged.
     fresh_failed_settlement_positions = [
         item
         for item in list(cadence.get("settlement_recoverable_positions") or [])
@@ -1240,6 +1241,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         in {
             "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
             "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+            "EXIT_ORDER_REJECTED",
         }
     ]
     fresh_failed_positions = [

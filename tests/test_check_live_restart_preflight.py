@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-29; last_reused=2026-08-31
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -8674,13 +8674,17 @@ def test_monitor_cadence_accepts_backoff_exhausted_min_order_dust_recovery(
 
 
 @pytest.mark.parametrize(
-    ("phase", "order_status"),
-    (("pending_exit", "backoff_exhausted"), ("day0_window", "filled")),
+    ("phase", "order_status", "settlement_recoverable"),
+    (
+        ("pending_exit", "backoff_exhausted", True),
+        ("day0_window", "filled", False),
+    ),
 )
 def test_monitor_handoff_counts_positive_dust_below_share_precision(
     tmp_path,
     phase,
     order_status,
+    settlement_recoverable,
 ):
     from src.ops.monitor_cadence import (
         collect_monitor_cadence_evidence,
@@ -8735,8 +8739,16 @@ def test_monitor_handoff_counts_positive_dust_below_share_precision(
 
     assert evidence["open_position_count"] == 1
     assert evidence["monitored_position_ids"] == ["subprecision-dust"]
-    assert evidence["fresh_position_count"] == 1
+    assert evidence["fresh_position_count"] == int(not settlement_recoverable)
     assert evidence["stale_or_missing_position_count"] == 0
+    assert evidence["settlement_recoverable_position_count"] == int(
+        settlement_recoverable
+    )
+    if settlement_recoverable:
+        recovered = evidence["settlement_recoverable_positions"][0]
+        assert recovered["position_id"] == "subprecision-dust"
+        assert recovered["closed_market_validation"] == "sell_share_precision_dust"
+        assert recovered["last_monitor_refreshed_at"] == now.isoformat()
     assert count_current_monitor_obligations(conn, now=now) == 1
     conn.close()
 

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
@@ -4749,8 +4749,12 @@ def test_deploy_live_pre_stop_handoff_classifies_current_closed_market_no_action
     assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
 
 
+@pytest.mark.parametrize(
+    "cadence_source",
+    ("PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED", "EXIT_ORDER_REJECTED"),
+)
 def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, cadence_source
 ):
     dl = _load("deploy_live_restart_terminal_subprecision_dust", "deploy_live.py")
     trade_db = tmp_path / "zeus_trades.db"
@@ -4772,7 +4776,7 @@ def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
         "settlement_recoverable_positions": [
             {
                 "position_id": "pos-dust",
-                "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                "cadence_source": cadence_source,
                 "last_monitor_refreshed_at": occurred_at,
             }
         ],
