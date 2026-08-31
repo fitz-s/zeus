@@ -29630,6 +29630,97 @@ def _reconcile_passes_short_conn(
             ),
         )
 
+    def _full_priority_inflight_fast_pass() -> bool:
+        """Resolve one unknown submit before unrelated full-sweep work."""
+
+        if scope != "full":
+            return False
+        with open_tracked(
+            read_conn_factory,
+            label="recovery.full_priority_inflight_fast:snapshot",
+        ) as conn:
+            priming = _collect_recovery_priming_keys(conn, scope="full")
+        command_id = str(priming.get("full_priority_inflight_command_id") or "")
+        if not command_id:
+            return False
+
+        assert_no_open_connection("recovery.full_priority_inflight_fast")
+        snapshot = capture_venue_read_snapshot(
+            client,
+            **_scheduled_venue_snapshot_kwargs(
+                "full",
+                priming,
+                deadline_monotonic=full_deadline,
+            ),
+        )
+        priority_writer_factory = _recovery_priority_conn_factory(
+            default_trade_conn_factory,
+            scope="live_tick",
+            deadline_monotonic=full_deadline,
+        )
+        priority_apply_factory = _recovery_apply_conn_factory(
+            priority_writer_factory,
+            scope="full",
+            deadline_monotonic=full_deadline,
+            monitor_preemptible=False,
+        )
+
+        def _apply(conn, snap_client):
+            rows = [
+                row
+                for row in find_unresolved_commands(conn)
+                if str(row.get("command_id") or "") == command_id
+            ]
+            result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
+            for row in rows:
+                try:
+                    outcome = _reconcile_row(
+                        conn,
+                        VenueCommand.from_row(row),
+                        snap_client,
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain durable continuation.
+                    logger.error(
+                        "recovery: priority inflight command %s failed: %s",
+                        command_id,
+                        exc,
+                    )
+                    result["errors"] += 1
+                    continue
+                if outcome in {"advanced", "stayed"}:
+                    result[outcome] += 1
+                else:
+                    result["errors"] += 1
+            summary["scanned"] = result["scanned"]
+            summary["advanced"] += result["advanced"]
+            summary["stayed"] += result["stayed"]
+            summary["errors"] += result["errors"]
+            return result
+
+        _run_recovery_pass_with_lock_policy(
+            "full_priority_inflight_apply",
+            lambda: run_three_phase(
+                lambda conn: None,
+                lambda _snap: snapshot,
+                _apply,
+                conn_factory=priority_apply_factory,
+                snapshot_conn_factory=read_conn_factory,
+                label="recovery.full_priority_inflight_fast",
+            ),
+            scope="full",
+            summary=summary,
+            deadline_monotonic=full_deadline,
+            bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
+        )
+        summary["full_priority_inflight_only"] = True
+        summary["inflight_quantum"] = command_id
+        summary["inflight_quantum_remaining"] = bool(
+            priming.get("full_priority_inflight_quantum_remaining")
+        )
+        summary["scope"] = scope
+        summary["deferred_full_sweep"] = True
+        return True
+
     def _capital_recovery_fast_pass():
         """Resolve capital-blocking terminal orders before maintenance.
 
@@ -30581,6 +30672,9 @@ def _reconcile_passes_short_conn(
         summary["scope"] = scope
         summary["venue_snapshot_deferred"] = True
         summary["deferred_full_sweep"] = True
+        return
+
+    if _full_priority_inflight_fast_pass():
         return
 
     if scope == "live_tick":
