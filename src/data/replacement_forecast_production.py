@@ -2618,6 +2618,9 @@ def _held_common_cycle_anchor_gaps(
     from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
         SOURCE_ID,
     )
+    from src.data.replacement_forecast_materialization_seed_builder import (  # noqa: PLC0415
+        latest_baseline_coverage_for_replacement_seed,
+    )
     from src.data.replacement_input_hwm import (  # noqa: PLC0415
         latest_eligible_ensemble_input_cycle,
     )
@@ -2632,16 +2635,34 @@ def _held_common_cycle_anchor_gaps(
         conn.execute("PRAGMA query_only=ON")
         scopes_by_cycle: dict[datetime, list[tuple[str, str, str]]] = {}
         for city, target_date, metric in held_scopes:
-            ensemble_cycle = latest_eligible_ensemble_input_cycle(
+            ensemble_hwm = latest_eligible_ensemble_input_cycle(
                 conn,
                 city=city,
                 target_date=target_date,
                 metric=metric,
                 decision_time=decision_time,
             )
-            if ensemble_cycle is None:
+            if ensemble_hwm is None:
                 continue
-            ensemble_cycle = ensemble_cycle.astimezone(timezone.utc)
+            ensemble_hwm = ensemble_hwm.astimezone(timezone.utc)
+            baseline = latest_baseline_coverage_for_replacement_seed(
+                conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+                not_after_source_cycle_time=ensemble_hwm,
+                as_of_time=decision_time,
+            )
+            if baseline is None:
+                continue
+            baseline_cycle = datetime.fromisoformat(
+                str(baseline["source_cycle_time"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            # Both high-water marks are authority-filtered as of the same
+            # decision clock. Their minimum is the newest cycle neither leg
+            # outruns; the materializer still performs exact same-cycle
+            # identity validation before publishing q.
+            common_cycle = min(baseline_cycle, ensemble_hwm)
             row = conn.execute(
                 """
                 SELECT source_cycle_time
@@ -2661,9 +2682,9 @@ def _held_common_cycle_anchor_gaps(
                 posterior_cycle = datetime.fromisoformat(
                     str(row[0]).replace("Z", "+00:00")
                 ).astimezone(timezone.utc)
-            if posterior_cycle is not None and posterior_cycle >= ensemble_cycle:
+            if posterior_cycle is not None and posterior_cycle >= common_cycle:
                 continue
-            scopes_by_cycle.setdefault(ensemble_cycle, []).append(
+            scopes_by_cycle.setdefault(common_cycle, []).append(
                 (city, target_date, metric)
             )
     except Exception:

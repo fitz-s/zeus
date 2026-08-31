@@ -423,10 +423,14 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
     import sqlite3
 
     import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_materialization_seed_builder as seed_builder
     import src.data.replacement_forecast_seed_discovery as discovery
     import src.data.replacement_input_hwm as input_hwm
     from src.data.replacement_forecast_current_target_plan import SOURCE_ID
 
+    ensemble_cycle = _dt("2026-06-10T06:00:00")
+    later_ensemble_cycle = _dt("2026-06-10T12:00:00")
+    baseline_available_at = _dt("2026-06-10T14:00:00")
     db = tmp_path / "forecasts.db"
     conn = sqlite3.connect(db)
     conn.executescript(
@@ -440,6 +444,14 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
             source_cycle_time TEXT NOT NULL,
             computed_at TEXT NOT NULL,
             runtime_layer TEXT NOT NULL
+        );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL
         );
         """
     )
@@ -466,9 +478,21 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
         ),
     )
     conn.commit()
+    conn.executemany(
+        """
+        INSERT INTO ensemble_snapshots(
+            city, target_date, temperature_metric,
+            source_cycle_time, source_available_at
+        ) VALUES (?, '2026-06-11', 'high', ?, ?)
+        """,
+        (
+            ("Moscow", ensemble_cycle.isoformat(), baseline_available_at.isoformat()),
+            ("Tel Aviv", ensemble_cycle.isoformat(), baseline_available_at.isoformat()),
+        ),
+    )
+    conn.commit()
     conn.close()
 
-    ensemble_cycle = _dt("2026-06-10T06:00:00")
     held = {
         ("Moscow", "2026-06-11", "high"): 0,
         ("Tel Aviv", "2026-06-11", "high"): 0,
@@ -477,7 +501,19 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
     monkeypatch.setattr(
         input_hwm,
         "latest_eligible_ensemble_input_cycle",
-        lambda *args, **kwargs: ensemble_cycle,
+        lambda *args, **kwargs: (
+            later_ensemble_cycle
+            if kwargs["decision_time"] > baseline_available_at
+            else ensemble_cycle
+        ),
+    )
+    monkeypatch.setattr(
+        seed_builder,
+        "latest_baseline_coverage_for_replacement_seed",
+        lambda *args, **kwargs: {
+            "source_cycle_time": ensemble_cycle.isoformat(),
+            "source_available_at": baseline_available_at.isoformat(),
+        },
     )
     checked: list[tuple[tuple[str, str, str], ...]] = []
 
