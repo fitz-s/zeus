@@ -932,6 +932,86 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
         assert marker["seed_file"] == str(old_seed)
 
 
+def test_cycle_advance_does_not_enqueue_anchor_behind_eligible_ensemble(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 06Z family seed cannot heal a scope whose eligible ENS HWM is 12Z."""
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+    family_cycle = datetime(2026, 8, 30, 6, tzinfo=UTC)
+    eligible_cycle = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    built = False
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: eligible_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "scope_needs_cycle_advance",
+        lambda *args, **kwargs: {
+            "needs_advance": True,
+            "consumed_cycle": family_cycle.isoformat(),
+            "target_cycle": eligible_cycle.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (family_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: eligible_cycle,
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
+        lambda **kwargs: {
+            "day0_observed_extreme_c": 22.0,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-08-30T10:00:00+00:00",
+            "day0_observed_extreme_sample_count": 4,
+            "day0_observed_extreme_unit": "C",
+        },
+    )
+
+    def _unexpected_build(*args, **kwargs):
+        nonlocal built
+        built = True
+        return tmp_path / "unexpected.json"
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        _unexpected_build,
+    )
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 8, 30, 12, 30, tzinfo=UTC),
+        limit=1,
+        scopes=(("Moscow", "2026-08-31", "high"),),
+        manifests=(),
+    )
+
+    assert report["family_cycle_behind_eligible_ensemble"] == 1
+    assert report["seeds_enqueued"] == 0
+    assert built is False
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_same_cycle_baseline_seed_replacement_uses_exact_marker_cas() -> None:
     """A concurrent marker owner cannot be overwritten by a stale ENS wake."""
 

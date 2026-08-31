@@ -251,6 +251,33 @@ def _day0_observation_reseed_cycle(
     return min(family_cycle, eligible_cycle)
 
 
+def _newer_eligible_ensemble_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    family_cycle: datetime,
+    decision_time: datetime,
+) -> datetime | None:
+    """Return the ENS HWM that makes an older family anchor unmaterializable."""
+
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    eligible_cycle = latest_eligible_ensemble_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if eligible_cycle is None or eligible_cycle <= family_cycle:
+        return None
+    return eligible_cycle
+
+
 def _manifests_through_cycle(
     manifests: tuple[RawForecastArtifactManifest, ...],
     *,
@@ -1642,6 +1669,7 @@ def enqueue_cycle_advance_reseeds(
         "leg_artifact_missing": 0,
         "family_cycle_missing": 0,
         "family_cycle_not_newer": 0,
+        "family_cycle_behind_eligible_ensemble": 0,
         "day0_skipped": 0,
         "comparison_failed": 0,
         "family_scope_check_failed": 0,
@@ -1914,6 +1942,53 @@ def enqueue_cycle_advance_reseeds(
                     report["causal_baseline_scope_failed"] = int(
                         report["causal_baseline_scope_failed"]
                     ) + 1
+                continue
+            try:
+                newer_ensemble_cycle = _newer_eligible_ensemble_cycle(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    family_cycle=family_cycle,
+                    decision_time=now,
+                )
+            except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
+                report["family_scope_check_failed"] = int(
+                    report.get("family_scope_check_failed", 0)
+                ) + 1
+                if causal_baseline_source_run_id:
+                    report["causal_baseline_scope_failed"] = int(
+                        report["causal_baseline_scope_failed"]
+                    ) + 1
+                _LOG.warning(
+                    "cycle-advance eligible ENS check failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            if newer_ensemble_cycle is not None:
+                # SCOPE: this city/date/metric only. DRAIN: capture its matching
+                # deterministic family anchor. RESET: family_cycle >= ENS HWM on
+                # the next poll. An older seed is guaranteed to be rejected by
+                # the queue HWM and must not consume the sole materializer lane.
+                report["family_cycle_behind_eligible_ensemble"] = int(
+                    report.get("family_cycle_behind_eligible_ensemble", 0)
+                ) + 1
+                if causal_baseline_source_run_id:
+                    report["causal_baseline_scope_failed"] = int(
+                        report["causal_baseline_scope_failed"]
+                    ) + 1
+                _LOG.info(
+                    "cycle-advance waiting for family anchor %s/%s/%s: "
+                    "family_cycle=%s eligible_ensemble_cycle=%s",
+                    city,
+                    target_date,
+                    metric,
+                    family_cycle.isoformat(),
+                    newer_ensemble_cycle.isoformat(),
+                )
                 continue
             if (
                 not missing_posterior

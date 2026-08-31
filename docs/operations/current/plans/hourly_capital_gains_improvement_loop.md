@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-30 — ENS HWM领先family anchor时不得循环生成旧cycle seed
+- **实时反例:** Moscow 2026-08-31 HIGH持仓的latest eligible ENS已到12Z，但family deterministic anchor仍停在06Z。cycle-advance每轮仍生成06Z Day0 seed；materialization queue按HWM正确丢弃，producer随后再次生成，连续两小时无法生成current q并浪费单writer队列。committed-ENS wake同时以`required=12Z,target=06Z`失败。
+- **修复:** cycle-advance在family-scope manifest cycle确定后，复用同一decision-time eligible ENS selector；若ENS HWM严格更新，则不构造必然被拒绝的旧seed，并记录`family_cycle_behind_eligible_ensemble`。不回退旧q、不改变ENS/anchor same-cycle law、不删除freshness gate。
+- **SCOPE / DRAIN / RESET:** scope仅一个city/date/metric producer admission；drain是该family matching deterministic anchor capture；reset是下一轮看到`family_cycle >= eligible_ensemble_cycle`后立即恢复seed build。HWM读取失败仍fail closed。
+- **验收:** live反例antibody必须证明06Z family + 12Z eligible ENS产生0 seed/0 marker；exact same-cycle committed-ENS replacement测试保持通过；部署后Moscow旧seed循环停止，matching anchor到齐后才允许current posterior。
+
 ### 2026-08-30 — RiskGuard direct bankroll refresh必须继承CLOB signature identity
 - **部署反例:** authority-q revision hotfix重启RiskGuard后，warm collateral snapshot超过180秒；RiskGuard direct wallet fallback因其LaunchAgent缺少`POLYMARKET_CLOB_V2_SIGNATURE_TYPE`而拒绝构造authenticated CLOB adapter，连续fail-closed为`DATA_DEGRADED`。live restart preflight只检查live-trading、price-channel、post-trade-capital和venue-heartbeat，未覆盖同样调用CLOB bankroll reader的RiskGuard，导致启动前配置证明与实际依赖图断层。
 - **修复:** riskguard-live template显式声明signature type `2`；preflight的CLOB sidecar集合加入`riskguard-live`，以后缺失/unsupported值会在停止main之前阻断。安装仍通过`install_launchd_plist.py`的parse/substitute/lint/atomic-write路径，deploy reload确保launchd不保留旧环境。
