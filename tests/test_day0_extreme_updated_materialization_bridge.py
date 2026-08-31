@@ -2479,11 +2479,12 @@ def test_day0_priority_lane_claims_while_background_runner_is_blocked(
     processed_dir = tmp_path / "processed"
     failed_dir = tmp_path / "failed"
     request_dir.mkdir()
+    today = datetime.now(timezone.utc).date().isoformat()
     ordinary = {
         "city": "Oslo",
-        "target_date": "2026-07-19",
+        "target_date": today,
         "temperature_metric": "high",
-        "source_cycle_time": "2026-07-19T00:00:00+00:00",
+        "source_cycle_time": f"{today}T00:00:00+00:00",
         "baseline_source_run_id": "baseline:0",
         "openmeteo_source_run_id": "openmeteo:0",
     }
@@ -2491,7 +2492,7 @@ def test_day0_priority_lane_claims_while_background_runner_is_blocked(
         **ordinary,
         "city": "Ankara",
         "day0_observed_extreme_source": "wu_icao_history",
-        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00+00:00",
+        "day0_observed_extreme_observation_time": f"{today}T05:00:00+00:00",
         "day0_observed_extreme_c": 35.0,
         "day0_observed_extreme_unit": "C",
     }
@@ -2558,6 +2559,58 @@ def test_day0_priority_lane_claims_while_background_runner_is_blocked(
     assert not background_thread.is_alive()
     assert not priority_thread.is_alive()
     assert len(reports) == 2
+
+
+def test_past_nonheld_day0_seed_returns_to_background_cleanup(
+    tmp_path,
+) -> None:
+    """Expired Day0 identity cannot retain priority ownership forever."""
+    old_path = tmp_path / "old.json"
+    current_path = tmp_path / "current.json"
+    old_path.write_text("{}", encoding="utf-8")
+    current_path.write_text("{}", encoding="utf-8")
+    identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-08-31T05:00:00+00:00",
+        "day0_observed_extreme_c": 30.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    payloads = {
+        old_path: {
+            "city": "Miami",
+            "target_date": "2026-08-21",
+            "temperature_metric": "low",
+            "source_cycle_time": "2026-08-21T18:00:00+00:00",
+            "baseline_source_run_id": "baseline:old",
+            "openmeteo_source_run_id": "openmeteo:old",
+            "computed_at": "2026-08-21T20:00:00+00:00",
+            **identity,
+        },
+        current_path: {
+            "city": "Miami",
+            "target_date": "2026-08-31",
+            "temperature_metric": "low",
+            "source_cycle_time": "2026-08-30T18:00:00+00:00",
+            "baseline_source_run_id": "baseline:current",
+            "openmeteo_source_run_id": "openmeteo:current",
+            "computed_at": "2026-08-31T05:00:00+00:00",
+            **identity,
+        },
+    }
+    priority_names: set[str] = set()
+
+    materialization_queue._cycle_advance_seed_priority_map(
+        None,
+        (old_path, current_path),
+        payloads,
+        current_money_risk=frozenset(),
+        current_global_scope=frozenset(),
+        priority_names=priority_names,
+        now_utc=datetime(2026, 8, 31, 5, tzinfo=timezone.utc),
+    )
+
+    assert old_path.name not in priority_names
+    assert current_path.name in priority_names
 
 
 def test_queue_lock_does_not_double_acquire_during_owner_publication(

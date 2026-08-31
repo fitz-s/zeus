@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -1863,6 +1863,10 @@ def _cycle_advance_seed_priority_map(
     }
     for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
+        try:
+            target_day = date.fromisoformat(fam_scope[1])
+        except ValueError:
+            target_day = None
         held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
         if fam_scope in current_money_risk:
             base_tier = -2
@@ -1884,6 +1888,10 @@ def _cycle_advance_seed_priority_map(
         tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
             payload = payload_by_name[name]
+            current_day0_identity = (
+                name in day0_identity_by_name
+                and (target_day is None or target_day >= priority_now.date())
+            )
             current_debt_day0 = (
                 _TIMEOUT_RETRY_MARKER not in path_by_name[name].name
                 and fam_scope in current_probability_debt
@@ -1898,7 +1906,7 @@ def _cycle_advance_seed_priority_map(
                 fam_scope in current_money_risk
                 or fam_scope in current_global_scope
                 or fam_scope in never_priced_scopes
-                or name in day0_identity_by_name
+                or current_day0_identity
             ):
                 # The Day0 conditioning identity is part of the durable request
                 # semantic key. A held family without Day0 evidence is still
