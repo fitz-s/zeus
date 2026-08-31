@@ -1907,6 +1907,7 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
         {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO},
     )
     scope = ("Dallas", "2026-08-17", "high")
+    past_scope = ("Dallas", "2026-06-08", "low")
     payload_path = tmp_path / "openmeteo_Dallas_2026-08-17_high.json"
     payload_path.write_text(json.dumps(_anchor_payload("2026-08-17")) + "\n")
     payload_bytes = payload_path.read_bytes()
@@ -1950,18 +1951,25 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
-        lambda: {scope: 0},
+        lambda: {past_scope: 0, scope: 0},
     )
 
     report = _download_replacement_forecast_current_targets_if_needed(
         _cfg(db, tmp_path),
-        required_scopes=(scope,),
+        required_scopes=(past_scope, scope),
         quota_critical=True,
     )
 
     assert report["status"] == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     assert report["target_count"] == 1
     assert report["written_manifest_count"] == 0
+    assert report["structurally_unservable_scopes"] == [list(past_scope)]
+    assert report["scope_exclusions"] == [
+        {
+            "scope": list(past_scope),
+            "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+        }
+    ]
     assert calls == []
     assert pool.close_count == 0
     production._close_current_target_bucket_pool()

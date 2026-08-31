@@ -874,7 +874,7 @@ def _download_replacement_forecast_current_targets_if_needed(
             if missing_critical_scopes is None:
                 raise RuntimeError("critical current-target anchor coverage unreadable")
             if not missing_critical_scopes:
-                return {
+                covered_report: dict[str, object] = {
                     "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
                     "available_cycle": available_cycle.isoformat(),
                     "downloaded_cycle": (
@@ -885,6 +885,16 @@ def _download_replacement_forecast_current_targets_if_needed(
                     "target_count": len(required_scopes),
                     "written_manifest_count": 0,
                 }
+                if structurally_unservable_critical_scopes:
+                    covered_report["structurally_unservable_scope_count"] = len(
+                        structurally_unservable_critical_scopes
+                    )
+                    covered_report["structurally_unservable_scopes"] = [
+                        list(scope)
+                        for scope in structurally_unservable_critical_scopes
+                    ]
+                    covered_report["scope_exclusions"] = critical_scope_exclusions
+                return covered_report
             required_scopes = missing_critical_scopes
     if quota_critical and required_scopes is None:
         raise ValueError("critical current-target quota requires explicit scopes")
