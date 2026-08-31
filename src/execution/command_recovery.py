@@ -30869,6 +30869,66 @@ def _reconcile_passes_short_conn(
     )
 
     # -- PHASE 3: APPLY (each pass on its own short bounded write connection) ---
+    priority_command_id = str(
+        priming.get("full_priority_inflight_command_id") or ""
+    )
+    if scope == "full" and priority_command_id:
+        # Apply the exact side-effect truth immediately after its dedicated
+        # NETWORK snapshot. Running unrelated legacy/projection maintenance
+        # first allowed monitor preemption to discard a completed account read
+        # and strand the capital-blocking command for another cadence.
+        def _apply_full_priority_inflight(conn, snap_client):
+            rows = [
+                row
+                for row in find_unresolved_commands(conn)
+                if str(row.get("command_id") or "") == priority_command_id
+            ]
+            result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
+            for row in rows:
+                try:
+                    outcome = _reconcile_row(
+                        conn,
+                        VenueCommand.from_row(row),
+                        snap_client,
+                    )
+                except Exception as exc:  # noqa: BLE001 - durable continuation on error.
+                    logger.error(
+                        "recovery: priority inflight command %s failed: %s",
+                        priority_command_id,
+                        exc,
+                    )
+                    result["errors"] += 1
+                    continue
+                if outcome in {"advanced", "stayed"}:
+                    result[outcome] += 1
+                else:
+                    result["errors"] += 1
+            summary["scanned"] = result["scanned"]
+            summary["advanced"] += result["advanced"]
+            summary["stayed"] += result["stayed"]
+            summary["errors"] += result["errors"]
+            summary["inflight_quantum"] = priority_command_id
+            return result
+
+        _run_pass_with_lock_retry(
+            "full_priority_inflight_apply",
+            lambda: run_three_phase(
+                lambda conn: None,
+                lambda _snap: venue_snapshot,
+                _apply_full_priority_inflight,
+                conn_factory=apply_conn_factory,
+                snapshot_conn_factory=read_conn_factory,
+                label="recovery.full_priority_inflight_apply",
+            ),
+        )
+        summary["full_priority_inflight_only"] = True
+        summary["inflight_quantum_remaining"] = bool(
+            priming.get("full_priority_inflight_quantum_remaining")
+        )
+        summary["scope"] = scope
+        summary["deferred_full_sweep"] = True
+        return
+
     # Order mirrors the legacy inline body exactly.
     _db_pass("edli_confirmed_legacy_command_repair",
              reconcile_edli_confirmed_legacy_command_repairs,
@@ -30889,15 +30949,6 @@ def _reconcile_passes_short_conn(
         ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         if scope == "restart_preflight":
             rows = _restart_preflight_unresolved_commands(conn)
-        elif scope == "full" and priming.get(
-            "full_priority_inflight_command_id"
-        ):
-            command_id = str(priming["full_priority_inflight_command_id"])
-            rows = [
-                row
-                for row in find_unresolved_commands(conn)
-                if str(row.get("command_id") or "") == command_id
-            ]
         elif scope == "full":
             rows = _full_quantum_candidates(conn)
         else:
@@ -30949,15 +31000,6 @@ def _reconcile_passes_short_conn(
             label="recovery.inflight_scan",
         ),
     )
-
-    if scope == "full" and priming.get("full_priority_inflight_command_id"):
-        summary["full_priority_inflight_only"] = True
-        summary["inflight_quantum_remaining"] = bool(
-            priming.get("full_priority_inflight_quantum_remaining")
-        )
-        summary["scope"] = scope
-        summary["deferred_full_sweep"] = True
-        return
 
     if scope == "restart_preflight":
         _client_pass(
