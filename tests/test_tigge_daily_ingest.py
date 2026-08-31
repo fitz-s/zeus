@@ -344,6 +344,85 @@ def test_run_subprocess_injects_51_scripts_dir_on_pythonpath(monkeypatch):
     assert os.path.normpath("/opt/zeus-live-main") in parts
 
 
+def test_resolve_paths_keeps_local_data_and_uses_external_download_assets(tmp_path):
+    project_root = tmp_path / "zeus"
+    source_root = project_root / "51 source data"
+    external_root = tmp_path / "external" / "51 source data"
+    (source_root / "raw").mkdir(parents=True)
+    (project_root / "scripts").mkdir(parents=True)
+    (external_root / "scripts").mkdir(parents=True)
+    (external_root / "docs").mkdir(parents=True)
+    for name in tigge_pipeline._DOWNLOAD_SCRIPT_NAMES:
+        (external_root / "scripts" / name).write_text("# asset\n")
+    (external_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").write_text(
+        "{}\n"
+    )
+
+    paths = tigge_pipeline.resolve_tigge_paths(
+        environ={},
+        source_root=source_root,
+        legacy_external_root=external_root,
+        project_root=project_root,
+    )
+
+    assert paths.origin == "home_repo_migration_split"
+    assert paths.raw_root == (source_root / "raw").resolve()
+    assert paths.status_root == (source_root / "tmp").resolve()
+    assert paths.download_scripts_dir == (external_root / "scripts").resolve()
+    assert paths.extract_scripts_dir == (project_root / "scripts").resolve()
+    assert paths.manifest_path == (
+        external_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+    ).resolve()
+
+
+def test_tigge_stage_commands_bind_local_raw_and_current_extractors(monkeypatch, tmp_path):
+    raw_root = tmp_path / "local" / "raw"
+    status_root = tmp_path / "local" / "tmp"
+    download_scripts = tmp_path / "external" / "scripts"
+    extract_scripts = tmp_path / "repo" / "scripts"
+    manifest = tmp_path / "external" / "docs" / "manifest.json"
+    captured: dict[str, list[str]] = {}
+
+    def runner(args, *, timeout, label):
+        captured[label] = args
+        return _ok_runner(args, timeout=timeout, label=label)
+
+    monkeypatch.setattr(tigge_pipeline, "RAW_ROOT", raw_root)
+    monkeypatch.setattr(tigge_pipeline, "TIGGE_STATUS_ROOT", status_root)
+    monkeypatch.setattr(tigge_pipeline, "SCRIPTS_DIR_51", download_scripts)
+    monkeypatch.setattr(tigge_pipeline, "EXTRACT_SCRIPTS_DIR", extract_scripts)
+    monkeypatch.setattr(tigge_pipeline, "TIGGE_MANIFEST_PATH", manifest)
+    monkeypatch.setattr(tigge_pipeline, "_conda_python", lambda: sys.executable)
+
+    tigge_pipeline._download_track(
+        "mx2t6_high",
+        date_from=date(2026, 8, 28),
+        date_to=date(2026, 8, 28),
+        timeout_seconds=5,
+        runner=runner,
+    )
+    tigge_pipeline._extract_track(
+        "mx2t6_high",
+        date_from=date(2026, 8, 28),
+        date_to=date(2026, 8, 28),
+        timeout_seconds=5,
+        runner=runner,
+    )
+
+    download = captured["download_mx2t6_high"]
+    extract = captured["extract_mx2t6_high"]
+    assert download[1] == str(download_scripts / "tigge_mx2t6_download_resumable.py")
+    assert download[download.index("--raw-root") + 1] == str(raw_root)
+    assert download[download.index("--status-path") + 1] == str(
+        status_root / "tigge_mx2t6_download_status.json"
+    )
+    assert download[download.index("--manifest-path") + 1] == str(manifest)
+    assert extract[1] == str(extract_scripts / "extract_tigge_mx2t6_localday_max.py")
+    assert extract[extract.index("--raw-root") + 1] == str(raw_root)
+    assert extract[extract.index("--output-root") + 1] == str(raw_root)
+    assert extract[extract.index("--manifest-path") + 1] == str(manifest)
+
+
 # ---------------------------------------------------------------------------
 # Daemon-level antibody: scheduler decorator swallows exceptions so a single
 # cycle failure must NOT crash other ingest jobs.

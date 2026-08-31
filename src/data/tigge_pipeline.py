@@ -54,6 +54,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -70,9 +71,82 @@ logger = logging.getLogger(__name__)
 
 ZEUS_ROOT = Path(__file__).resolve().parents[2]
 FIFTY_ONE_ROOT = ZEUS_ROOT / "51 source data"
-RAW_ROOT = FIFTY_ONE_ROOT / "raw"
-SCRIPTS_DIR_51 = FIFTY_ONE_ROOT / "scripts"
+LEGACY_FIFTY_ONE_ROOT = (
+    Path.home() / ".openclaw" / "workspace-venus" / "51 source data"
+)
 ECMWF_API_RC = Path.home() / ".ecmwfapirc"
+
+_DOWNLOAD_SCRIPT_NAMES = (
+    "tigge_mx2t6_download_resumable.py",
+    "tigge_mn2t6_download_resumable.py",
+)
+
+
+@dataclass(frozen=True)
+class TiggePaths:
+    raw_root: Path
+    download_scripts_dir: Path
+    extract_scripts_dir: Path
+    manifest_path: Path
+    status_root: Path
+    origin: str
+
+
+def resolve_tigge_paths(
+    *,
+    environ: dict[str, str] | None = None,
+    source_root: Path | None = None,
+    legacy_external_root: Path | None = None,
+    project_root: Path | None = None,
+) -> TiggePaths:
+    """Bind local data paths and migration-split executable assets once."""
+
+    env = os.environ if environ is None else environ
+    configured = str(env.get("ZEUS_51_SOURCE_ROOT", "")).strip()
+    raw_source_root = Path(
+        configured or source_root or FIFTY_ONE_ROOT
+    ).expanduser().resolve()
+    local_scripts = (project_root or ZEUS_ROOT).expanduser().resolve() / "scripts"
+
+    def has_download_assets(root: Path) -> bool:
+        scripts = root / "scripts"
+        manifest = root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+        return manifest.is_file() and all(
+            (scripts / name).is_file() for name in _DOWNLOAD_SCRIPT_NAMES
+        )
+
+    if configured or has_download_assets(raw_source_root):
+        asset_root = raw_source_root
+        origin = "env_complete_root" if configured else "source_root_complete"
+    else:
+        fallback = Path(
+            legacy_external_root or LEGACY_FIFTY_ONE_ROOT
+        ).expanduser().resolve()
+        if has_download_assets(fallback):
+            asset_root = fallback
+            origin = "home_repo_migration_split"
+        else:
+            asset_root = raw_source_root
+            origin = "source_root_missing_assets"
+
+    return TiggePaths(
+        raw_root=raw_source_root / "raw",
+        download_scripts_dir=asset_root / "scripts",
+        extract_scripts_dir=local_scripts,
+        manifest_path=(
+            asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+        ),
+        status_root=raw_source_root / "tmp",
+        origin=origin,
+    )
+
+
+TIGGE_PATHS = resolve_tigge_paths()
+RAW_ROOT = TIGGE_PATHS.raw_root
+SCRIPTS_DIR_51 = TIGGE_PATHS.download_scripts_dir
+EXTRACT_SCRIPTS_DIR = TIGGE_PATHS.extract_scripts_dir
+TIGGE_MANIFEST_PATH = TIGGE_PATHS.manifest_path
+TIGGE_STATUS_ROOT = TIGGE_PATHS.status_root
 
 # Boot-time catch-up cap (per design constraints).
 MAX_LOOKBACK_DAYS = 7
@@ -363,14 +437,19 @@ def _download_track(
     """Run the resumable downloader for one TIGGE track over a date window."""
     if track == "mx2t6_high":
         script = SCRIPTS_DIR_51 / "tigge_mx2t6_download_resumable.py"
+        status_name = "tigge_mx2t6_download_status.json"
     elif track == "mn2t6_low":
         script = SCRIPTS_DIR_51 / "tigge_mn2t6_download_resumable.py"
+        status_name = "tigge_mn2t6_download_status.json"
     else:
         return {"label": f"download_{track}", "ok": False, "error": f"unknown track {track!r}"}
 
     args = [
         _conda_python(),
         str(script),
+        "--manifest-path", str(TIGGE_MANIFEST_PATH),
+        "--status-path", str(TIGGE_STATUS_ROOT / status_name),
+        "--raw-root", str(RAW_ROOT),
         "--date-from", date_from.isoformat(),
         "--date-to", date_to.isoformat(),
         "--max-passes", "1",  # daily ingest = single pass; resumability handled by re-runs
@@ -393,15 +472,18 @@ def _extract_track(
 ) -> dict:
     """Run the local-day extractor for one TIGGE track over a date window."""
     if track == "mx2t6_high":
-        script = SCRIPTS_DIR_51 / "extract_tigge_mx2t6_localday_max.py"
+        script = EXTRACT_SCRIPTS_DIR / "extract_tigge_mx2t6_localday_max.py"
     elif track == "mn2t6_low":
-        script = SCRIPTS_DIR_51 / "extract_tigge_mn2t6_localday_min.py"
+        script = EXTRACT_SCRIPTS_DIR / "extract_tigge_mn2t6_localday_min.py"
     else:
         return {"label": f"extract_{track}", "ok": False, "error": f"unknown track {track!r}"}
 
     args = [
         _conda_python(),
         str(script),
+        "--manifest-path", str(TIGGE_MANIFEST_PATH),
+        "--raw-root", str(RAW_ROOT),
+        "--output-root", str(RAW_ROOT),
         "--date-from", date_from.isoformat(),
         "--date-to", date_to.isoformat(),
     ]
