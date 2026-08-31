@@ -888,18 +888,36 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
             (str(row[0]), str(row[1]), str(row[2]))
             for row in conn.execute(
                 """
-                SELECT city, target_date, temperature_metric
-                  FROM ensemble_snapshots
-                 WHERE source_run_id = ?
-                   AND source_id = 'ecmwf_open_data'
-                   AND model_version = 'ecmwf_ens'
-                   AND authority = 'VERIFIED'
-                   AND causality_status = 'OK'
-                   AND boundary_ambiguous = 0
-                   AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-                   AND contributes_to_target_extrema = 1
-                 GROUP BY city, target_date, temperature_metric
-                 ORDER BY target_date, city, temperature_metric
+                SELECT ens.city, ens.target_date, ens.temperature_metric
+                  FROM ensemble_snapshots ens
+                  JOIN source_run_coverage coverage
+                    ON coverage.source_run_id = ens.source_run_id
+                   AND coverage.city = ens.city
+                   AND coverage.target_local_date = ens.target_date
+                   AND coverage.temperature_metric = ens.temperature_metric
+                 WHERE ens.source_run_id = ?
+                   AND ens.source_id = 'ecmwf_open_data'
+                   AND ens.model_version = 'ecmwf_ens'
+                   AND ens.authority = 'VERIFIED'
+                   AND ens.causality_status = 'OK'
+                   AND ens.boundary_ambiguous = 0
+                   AND ens.forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+                   AND ens.contributes_to_target_extrema = 1
+                   AND coverage.completeness_status = 'COMPLETE'
+                   AND coverage.readiness_status = 'LIVE_ELIGIBLE'
+                   AND coverage.expires_at IS NOT NULL
+                   AND julianday(coverage.expires_at) > julianday('now')
+                   AND EXISTS (
+                       SELECT 1
+                         FROM market_events market
+                        WHERE market.city = ens.city
+                          AND market.target_date = ens.target_date
+                          AND market.temperature_metric = ens.temperature_metric
+                          AND market.token_id IS NOT NULL
+                          AND market.range_label IS NOT NULL
+                   )
+                 GROUP BY ens.city, ens.target_date, ens.temperature_metric
+                 ORDER BY ens.target_date, ens.city, ens.temperature_metric
                 """,
                 (source_run_id,),
             )
