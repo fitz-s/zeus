@@ -9645,6 +9645,34 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
     )
 
 
+def reconcile_open_entry_obligation_execution_fact_repairs(
+    conn: sqlite3.Connection,
+) -> dict:
+    """Repair only stale entry facts that currently hold a capital obligation."""
+
+    if not _table_exists(conn, "entry_exposure_obligations"):
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_ids = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT command_id
+              FROM entry_exposure_obligations
+             WHERE status = 'OPEN'
+            """
+        ).fetchall()
+        if str(row[0] or "")
+    }
+    if not command_ids:
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidates = [
+        candidate
+        for candidate in _filled_entry_execution_fact_repair_candidates(conn)
+        if str(candidate.get("command_id") or "") in command_ids
+    ]
+    return _reconcile_filled_entry_execution_fact_candidates(conn, candidates)
+
+
 def reconcile_missing_filled_entry_execution_fact_repairs(
     conn: sqlite3.Connection,
 ) -> dict:
@@ -30603,8 +30631,17 @@ def _reconcile_passes_short_conn(
 
     if scope == "live_tick":
         # Command-bound fills and terminal partials are current collateral
-        # truth.  Consume both before historical projection maintenance so a
-        # broad repair query cannot strand spendable capital behind them.
+        # truth.  SCOPE is one OPEN obligation with its own command-bound fact;
+        # DRAIN is canonical fill repair followed by the obligation reducer;
+        # RESET is fact convergence and obligation RESOLVED on this cadence.
+        _db_pass(
+            "open_entry_obligation_execution_fact_repair",
+            reconcile_open_entry_obligation_execution_fact_repairs,
+            "open_entry_obligation_execution_fact_repair",
+        )
+        # A command with no fact still uses the stricter missing-fact proof.
+        # Consume both before historical projection maintenance so a broad
+        # repair query cannot strand spendable capital behind them.
         _db_pass(
             "missing_filled_entry_execution_fact_repair",
             reconcile_missing_filled_entry_execution_fact_repairs,

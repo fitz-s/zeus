@@ -2607,6 +2607,10 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
         calls.append("terminal_entry_exposure_obligations")
         return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
 
+    def _obligation_execution_fact(_conn):
+        calls.append("open_entry_obligation_execution_fact_repair")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
     def _matched_cancel_review(_conn):
         calls.append("matched_cancel_review_required_entries")
         return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -2637,6 +2641,11 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
     )
     monkeypatch.setattr(
         command_recovery,
+        "reconcile_open_entry_obligation_execution_fact_repairs",
+        _obligation_execution_fact,
+    )
+    monkeypatch.setattr(
+        command_recovery,
         "reconcile_matched_cancel_review_required_entries",
         _matched_cancel_review,
     )
@@ -2660,6 +2669,7 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
     )
 
     assert calls == [
+        "open_entry_obligation_execution_fact_repair",
         "terminal_entry_exposure_obligations",
         "matched_cancel_review_required_entries",
         "terminal_order_facts",
@@ -26452,6 +26462,7 @@ class TestRecoveryResolutionTable:
     ):
         from src.execution.command_recovery import (
             reconcile_filled_entry_execution_fact_repairs,
+            reconcile_open_entry_obligation_execution_fact_repairs,
             reconcile_terminal_entry_exposure_obligations,
         )
         from src.state.db import log_execution_fact
@@ -26660,7 +26671,7 @@ class TestRecoveryResolutionTable:
             projection,
         )
 
-        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+        assert reconcile_open_entry_obligation_execution_fact_repairs(conn) == {
             "scanned": 1,
             "advanced": 1,
             "stayed": 0,
