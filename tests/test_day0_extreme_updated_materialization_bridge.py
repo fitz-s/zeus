@@ -3497,6 +3497,71 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     conn.close()
 
 
+def test_held_day0_owner_verification_waits_for_queue_window(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = _day0_payload("2026-07-19T05:05:00+00:00")
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC).isoformat()
+    seed_file = tmp_path / "seeds" / "held-old-owner.json"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(seed_file),
+        reason="MISSING_LIVE_POSTERIOR",
+        day0_observed_extreme_observation_time=old_payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=old_payload[
+            "day0_observed_extreme_source"
+        ],
+        day0_observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=old_payload["day0_observed_extreme_unit"],
+    )
+    conn.commit()
+    waits: list[float] = []
+
+    def owner_check(**kwargs):
+        waits.append(float(kwargs["queue_lock_wait_seconds"]))
+        return cycle_advance._Day0EnqueueOwnerRequestCheck(
+            cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE,
+            "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT",
+        )
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "_day0_enqueue_owner_request_check",
+        owner_check,
+    )
+    decision = cycle_advance._enqueue_decision(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        day0_observed_extreme_observation_time=new_payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        day0_observed_extreme_source=new_payload[
+            "day0_observed_extreme_source"
+        ],
+        day0_observed_extreme_c=new_payload["day0_observed_extreme_c"],
+        day0_observed_extreme_unit=new_payload["day0_observed_extreme_unit"],
+    )
+
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+    assert waits == [cycle_advance._HELD_DAY0_OWNER_LOCK_WAIT_SECONDS]
+    conn.close()
+
+
 def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
     tmp_path, monkeypatch
 ) -> None:

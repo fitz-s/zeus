@@ -67,6 +67,7 @@ UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
+_HELD_DAY0_OWNER_LOCK_WAIT_SECONDS = 2.0
 _CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS = 120.0
 _DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
 _CYCLE_ADVANCE_STAGING_DIR = ".cycle-advance-staging"
@@ -1051,6 +1052,10 @@ def _enqueue_decision(
     recorded_identity = (
         str(recorded_identity_raw) if recorded_identity_raw not in (None, "") else None
     )
+    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
+    owner_lock_wait_seconds = (
+        _HELD_DAY0_OWNER_LOCK_WAIT_SECONDS if held else 0.0
+    )
     incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
     recorded_version = normalize_observation_version(
         row["day0_observed_extreme_observation_time"] if hasattr(row, "keys") else row[3]
@@ -1104,6 +1109,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=recorded_identity,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.RETRY_PENDING
@@ -1152,6 +1158,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=incoming_identity,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
@@ -1193,6 +1200,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=None,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
@@ -1234,7 +1242,6 @@ def _enqueue_decision(
     # Auto-enable the missing-seed re-enqueue for held rows, mirroring the day0 escape hatch.
     # Bounded by the upstream needs_advance/coverage gate, so a successfully materialized cycle
     # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
-    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
     if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
         # A moved seed file is normal after the queue processed it. Re-enqueueing immediately every
         # poll tick creates a live backlog of identical failed work. Only Day0 observation-version
