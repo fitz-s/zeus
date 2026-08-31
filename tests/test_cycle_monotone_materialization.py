@@ -1518,6 +1518,79 @@ def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
     assert row["reason"] == "HELD_BELIEF_COMPUTED_AGE_EXPIRED"
 
 
+def test_single_family_day0_does_not_enqueue_anchor_behind_eligible_ensemble(
+    tmp_path, monkeypatch
+) -> None:
+    """A Day0 wake must not churn an old carrier after ENS advanced past its anchor."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    anchor_cycle = datetime(2026, 8, 30, 6, tzinfo=UTC)
+    ensemble_cycle = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=ensemble_cycle.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Moscow",
+        target_date="2026-08-31",
+        metric="high",
+        cycle_iso=anchor_cycle.isoformat(),
+        computed_at="2026-08-30T08:00:00+00:00",
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (anchor_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: ensemble_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("anchor-behind-ENS family must not build a seed")
+        ),
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Moscow",
+        target_date="2026-08-31",
+        metric="high",
+        computed_at=datetime(2026, 8, 30, 19, tzinfo=UTC),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time="2026-08-30T18:55:00+00:00",
+        day0_observed_extreme_sample_count=24,
+        day0_observed_extreme_unit="C",
+        held_position=True,
+    )
+
+    assert report == {
+        "status": "CYCLE_ADVANCE_FAMILY_ANCHOR_BEHIND_ENSEMBLE",
+        "city": "Moscow",
+        "target_date": "2026-08-31",
+        "metric": "high",
+        "held_position": True,
+        "enqueued": False,
+        "freshest_materializable_cycle": ensemble_cycle.isoformat(),
+        "consumed_cycle": anchor_cycle.isoformat(),
+        "family_cycle": anchor_cycle.isoformat(),
+        "eligible_ensemble_cycle": ensemble_cycle.isoformat(),
+    }
+    assert not (tmp_path / "seeds").exists()
+
+
 def test_single_family_monitor_does_not_recompute_fresh_same_cycle_posterior(
     tmp_path, monkeypatch
 ) -> None:

@@ -2381,6 +2381,44 @@ def enqueue_single_family_cycle_advance_reseed(
             report["consumed_cycle"] = consumed_cycle_iso
             report["target_cycle"] = target_cycle_iso
             return report
+        if family_cycle is None:
+            report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+            report["consumed_cycle"] = consumed_cycle_iso
+            return report
+        try:
+            newer_ensemble_cycle = _newer_eligible_ensemble_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                family_cycle=family_cycle,
+                decision_time=now,
+            )
+        except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
+            report["status"] = "CYCLE_ADVANCE_ENSEMBLE_HWM_UNREADABLE"
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["family_cycle"] = family_cycle.isoformat()
+            report["reason"] = str(exc)
+            return report
+        if newer_ensemble_cycle is not None:
+            # SCOPE: this city/date/metric only. DRAIN: capture its matching
+            # deterministic family anchor. RESET: family_cycle >= ENS HWM on
+            # the next single-family decision. An older seed is guaranteed to
+            # be rejected by the queue HWM and must not consume the materializer.
+            report["status"] = "CYCLE_ADVANCE_FAMILY_ANCHOR_BEHIND_ENSEMBLE"
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["family_cycle"] = family_cycle.isoformat()
+            report["eligible_ensemble_cycle"] = newer_ensemble_cycle.isoformat()
+            _LOG.info(
+                "single-family cycle-advance waiting for family anchor %s/%s/%s: "
+                "family_cycle=%s eligible_ensemble_cycle=%s",
+                city,
+                target_date,
+                metric,
+                family_cycle.isoformat(),
+                newer_ensemble_cycle.isoformat(),
+            )
+            return report
         # Day0 observation time is an independent source clock. A newer global
         # forecast cycle carried by another family must not divert this family
         # around the monotone observation-time re-materialization path below.
@@ -2388,8 +2426,7 @@ def enqueue_single_family_cycle_advance_reseed(
             if verdict.get("consumed_cycle") is not None:
                 if has_day0_evidence:
                     if (
-                        family_cycle is None
-                        or family_cycle < consumed_cycle_dt(consumed_cycle_iso)
+                        family_cycle < consumed_cycle_dt(consumed_cycle_iso)
                     ):
                         report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
                         report["consumed_cycle"] = consumed_cycle_iso
