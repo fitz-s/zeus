@@ -984,10 +984,10 @@ def _record_replacement_bpf_maintenance_progress(
 
     status = str(report.get("status") or "") if isinstance(report, dict) else ""
     written = int(report.get("written_row_count") or 0) if isinstance(report, dict) else 0
-    if (
-        status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        and written == 0
-    ):
+    if status in {
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    } and written == 0:
         _REPLACEMENT_BPF_NO_PROGRESS_FAILURES += 1
         delay = min(
             REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS,

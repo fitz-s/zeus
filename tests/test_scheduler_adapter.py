@@ -2386,8 +2386,16 @@ def test_replacement_maintenance_repairs_full_extras_before_reseed(
     assert "maintenance_errors" not in result
 
 
+@pytest.mark.parametrize(
+    "zero_progress_status",
+    (
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    ),
+)
 def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     monkeypatch,
+    zero_progress_status,
 ) -> None:
     """A transient broad fan-out cannot spend quota every minute without new rows."""
     import src.data.replacement_forecast_production as prod
@@ -2415,7 +2423,7 @@ def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     current_calls: list[float] = []
     extras_reports = [
         {
-            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "status": zero_progress_status,
             "written_row_count": 0,
         },
         {
@@ -2447,9 +2455,7 @@ def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     )
 
     first = ingest_main._replacement_maintenance_tick.__wrapped__()
-    assert first["bayes_precision_fusion_extra_status"] == (
-        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-    )
+    assert first["bayes_precision_fusion_extra_status"] == zero_progress_status
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 1
 
     now[0] = 160.0
