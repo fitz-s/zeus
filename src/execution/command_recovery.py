@@ -9068,6 +9068,11 @@ def _filled_entry_execution_fact_needs_repair(
 
 
 def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    # CANCELLED repair scope is one immutable command-bound entry fact.  A
+    # canonical trade aggregate drains a stale fact for that same command; a
+    # missing command fact still requires an otherwise fact-free position plus
+    # an exact synced projection.  Re-running after convergence resets the
+    # candidate because _filled_entry_execution_fact_needs_repair becomes false.
     required = {
         "venue_commands",
         "venue_order_facts",
@@ -9222,42 +9227,47 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                cmd.state != 'CANCELLED'
                OR (
                    entry_fill.has_confirmed_fill = 1
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM execution_fact existing_entry_fact
-                        WHERE existing_entry_fact.position_id = cmd.position_id
-                          AND existing_entry_fact.order_role = 'entry'
-                   )
-                   AND EXISTS (
-                       SELECT 1
-                         FROM position_current current_position
-                        WHERE current_position.position_id = cmd.position_id
-                          AND current_position.phase IN (
-                              'active', 'day0_window', 'pending_exit'
-                          )
-                          AND current_position.chain_state = 'synced'
-                          AND current_position.fill_authority IN (
-                              'venue_confirmed_full',
-                              'cancelled_remainder',
-                              'venue_position_observed'
-                          )
-                          AND current_position.order_id = cmd.venue_order_id
-                          AND ABS(
-                              COALESCE(current_position.shares, 0)
-                              - entry_fill.filled_size
-                          ) <= 0.0001
-                          AND ABS(
-                              COALESCE(current_position.cost_basis_usd, 0)
-                              - (entry_fill.filled_size * entry_fill.fill_price)
-                          ) <= 0.0001
-                          AND ABS(
-                              COALESCE(current_position.chain_shares, 0)
-                              - entry_fill.filled_size
-                          ) <= 0.0001
-                          AND ABS(
-                              COALESCE(current_position.chain_cost_basis_usd, 0)
-                              - (entry_fill.filled_size * entry_fill.fill_price)
-                          ) <= 0.0001
+                   AND (
+                       command_ef.intent_id IS NOT NULL
+                       OR (
+                           NOT EXISTS (
+                               SELECT 1
+                                 FROM execution_fact existing_entry_fact
+                                WHERE existing_entry_fact.position_id = cmd.position_id
+                                  AND existing_entry_fact.order_role = 'entry'
+                           )
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM position_current current_position
+                                WHERE current_position.position_id = cmd.position_id
+                                  AND current_position.phase IN (
+                                      'active', 'day0_window', 'pending_exit'
+                                  )
+                                  AND current_position.chain_state = 'synced'
+                                  AND current_position.fill_authority IN (
+                                      'venue_confirmed_full',
+                                      'cancelled_remainder',
+                                      'venue_position_observed'
+                                  )
+                                  AND current_position.order_id = cmd.venue_order_id
+                                  AND ABS(
+                                      COALESCE(current_position.shares, 0)
+                                      - entry_fill.filled_size
+                                  ) <= 0.0001
+                                  AND ABS(
+                                      COALESCE(current_position.cost_basis_usd, 0)
+                                      - (entry_fill.filled_size * entry_fill.fill_price)
+                                  ) <= 0.0001
+                                  AND ABS(
+                                      COALESCE(current_position.chain_shares, 0)
+                                      - entry_fill.filled_size
+                                  ) <= 0.0001
+                                  AND ABS(
+                                      COALESCE(current_position.chain_cost_basis_usd, 0)
+                                      - (entry_fill.filled_size * entry_fill.fill_price)
+                                  ) <= 0.0001
+                           )
+                       )
                    )
                )
            )

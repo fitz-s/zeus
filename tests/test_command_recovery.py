@@ -26446,6 +26446,319 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_cancelled_increment_repairs_its_bound_fact_and_releases_obligation(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.ledger import append_many_and_project
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-cancelled-increment"
+        baseline_command = "cmd-cancelled-increment-baseline"
+        baseline_order = "ord-cancelled-increment-baseline"
+        _insert(
+            conn,
+            command_id=baseline_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-baseline",
+            size=5.0,
+            price=0.30,
+            created_at="2026-04-26T00:01:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=baseline_command,
+            venue_order_id=baseline_order,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+            (baseline_command,),
+        )
+        _append_trade_fact(
+            conn,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            trade_id="trade-cancelled-increment-baseline",
+            filled_size="5",
+            fill_price="0.30",
+        )
+        _append_order_fact(
+            conn,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            state="MATCHED",
+            matched_size="5",
+            remaining_size="0",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=baseline_command,
+            order_id=baseline_order,
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            shares=5.0,
+            cost_basis_usd=1.50,
+            size_usd=1.50,
+            entry_price=0.30,
+        )
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry:{baseline_command}",
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-baseline",
+            command_id=baseline_command,
+            order_role="entry",
+            posted_at="2026-04-26T00:01:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            fill_price=0.30,
+            shares=5.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+
+        increment_command = "cmd-cancelled-increment"
+        increment_order = "ord-cancelled-increment"
+        _insert(
+            conn,
+            command_id=increment_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment",
+            size=10.0,
+            price=0.35,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _open_test_entry_obligation(conn, increment_command)
+        _advance_to_acked(
+            conn,
+            command_id=increment_command,
+            venue_order_id=increment_order,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            trade_id="trade-cancelled-increment-1",
+            filled_size="4",
+            fill_price="0.35",
+            observed_at="2026-04-26T00:10:00Z",
+        )
+        _append_trade_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            trade_id="trade-cancelled-increment-2",
+            filled_size="2",
+            fill_price="0.35",
+            observed_at="2026-04-26T00:11:00Z",
+        )
+        _append_order_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            state="PARTIALLY_MATCHED",
+            matched_size="6",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "terminal_partial_order_fact",
+                "status": "PARTIALLY_MATCHED",
+            },
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:12:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:13:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:14:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry:{increment_command}",
+            position_id=position_id,
+            decision_id="dec-cancelled-increment",
+            command_id=increment_command,
+            order_role="entry",
+            posted_at="2026-04-26T00:07:00Z",
+            filled_at="2026-04-26T00:10:00Z",
+            fill_price=0.35,
+            shares=4.0,
+            venue_status="PARTIAL",
+            terminal_exec_status="partial",
+        )
+        projection = dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        )
+        projection.update(
+            phase="active",
+            shares=11.0,
+            cost_basis_usd=3.60,
+            size_usd=3.60,
+            entry_price=3.60 / 11.0,
+            order_id=increment_order,
+            order_status="partial",
+            fill_authority="venue_position_observed",
+            chain_state="synced",
+            chain_shares=11.0,
+            chain_cost_basis_usd=3.60,
+            chain_avg_price=3.60 / 11.0,
+            updated_at="2026-04-26T00:15:00Z",
+        )
+        append_many_and_project(
+            conn,
+            [
+                {
+                    "event_id": f"{position_id}:filled:{increment_command}",
+                    "position_id": position_id,
+                    "event_version": 1,
+                    "sequence_no": 4,
+                    "event_type": "ENTRY_ORDER_FILLED",
+                    "occurred_at": "2026-04-26T00:15:00Z",
+                    "phase_before": "active",
+                    "phase_after": "active",
+                    "strategy_key": "opening_inertia",
+                    "decision_id": "dec-cancelled-increment",
+                    "snapshot_id": "snap-pos-001",
+                    "order_id": increment_order,
+                    "command_id": increment_command,
+                    "caused_by": None,
+                    "idempotency_key": f"{position_id}:filled:{increment_command}",
+                    "venue_status": "PARTIAL",
+                    "source_module": "tests.test_command_recovery",
+                    "env": "live",
+                    "payload_json": json.dumps(
+                        {"shares": 6.0, "size_usd": 2.10, "entry_price": 0.35},
+                        sort_keys=True,
+                    ),
+                }
+            ],
+            projection,
+        )
+
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        facts = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE position_id = ? AND order_role = 'entry'
+             ORDER BY command_id
+            """,
+            (position_id,),
+        ).fetchall()
+        assert [dict(row) for row in facts] == [
+            {
+                "command_id": increment_command,
+                "shares": 6.0,
+                "fill_price": pytest.approx(0.35),
+                "venue_status": "PARTIAL",
+                "terminal_exec_status": "filled",
+            },
+            {
+                "command_id": baseline_command,
+                "shares": 5.0,
+                "fill_price": 0.30,
+                "venue_status": "FILLED",
+                "terminal_exec_status": "filled",
+            },
+        ]
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (increment_command,),
+        ).fetchone()[0] == "RESOLVED"
+
+        ambiguous_command = "cmd-cancelled-increment-unbound"
+        ambiguous_order = "ord-cancelled-increment-unbound"
+        _insert(
+            conn,
+            command_id=ambiguous_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-unbound",
+            size=2.0,
+            price=0.35,
+            created_at="2026-04-26T00:16:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=ambiguous_command,
+            venue_order_id=ambiguous_order,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=ambiguous_command,
+            order_id=ambiguous_order,
+            trade_id="trade-cancelled-increment-unbound",
+            filled_size="1",
+            fill_price="0.35",
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:17:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:18:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:19:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
+            (ambiguous_command,),
+        ).fetchone()[0] == 0
+
     def test_filled_entry_execution_fact_uses_exact_fok_envelope_economics(
         self,
         conn,

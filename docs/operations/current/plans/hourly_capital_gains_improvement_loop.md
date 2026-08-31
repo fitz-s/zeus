@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-30 — cancelled partial ENTRY必须关闭command-scoped capital obligation
+- **实时反例:** Tel Aviv command `df84f6142b994e02`已由authenticated order/trade facts证明`25.683169/30` shares成交、remainder取消，canonical position已吸收该增量且command为`CANCELLED`；但command-scoped `execution_fact.shares`仍停在较早的`17.746664`，导致`entry_exposure_obligations`保持`OPEN`。每个global auction因此把不存在的`$11.10` pending commitment同时从spendable cash扣除并加入terminal claim，污染wealth objective和BUY capacity。
+- **结构原因:** stale execution-fact repair对`CANCELLED` ENTRY要求整个position不存在任何entry execution fact。该条件只适用于缺失首笔事实的保守重建，却错误排除了已经有command-bound fact的same-token increment；后续obligation reducer正确拒绝不一致的`17.746664` vs `25.683169`。
+- **修复合同:** 若CANCELLED ENTRY已有唯一command-bound execution fact且canonical positive trade aggregate、terminal order matched size和command identity一致，允许同一repair writer把该fact单调更新到完整command fill aggregate。缺失command-bound fact仍保留原exact-position proof；obligation仅在现有terminal-partial reducer再次证明cancel ACK、zero remainder、trade aggregate、execution fact和position absorption后RESOLVED。
+- **SCOPE / DRAIN / RESET:** scope仅一个已有command-bound fact的cancelled ENTRY；drain顺序为execution-fact repair→terminal obligation reducer；reset为下一recovery tick看到facts一致并释放该command commitment。无command fact、无confirmed fill、非terminal order、fill mismatch或未吸收position继续fail closed；不修改position shares/PnL、venue command、chain fact或概率。
+- **验收:** antibody构造同position baseline ENTRY + cancelled partial increment，并证明旧stale command fact被更新、obligation随后RESOLVED、baseline fact不变；缺失command fact的ambiguous increment仍不产生事实。live部署后该唯一OPEN obligation清零，auction reservations从`$11.10`降为`$0`、spendable cash回到current CHAIN pUSD，且不生成venue command/fill。
+
 ### 2026-08-30 — ENS HWM领先family anchor时不得循环生成旧cycle seed
 - **实时反例:** Moscow 2026-08-31 HIGH持仓的latest eligible ENS已到12Z，但family deterministic anchor仍停在06Z。cycle-advance每轮仍生成06Z Day0 seed；materialization queue按HWM正确丢弃，producer随后再次生成，连续两小时无法生成current q并浪费单writer队列。committed-ENS wake同时以`required=12Z,target=06Z`失败。
 - **修复:** batch与single-family Day0 bridge都在family-scope manifest cycle确定后复用同一decision-time eligible ENS selector；若ENS HWM严格更新，则不构造必然被拒绝的旧seed。batch累计`family_cycle_behind_eligible_ensemble`，single-family返回`CYCLE_ADVANCE_FAMILY_ANCHOR_BEHIND_ENSEMBLE`。不回退旧q、不改变ENS/anchor same-cycle law、不删除freshness gate；HWM不可读时两个producer都fail closed。
