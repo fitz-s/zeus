@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-30
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-30; last_reused=2026-08-30
+# Last reused/audited: 2026-08-31
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -1354,6 +1354,62 @@ def _fan_out_anchor_payloads(
     return expanded
 
 
+def _expand_required_metric_siblings(
+    forecast_db: Path,
+    scopes: Sequence[tuple[str, str, str]],
+) -> tuple[tuple[str, str, str], ...]:
+    """Close active HIGH/LOW twins before spending a city/run request.
+
+    One run-pinned hourly payload is the raw input for both extrema.  A scoped
+    recovery that requests only one active metric must persist its active twin
+    in the same pass; otherwise the local target rotation can strand usable
+    bytes until a later cycle.  Missing ``market_events`` keeps the caller's
+    exact scope unchanged for isolated fixtures and non-market repair use.
+    """
+
+    normalized = tuple(
+        dict.fromkeys(
+            (
+                str(city).strip(),
+                str(target_date).strip(),
+                str(metric).strip(),
+            )
+            for city, target_date, metric in scopes
+            if str(city).strip()
+            and str(target_date).strip()
+            and str(metric).strip() in {"high", "low"}
+        )
+    )
+    if not normalized or not forecast_db.exists():
+        return normalized
+    try:
+        conn = _connect(forecast_db)
+        active_scopes = {
+            (str(city), str(target_date), str(metric))
+            for city, target_date, metric in conn.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE temperature_metric IN ('high', 'low')
+                """
+            ).fetchall()
+        }
+    except (OSError, sqlite3.Error):
+        return normalized
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    expanded = list(normalized)
+    seen = set(normalized)
+    for city, target_date, metric in normalized:
+        sibling = (city, target_date, "low" if metric == "high" else "high")
+        if sibling in active_scopes and sibling not in seen:
+            expanded.append(sibling)
+            seen.add(sibling)
+    return tuple(expanded)
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -1392,6 +1448,10 @@ def download_current_target_raw_inputs(
         raise ValueError("limit must be a positive integer or None")
     plan: ReplacementForecastCurrentTargetPlan | None = None
     if required_scopes is not None:
+        required_scopes = _expand_required_metric_siblings(
+            forecast_db,
+            required_scopes,
+        )
         _rows = [
             ReplacementForecastTargetKey(city, target_date, metric)
             for city, target_date, metric in dict.fromkeys(

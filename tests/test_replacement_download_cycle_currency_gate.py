@@ -1372,6 +1372,76 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
 
 
+def test_scoped_download_closes_active_metric_twin_from_one_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?)",
+        (
+            ("Dallas", "2026-06-10", "high"),
+            ("Dallas", "2026-06-10", "low"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    fetches = []
+
+    def _resolve(**kwargs):
+        fetches.append((kwargs["city"], kwargs["target_date"]))
+        return (
+            _anchor_payload(),
+            {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            },
+        )
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _resolve)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", "high"),),
+    )
+
+    conn = sqlite3.connect(db)
+    metrics = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT json_extract(artifact_metadata_json, '$.metric')
+              FROM raw_forecast_artifacts
+            """
+        ).fetchall()
+    }
+    conn.close()
+    assert len(fetches) == 1
+    assert report["required_scope_count"] == 2
+    assert report["written_manifest_count"] == 2
+    assert metrics == {"high", "low"}
+
+
 def test_identical_run_payloads_persist_distinct_target_certificates(
     tmp_path,
     monkeypatch,
