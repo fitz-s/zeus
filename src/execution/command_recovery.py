@@ -29666,11 +29666,19 @@ def _reconcile_passes_short_conn(
         )
 
         def _apply(conn, snap_client):
-            rows = [
-                row
-                for row in find_unresolved_commands(conn)
-                if str(row.get("command_id") or "") == command_id
-            ]
+            current = conn.execute(
+                """
+                SELECT * FROM venue_commands
+                 WHERE command_id = ?
+                   AND state IN (?, ?)
+                """,
+                (
+                    command_id,
+                    CommandState.UNKNOWN.value,
+                    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+                ),
+            ).fetchone()
+            rows = [_dict_row(current)] if current is not None else []
             result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
             for row in rows:
                 try:
@@ -30972,11 +30980,19 @@ def _reconcile_passes_short_conn(
         # first allowed monitor preemption to discard a completed account read
         # and strand the capital-blocking command for another cadence.
         def _apply_full_priority_inflight(conn, snap_client):
-            rows = [
-                row
-                for row in find_unresolved_commands(conn)
-                if str(row.get("command_id") or "") == priority_command_id
-            ]
+            current = conn.execute(
+                """
+                SELECT * FROM venue_commands
+                 WHERE command_id = ?
+                   AND state IN (?, ?)
+                """,
+                (
+                    priority_command_id,
+                    CommandState.UNKNOWN.value,
+                    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+                ),
+            ).fetchone()
+            rows = [_dict_row(current)] if current is not None else []
             result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
             for row in rows:
                 try:
