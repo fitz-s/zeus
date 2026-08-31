@@ -4569,10 +4569,6 @@ def process_replacement_forecast_live_materialization_queue(
         and seed_dir is not None
         and seed_limit != 0
     )
-    # A priority seed bridge must prepare its bounded seed tranche before it
-    # claims a published request.  That makes newly-ready Day0 debt compete on
-    # the same priority axis as timeout retries, while HWM-waiting seeds remain
-    # producer-owned queue debt and never reach the child.
     request_only = (
         not priority_seed_transport
         and (
@@ -4730,62 +4726,80 @@ def process_replacement_forecast_live_materialization_queue(
                 ),
             )
     if claim is None:
-        with _queue_lock(
-            request_path.parent / ".materialization_queue.lock",
-            wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
-        ) as lock_acquired:
-            if not lock_acquired:
-                return ReplacementForecastLiveMaterializationQueueReport(
-                    status="LOCKED",
-                    request_dir=str(request_path),
-                    processed_dir=str(processed_path),
-                    failed_dir=str(failed_path),
-                    processed_count=0,
-                    failed_count=0,
-                    skipped_count=0,
-                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
-                )
+        try:
+            with _claim_read_deadline_guard():
+                with _queue_lock(
+                    request_path.parent / ".materialization_queue.lock",
+                    wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
+                ) as lock_acquired:
+                    if not lock_acquired:
+                        return ReplacementForecastLiveMaterializationQueueReport(
+                            status="LOCKED",
+                            request_dir=str(request_path),
+                            processed_dir=str(processed_path),
+                            failed_dir=str(failed_path),
+                            processed_count=0,
+                            failed_count=0,
+                            skipped_count=0,
+                            reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
+                        )
+                    if (
+                        read_plan is not None
+                        and not priority_seed_transport
+                        and not read_plan.stale_conflict_batches
+                        and read_plan.claim.selected_files
+                    ):
+                        try:
+                            # SCOPE: this exact queue snapshot and forecast DB identity.
+                            # DRAIN: the next scheduler claim rebuilds its read plan. RESET:
+                            # no change between plan and apply. A mismatch consumes nothing.
+                            current_db_fingerprint = _claim_db_fingerprint(forecast_db)
+                        except sqlite3.Error:
+                            return ReplacementForecastLiveMaterializationQueueReport(
+                                status="DEFERRED", request_dir=str(request_path),
+                                processed_dir=str(processed_path), failed_dir=str(failed_path),
+                                processed_count=0, failed_count=0, skipped_count=0,
+                                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                            )
+                        if (
+                            _queue_files_snapshot(request_path) != read_plan.claim.request_snapshot
+                            or current_db_fingerprint != read_plan.claim.forecast_db_fingerprint
+                        ):
+                            return ReplacementForecastLiveMaterializationQueueReport(
+                                status="DEFERRED", request_dir=str(request_path),
+                                processed_dir=str(processed_path), failed_dir=str(failed_path),
+                                processed_count=0, failed_count=0, skipped_count=0,
+                                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                            )
+                        claim = _apply_request_claim_read_plan(read_plan)
+                    else:
+                        # Discovery/seed transport and durable stale-claim recovery retain
+                        # their existing single-flight path; neither is represented as a
+                        # request plan until each action has an immutable apply record.
+                        claim = _claim_replacement_forecast_live_materialization_queue_locked(
+                            request_path=request_path, processed_path=processed_path,
+                            failed_path=failed_path, seed_dir=seed_dir,
+                            seed_processed_dir=seed_processed_dir, seed_failed_dir=seed_failed_dir,
+                            forecast_db=forecast_db, raw_manifest_dir=raw_manifest_dir,
+                            seed_discovery_limit=seed_discovery_limit, seed_limit=seed_limit,
+                            limit=limit, discover=discover, lane=lane,
+                        )
+        except (_ClaimReadDeadlineExceeded, sqlite3.OperationalError) as exc:
             if (
-                read_plan is not None
-                and not priority_seed_transport
-                and not read_plan.stale_conflict_batches
-                and read_plan.claim.selected_files
+                isinstance(exc, sqlite3.OperationalError)
+                and exc.args != ("DB_CONNECTION_DEADLINE_EXPIRED",)
             ):
-                try:
-                    # SCOPE: this exact queue snapshot and forecast DB identity.
-                    # DRAIN: the next scheduler claim rebuilds its read plan. RESET:
-                    # no change between plan and apply. A mismatch consumes nothing.
-                    current_db_fingerprint = _claim_db_fingerprint(forecast_db)
-                except sqlite3.Error:
-                    return ReplacementForecastLiveMaterializationQueueReport(
-                        status="DEFERRED", request_dir=str(request_path),
-                        processed_dir=str(processed_path), failed_dir=str(failed_path),
-                        processed_count=0, failed_count=0, skipped_count=0,
-                        reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
-                    )
-                if (
-                    _queue_files_snapshot(request_path) != read_plan.claim.request_snapshot
-                    or current_db_fingerprint != read_plan.claim.forecast_db_fingerprint
-                ):
-                    return ReplacementForecastLiveMaterializationQueueReport(
-                        status="DEFERRED", request_dir=str(request_path),
-                        processed_dir=str(processed_path), failed_dir=str(failed_path),
-                        processed_count=0, failed_count=0, skipped_count=0,
-                        reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
-                    )
-                claim = _apply_request_claim_read_plan(read_plan)
-            else:
-                # Discovery/seed transport and durable stale-claim recovery retain
-                # their existing single-flight path; neither is represented as a
-                # request plan until each action has an immutable apply record.
-                claim = _claim_replacement_forecast_live_materialization_queue_locked(
-                    request_path=request_path, processed_path=processed_path,
-                    failed_path=failed_path, seed_dir=seed_dir,
-                    seed_processed_dir=seed_processed_dir, seed_failed_dir=seed_failed_dir,
-                    forecast_db=forecast_db, raw_manifest_dir=raw_manifest_dir,
-                    seed_discovery_limit=seed_discovery_limit, seed_limit=seed_limit,
-                    limit=limit, discover=discover, lane=lane,
-                )
+                raise
+            return ReplacementForecastLiveMaterializationQueueReport(
+                status="DEFERRED",
+                request_dir=str(request_path),
+                processed_dir=str(processed_path),
+                failed_dir=str(failed_path),
+                processed_count=0,
+                failed_count=0,
+                skipped_count=0,
+                reason_codes=(_CLAIM_READ_DEFERRED_REASON,),
+            )
     if claim.batch_path is None:
         return _claim_only_report(claim)
     try:

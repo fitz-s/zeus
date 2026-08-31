@@ -3115,6 +3115,60 @@ def test_materialization_queue_releases_lock_before_family_compute(
     assert not tuple(request_dir.glob("*.json"))
 
 
+def test_seed_prepare_cannot_hold_global_queue_lock_past_claim_deadline(
+    tmp_path, monkeypatch
+) -> None:
+    import time
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    monkeypatch.setattr(queue_mod, "_MATERIALIZATION_CLAIM_DEADLINE_SECONDS", 0.01)
+
+    def slow_claim(**_kwargs):
+        time.sleep(0.02)
+        return queue_mod._MaterializationQueueClaim(
+            request_path=request_dir,
+            batch_path=None,
+            processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed",
+            claimed_count=0,
+            skipped_count=0,
+            inflight_deferred_count=0,
+            timeout_retry_deferred_count=0,
+            processed_files=(),
+            failed_files=(),
+            seed_processed_files=(),
+            seed_failed_files=(),
+            seed_reasons=(),
+            discovery_report=None,
+        )
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        slow_claim,
+    )
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=tmp_path / "seeds",
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        seed_limit=1,
+        discover=False,
+        limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
+    )
+
+    assert report.status == "DEFERRED"
+    assert report.reason_codes == (queue_mod._CLAIM_READ_DEFERRED_REASON,)
+    with queue_mod._queue_lock(tmp_path / ".materialization_queue.lock") as acquired:
+        assert acquired
+
+
 def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path, monkeypatch):
     """Current held identity claims without waiting behind discovery/retry flock work."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
