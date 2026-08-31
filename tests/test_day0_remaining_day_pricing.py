@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-29
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Last reused or audited: 2026-08-30
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -564,6 +564,99 @@ def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
     assert carrier["sample_count"] == 500
     assert len(carrier["samples"]) == 500
     assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
+    conn.close()
+
+
+def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.replacement_forecast_materializer as materializer
+
+    monkeypatch.setattr(
+        materializer,
+        "_day0_noaa_future_vector_members",
+        lambda *_args, **_kwargs: (
+            (31.0, 32.0),
+            0.5,
+            "2026-08-31T02:57:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.station_forecast_adapter.load_station_forecast_config",
+        lambda: {"cwa_township": object()},
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            forecast_value_c REAL NOT NULL,
+            source_id TEXT,
+            coverage_status TEXT
+        )
+        """
+    )
+    for raw_id, captured_at, value in (
+        (11, "2026-08-31T02:33:55+00:00", 33.0),
+        (12, "2026-08-31T02:50:00+00:00", 35.0),
+    ):
+        conn.execute(
+            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                raw_id,
+                "cwa_township",
+                "Taipei",
+                "2026-08-31",
+                "high",
+                captured_at,
+                captured_at,
+                captured_at,
+                value,
+                "cwa_township_single_runs",
+                "COVERED",
+            ),
+        )
+    request = SimpleNamespace(
+        city="Taipei",
+        target_date="2026-08-31",
+        computed_at="2026-08-31T02:57:00+00:00",
+    )
+    fusion = SimpleNamespace(
+        used_models=("ecmwf_ifs", "cwa_township"),
+        current_value_serving={
+            "cwa_township": {"raw_model_forecast_id": 11}
+        },
+    )
+
+    future, sigma, cutoff, evidence = (
+        materializer._day0_noaa_carrier_future_members(
+            conn,
+            request,
+            metric="high",
+            fusion=fusion,
+        )
+    )
+
+    assert future == (31.0, 32.0, 33.0)
+    assert sigma == pytest.approx(float(np.std(np.asarray(future), ddof=0)))
+    assert cutoff == "2026-08-31T02:57:00+00:00"
+    assert evidence == (
+        {
+            "model": "cwa_township",
+            "raw_model_forecast_id": 11,
+            "forecast_value_c": 33.0,
+            "source_cycle_time": "2026-08-31T02:33:55+00:00",
+            "source_available_at": "2026-08-31T02:33:55+00:00",
+            "captured_at": "2026-08-31T02:33:55+00:00",
+        },
+    )
     conn.close()
 
 def test_tel_aviv_no_confirmed_prior_uses_real_jeffreys_carrier(
