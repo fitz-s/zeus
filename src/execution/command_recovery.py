@@ -29653,15 +29653,18 @@ def _reconcile_passes_short_conn(
                 deadline_monotonic=full_deadline,
             ),
         )
+        priority_apply_deadline = time.monotonic() + (
+            _capital_recovery_db_budget_seconds()
+        )
         priority_writer_factory = _recovery_priority_conn_factory(
             default_trade_conn_factory,
             scope="live_tick",
-            deadline_monotonic=full_deadline,
+            deadline_monotonic=priority_apply_deadline,
         )
         priority_apply_factory = _recovery_apply_conn_factory(
             priority_writer_factory,
             scope="full",
-            deadline_monotonic=full_deadline,
+            deadline_monotonic=priority_apply_deadline,
             monitor_preemptible=False,
         )
 
@@ -29717,7 +29720,7 @@ def _reconcile_passes_short_conn(
             ),
             scope="full",
             summary=summary,
-            deadline_monotonic=full_deadline,
+            deadline_monotonic=priority_apply_deadline,
             bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
         )
         summary["full_priority_inflight_only"] = True
@@ -31020,18 +31023,21 @@ def _reconcile_passes_short_conn(
             summary["inflight_quantum"] = priority_command_id
             return result
 
+        priority_apply_deadline = time.monotonic() + (
+            _capital_recovery_db_budget_seconds()
+        )
         priority_writer_factory = _recovery_priority_conn_factory(
             default_trade_conn_factory,
             # An unresolved submit is current unknown capital exposure, not
             # historical maintenance. Give it the same typed priority as the
             # live capital lane while retaining the full-sweep deadline.
             scope="live_tick",
-            deadline_monotonic=apply_deadline,
+            deadline_monotonic=priority_apply_deadline,
         )
         priority_apply_conn_factory = _recovery_apply_conn_factory(
             priority_writer_factory,
             scope="full",
-            deadline_monotonic=apply_deadline,
+            deadline_monotonic=priority_apply_deadline,
             # Acquisition still yields to an existing monitor owner/waiter.
             # Once acquired, this exact command/reservation transition is a
             # short atomic capital release and must finish before yielding.
