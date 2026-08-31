@@ -4408,6 +4408,21 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
     assert authority is not None
     assert authority.maker_witness_identity == maker_witness.witness_identity
+def test_global_escalated_buy_rejects_only_repeated_maker_proposal():
+    armed = frozenset({"token"})
+
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="BUY", execution_mode="MAKER_REST", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) == "GLOBAL_MAKER_REST_ALREADY_ESCALATED"
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="BUY", execution_mode="TAKER_LIMIT", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) is None
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="SELL", execution_mode="MAKER_REST", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) is None
 
 
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():
