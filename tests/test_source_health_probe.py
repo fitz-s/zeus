@@ -510,22 +510,13 @@ class TestPriorStateSemantics:
         assert "GLOBAL_COOLDOWN" in result["error"]
         assert result["defer_reason"] is None
 
-    @pytest.mark.parametrize(
-        ("lane", "limit_name", "expected_reason"),
-        [
-            ("priority_lane", "PRIORITY_DAILY_LIMIT", "PRIORITY_DAILY_LIMIT"),
-            ("critical_lane", "DAILY_HARD_CAP", "CRITICAL_HARD_DAILY_LIMIT"),
-        ],
-    )
-    def test_openmeteo_priority_and_critical_limits_never_defer_archive(
-        self, monkeypatch, lane, limit_name, expected_reason
-    ):
-        """Priority and critical hard-cap denials cannot masquerade as reserve deferral."""
+    def test_openmeteo_priority_limit_never_defers_archive(self, monkeypatch):
+        """A source-clock cap denial cannot masquerade as reserve deferral."""
         import src.data.openmeteo_client as omc
         from src.data import openmeteo_quota
 
         tracker = openmeteo_quota.OpenMeteoQuotaTracker()
-        tracker._count = getattr(openmeteo_quota, limit_name)
+        tracker._count = openmeteo_quota.PRIORITY_DAILY_LIMIT
         monkeypatch.setattr(omc, "quota_tracker", tracker)
         monkeypatch.setattr(
             omc.httpx,
@@ -535,11 +526,11 @@ class TestPriorStateSemantics:
             ),
         )
 
-        with getattr(tracker, lane)():
+        with tracker.priority_lane():
             result = probe_sources(("open_meteo_archive",))["open_meteo_archive"]
 
         assert result["disposition"] == "FAILURE"
-        assert expected_reason in result["error"]
+        assert "PRIORITY_DAILY_LIMIT" in result["error"]
         assert result["defer_reason"] is None
 
     def test_successful_openmeteo_probe_clears_prior_deferred_state(self, monkeypatch):

@@ -785,6 +785,10 @@ def _download_replacement_forecast_current_targets_if_needed(
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
     plan = None
+    structurally_unservable_critical_scopes: tuple[
+        tuple[str, str, str], ...
+    ] = ()
+    critical_scope_exclusions: list[dict[str, object]] = []
     if required_scopes is None:
         plan = build_replacement_forecast_current_target_plan(
             Path(str(forecast_db)),
@@ -812,6 +816,56 @@ def _download_replacement_forecast_current_targets_if_needed(
                     "day0_window/pending_exit scopes: "
                     + ",".join("/".join(scope) for scope in unauthorized)
                 )
+            from src.config import cities_by_name  # noqa: PLC0415
+
+            # A current source cycle cannot repair a past local target day.  Such
+            # exposure remains an observation/settlement/exit obligation, but it
+            # must not become infinite forecast-anchor quota debt.
+            for scope in required_scopes:
+                city_cfg = cities_by_name.get(scope[0])
+                reason = (
+                    "CITY_CONFIG_UNAVAILABLE"
+                    if city_cfg is None
+                    else "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW"
+                    if not _source_cycle_can_cover_local_decision_window(
+                        cycle=available_cycle,
+                        target_date=scope[1],
+                        timezone_name=str(city_cfg.timezone),
+                    )
+                    else None
+                )
+                if reason is not None:
+                    critical_scope_exclusions.append(
+                        {"scope": list(scope), "reason": reason}
+                    )
+            structurally_unservable_critical_scopes = tuple(
+                tuple(str(value) for value in row["scope"])
+                for row in critical_scope_exclusions
+            )
+            unservable = set(structurally_unservable_critical_scopes)
+            required_scopes = tuple(
+                scope for scope in required_scopes if scope not in unservable
+            )
+            if not required_scopes:
+                return {
+                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
+                    "available_cycle": available_cycle.isoformat(),
+                    "downloaded_cycle": (
+                        None
+                        if downloaded_cycle is None
+                        else downloaded_cycle.isoformat()
+                    ),
+                    "target_count": len(structurally_unservable_critical_scopes),
+                    "structurally_unservable_scope_count": len(
+                        structurally_unservable_critical_scopes
+                    ),
+                    "structurally_unservable_scopes": [
+                        list(scope)
+                        for scope in structurally_unservable_critical_scopes
+                    ],
+                    "scope_exclusions": critical_scope_exclusions,
+                    "written_manifest_count": 0,
+                }
             missing_critical_scopes = _critical_scopes_missing_current_anchor(
                 Path(str(forecast_db)),
                 required_scopes,
@@ -948,6 +1002,14 @@ def _download_replacement_forecast_current_targets_if_needed(
         "downloaded_cycle",
         None if downloaded_cycle is None else downloaded_cycle.isoformat(),
     )
+    if structurally_unservable_critical_scopes:
+        result["structurally_unservable_scope_count"] = len(
+            structurally_unservable_critical_scopes
+        )
+        result["structurally_unservable_scopes"] = [
+            list(scope) for scope in structurally_unservable_critical_scopes
+        ]
+        result["scope_exclusions"] = critical_scope_exclusions
     return result
 
 

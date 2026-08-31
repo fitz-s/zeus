@@ -14338,6 +14338,72 @@ def test_openmeteo_quota_reserves_final_tranche_for_held_day0():
         assert tracker.acquire_call("held_day0") is True
 
 
+def test_openmeteo_held_critical_reaches_provider_after_local_cap():
+    tracker = OpenMeteoQuotaTracker()
+    tracker._count = openmeteo_quota.DAILY_HARD_CAP
+    tracker._hour_count = openmeteo_quota.HOURLY_HARD_CAP
+    tracker._minute_count = openmeteo_quota.MINUTE_HARD_CAP
+
+    with tracker.critical_lane():
+        assert tracker.can_call() is True
+        assert tracker.retry_after_seconds() == 0
+        allowed, reason, lease_id = tracker.acquire_request(
+            "held-after-local-cap",
+            endpoint="api.open-meteo.com/v1/forecast",
+            job="held-probability",
+        )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    assert tracker.calls_today() == openmeteo_quota.DAILY_HARD_CAP + 1
+    assert tracker._request_states["held-after-local-cap"]["priority"] == "critical"
+
+
+def test_openmeteo_shared_held_critical_reaches_provider_after_local_cap(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    state = tracker._default_state(datetime.now(timezone.utc))
+    state["day_count"] = openmeteo_quota.DAILY_HARD_CAP
+    state["hour_count"] = openmeteo_quota.HOURLY_HARD_CAP
+    state["minute_count"] = openmeteo_quota.MINUTE_HARD_CAP
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with tracker.critical_lane():
+        assert tracker.can_call() is True
+        assert tracker.retry_after_seconds() == 0
+        allowed, reason, lease_id = tracker.acquire_request(
+            "shared-held-after-local-cap",
+            endpoint="api.open-meteo.com/v1/forecast",
+            job="held-probability",
+        )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["day_count"] == openmeteo_quota.DAILY_HARD_CAP + 1
+    assert payload["requests"]["shared-held-after-local-cap"]["priority"] == "critical"
+
+
+def test_openmeteo_held_critical_still_obeys_provider_cooldown():
+    tracker = OpenMeteoQuotaTracker()
+    tracker._count = openmeteo_quota.DAILY_HARD_CAP
+    tracker.note_rate_limited(60, endpoint="api.open-meteo.com/v1/forecast")
+
+    with tracker.critical_lane():
+        allowed, reason, lease_id = tracker.acquire_request(
+            "held-after-provider-429",
+            endpoint="api.open-meteo.com/v1/forecast",
+            job="held-probability",
+        )
+
+    assert allowed is False
+    assert reason is not None and reason.startswith("cooldown_until=")
+    assert lease_id is None
+
+
 def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch, caplog):
     class _Resp:
         status_code = 429

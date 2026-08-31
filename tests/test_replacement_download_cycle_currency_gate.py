@@ -1822,6 +1822,83 @@ def test_nonheld_scope_cannot_borrow_critical_quota(
     assert calls == []
 
 
+def test_past_held_scope_does_not_block_current_held_anchor(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    past_scope = ("Dallas", "2026-06-08", "high")
+    current_scope = ("Dallas", "2026-06-10", "low")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {past_scope: 0, current_scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(past_scope, current_scope),
+        quota_critical=True,
+    )
+
+    assert report is not None
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == (current_scope,)
+    assert report["structurally_unservable_scope_count"] == 1
+    assert report["structurally_unservable_scopes"] == [list(past_scope)]
+    assert report["scope_exclusions"] == [
+        {
+            "scope": list(past_scope),
+            "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+        }
+    ]
+
+
+def test_only_past_held_scopes_close_forecast_lane_without_http(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {"openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO},
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Dallas", "2026-06-08", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report == {
+        "status": "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
+        "available_cycle": AVAILABLE_CYCLE.isoformat(),
+        "downloaded_cycle": datetime.fromisoformat(STALE_CYCLE_ISO).isoformat(),
+        "target_count": 1,
+        "structurally_unservable_scope_count": 1,
+        "structurally_unservable_scopes": [list(scope)],
+        "scope_exclusions": [
+            {
+                "scope": list(scope),
+                "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+            }
+        ],
+        "written_manifest_count": 0,
+    }
+    assert calls == []
+
+
 def test_covered_critical_scope_does_not_rewrite_anchor(
     tmp_path, monkeypatch
 ) -> None:

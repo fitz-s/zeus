@@ -2104,6 +2104,7 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     import src.ingest_main as ingest_main
 
     held_scope = ("NYC", "2026-08-17", "low")
+    past_scope = ("Hong Kong", "2026-08-15", "high")
     now = [100.0]
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
@@ -2114,7 +2115,7 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     monkeypatch.setattr(
         ingest_main,
         "_all_held_current_target_scopes",
-        lambda: (held_scope,),
+        lambda: (past_scope, held_scope),
     )
     monkeypatch.setattr(
         ingest_main,
@@ -2138,7 +2139,8 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
         return {
             "status": held_status,
             "written_manifest_count": written_manifest_count,
-            "required_scope_count": 1,
+            "required_scope_count": 2,
+            "structurally_unservable_scopes": [list(past_scope)],
         }
 
     monkeypatch.setattr(
@@ -2169,7 +2171,10 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     second = ingest_main._replacement_maintenance_tick.__wrapped__()
 
     assert len(downloads) == 2
-    assert all(call["required_scopes"] == (held_scope,) for call in downloads)
+    assert all(
+        call["required_scopes"] == (past_scope, held_scope)
+        for call in downloads
+    )
     assert all(call["quota_critical"] is True for call in downloads)
     assert all(0 < call["max_wall_clock_seconds"] <= 10.0 for call in downloads)
     assert result["held_current_target_download"] == {

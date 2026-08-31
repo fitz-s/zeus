@@ -2519,6 +2519,7 @@ def _harvester_truth_writer_tick():
 _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
     {
         "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+        "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
         "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
         "CURRENT_TARGETS_ALREADY_COVERED",
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
@@ -2705,7 +2706,16 @@ def _replacement_maintenance_tick():
                 isinstance(partition_report, dict)
                 and int(partition_report.get("written_manifest_count") or 0) > 0
             ):
-                held_reseed_scope_set.update(scopes)
+                structurally_unservable = {
+                    tuple(str(value) for value in scope)
+                    for scope in (
+                        partition_report.get("structurally_unservable_scopes") or ()
+                    )
+                    if isinstance(scope, (list, tuple)) and len(scope) == 3
+                } if isinstance(partition_report, dict) else set()
+                held_reseed_scope_set.update(
+                    scope for scope in scopes if scope not in structurally_unservable
+                )
         for lane, _scopes, partition_report in partition_reports:
             if lane == "critical":
                 held_report = partition_report
