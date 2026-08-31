@@ -673,7 +673,7 @@ def _critical_scopes_missing_current_anchor(
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
 ) -> tuple[tuple[str, str, str], ...] | None:
-    """Return exact critical scopes without materializable canonical raw at ``cycle``."""
+    """Return exact scoped targets without materializable canonical raw at ``cycle``."""
 
     from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
         expected_replacement_dependency_identity_by_role,
@@ -866,36 +866,47 @@ def _download_replacement_forecast_current_targets_if_needed(
                     "scope_exclusions": critical_scope_exclusions,
                     "written_manifest_count": 0,
                 }
-            missing_critical_scopes = _critical_scopes_missing_current_anchor(
-                Path(str(forecast_db)),
-                required_scopes,
-                available_cycle,
-            )
-            if missing_critical_scopes is None:
-                raise RuntimeError("critical current-target anchor coverage unreadable")
-            if not missing_critical_scopes:
-                covered_report: dict[str, object] = {
-                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
-                    "available_cycle": available_cycle.isoformat(),
-                    "downloaded_cycle": (
-                        None
-                        if downloaded_cycle is None
-                        else downloaded_cycle.isoformat()
-                    ),
-                    "target_count": len(required_scopes),
-                    "written_manifest_count": 0,
-                }
-                if structurally_unservable_critical_scopes:
-                    covered_report["structurally_unservable_scope_count"] = len(
-                        structurally_unservable_critical_scopes
-                    )
-                    covered_report["structurally_unservable_scopes"] = [
-                        list(scope)
-                        for scope in structurally_unservable_critical_scopes
-                    ]
-                    covered_report["scope_exclusions"] = critical_scope_exclusions
-                return covered_report
-            required_scopes = missing_critical_scopes
+        # Explicit ordinary held scopes need the same exact-cycle reuse proof as
+        # critical held scopes.  Previously only quota_critical entered this
+        # check, so already-materializable active positions re-downloaded the
+        # same provider cycle every minute until the local quota failed. SCOPE:
+        # only this explicit scoped slice. DRAIN: missing scopes continue into
+        # the existing bounded transport below. RESET: a newer provider cycle or
+        # a missing/invalid canonical artifact makes the scope missing again.
+        missing_scopes = _critical_scopes_missing_current_anchor(
+            Path(str(forecast_db)),
+            required_scopes,
+            available_cycle,
+        )
+        if missing_scopes is None:
+            raise RuntimeError("scoped current-target anchor coverage unreadable")
+        if not missing_scopes:
+            covered_report: dict[str, object] = {
+                "status": (
+                    "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+                    if quota_critical
+                    else "CURRENT_TARGETS_ALREADY_COVERED"
+                ),
+                "available_cycle": available_cycle.isoformat(),
+                "downloaded_cycle": (
+                    None
+                    if downloaded_cycle is None
+                    else downloaded_cycle.isoformat()
+                ),
+                "target_count": len(required_scopes),
+                "written_manifest_count": 0,
+            }
+            if structurally_unservable_critical_scopes:
+                covered_report["structurally_unservable_scope_count"] = len(
+                    structurally_unservable_critical_scopes
+                )
+                covered_report["structurally_unservable_scopes"] = [
+                    list(scope)
+                    for scope in structurally_unservable_critical_scopes
+                ]
+                covered_report["scope_exclusions"] = critical_scope_exclusions
+            return covered_report
+        required_scopes = missing_scopes
     if quota_critical and required_scopes is None:
         raise ValueError("critical current-target quota requires explicit scopes")
     cycle_targets_have_current_manifests = (

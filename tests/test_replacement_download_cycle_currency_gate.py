@@ -1751,6 +1751,40 @@ def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(
     assert calls[0]["limit"] is None
 
 
+def test_ordinary_scoped_current_anchor_coverage_skips_transport(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": AVAILABLE_CYCLE.isoformat(),
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Moscow", "2026-08-31", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production."
+        "_critical_scopes_missing_current_anchor",
+        lambda _db, scopes, _cycle: () if tuple(scopes) == (scope,) else tuple(scopes),
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+    )
+
+    assert report == {
+        "status": "CURRENT_TARGETS_ALREADY_COVERED",
+        "available_cycle": AVAILABLE_CYCLE.isoformat(),
+        "downloaded_cycle": AVAILABLE_CYCLE.isoformat(),
+        "target_count": 1,
+        "written_manifest_count": 0,
+    }
+    assert calls == []
+
+
 def test_exact_held_day0_scope_enters_critical_quota_lane(
     tmp_path, monkeypatch
 ) -> None:
