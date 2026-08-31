@@ -30910,8 +30910,16 @@ def _reconcile_passes_short_conn(
             summary["inflight_quantum"] = priority_command_id
             return result
 
+        priority_writer_factory = _recovery_priority_conn_factory(
+            default_trade_conn_factory,
+            # An unresolved submit is current unknown capital exposure, not
+            # historical maintenance. Give it the same typed priority as the
+            # live capital lane while retaining the full-sweep deadline.
+            scope="live_tick",
+            deadline_monotonic=apply_deadline,
+        )
         priority_apply_conn_factory = _recovery_apply_conn_factory(
-            conn_factory,
+            priority_writer_factory,
             scope="full",
             deadline_monotonic=apply_deadline,
             # Acquisition still yields to an existing monitor owner/waiter.
