@@ -4655,6 +4655,169 @@ def test_deploy_live_loaded_restart_admits_fresh_probability_and_no_action_mix(
     assert "probability_degraded_positions=1" in detail
 
 
+def test_deploy_live_quote_only_repair_handoff_requires_exact_current_held_book(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_quote_only_repair", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        INSERT INTO position_current VALUES (
+            'pos-quote', 'condition-quote', 'buy_no', 'yes-token', 'no-token'
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 1, 0, 1, ?, ?, ?)",
+        (
+            "condition-quote",
+            "no-token",
+            "0.70",
+            now.isoformat(),
+            (now + timedelta(minutes=3)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    position_ids = ("pos-fresh", "pos-quote")
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        monitored_position_ids=position_ids,
+        fresh_position_count=1,
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+        fresh_failed_monitor_no_action_position_count=0,
+        fresh_failed_monitor_no_action_position_ids=(),
+        fresh_failed_monitor_other_classified_position_ids=("pos-quote",),
+        restart_blocking_position_count=0,
+        restart_blocking_position_ids=(),
+        settlement_recoverable_position_count=0,
+        settlement_recoverable_position_ids=(),
+        stale_classified_position_ids=(),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._quote_only_monitor_repair_handoff_admission(
+        trade_db=trade_db,
+        obligations={
+            "open_position_count": 2,
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is True
+    assert "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "exact_held_books=current" in detail
+
+
+def test_deploy_live_quote_only_repair_handoff_rejects_expired_held_book(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_quote_only_expired", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        INSERT INTO position_current VALUES (
+            'pos-quote', 'condition-quote', 'buy_yes', 'yes-token', 'no-token'
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 1, 0, 1, ?, ?, ?)",
+        (
+            "condition-quote",
+            "yes-token",
+            "0.60",
+            (now - timedelta(minutes=4)).isoformat(),
+            (now - timedelta(minutes=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    position_ids = ("pos-fresh", "pos-quote")
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        monitored_position_ids=position_ids,
+        fresh_position_count=1,
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+        fresh_failed_monitor_no_action_position_count=0,
+        fresh_failed_monitor_no_action_position_ids=(),
+        fresh_failed_monitor_other_classified_position_ids=("pos-quote",),
+        restart_blocking_position_count=0,
+        restart_blocking_position_ids=(),
+        settlement_recoverable_position_count=0,
+        settlement_recoverable_position_ids=(),
+        stale_classified_position_ids=(),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: pytest.fail("expired exact book must refuse before sidecar proof"),
+    )
+
+    ok, detail = dl._quote_only_monitor_repair_handoff_admission(
+        trade_db=trade_db,
+        obligations={
+            "open_position_count": 2,
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is False
+    assert detail.endswith("exact_held_book_not_current")
+
+
 def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(
     monkeypatch, tmp_path
 ):

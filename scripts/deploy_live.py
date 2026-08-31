@@ -1784,6 +1784,232 @@ def _fresh_failed_monitor_repair_handoff_admission(
     )
 
 
+def _current_quote_only_repair_snapshot_ids(
+    trade_db: Path,
+    *,
+    position_ids: tuple[str, ...],
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Return quote-gap positions with exact current local held-book proof."""
+
+    wanted = tuple(dict.fromkeys(str(value).strip() for value in position_ids))
+    if not wanted or any(not position_id for position_id in wanted):
+        return ()
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    placeholders = ", ".join("?" for _ in wanted)
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        position_columns = _sqlite_table_columns(conn, "position_current")
+        snapshot_columns = _sqlite_table_columns(
+            conn, "executable_market_snapshot_latest"
+        )
+        if not {
+            "position_id",
+            "condition_id",
+            "direction",
+            "token_id",
+            "no_token_id",
+        }.issubset(position_columns) or not {
+            "condition_id",
+            "selected_outcome_token_id",
+            "active",
+            "closed",
+            "accepting_orders",
+            "orderbook_top_bid",
+            "captured_at",
+            "freshness_deadline",
+        }.issubset(snapshot_columns):
+            return ()
+        rows = conn.execute(
+            f"""
+            SELECT pc.position_id,
+                   CASE pc.direction
+                       WHEN 'buy_yes' THEN pc.token_id
+                       WHEN 'buy_no' THEN pc.no_token_id
+                   END AS held_token_id,
+                   snapshot.selected_outcome_token_id,
+                   snapshot.active,
+                   snapshot.closed,
+                   snapshot.accepting_orders,
+                   snapshot.orderbook_top_bid,
+                   snapshot.captured_at,
+                   snapshot.freshness_deadline
+              FROM position_current AS pc
+              LEFT JOIN executable_market_snapshot_latest AS snapshot
+                ON snapshot.condition_id = pc.condition_id
+               AND snapshot.selected_outcome_token_id = CASE pc.direction
+                       WHEN 'buy_yes' THEN pc.token_id
+                       WHEN 'buy_no' THEN pc.no_token_id
+                   END
+             WHERE pc.position_id IN ({placeholders})
+            """,
+            wanted,
+        ).fetchall()
+    except (RuntimeError, sqlite3.Error):
+        return ()
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+    proven: set[str] = set()
+    for row in rows:
+        position_id = str(row["position_id"] or "").strip()
+        held_token_id = str(row["held_token_id"] or "").strip()
+        selected_token_id = str(row["selected_outcome_token_id"] or "").strip()
+        captured_at = _parse_iso_utc(row["captured_at"])
+        freshness_deadline = _parse_iso_utc(row["freshness_deadline"])
+        try:
+            held_bid = float(row["orderbook_top_bid"])
+        except (TypeError, ValueError):
+            continue
+        if (
+            position_id not in wanted
+            or position_id in proven
+            or not held_token_id
+            or selected_token_id != held_token_id
+            or row["active"] != 1
+            or row["closed"] != 0
+            or row["accepting_orders"] != 1
+            or captured_at is None
+            or freshness_deadline is None
+            or captured_at > now_utc
+            or freshness_deadline < now_utc
+            or not math.isfinite(held_bid)
+            or not 0.05 <= held_bid <= 0.95
+        ):
+            continue
+        proven.add(position_id)
+    return tuple(position_id for position_id in wanted if position_id in proven)
+
+
+def _quote_only_monitor_repair_handoff_admission(
+    *,
+    trade_db: Path,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+    repair_pending: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit an exact current-book repair over a loaded quote-age defect only.
+
+    SCOPE: restart permission while the loaded daemon misclassifies a freshly
+    fetched low-activity CLOB book by its last-mutation timestamp. DRAIN: the
+    replacement runtime uses fetch receipt time and must pass post-boot held
+    monitoring. RESET: any command, pause release, identity gap, expired exact
+    held-token snapshot, or loaded SHA convergence refuses immediately.
+    """
+
+    if not all(
+        isinstance(value, dict)
+        for value in (obligations, pause_state, handoff, repair_pending)
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:evidence_invalid"
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    monitored_ids = tuple(handoff.get("monitored_position_ids") or ())
+    monitored_set = {str(position_id).strip() for position_id in monitored_ids}
+    if pause_state.get("entries_paused") is not True:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:nonterminal_commands"
+    if repair_pending.get("pending") is not True:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:repair_code_not_pending"
+    if (
+        open_count <= 0
+        or len(expected_ids) != open_count
+        or len(expected_set) != open_count
+        or len(monitored_ids) != open_count
+        or len(monitored_set) != open_count
+        or monitored_set != expected_set
+        or int(handoff.get("open_position_count") or 0) != open_count
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:canonical_open_identity_incomplete"
+    if (
+        int(handoff.get("future_monitor_event_count") or 0) != 0
+        or int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0
+        or int(handoff.get("reauction_handoff_position_count") or 0) != 0
+        or handoff.get("quote_only_stale_shape_valid") is not True
+        or handoff.get("fresh_failed_monitor_duplicate_position_ids")
+        or handoff.get("fresh_failed_monitor_timestamp_stale_position_ids")
+        or handoff.get("stale_classified_position_ids")
+        or handoff.get("missing_monitor_timestamp_position_ids")
+        or handoff.get("invalid_monitor_timestamp_position_ids")
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:current_partition_invalid"
+
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    quote_ids = tuple(handoff.get("quote_only_stale_position_ids") or ())
+    no_action_ids = tuple(
+        handoff.get("fresh_failed_monitor_no_action_position_ids") or ()
+    )
+    other_ids = tuple(
+        handoff.get("fresh_failed_monitor_other_classified_position_ids") or ()
+    )
+    probability_set = {str(position_id).strip() for position_id in probability_ids}
+    quote_set = {str(position_id).strip() for position_id in quote_ids}
+    no_action_set = {str(position_id).strip() for position_id in no_action_ids}
+    other_set = {str(position_id).strip() for position_id in other_ids}
+    fresh_count = int(handoff.get("fresh_position_count") or 0)
+    if (
+        not quote_ids
+        or len(probability_ids)
+        != int(handoff.get("probability_degraded_position_count") or 0)
+        or len(quote_ids) != int(handoff.get("quote_only_stale_position_count") or 0)
+        or len(no_action_ids)
+        != int(handoff.get("fresh_failed_monitor_no_action_position_count") or 0)
+        or len(probability_set) != len(probability_ids)
+        or len(quote_set) != len(quote_ids)
+        or len(no_action_set) != len(no_action_ids)
+        or probability_set & quote_set
+        or probability_set & no_action_set
+        or quote_set & no_action_set
+        or other_set != probability_set | quote_set
+        or not (probability_set | quote_set | no_action_set).issubset(expected_set)
+        or fresh_count + len(probability_set | quote_set | no_action_set)
+        != open_count
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:open_partition_incomplete"
+    restart_ids = {
+        str(position_id).strip()
+        for position_id in tuple(handoff.get("restart_blocking_position_ids") or ())
+    }
+    settlement_ids = {
+        str(position_id).strip()
+        for position_id in tuple(handoff.get("settlement_recoverable_position_ids") or ())
+    }
+    if not restart_ids.issubset(no_action_set) or not settlement_ids.issubset(
+        no_action_set
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_invalid"
+
+    snapshot_ids = _current_quote_only_repair_snapshot_ids(
+        trade_db,
+        position_ids=quote_ids,
+    )
+    if set(snapshot_ids) != quote_set or len(snapshot_ids) != len(quote_ids):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:exact_held_book_not_current"
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_ADMITTED: "
+        f"open_positions={open_count} fresh_positions={fresh_count} "
+        f"quote_only_positions={len(quote_ids)} exact_held_books=current "
+        "durable_entries_pause=true nonterminal_commands=0 "
+        "restart_permission_only=true",
+    )
+
+
 def _exact_v4_reauction_restart_handoff_ids(
     conn: sqlite3.Connection,
     *,
@@ -2156,12 +2382,24 @@ def _loaded_live_restart_obligation_gate(
             )
             if fresh_failed_ok:
                 return True, f"loaded live-trading {fresh_failed_detail}"
+            quote_only_ok, quote_only_detail = (
+                _quote_only_monitor_repair_handoff_admission(
+                    trade_db=trade_db,
+                    obligations=obligations,
+                    pause_state=pause_state,
+                    handoff=handoff,
+                    repair_pending=_loaded_live_runtime_repair_pending(),
+                )
+            )
+            if quote_only_ok:
+                return True, f"loaded live-trading {quote_only_detail}"
             return (
                 False,
                 "loaded live-trading repair handoff is not current: "
                 f"open_positions={open_count} evidence={handoff} "
                 f"stuck_monitor_recovery={stuck_detail} "
-                f"fresh_failed_monitor_repair_handoff={fresh_failed_detail}",
+                f"fresh_failed_monitor_repair_handoff={fresh_failed_detail} "
+                f"quote_only_monitor_repair_handoff={quote_only_detail}",
             )
         return (
             True,
