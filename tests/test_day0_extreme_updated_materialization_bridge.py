@@ -2613,6 +2613,24 @@ def test_past_nonheld_day0_seed_returns_to_background_cleanup(
     assert current_path.name in priority_names
 
 
+def test_materialization_lanes_keep_independent_seed_cursors(tmp_path) -> None:
+    """Priority progress cannot move the background cleanup frontier."""
+    request_dir = tmp_path / "requests"
+
+    assert materialization_queue._day0_enqueue_ownership_cursor_path(
+        request_dir,
+        lane=materialization_queue.MATERIALIZATION_LANE_ALL,
+    ) == tmp_path / ".replacement-day0-enqueue.cursor"
+    assert materialization_queue._day0_enqueue_ownership_cursor_path(
+        request_dir,
+        lane=materialization_queue.MATERIALIZATION_LANE_PRIORITY,
+    ) == tmp_path / ".replacement-day0-enqueue.cursor.priority"
+    assert materialization_queue._day0_enqueue_ownership_cursor_path(
+        request_dir,
+        lane=materialization_queue.MATERIALIZATION_LANE_BACKGROUND,
+    ) == tmp_path / ".replacement-day0-enqueue.cursor.background"
+
+
 def test_queue_lock_does_not_double_acquire_during_owner_publication(
     tmp_path, monkeypatch
 ) -> None:

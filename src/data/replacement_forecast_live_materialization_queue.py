@@ -3469,9 +3469,14 @@ def _try_claim_priority_request(
     )
 
 
-def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
-    """Return the hidden, non-seed cursor co-located with queue state."""
-    return request_dir.parent / _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
+def _day0_enqueue_ownership_cursor_path(request_dir: Path, *, lane: str) -> Path:
+    """Return one durable inspection cursor per independently scheduled lane."""
+    name = (
+        _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
+        if lane == MATERIALIZATION_LANE_ALL
+        else f"{_DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME}.{lane}"
+    )
+    return request_dir.parent / name
 
 
 def _current_money_risk_seed_prefixes(
@@ -3931,7 +3936,7 @@ def _prepare_seed_requests(
     processed: list[str] = []
     failed: list[str] = []
     reasons: list[str] = []
-    cursor_path = _day0_enqueue_ownership_cursor_path(request_dir)
+    cursor_path = _day0_enqueue_ownership_cursor_path(request_dir, lane=lane)
     raw_snapshot = tuple(sorted(seed_files, key=lambda path: path.name))
     rotated_raw_snapshot = _rotate_seed_snapshot_after_cursor(
         raw_snapshot,
