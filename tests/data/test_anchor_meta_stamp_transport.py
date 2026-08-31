@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused/audited: 2026-08-31
 # Authority basis: operator directive 2026-06-11 (most-correct method, never starve on
 #   data again) — K4.0b(f) anchor transport ladder. Relationship tests: the meta-stamped
 #   path is unconstructable for a cycle the provider does not declare, atomicity is
@@ -18,6 +18,7 @@ import pytest
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     RUN_AUTHORITY_META_DECLARED,
     build_anchor_request,
+    fetch_openmeteo_ifs9_model_meta,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
 )
 
@@ -43,6 +44,27 @@ def _request(run: str = "2026-06-11T00:00:00"):
 
 
 class TestMetaStampedFetch:
+    def test_provider_metadata_does_not_consume_forecast_api_quota(self, monkeypatch):
+        import src.data.openmeteo_client as omc
+
+        calls = []
+
+        def fake_fetch(url, params, **kwargs):
+            calls.append((url, params, kwargs))
+            return {
+                "last_run_initialisation_time": 1781136000,
+                "last_run_availability_time": 1781139600,
+                "last_run_modification_time": 1781139600,
+            }
+
+        monkeypatch.setattr(omc, "fetch", fake_fetch)
+
+        fetch_openmeteo_ifs9_model_meta()
+
+        assert calls[0][1] == {}
+        assert calls[0][2]["endpoint_label"] == "openmeteo_ecmwf_ifs9_model_meta"
+        assert calls[0][2]["count_toward_quota"] is False
+
     def test_declared_run_mismatch_refuses(self, monkeypatch):
         metas = [_meta("2026-06-10T18:00:00", "2026-06-11T01:00:00", "2026-06-11T01:00:00")]
 
