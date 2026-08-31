@@ -2211,6 +2211,11 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         ingest_main,
+        "_REPLACEMENT_HELD_PARTITION_FIRST",
+        "critical",
+    )
+    monkeypatch.setattr(
+        ingest_main,
         "_replacement_current_target_poll_timeout_seconds",
         lambda _poll_seconds: timeout_s,
     )
@@ -2316,6 +2321,34 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         )
     else:
         assert "maintenance_errors" not in result
+
+
+def test_replacement_held_partitions_alternate_first_lane(monkeypatch) -> None:
+    """Repeated timeboxes cannot permanently strand the ordinary held partition."""
+    import src.ingest_main as ingest_main
+
+    critical_scope = ("NYC", "2026-08-17", "low")
+    ordinary_scope = ("Busan", "2026-08-19", "high")
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_HELD_PARTITION_FIRST",
+        "critical",
+    )
+
+    assert ingest_main._next_replacement_held_partition_order(
+        (critical_scope,),
+        (ordinary_scope,),
+    ) == (
+        ("critical", (critical_scope,)),
+        ("ordinary", (ordinary_scope,)),
+    )
+    assert ingest_main._next_replacement_held_partition_order(
+        (critical_scope,),
+        (ordinary_scope,),
+    ) == (
+        ("ordinary", (ordinary_scope,)),
+        ("critical", (critical_scope,)),
+    )
 
 
 def test_replacement_maintenance_repairs_full_extras_before_reseed(

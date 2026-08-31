@@ -79,6 +79,7 @@ _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
 _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
+_REPLACEMENT_HELD_PARTITION_FIRST = "critical"
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -927,6 +928,25 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
 
 
 _REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS = 8.0
+
+
+def _next_replacement_held_partition_order(
+    critical_scopes: tuple[tuple[str, str, str], ...],
+    ordinary_scopes: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]:
+    """Alternate the first held lane so one slow provider wave cannot starve its twin."""
+    global _REPLACEMENT_HELD_PARTITION_FIRST
+    partitions = (
+        ("critical", critical_scopes),
+        ("ordinary", ordinary_scopes),
+    )
+    if not critical_scopes or not ordinary_scopes:
+        return tuple((lane, scopes) for lane, scopes in partitions if scopes)
+    first = _REPLACEMENT_HELD_PARTITION_FIRST
+    _REPLACEMENT_HELD_PARTITION_FIRST = (
+        "ordinary" if first == "critical" else "critical"
+    )
+    return partitions if first == "critical" else tuple(reversed(partitions))
 
 
 def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
@@ -2656,12 +2676,10 @@ def _replacement_maintenance_tick():
             held_budget_s / max(1, partition_count),
         )
         partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
-        for lane, scopes in (
-            ("critical", critical_scopes),
-            ("ordinary", ordinary_scopes),
+        for lane, scopes in _next_replacement_held_partition_order(
+            critical_scopes,
+            ordinary_scopes,
         ):
-            if not scopes:
-                continue
             kwargs: dict[str, object] = {
                 "max_wall_clock_seconds": held_lane_budget,
                 "required_scopes": scopes,
