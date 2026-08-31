@@ -649,23 +649,14 @@ def _probe_resolved_available_cycle() -> datetime | None:
 
 
 def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
-    """Newest cycle fetchable by the BPF extras transport itself.
+    """Newest provider-confirmed cycle for a BPF download attempt.
 
-    The anchor lane can use a ladder (single-runs, model meta, bucket). BPF
-    extras are persisted from the Open-Meteo single-runs API, so an anchor-only
-    bucket/meta cycle is not enough proof that extras can fetch the same run.
+    Availability preflight and data capture must not both spend single-runs
+    quota. Free provider metadata/S3 selects the exact cycle; the BPF downloader
+    itself proves single-runs transport availability and durably records 400,
+    cooldown, coverage, and written rows. No failed download becomes data.
     """
-    from src.data.replacement_cycle_availability import (  # noqa: PLC0415
-        newest_complete_cycle,
-        probe_openmeteo_single_run_available,
-        resolve_anchor_cycle_availability,
-    )
-
-    availability = resolve_anchor_cycle_availability(
-        datetime.now(timezone.utc),
-        probe_anchor=probe_openmeteo_single_run_available,
-    )
-    return newest_complete_cycle(availability)
+    return _probe_resolved_available_cycle()
 
 
 def _critical_scopes_missing_current_anchor(
@@ -1064,10 +1055,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
                 "cooldown_seconds": cooldown_seconds,
             }
-        # RUN-SELECTION AUTHORITY (2026-06-19): the capture cycle is the newest cycle
-        # provably fetchable by the BPF extras transport itself. The anchor lane can
-        # advance through meta/bucket before the single-runs API serves the same run;
-        # extras must not follow that anchor-only cycle and then fail every target.
+        # RUN-SELECTION AUTHORITY: free provider metadata/S3 chooses the exact
+        # cycle. The real extras download, not a duplicate paid preflight,
+        # proves whether single-runs can serve it and records any refusal.
         cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
         if cycle is None:
             # The single-runs probe can be unavailable while the anchor lane has
@@ -2513,7 +2503,10 @@ def _record_bayes_precision_fusion_capture_health(
             },
         )
         return
-    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+    if (
+        status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+        and not report.get("global_models_unavailable")
+    ):
         cycle_raw = report.get("cycle")
         try:
             cycle = datetime.fromisoformat(str(cycle_raw).replace("Z", "+00:00"))
@@ -2525,6 +2518,7 @@ def _record_bayes_precision_fusion_capture_health(
                 cycle,
                 written=int(report.get("written_row_count", 0) or 0),
             )
+    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
         unavailable = report.get("global_models_unavailable")
         if unavailable:
             _write_scheduler_health(
@@ -2580,11 +2574,10 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
          servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
       B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
          ``_probe_resolved_bayes_precision_fusion_extras_cycle()`` — the newest cycle the
-         BPF extras single-runs transport itself can serve on the fixed 00/06/12/18Z grid
-         (replacement_cycle_availability.py:47), monotone in publish order. Within ~6h the
-         next single-runs cycle publishes, the probe advances to C', the latch (keyed on C's
-         ISO) goes stale, and C' is healed from scratch. A permanently-unservable scope thus
-         halts looping for C but never poisons C+1.
+         provider metadata/S3 frontier declares on the fixed 00/06/12/18Z grid. The real
+         download is the single-runs availability proof. When the provider frontier advances
+         to C', the latch (keyed on C's ISO) goes stale and C' is healed from scratch. A
+         permanently-unservable scope thus halts looping for C but never poisons C+1.
          => INVARIANT: for any cycle C the fan-out runs on finitely many ticks — bounded by
             min(ticks-until-covered-count-stops-rising, C's ~6h active-probe window) — and the
             unservable residual is surfaced (logged), never silently looped on.
@@ -3155,7 +3148,14 @@ def _replacement_cycle_availability_poll_if_needed(
             # and is a TRANSIENT error, NOT proof the residual is unservable — latching on it
             # would wrongly suppress the self-healing re-run. (Distinguishes "unservable ->
             # complete-with-gap" from "transient fan-out error -> keep re-running".)
-            if _extras_cycle is not None and _bpf_status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+            if (
+                _extras_cycle is not None
+                and _bpf_status
+                == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+                and not bayes_precision_fusion_report.get(
+                    "global_models_unavailable"
+                )
+            ):
                 _record_extras_fixpoint(
                     cfg,
                     _extras_cycle,

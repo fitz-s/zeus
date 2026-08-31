@@ -15,9 +15,10 @@ hours on stale bounds (RULE-1 audit, docs/evidence/rule1_audits/).
 
 This module replaces the guess with Open-Meteo anchor PROBES:
 
-- ``probe_openmeteo_single_run_available``: one minimal single-runs API request
-  (one probe city, forecast_hours=1) — their API answers 400 "model run is not available"
-  until the run is published, 200 after.
+- provider metadata plus the public S3 run manifest are the production
+  availability probes; they do not spend the same quota needed for data.
+- ``probe_openmeteo_single_run_available`` remains a direct diagnostic helper,
+  not a production preflight before the real download.
 - ``resolve_anchor_cycle_availability``: pure logic — walk candidate cycles newest→oldest
   from wall clock (NO lag constant anywhere in the decision) and report the anchor
   leg's published state.
@@ -148,9 +149,10 @@ def probe_bucket_run_declared(cycle: datetime) -> bool:
 class AnchorAvailabilityProbe:
     """One provider snapshot reused across one candidate-cycle decision.
 
-    Single-runs and bucket availability remain cycle-specific.  Model metadata
-    describes one provider-current run, so fetching it once per candidate was
-    redundant and made the 15-second poll deterministically exhaust daily quota.
+    Bucket availability remains cycle-specific. Model metadata describes one
+    provider-current run, so fetching it once per candidate was redundant and
+    made the 15-second poll deterministically exhaust daily quota. A metered
+    single-runs fallback is diagnostic-only and opt-in.
     """
 
     def __init__(
@@ -159,12 +161,14 @@ class AnchorAvailabilityProbe:
         urlopen: Callable[..., object] | None = None,
         meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
         cached_updates_path: str | Path | None = DEFAULT_MODEL_UPDATES_JSONL,
+        allow_metered_fallback: bool = False,
     ) -> None:
         self._urlopen = urlopen
         self._meta_fetch = meta_fetch
         self._cached_updates_path = (
             None if cached_updates_path is None else Path(cached_updates_path)
         )
+        self._allow_metered_fallback = bool(allow_metered_fallback)
         self._meta_loaded = False
         self._meta: Mapping[str, Any] | None = None
 
@@ -219,8 +223,8 @@ class AnchorAvailabilityProbe:
         # Free signals first: the cached model meta and the public S3 bucket
         # manifest confirm publication without spending API quota. The metered
         # single-runs probe is the last rung, paid only when neither free
-        # signal confirms -- before this reorder it ran FIRST on every call
-        # and burned one quota unit per pre-publication 400.
+        # signal confirms. The paid diagnostic fallback is opt-in; production
+        # lets the real downloader prove transport availability.
         meta = self._model_meta()
         if meta is not None:
             try:
@@ -243,6 +247,8 @@ class AnchorAvailabilityProbe:
                     return probe_bucket_run_declared(cycle)
         if probe_bucket_run_declared(cycle):
             return True
+        if not self._allow_metered_fallback:
+            return False
         return probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen)
 
 
@@ -251,17 +257,13 @@ def probe_anchor_available_any(
     *,
     urlopen: Callable[..., object] | None = None,
 ) -> bool:
-    """True iff the anchor leg can be fetched for this cycle by ANY ladder transport.
+    """True iff a free provider probe declares the anchor cycle fetchable.
 
-    Transport ladder mirror (K4.0b(f)): run-pinned single-runs OR the meta-stamped
-    standard API (provider meta declares exactly this run as its current completed run)
-    OR the S3 data_spatial bucket declaring the run (rung 3 — serves a run's steps the
-    moment they are written, hours before the API publishes; 2026-06-11 the 00Z run was
-    bucket-only while meta still declared 06-10T06Z). Every path yields a journalable
-    anchor artifact with explicit run authority, so the availability poll may treat the
-    leg as published when any probe passes. The probe set MUST stay a superset-mirror of
-    the downloader's ladder: a rung the probe cannot see is a rung the run-selection
-    authority will starve (the downloader only ever fetches probe-confirmed cycles)."""
+    Provider metadata or the S3 data_spatial bucket yields explicit run
+    authority. The real downloader remains the transport proof and records any
+    provider refusal; production must not spend one request probing and another
+    downloading the same bytes.
+    """
     return AnchorAvailabilityProbe(urlopen=urlopen)(cycle)
 
 

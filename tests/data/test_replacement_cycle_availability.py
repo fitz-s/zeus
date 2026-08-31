@@ -243,9 +243,28 @@ class TestProbeResolvedSelection:
                 "__exit__": lambda self, *exc: None,
             })(),
             meta_fetch=lambda: {},
+            allow_metered_fallback=True,
         )
 
         assert probe(_dt("2026-06-11T18:00:00")) is True
+
+    def test_production_probe_does_not_meter_when_free_probes_are_unavailable(
+        self, monkeypatch
+    ):
+        import src.data.replacement_cycle_availability as rca
+
+        metered_calls: list[datetime] = []
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: metered_calls.append(cycle) or True,
+        )
+
+        probe = AnchorAvailabilityProbe(meta_fetch=lambda: {})
+
+        assert probe(_dt("2026-06-11T18:00:00")) is False
+        assert metered_calls == []
 
     def test_production_single_run_probe_uses_shared_priority_quota(self, monkeypatch):
         import src.data.replacement_cycle_availability as rca
