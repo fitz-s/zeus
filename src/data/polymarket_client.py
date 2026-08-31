@@ -37,7 +37,6 @@ from src.data.polymarket_request_governor import (
     polymarket_request_governor,
 )
 from src.contracts.executable_market_snapshot import (
-    FRESHNESS_WINDOW_DEFAULT,
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
     fee_rate_fraction_from_details,
@@ -991,10 +990,14 @@ class PolymarketClient:
                         if asset_id != token_id:
                             invalid_book_progress = True
                             continue
+                        # A successful current /books response is observed at
+                        # ``progress_at``.  CLOB leaves the payload timestamp at
+                        # the book's last mutation, so an inactive but currently
+                        # re-fetched book may legitimately carry an old value.
+                        # Keep the source clock for shape validation, but never
+                        # turn content age into transport staleness.
                         if raw_source_at not in (None, "") and (
-                            source_at is None
-                            or source_at > progress_at
-                            or progress_at - source_at > FRESHNESS_WINDOW_DEFAULT
+                            source_at is None or source_at > progress_at
                         ):
                             invalid_book_progress = True
                             continue

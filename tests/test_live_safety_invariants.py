@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-29
+# Last reused/audited: 2026-08-31
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -14297,7 +14297,7 @@ def test_held_book_partial_progress_survives_later_chunk_timeout(monkeypatch):
     assert context.process.kwargs["args"][3] == pm._HELD_ORDERBOOK_CHUNK_SIZE == 8
 
 
-def test_held_book_stale_server_timestamp_is_not_executable(monkeypatch):
+def test_held_book_old_last_mutation_timestamp_uses_current_fetch_receipt(monkeypatch):
     from src.data import polymarket_client as pm
 
     payloads = [
@@ -14366,9 +14366,17 @@ def test_held_book_stale_server_timestamp_is_not_executable(monkeypatch):
         timeout_seconds=0.5,
     )
 
-    assert result == {}
-    assert result.terminal_reason == "invalid_book_progress"
-    assert result.captured_at is None
+    assert result == {
+        "stale": {
+            "asset_id": "stale",
+            "timestamp": "1",
+            "bids": [],
+            "asks": [],
+        }
+    }
+    assert result.terminal_reason == "complete"
+    assert result.captured_at is not None
+    assert result.captured_at_by_token == {"stale": result.captured_at}
 
 
 def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout(
