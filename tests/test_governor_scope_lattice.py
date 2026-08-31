@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-31
 # Authority basis: docs/evidence/live_order_pathology/2026-06-22_governor_scope_lattice_decision.md
 #                  (frontier consult REQ-20260621-211850, Pro Extended, HIGH confidence)
 """Scope-aware governor gating: a SCOPED single-market unknown side effect triggers
@@ -374,7 +374,8 @@ def _insert_reconcile_finding(
     conn.commit()
 
 
-def test_classify_local_orphan_reconcile_finding_by_command_market(conn):
+@pytest.mark.parametrize("kind", ["local_orphan_order", "exchange_ghost_order"])
+def test_classify_order_reconcile_finding_by_command_market(conn, kind):
     _insert_review_required(
         conn,
         command_id="c-orphan",
@@ -384,7 +385,7 @@ def test_classify_local_orphan_reconcile_finding_by_command_market(conn):
     _insert_reconcile_finding(
         conn,
         finding_id="f-orphan",
-        kind="local_orphan_order",
+        kind=kind,
         subject_id="venue-orphan",
     )
 
@@ -554,7 +555,8 @@ def test_refresh_global_allocator_scoped_market_does_not_freeze_book(conn, monke
         clear_global_allocator()
 
 
-def test_refresh_global_allocator_scoped_orphan_does_not_freeze_book(conn):
+@pytest.mark.parametrize("kind", ["local_orphan_order", "exchange_ghost_order"])
+def test_refresh_global_allocator_scoped_orphan_does_not_freeze_book(conn, kind):
     from src.risk_allocator.governor import (
         AllocationDenied,
         assert_global_allocation_allows,
@@ -571,7 +573,7 @@ def test_refresh_global_allocator_scoped_orphan_does_not_freeze_book(conn):
     _insert_reconcile_finding(
         conn,
         finding_id="f-orphan",
-        kind="local_orphan_order",
+        kind=kind,
         subject_id="venue-orphan",
     )
     snap = refresh_global_allocator(

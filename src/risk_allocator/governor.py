@@ -1772,7 +1772,7 @@ def classify_reconcile_finding_scope(
             joins: list[str] = []
             if {"venue_order_id", "market_id"}.issubset(command_columns):
                 joins.append(
-                    "(f.kind = 'local_orphan_order' "
+                    "(f.kind IN ('local_orphan_order', 'exchange_ghost_order') "
                     "AND vc.venue_order_id = f.subject_id)"
                 )
             if {"token_id", "market_id", "intent_kind"}.issubset(command_columns):
@@ -1810,6 +1810,7 @@ def classify_reconcile_finding_scope(
         row = _row_mapping(raw_row)
         market = str(row.get("market_id") or "").strip()
         if str(row.get("kind") or "") in {
+            "exchange_ghost_order",
             "local_orphan_order",
             "position_drift",
             "unrecorded_trade",
