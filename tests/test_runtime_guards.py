@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-26; last_reused=2026-08-26
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-26
+# Last reused/audited: 2026-08-31
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -3821,6 +3821,87 @@ def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
 
     assert cancelled_count == 0
     assert cancelled == []
+
+
+def test_stale_order_cleanup_durably_cancels_terminal_command_reappeared_open(tmp_path):
+    conn = get_connection(tmp_path / "terminal-reappeared-order.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            'cmd-terminal-reappeared', 'snap-terminal', 'env-terminal',
+            'pos-terminal', 'dec-terminal', 'idem-terminal', 'ENTRY',
+            'market-terminal', 'token-terminal', 'BUY', 10, 0.25,
+            'order-terminal-reappeared', 'EXPIRED', NULL,
+            '2026-08-31T00:00:00+00:00', '2026-08-31T00:01:00+00:00', NULL
+        )
+        """
+    )
+    conn.commit()
+    cancel_observed_after_request: list[str] = []
+
+    class DummyClob:
+        def get_open_orders(self):
+            return [{"id": "order-terminal-reappeared", "status": "LIVE"}]
+
+        def cancel_order(self, order_id):
+            request = conn.execute(
+                """
+                SELECT event_type
+                  FROM provenance_envelope_events
+                 WHERE subject_type = 'order' AND subject_id = ?
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+            assert request["event_type"] == "TERMINAL_ORDER_CANCEL_REQUESTED"
+            cancel_observed_after_request.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        DummyClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_terminal_reappeared")),
+        conn=conn,
+    )
+
+    assert cancelled_count == 1
+    assert cancel_observed_after_request == ["order-terminal-reappeared"]
+    command = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-terminal-reappeared'"
+    ).fetchone()
+    assert command["state"] == "EXPIRED"
+    provenance = conn.execute(
+        """
+        SELECT event_type
+          FROM provenance_envelope_events
+         WHERE subject_type = 'order' AND subject_id = 'order-terminal-reappeared'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in provenance] == [
+        "TERMINAL_ORDER_CANCEL_REQUESTED",
+        "TERMINAL_ORDER_CANCEL_ACKED",
+    ]
+    finding = conn.execute(
+        """
+        SELECT resolved_at, resolution
+          FROM exchange_reconcile_findings
+         WHERE kind = 'local_orphan_order'
+           AND subject_id = 'order-terminal-reappeared'
+           AND context = 'periodic'
+        """
+    ).fetchone()
+    assert finding["resolved_at"] is not None
+    assert finding["resolution"] == "terminal_reappeared_order_cancel_confirmed"
+    conn.close()
 
 
 def test_stale_order_cleanup_quarantines_position_current_owned_order(monkeypatch, tmp_path):

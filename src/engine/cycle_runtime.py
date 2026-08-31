@@ -11,6 +11,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -127,6 +128,9 @@ _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 _ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES)
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
+)
+_TERMINAL_REAPPEARED_CANCEL_STATES = frozenset(
+    {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
 _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS = 6 * 60 * 60
 _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES = frozenset({"economically_closed"})
@@ -2157,6 +2161,126 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
     return reconcile_stats, True
 
 
+def _canonical_payload_hash(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            dict(payload),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _cancel_reappeared_terminal_order(
+    conn: sqlite3.Connection,
+    clob,
+    *,
+    command_id: str,
+    command_state: str,
+    venue_order_id: str,
+    deps,
+) -> bool:
+    """Durably cancel one venue-open order whose local command is terminal.
+
+    The terminal command remains terminal: its earlier no-fill conclusion is
+    historical local truth, while the current CLOB-open order is an external
+    exposure obligation.  A reconcile finding plus immutable provenance is
+    committed before the venue call so a crash cannot lose the cancellation
+    debt or fabricate a command-state resurrection.
+    """
+
+    from src.execution.exchange_reconcile import record_finding, resolve_finding
+    from src.execution.exit_safety import parse_cancel_response
+    from src.state.venue_command_repo import append_provenance_event
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    request_payload = {
+        "schema_version": 1,
+        "reason": "terminal_command_venue_order_reappeared_open",
+        "command_id": command_id,
+        "command_state": command_state,
+        "venue_order_id": venue_order_id,
+        "source": "authenticated_open_orders",
+    }
+    # INV-47 SCOPE: exactly this command/order identity. DRAIN: this recurring
+    # cleanup retries the durable finding and M5 re-proves point/order truth.
+    # RESET: a confirmed cancel resolves the finding; an unknown outcome stays
+    # unresolved until authenticated terminal/absence proof arrives.
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=venue_order_id,
+        context="periodic",
+        evidence=request_payload,
+        recorded_at=observed_at,
+    )
+    append_provenance_event(
+        conn,
+        subject_type="order",
+        subject_id=venue_order_id,
+        event_type="TERMINAL_ORDER_CANCEL_REQUESTED",
+        payload_hash=_canonical_payload_hash(request_payload),
+        payload_json=request_payload,
+        source="OPERATOR",
+        observed_at=observed_at,
+    )
+    conn.commit()
+
+    try:
+        raw = clob.cancel_order(venue_order_id)
+        outcome = parse_cancel_response(raw)
+    except Exception as exc:  # possible venue side effect; preserve UNKNOWN
+        raw = {
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+        }
+        outcome = None
+
+    result_at = datetime.now(timezone.utc).isoformat()
+    confirmed = bool(outcome and is_cancel_confirmed_status(outcome.status))
+    result_payload = {
+        "schema_version": 1,
+        "reason": "terminal_command_venue_order_reappeared_open",
+        "command_id": command_id,
+        "command_state": command_state,
+        "venue_order_id": venue_order_id,
+        "cancel_status": outcome.status if outcome is not None else "UNKNOWN",
+        "cancel_outcome": raw,
+    }
+    append_provenance_event(
+        conn,
+        subject_type="order",
+        subject_id=venue_order_id,
+        event_type=(
+            "TERMINAL_ORDER_CANCEL_ACKED"
+            if confirmed
+            else "TERMINAL_ORDER_CANCEL_UNKNOWN"
+        ),
+        payload_hash=_canonical_payload_hash(result_payload),
+        payload_json=result_payload,
+        source="REST" if outcome is not None else "OPERATOR",
+        observed_at=result_at,
+    )
+    if confirmed:
+        resolve_finding(
+            conn,
+            finding.finding_id,
+            resolution="terminal_reappeared_order_cancel_confirmed",
+            resolved_by="src.engine.cycle_runtime",
+            resolved_at=result_at,
+        )
+    conn.commit()
+    if not confirmed:
+        deps.logger.warning(
+            "Terminal command order cancel remains unresolved command=%s order=%s status=%s",
+            command_id,
+            venue_order_id,
+            result_payload["cancel_status"],
+        )
+    return confirmed
+
+
 def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
     """Cancel exchange orders that are not tracked locally.
 
@@ -2199,13 +2323,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = extract_order_id(order)
-        if not order_id or order_id in tracked_order_ids:
-            continue
-        if order_id in locally_owned_order_ids:
-            deps.logger.warning(
-                "Open order %s has durable local ownership — quarantining instead of cancelling",
-                order_id,
-            )
+        if not order_id:
             continue
         if conn is None:
             deps.logger.warning(
@@ -2216,7 +2334,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
         try:
             row = conn.execute(
                 """
-                SELECT command_id
+                SELECT command_id, state
                   FROM venue_commands
                  WHERE venue_order_id = ?
                  ORDER BY updated_at DESC, created_at DESC
@@ -2243,13 +2361,42 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                 order_id,
             )
             continue
+        command_id = str(row["command_id"] if hasattr(row, "keys") else row[0])
+        command_state = str(
+            row["state"] if hasattr(row, "keys") else row[1]
+        ).upper()
+        if command_state in _TERMINAL_REAPPEARED_CANCEL_STATES:
+            try:
+                if _cancel_reappeared_terminal_order(
+                    conn,
+                    clob,
+                    command_id=command_id,
+                    command_state=command_state,
+                    venue_order_id=order_id,
+                    deps=deps,
+                ):
+                    cancelled += 1
+            except Exception as exc:
+                deps.logger.warning(
+                    "Terminal command order durable cancel failed for %s: %s",
+                    order_id,
+                    exc,
+                )
+            continue
+        if order_id in tracked_order_ids:
+            continue
+        if order_id in locally_owned_order_ids:
+            deps.logger.warning(
+                "Open order %s has durable local ownership — quarantining instead of cancelling",
+                order_id,
+            )
+            continue
         try:
             from src.execution.exit_safety import request_cancel_for_command
 
-            command_id = row["command_id"] if hasattr(row, "keys") else row[0]
             outcome = request_cancel_for_command(
                 conn,
-                str(command_id),
+                command_id,
                 lambda venue_order_id: clob.cancel_order(venue_order_id),
             )
             if is_cancel_confirmed_status(outcome.status):
