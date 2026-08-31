@@ -136,6 +136,10 @@ _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
 _FULL_SWEEP_BUDGET_SECONDS = 45.0
+# A priority unknown-submit quantum owns account truth plus one exact order
+# lookup.  Fifteen seconds proved sufficient for account pagination but left no
+# time for the identity read; keep this bounded below the full sweep budget.
+_FULL_PRIORITY_ACCOUNT_TRUTH_DEADLINE_SECONDS = 30.0
 # Full recovery is deliberately background work.  Keep each matched-fact apply
 # lease to one command so a monitor that registers mid-sweep can take the next
 # writer turn instead of waiting for a historical debt scan to finish.
@@ -190,6 +194,14 @@ def _scheduled_venue_snapshot_kwargs(
             raise ValueError(f"{scope} recovery requires a shared deadline")
         kwargs["deadline_monotonic"] = deadline_monotonic
         kwargs["derive_orders_from_account_truth"] = True
+    if scope == "full" and priming.get("full_priority_inflight_command_id"):
+        # SCOPE: one highest-priority UNKNOWN/SUBMIT_UNKNOWN_SIDE_EFFECT
+        # command. DRAIN: complete account truth plus its exact point read
+        # before any historical order maintenance. RESET: the command advances
+        # or remains the next bounded full-sweep continuation.
+        kwargs["account_truth_deadline_seconds"] = (
+            _FULL_PRIORITY_ACCOUNT_TRUTH_DEADLINE_SECONDS
+        )
     return kwargs
 
 
@@ -28952,10 +28964,15 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
                 if cid:
                     condition_ids.add(cid)
 
+    full_priority_rows: list[dict] = []
+
     # The in-flight scan (per-row _reconcile_row venue lookups).
     try:
         if scope == "restart_preflight":
             _harvest(_restart_preflight_unresolved_commands(conn))
+        elif scope == "full":
+            full_priority_rows = _full_quantum_candidates(conn)
+            _harvest(full_priority_rows[:1])
         else:
             _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
@@ -28985,6 +29002,28 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             "idempotency_keys": idem_keys,
             "condition_ids": condition_ids,
         }
+    if full_priority_rows:
+        priority = full_priority_rows[0]
+        priority_state = str(priority.get("state") or "")
+        priority_order_id = str(priority.get("venue_order_id") or "").strip()
+        if priority_order_id and priority_state in {
+            CommandState.UNKNOWN.value,
+            CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+        }:
+            # One exact unresolved side effect outranks every historical point
+            # read. Returning here prevents unrelated active/partial debt from
+            # consuming the shared account+order deadline first.
+            return {
+                "order_ids": order_ids,
+                "idempotency_keys": idem_keys,
+                "condition_ids": condition_ids,
+                "full_priority_inflight_command_id": str(
+                    priority.get("command_id") or ""
+                ),
+                "full_priority_inflight_quantum_remaining": (
+                    len(full_priority_rows) > 1
+                ),
+            }
     if scope in {"live_tick", "boot_fast"}:
         try:
             _harvest(
@@ -30850,6 +30889,15 @@ def _reconcile_passes_short_conn(
         ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         if scope == "restart_preflight":
             rows = _restart_preflight_unresolved_commands(conn)
+        elif scope == "full" and priming.get(
+            "full_priority_inflight_command_id"
+        ):
+            command_id = str(priming["full_priority_inflight_command_id"])
+            rows = [
+                row
+                for row in find_unresolved_commands(conn)
+                if str(row.get("command_id") or "") == command_id
+            ]
         elif scope == "full":
             rows = _full_quantum_candidates(conn)
         else:
@@ -30901,6 +30949,15 @@ def _reconcile_passes_short_conn(
             label="recovery.inflight_scan",
         ),
     )
+
+    if scope == "full" and priming.get("full_priority_inflight_command_id"):
+        summary["full_priority_inflight_only"] = True
+        summary["inflight_quantum_remaining"] = bool(
+            priming.get("full_priority_inflight_quantum_remaining")
+        )
+        summary["scope"] = scope
+        summary["deferred_full_sweep"] = True
+        return
 
     if scope == "restart_preflight":
         _client_pass(

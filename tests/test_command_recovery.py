@@ -36926,6 +36926,58 @@ def test_full_priming_limits_historical_matched_orders_to_one_network_quantum(
     assert "filled-order-4" not in priming["order_ids"]
 
 
+def test_full_priming_isolates_priority_unknown_from_historical_orders(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    unknown = {
+        "command_id": "unknown-priority",
+        "state": "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "venue_order_id": "order-priority",
+        "idempotency_key": "idem-priority",
+    }
+    historical = {
+        "command_id": "historical-review",
+        "state": "REVIEW_REQUIRED",
+        "venue_order_id": "order-historical",
+        "idempotency_key": "idem-historical",
+    }
+    monkeypatch.setattr(
+        command_recovery,
+        "_full_quantum_candidates",
+        lambda _conn: [unknown, historical],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_active_venue_command_priming_rows",
+        lambda *_args, **_kwargs: pytest.fail(
+            "historical priming must not run before priority unknown truth"
+        ),
+    )
+
+    priming = command_recovery._collect_recovery_priming_keys(
+        object(),
+        scope="full",
+    )
+
+    assert priming == {
+        "order_ids": {"order-priority"},
+        "idempotency_keys": {"idem-priority"},
+        "condition_ids": set(),
+        "full_priority_inflight_command_id": "unknown-priority",
+        "full_priority_inflight_quantum_remaining": True,
+    }
+    kwargs = command_recovery._scheduled_venue_snapshot_kwargs(
+        "full",
+        priming,
+        deadline_monotonic=123.0,
+    )
+    assert kwargs["order_ids"] == {"order-priority"}
+    assert kwargs["derive_orders_from_account_truth"] is True
+    assert kwargs["account_truth_deadline_seconds"] == 30.0
+
+
 def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecision(
     conn,
     mock_client,
