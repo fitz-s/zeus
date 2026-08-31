@@ -1228,11 +1228,14 @@ def _latest_authorized_day0_fact(
                 settlement_channels = {"wu_icao_history"}
                 physical_channels = {"wu_icao_history", "aviationweather_metar", "wu_api"}
             elif source_type == "hko":
-                # HKO rhrread is an instantaneous telemetry, not the official
-                # since-midnight 1-minute-mean extreme used by the contract.
-                # It may trigger collection, but it cannot become payoff support.
+                # HKO publishes both products from the same station and the
+                # same 1-minute-mean temperature basis.  The current print is
+                # therefore a causal physical bound on the eventual daily
+                # extreme, while remaining ineligible for settlement/payoff
+                # certainty.  ``require_settlement_channel`` keeps those two
+                # roles separate below.
                 settlement_channels = set()
-                physical_channels = set()
+                physical_channels = {"hko_rhrread_spot"}
             elif source_type == "noaa" and expected_station:
                 ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
                 settlement_channels = {ogimet_channel}
@@ -1539,8 +1542,7 @@ def _latest_authorized_day0_fact(
     if source_type == "hko":
         # HKO publishes cumulative official snapshots. The provider may correct
         # a provisional snapshot, so cross-time MAX/MIN would make a retracted
-        # value falsely absorbing. Select the latest official HKO fact and never
-        # mix the rhrread spot statistic into settlement support.
+        # value falsely absorbing. Select the latest official HKO fact first.
         hko_facts = [
             fact
             for fact in facts
@@ -1562,7 +1564,36 @@ def _latest_authorized_day0_fact(
             return None
         if rollover_status != "RESET_CONFIRMED":
             return None
-        return max(hko_facts, key=fact_time)
+        latest_official = max(hko_facts, key=fact_time)
+        if require_settlement_channel:
+            return latest_official
+
+        # ``rhrread`` is HKO's latest 1-minute-mean temperature, whereas the
+        # official extrema product is the max/min of those 1-minute means since
+        # midnight.  A causal same-station spot can therefore advance the
+        # statistical physical frontier without becoming deterministic payoff
+        # truth.  Spot corrections are canonicalized per publication clock by
+        # the ledger code above; across distinct clocks the physical daily
+        # HIGH/LOW is absorbing in the corresponding direction.
+        hko_spot_facts = [
+            fact
+            for fact in facts
+            if str(fact.get("observation_source") or "").strip().lower()
+            == "hko_rhrread_spot"
+        ]
+        physical_facts = [latest_official, *hko_spot_facts]
+        best_extreme = (min if metric == "low" else max)(
+            float(fact["observed_extreme_native"])
+            for fact in physical_facts
+        )
+        return max(
+            (
+                fact
+                for fact in physical_facts
+                if float(fact["observed_extreme_native"]) == best_extreme
+            ),
+            key=fact_time,
+        )
     # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris
     # regression): the day-so-far extreme is the max (high) / min (low) across
     # every authorized source seen so far. Picking the temporally freshest

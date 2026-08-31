@@ -1726,6 +1726,115 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
     conn.close()
 
 
+@pytest.mark.parametrize(
+    ("metric", "official", "spot", "expected_physical"),
+    (
+        ("high", 31.9, 32.0, 32.0),
+        ("low", 27.1, 27.0, 27.0),
+    ),
+)
+def test_hko_same_station_spot_advances_only_statistical_physical_frontier(
+    metric: str,
+    official: float,
+    spot: float,
+    expected_physical: float,
+) -> None:
+    """The faster HKO 1-minute-mean print leads q but never payoff truth."""
+
+    conn = _day0_source_switch_conn()
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )
+        """
+    )
+    conn.execute(
+        "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT"
+    )
+    previous_provenance = json.dumps(
+        {
+            "observation_basis": "hko_since_midnight_extrema_1min_mean",
+            "official_running_high_c": 31.0,
+            "official_running_low_c": 28.0,
+        }
+    )
+    current_provenance = json.dumps(
+        {
+            "observation_basis": "hko_since_midnight_extrema_1min_mean",
+            "official_running_high_c": 31.9,
+            "official_running_low_c": 27.1,
+        }
+    )
+    for local_ts, utc_ts, imported_at, high, low, provenance in (
+        (
+            "2026-08-28T00:10:00+08:00",
+            "2026-08-27T16:10:00+00:00",
+            "2026-08-27T16:20:00+00:00",
+            31.0,
+            28.0,
+            previous_provenance,
+        ),
+        (
+            "2026-08-28T15:00:00+08:00",
+            "2026-08-28T07:00:00+00:00",
+            "2026-08-28T07:10:00+00:00",
+            31.9,
+            27.1,
+            current_provenance,
+        ),
+    ):
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "Hong Kong", "2026-08-28", "hko_hourly_accumulator",
+                "HKO", "C", imported_at, local_ts, utc_ts, high, low,
+                "ICAO_STATION_NATIVE", 0, "OK", "runtime_monitoring",
+                provenance,
+            ),
+        )
+    raw_report = json.dumps(
+        {"temperature": {"data": [{"place": "Hong Kong Observatory", "value": spot}]}}
+    )
+    conn.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Hong Kong", "HKO", "hko_rhrread_spot",
+            "2026-08-28T07:02:00+00:00", spot, "C",
+            "2026-08-28T07:05:01+00:00", raw_report,
+        ),
+    )
+    decision_time = datetime(2026, 8, 28, 7, 11, tzinfo=timezone.utc)
+
+    physical = _latest_authorized_day0_fact(
+        conn,
+        city="Hong Kong",
+        target_date="2026-08-28",
+        temperature_metric=metric,
+        decision_time=decision_time,
+    )
+    settlement = _latest_authorized_day0_fact(
+        conn,
+        city="Hong Kong",
+        target_date="2026-08-28",
+        temperature_metric=metric,
+        decision_time=decision_time,
+        require_settlement_channel=True,
+    )
+
+    assert physical is not None
+    assert physical["observed_extreme_native"] == expected_physical
+    assert physical["observation_source"] == "hko_rhrread_spot"
+    assert physical["observation_time"] == "2026-08-28T07:02:00+00:00"
+    assert physical["observation_available_at"] == "2026-08-28T07:05:01+00:00"
+    assert settlement is not None
+    assert settlement["observed_extreme_native"] == official
+    assert settlement["observation_source"] == "hko_hourly_accumulator"
+    conn.close()
+
+
 def test_hko_day0_fact_rejects_unwitnessed_row_and_legacy_event() -> None:
     conn = _day0_source_switch_conn()
     conn.execute(
