@@ -224,14 +224,23 @@ class AnchorAvailabilityProbe:
         meta = self._model_meta()
         if meta is not None:
             try:
-                if (
-                    meta["run_initialisation_utc"] == cycle.astimezone(UTC)
-                    and meta["run_availability_utc"]
-                    >= meta["run_initialisation_utc"]
-                ):
+                current_run = meta["run_initialisation_utc"].astimezone(UTC)
+                current_available = meta["run_availability_utc"].astimezone(UTC)
+                wanted = cycle.astimezone(UTC)
+                if current_available >= current_run and wanted == current_run:
                     return True
-            except (KeyError, TypeError, ValueError) as exc:
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
                 logger.debug("anchor meta probe malformed (treated unavailable): %s", exc)
+            else:
+                # Provider-current metadata is also a monotone negative witness:
+                # a newer run is not yet the provider's current completed run. The
+                # free bucket may still publish it first, but repeatedly asking the
+                # metered API cannot add truth while this metadata frontier is
+                # unchanged. SCOPE: this newer candidate cycle only. DRAIN: the
+                # unmetered metadata or bucket frontier advances on the normal poll.
+                # RESET: malformed/unavailable metadata retains the metered fallback.
+                if wanted > current_run:
+                    return probe_bucket_run_declared(cycle)
         if probe_bucket_run_declared(cycle):
             return True
         return probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen)

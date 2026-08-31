@@ -209,6 +209,28 @@ class TestProbeResolvedSelection:
         assert probe(cycle) is True
         assert single_runs_calls == []
 
+    def test_free_meta_frontier_avoids_repeated_metered_prepublication_400(
+        self, monkeypatch
+    ):
+        import src.data.replacement_cycle_availability as rca
+
+        current = _dt("2026-06-11T12:00:00")
+        wanted = _dt("2026-06-11T18:00:00")
+        single_runs_calls: list[None] = []
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+
+        probe = AnchorAvailabilityProbe(
+            urlopen=lambda *args, **kwargs: single_runs_calls.append(None),
+            meta_fetch=lambda: {
+                "run_initialisation_utc": current,
+                "run_availability_utc": current,
+                "run_modification_utc": current,
+            },
+        )
+
+        assert probe(wanted) is False
+        assert single_runs_calls == []
+
     def test_metered_single_runs_probe_is_last_rung(self, monkeypatch):
         # When neither free signal confirms, the metered probe still decides.
         import src.data.replacement_cycle_availability as rca
