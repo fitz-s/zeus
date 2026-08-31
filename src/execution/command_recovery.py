@@ -29618,7 +29618,11 @@ def _reconcile_passes_short_conn(
                 bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
             )
 
-        def _capital_apply_conn_factory(deadline_monotonic: float):
+        def _capital_apply_conn_factory(
+            deadline_monotonic: float,
+            *,
+            cross_db: bool = False,
+        ):
             """Bind exact capital APPLY work to its own fresh writer deadline.
 
             The ordinary live-tick factory is bound to the cumulative 100 ms
@@ -29626,11 +29630,14 @@ def _reconcile_passes_short_conn(
             factory with a later deadline cannot revive its already-expired
             inner writer lease.  These passes are trade-owned and already have
             their own bounded capital deadline, so build the priority lease from
-            the canonical trade-only base for every APPLY attempt.
+            the canonical trade-only base unless the pass also projects WORLD
+            truth.  A cross-DB pass must retain the sanctioned WORLD+TRADE
+            connection so its complete atomic write set can commit.
             """
 
+            base_factory = conn_factory if cross_db else capital_conn_factory
             priority_factory = _recovery_priority_conn_factory(
-                capital_conn_factory,
+                base_factory,
                 scope="live_tick",
                 deadline_monotonic=deadline_monotonic,
             )
@@ -29804,6 +29811,13 @@ def _reconcile_passes_short_conn(
             terminal_fact_deadline = _capital_deadline()
             terminal_fact_conn_factory = _capital_apply_conn_factory(
                 terminal_fact_deadline,
+                # reconcile_terminal_order_facts releases TRADE capital and
+                # projects WORLD EDLI lifecycle in one sanctioned transaction.
+                # SCOPE: this exact already-terminal command/fact pair.
+                # DRAIN: the dedicated cross-DB writer lease commits both
+                # projections atomically. RESET: the terminal command state and
+                # released reservation remove the candidate on the next scan.
+                cross_db=True,
             )
             preexisting_terminal_result = _run_capital_pass(
                 "terminal_order_facts_fast",

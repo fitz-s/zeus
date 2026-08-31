@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-31
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -35691,7 +35691,7 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     tmp_path,
     monkeypatch,
 ):
-    """A durable terminal fact must not inherit the spent maintenance lease."""
+    """Terminal release gets a fresh sanctioned WORLD+TRADE writer lease."""
     from contextlib import nullcontext
 
     from src.execution import command_recovery, venue_sync_contract
@@ -35733,8 +35733,11 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
         conn.row_factory = sqlite3.Row
         return conn
 
+    full_factory_calls = []
+
     def _full_factory(**_kwargs):
-        pytest.fail("capital APPLY must use the trade-only writer base")
+        full_factory_calls.append(dict(_kwargs))
+        return _conn_factory()
 
     _full_factory.requires_writer_flocks = True
     _full_factory.supports_nonblocking_flocks = True
@@ -35788,6 +35791,7 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     )
 
     assert summary["terminal_order_facts"]["advanced"] == 1
+    assert full_factory_calls
     assert lease_deadlines
     assert lease_deadlines[0] > 0
     verified = _conn_factory()
