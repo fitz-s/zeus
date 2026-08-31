@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-08-22; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
 """Relationship antibodies for the event-time total-loss loop."""
@@ -3425,6 +3425,75 @@ def test_incomplete_latest_cannot_hide_corroborated_no_bid_catchup(
     assert hard[0]["crossing_kind"] == "no_bid"
     assert hard[0]["crossing_evidence_id"] == "buy-no-bid"
     assert hard[0]["t_floor"] is None
+
+
+def test_corroborated_no_bid_stays_one_episode_behind_newer_incomplete_latest(
+    cfg: dict,
+) -> None:
+    _position(cfg, direction="buy_no")
+    _quote(
+        cfg,
+        "buy-no-bid-1",
+        "2026-08-22T09:00:01+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-1",
+        "2026-08-22T09:00:02+00:00",
+        0.0,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-1'"
+        )
+
+    loop.detect(cfg)
+    with loop.memory(cfg) as conn:
+        conn.execute(
+            "UPDATE incidents SET status='blocked',stage='evidence' "
+            "WHERE crossing_kind='no_bid'"
+        )
+        conn.commit()
+
+    _quote(
+        cfg,
+        "buy-no-bid-2",
+        "2026-08-22T09:00:03+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-2",
+        "2026-08-22T09:00:04+00:00",
+        0.0,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-2'"
+        )
+
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["crossing_kind"] == "no_bid"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_evidence_id"] == "buy-no-bid-2"
+    with loop.memory(cfg) as conn:
+        state = conn.execute(
+            "SELECT quote_seen_at,quote_status,no_bid_episode_open "
+            "FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == ("2026-08-22T09:00:04+00:00", "no_bid", 1)
 
 
 def test_precursor_uses_buy_no_carrier_when_sell_no_latest_is_incomplete(cfg: dict) -> None:

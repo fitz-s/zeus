@@ -1303,6 +1303,7 @@ def _observe_quote(
     floor: float,
     *,
     historical_backfill: bool = False,
+    corroborated_seen_at: str | None = None,
 ) -> str | None:
     position_id = str(position["position_id"])
     evidence_id = str(quote["evidence_id"])
@@ -1325,6 +1326,22 @@ def _observe_quote(
     previous_at = parse_time(str(previous[1])) if previous else None
     seen_time = parse_time(seen_at)
     out_of_order = previous_at is not None and seen_time is not None and seen_time < previous_at
+    corroborated_time = parse_time(corroborated_seen_at)
+    if (
+        out_of_order
+        and (below or no_bid)
+        and corroborated_time is not None
+        and _quote_within_exposure(position, str(corroborated_seen_at))
+        and (previous_at is None or corroborated_time >= previous_at)
+    ):
+        # The older full book remains the executable authority, while the
+        # newer incomplete SELL projection independently proves there was no
+        # recovery. Persist one current floor episode at the corroboration
+        # clock; otherwise every newer full-book carrier would look like a new
+        # crossing behind the already-newer incomplete projection.
+        seen_at = str(corroborated_seen_at)
+        seen_time = corroborated_time
+        out_of_order = False
     # A historical no-bid row older than durable live state cannot start a new
     # causal episode. Replaying it would manufacture one incident per evidence
     # row while intentionally preserving the newer quote state.
@@ -2428,7 +2445,13 @@ def _detect_trigger(
                         current_quote if isinstance(current_quote, Mapping) else None,
                         floor,
                     ):
-                        incident_id = _observe_quote(mem, position, quote, floor)
+                        incident_id = _observe_quote(
+                            mem,
+                            position,
+                            quote,
+                            floor,
+                            corroborated_seen_at=str(current_quote["quote_seen_at"]),
+                        )
                         if incident_id:
                             created.append(incident_id)
                     observed_quote = current_quote if current_quote is not None else quote
