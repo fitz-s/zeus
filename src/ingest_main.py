@@ -2656,9 +2656,9 @@ def _replacement_maintenance_tick():
             held_budget_s / max(1, partition_count),
         )
         partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
-        for lane, scopes, quota_critical in (
-            ("critical", critical_scopes, True),
-            ("ordinary", ordinary_scopes, False),
+        for lane, scopes in (
+            ("critical", critical_scopes),
+            ("ordinary", ordinary_scopes),
         ):
             if not scopes:
                 continue
@@ -2666,8 +2666,13 @@ def _replacement_maintenance_tick():
                 "max_wall_clock_seconds": held_lane_budget,
                 "required_scopes": scopes,
             }
-            if quota_critical:
-                kwargs["quota_critical"] = True
+            # Every canonical open position is capital-critical. The phase
+            # partition keeps independent time budgets, but must not demote an
+            # ordinary active holding behind our local quota ceilings. SCOPE:
+            # exact held families only. DRAIN: bounded provider-authoritative
+            # fetch or canonical reuse. RESET: position closure removes scope;
+            # provider cooldown/terminal response and single-flight still bind.
+            kwargs["quota_critical"] = True
             try:
                 partition_report = (
                     _download_replacement_forecast_current_targets_if_needed(
@@ -3326,9 +3331,7 @@ def _replacement_availability_poll_tick():
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
         # slower Single Runs archive used by the multimodel BPF inputs.
-        held_anchor_scopes = _held_day0_current_target_scopes(
-            _all_held_current_target_scopes()
-        )
+        held_anchor_scopes = _all_held_current_target_scopes()
         if held_anchor_scopes:
             source_clock_held_anchor_report = _download_current_targets(
                 max_wall_clock_seconds=min(
@@ -3470,7 +3473,10 @@ def _replacement_availability_poll_tick():
         if scopes:
             manifest_snapshot = None
             if anchor_scopes:
-                critical_anchor_scopes = _held_day0_current_target_scopes(anchor_scopes)
+                held_scope_set = set(_all_held_current_target_scopes())
+                critical_anchor_scopes = tuple(
+                    scope for scope in anchor_scopes if scope in held_scope_set
+                )
                 critical_set = set(critical_anchor_scopes)
                 ordinary_anchor_scopes = tuple(
                     scope for scope in anchor_scopes if scope not in critical_set
@@ -3483,7 +3489,7 @@ def _replacement_availability_poll_tick():
                 )
                 anchor_reports: list[dict[str, object]] = []
                 written_manifests: list[str] = []
-                for partition, quota_critical in (
+                for partition, held_capital_scope in (
                     (critical_anchor_scopes, True),
                     (ordinary_anchor_scopes, False),
                 ):
@@ -3496,7 +3502,7 @@ def _replacement_availability_poll_tick():
                         "max_wall_clock_seconds": remaining,
                         "required_scopes": partition,
                     }
-                    if quota_critical:
+                    if held_capital_scope:
                         anchor_kwargs["quota_critical"] = True
                     else:
                         anchor_kwargs["quota_priority"] = True

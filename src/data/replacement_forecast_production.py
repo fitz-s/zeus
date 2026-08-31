@@ -806,14 +806,14 @@ def _download_replacement_forecast_current_targets_if_needed(
                 held_position_family_priorities,
             )
 
-            critical_families = held_position_family_priorities()
+            held_families = held_position_family_priorities()
             unauthorized = tuple(
-                scope for scope in required_scopes if critical_families.get(scope) != 0
+                scope for scope in required_scopes if scope not in held_families
             )
             if unauthorized:
                 raise ValueError(
                     "critical current-target quota requires exact canonical "
-                    "day0_window/pending_exit scopes: "
+                    "open-held scopes: "
                     + ",".join("/".join(scope) for scope in unauthorized)
                 )
             from src.config import cities_by_name  # noqa: PLC0415

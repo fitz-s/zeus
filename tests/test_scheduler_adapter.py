@@ -671,12 +671,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     def _download_anchor(_cfg, **kwargs):
         call_order.append("anchor_scope_download")
         anchor_calls.append(kwargs)
-        city = kwargs["required_scopes"][0][0]
+        cities = tuple(scope[0] for scope in kwargs["required_scopes"])
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
-            "written_manifest_count": 1,
-            "written_manifests": [f"/tmp/{city.lower()}-high.manifest.json"],
+            "written_manifest_count": len(cities),
+            "written_manifests": [
+                f"/tmp/{city.lower()}-high.manifest.json" for city in cities
+            ],
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -753,18 +755,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "/tmp/seoul-high.manifest.json",
         "/tmp/wellington-high.manifest.json",
     )
-    assert len(anchor_calls) == 2
+    assert len(anchor_calls) == 1
     assert anchor_calls[0]["required_scopes"] == (
         ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
     )
     assert anchor_calls[0]["quota_critical"] is True
     assert 0.0 < anchor_calls[0]["max_wall_clock_seconds"] <= 10.0
-    assert anchor_calls[1]["required_scopes"] == (
-        ("Wellington", "2026-07-03", "high"),
-    )
-    assert "quota_critical" not in anchor_calls[1]
-    assert anchor_calls[1]["quota_priority"] is True
-    assert 0.0 < anchor_calls[1]["max_wall_clock_seconds"] <= 10.0
+    assert "quota_priority" not in anchor_calls[0]
     assert cycle_calls[0]["scopes"] == (
         ("Seoul", "2026-07-03", "high"),
         ("Wellington", "2026-07-03", "high"),
@@ -776,7 +774,6 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert call_order == [
         "probe",
         "scoped_download",
-        "anchor_scope_download",
         "anchor_scope_download",
         "fusion_reseed",
         "cycle_reseed",
@@ -2246,7 +2243,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
 
     def _download(_cfg, **kwargs):
         downloads.append(kwargs)
-        if critical_timeout and kwargs.get("quota_critical"):
+        if critical_timeout and kwargs.get("required_scopes") == (day0_scope,):
             raise TimeoutError("critical lane deadline")
         return {
             "status": (
@@ -2292,6 +2289,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         {
             "max_wall_clock_seconds": lane_budget,
             "required_scopes": (future_scope,),
+            "quota_critical": True,
         },
     ]
     reseed_scopes = (
@@ -2309,7 +2307,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         else "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     )
     assert result["held_ordinary_current_target_download"]["status"] == (
-        "CURRENT_TARGETS_ALREADY_COVERED"
+        "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     )
     assert result["broad_maintenance_status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
     if critical_timeout:

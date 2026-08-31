@@ -1828,7 +1828,7 @@ def test_exact_held_day0_scope_enters_critical_quota_lane(
     assert calls[0]["required_scopes"] == (scope,)
 
 
-def test_nonheld_scope_cannot_borrow_critical_quota(
+def test_active_held_scope_can_borrow_critical_quota(
     tmp_path, monkeypatch
 ) -> None:
     db = _make_db(
@@ -1846,7 +1846,35 @@ def test_nonheld_scope_cannot_borrow_critical_quota(
         lambda: {scope: 1},
     )
 
-    with pytest.raises(ValueError, match="exact canonical day0_window/pending_exit"):
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report is not None
+    assert calls[0]["required_scopes"] == (scope,)
+
+
+def test_nonheld_scope_cannot_borrow_critical_quota(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Cape Town", "2026-08-19", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {},
+    )
+
+    with pytest.raises(ValueError, match="exact canonical open-held scopes"):
         _download_replacement_forecast_current_targets_if_needed(
             _cfg(db, tmp_path),
             required_scopes=(scope,),
