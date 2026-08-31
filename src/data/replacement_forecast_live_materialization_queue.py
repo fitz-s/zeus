@@ -2396,6 +2396,29 @@ def _blocked_attempt_fingerprint(
                 models=configured_models,
                 schema=current_value_serving_schema(conn),
             )
+            from src.data.replacement_input_hwm import (  # noqa: PLC0415
+                _latest_eligible_ensemble_input_mark,
+            )
+
+            # SCOPE: the exact city/date/metric blocked request. DRAIN: a new
+            # decision-time eligible ENS snapshot changes this fingerprint and
+            # permits one fresh attempt. RESET: unchanged snapshot id+cycle keeps
+            # suppression; unreadable authority returns None below and retries.
+            ensemble_mark = _latest_eligible_ensemble_input_mark(
+                conn,
+                city=scope[0],
+                target_date=scope[1],
+                metric=scope[2],
+                decision_time=computed_at,
+            )
+            eligible_ensemble_input_mark = (
+                None
+                if ensemble_mark is None
+                else {
+                    "snapshot_id": ensemble_mark[0],
+                    "source_cycle_time": ensemble_mark[1].isoformat(),
+                }
+            )
         finally:
             conn.close()
     except _ClaimReadDeadlineExceeded:
@@ -2439,6 +2462,7 @@ def _blocked_attempt_fingerprint(
             "raw": {
                 "missing_configured_sources": missing_sources,
                 "source_clock_frontier": source_clock_frontier,
+                "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
             },
             "logic": logic_revisions,
         },

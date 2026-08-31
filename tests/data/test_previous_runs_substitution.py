@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-30
+# Last reused or audited: 2026-08-31
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -5481,6 +5481,74 @@ def test_queue_requeues_typed_child_deadline_before_outer_timeout(tmp_path) -> N
     assert not report.failed_files
     assert "REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_PREPARE_FUSION" in report.reason_codes
     assert len(tuple(request_dir.glob("Madrid.timeout-retry-*.json"))) == 1
+
+
+def test_blocked_fingerprint_resets_when_eligible_ensemble_mark_advances(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    forecast_db = tmp_path / "forecasts.db"
+    sqlite3.connect(forecast_db).close()
+    request_path = tmp_path / "Moscow.json"
+    request_path.write_text("{}", encoding="utf-8")
+    base = {
+        "city": "Moscow",
+        "target_date": "2026-08-31",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-30T18:00:00+00:00",
+        "bins": [{"bin_id": "22C"}],
+    }
+    monkeypatch.setattr(
+        queue_mod,
+        "_source_clock_missing_configured_sources",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "read_current_instrument_frontier_identity",
+        lambda *_args, **_kwargs: {"revision": "same-provider-frontier"},
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "current_value_serving_schema",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(weights, "scheme_for_city", lambda *_args, **_kwargs: None)
+
+    def _ensemble_mark(_conn, *, decision_time, **_kwargs):
+        if decision_time < datetime(2026, 8, 31, 1, 27, tzinfo=timezone.utc):
+            return (1294588, datetime(2026, 8, 30, 12, tzinfo=timezone.utc))
+        return (1295198, datetime(2026, 8, 30, 18, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(
+        input_hwm,
+        "_latest_eligible_ensemble_input_mark",
+        _ensemble_mark,
+    )
+
+    before_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:11:01+00:00"},
+    )
+    after_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:55:59+00:00"},
+    )
+    unchanged_after_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:56:59+00:00"},
+    )
+
+    assert before_ens is not None
+    assert after_ens is not None
+    assert before_ens != after_ens
+    assert after_ens == unchanged_after_ens
 
 
 @pytest.mark.parametrize(
