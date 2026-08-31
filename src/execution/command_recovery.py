@@ -30910,13 +30910,22 @@ def _reconcile_passes_short_conn(
             summary["inflight_quantum"] = priority_command_id
             return result
 
+        priority_apply_conn_factory = _recovery_apply_conn_factory(
+            conn_factory,
+            scope="full",
+            deadline_monotonic=apply_deadline,
+            # Acquisition still yields to an existing monitor owner/waiter.
+            # Once acquired, this exact command/reservation transition is a
+            # short atomic capital release and must finish before yielding.
+            monitor_preemptible=False,
+        )
         _run_pass_with_lock_retry(
             "full_priority_inflight_apply",
             lambda: run_three_phase(
                 lambda conn: None,
                 lambda _snap: venue_snapshot,
                 _apply_full_priority_inflight,
-                conn_factory=apply_conn_factory,
+                conn_factory=priority_apply_conn_factory,
                 snapshot_conn_factory=read_conn_factory,
                 label="recovery.full_priority_inflight_apply",
             ),
