@@ -2707,6 +2707,83 @@ def _held_common_cycle_anchor_gaps(
     return tuple(batches)
 
 
+def _recover_held_common_cycle_anchors_if_needed(
+    cfg: Mapping[str, object],
+    *,
+    decision_time: datetime | None = None,
+) -> dict[str, object] | None:
+    """Capture exact missing anchor legs for held scopes' common input cycle."""
+
+    forecast_db = cfg.get("forecast_db")
+    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
+    if forecast_db is None or output_dir is None:
+        return None
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        download_current_target_openmeteo_inputs,
+    )
+
+    now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    forecast_db_path = Path(str(forecast_db))
+    batches = _held_common_cycle_anchor_gaps(
+        forecast_db_path,
+        decision_time=now,
+    )
+    if batches is None:
+        return {
+            "status": "HELD_COMMON_CYCLE_EVIDENCE_UNREADABLE_RETRY",
+            "decision_time": now.isoformat(),
+            "recoveries": [],
+        }
+    report: dict[str, object] = {
+        "status": (
+            "HELD_COMMON_CYCLE_GAPS_FOUND"
+            if batches
+            else "HELD_COMMON_CYCLE_CURRENT"
+        ),
+        "decision_time": now.isoformat(),
+        "recoveries": [],
+    }
+    for cycle, scopes in batches:
+        try:
+            result = download_current_target_openmeteo_inputs(
+                forecast_db=forecast_db_path,
+                output_dir=Path(str(output_dir)),
+                cycle=cycle,
+                limit=None,
+                write_db=True,
+                release_lag_hours=float(
+                    cfg.get("download_release_lag_hours") or 14.0
+                ),
+                anchor_sigma_c=float(
+                    cfg.get("download_anchor_sigma_c") or 3.0
+                ),
+                required_scopes=scopes,
+                fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                quota_priority=True,
+            )
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": result.get("status"),
+                    "written_manifest_count": result.get(
+                        "written_manifest_count"
+                    ),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
+            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "FETCH_FAILED_RETRY",
+                    "error": str(exc)[:200],
+                }
+            )
+    return report
+
+
 def _replacement_cycle_availability_poll_if_needed(
     cfg: dict[str, object],
     *,
@@ -2788,55 +2865,20 @@ def _replacement_cycle_availability_poll_if_needed(
     except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
         report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
         report["source_clock_error"] = str(exc)[:200]
-    recovery_batches = _held_common_cycle_anchor_gaps(
-        forecast_db_path,
+    recovery_report = _recover_held_common_cycle_anchors_if_needed(
+        cfg,
         decision_time=now,
     )
-    if recovery_batches is None:
-        report["held_common_cycle_recovery_status"] = "EVIDENCE_UNREADABLE_RETRY"
-    else:
-        report["held_common_cycle_recovery_status"] = (
-            "GAPS_FOUND" if recovery_batches else "CURRENT"
+    if recovery_report is not None:
+        report["held_common_cycle_recovery_status"] = recovery_report.get(
+            "status"
         )
-        report["held_common_cycle_recovery"] = []
-        for recovery_cycle, recovery_scopes in recovery_batches:
-            try:
-                recovery_result = download_current_target_openmeteo_inputs(
-                    forecast_db=forecast_db_path,
-                    output_dir=Path(str(output_dir)),
-                    cycle=recovery_cycle,
-                    limit=None,
-                    write_db=True,
-                    release_lag_hours=float(
-                        cfg.get("download_release_lag_hours") or 14.0
-                    ),
-                    anchor_sigma_c=float(
-                        cfg.get("download_anchor_sigma_c") or 3.0
-                    ),
-                    required_scopes=recovery_scopes,
-                    fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-                    quota_priority=True,
-                )
-                report["held_common_cycle_recovery"].append(  # type: ignore[union-attr]
-                    {
-                        "cycle": recovery_cycle.isoformat(),
-                        "scopes": [list(scope) for scope in recovery_scopes],
-                        "status": recovery_result.get("status"),
-                        "written_manifest_count": recovery_result.get(
-                            "written_manifest_count"
-                        ),
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
-                report["held_common_cycle_recovery"].append(  # type: ignore[union-attr]
-                    {
-                        "cycle": recovery_cycle.isoformat(),
-                        "scopes": [list(scope) for scope in recovery_scopes],
-                        "status": "FETCH_FAILED_RETRY",
-                        "error": str(exc)[:200],
-                    }
-                )
-    if fetch_anchor_cycle is None and not recovery_batches:
+        report["held_common_cycle_recovery"] = recovery_report.get("recoveries")
+    recovery_active = bool(
+        recovery_report
+        and recovery_report.get("status") != "HELD_COMMON_CYCLE_CURRENT"
+    )
+    if fetch_anchor_cycle is None and not recovery_active:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
         # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).

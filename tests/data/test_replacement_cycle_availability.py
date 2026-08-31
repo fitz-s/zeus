@@ -406,7 +406,9 @@ class TestPollFetchDecision:
         assert recovered["required_scopes"] == (scope,)
         assert recovered["limit"] is None
         assert recovered["quota_priority"] is True
-        assert report["held_common_cycle_recovery_status"] == "GAPS_FOUND"
+        assert report["held_common_cycle_recovery_status"] == (
+            "HELD_COMMON_CYCLE_GAPS_FOUND"
+        )
         assert report["held_common_cycle_recovery"] == [
             {
                 "cycle": ensemble_cycle.isoformat(),
@@ -531,6 +533,18 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
         (ensemble_cycle, (("Moscow", "2026-06-11", "high"),)),
     )
     assert checked == [(('Moscow', '2026-06-11', 'high'),)]
+
+
+def test_ingest_poll_calls_held_common_cycle_recovery() -> None:
+    import inspect
+
+    import src.ingest_main as ingest_main
+
+    source = inspect.getsource(ingest_main._replacement_availability_poll_tick)
+    assert "_recover_held_common_cycle_anchors_if_needed(cfg)" in source
+    assert source.index("_recover_held_common_cycle_anchors_if_needed(cfg)") < (
+        source.index("_ingest_station_forecasts_if_due(cfg)")
+    )
 
     def test_flag_off_is_inert(self, tmp_path):
         import src.data.replacement_forecast_production as prod

@@ -2980,6 +2980,7 @@ def _replacement_availability_poll_tick():
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _ingest_station_forecasts_if_due,
+        _recover_held_common_cycle_anchors_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
@@ -2989,6 +2990,17 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    try:
+        common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(cfg)
+        if common_cycle_recovery and common_cycle_recovery.get("status") != (
+            "HELD_COMMON_CYCLE_CURRENT"
+        ):
+            logger.info(
+                "held common-cycle anchor recovery report: %s",
+                common_cycle_recovery,
+            )
+    except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
+        logger.warning("held common-cycle anchor recovery failed: %s", exc)
     # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
