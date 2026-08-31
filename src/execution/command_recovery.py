@@ -2449,11 +2449,6 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
             ON fact.command_id = cmd.command_id
          WHERE finding.kind = 'local_orphan_order'
            AND finding.resolved_at IS NULL
-           AND NOT (
-                finding.context = 'operator'
-                AND json_extract(finding.evidence_json, '$.reason') =
-                    'terminal_command_venue_order_reappeared_open'
-           )
            AND cmd.intent_kind = 'ENTRY'
            AND cmd.state IN ('CANCELLED', 'EXPIRED')
            AND fact.state IN ({state_placeholders})
@@ -15399,11 +15394,6 @@ def _resolve_m5_local_orphan_findings(
          WHERE kind = 'local_orphan_order'
            AND subject_id = ?
            AND resolved_at IS NULL
-           AND NOT (
-                context = 'operator'
-                AND json_extract(evidence_json, '$.reason') =
-                    'terminal_command_venue_order_reappeared_open'
-           )
            {identity_clause}
          ORDER BY recorded_at, finding_id
         """,

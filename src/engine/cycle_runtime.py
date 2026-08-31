@@ -2209,7 +2209,7 @@ def _cancel_reappeared_terminal_order(
     # unresolved until authenticated terminal/absence proof arrives.
     finding = record_finding(
         conn,
-        kind="local_orphan_order",
+        kind="exchange_ghost_order",
         subject_id=venue_order_id,
         context="operator",
         evidence=request_payload,

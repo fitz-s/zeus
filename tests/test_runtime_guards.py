@@ -3894,7 +3894,7 @@ def test_stale_order_cleanup_durably_cancels_terminal_command_reappeared_open(tm
         """
         SELECT resolved_at, resolution
           FROM exchange_reconcile_findings
-         WHERE kind = 'local_orphan_order'
+         WHERE kind = 'exchange_ghost_order'
            AND subject_id = 'order-terminal-reappeared'
            AND context = 'operator'
         """
@@ -3965,7 +3965,7 @@ def test_terminal_reappeared_cancel_unknown_debt_survives_stale_terminal_fact(tm
         """
         SELECT resolved_at
           FROM exchange_reconcile_findings
-         WHERE kind = 'local_orphan_order'
+         WHERE kind = 'exchange_ghost_order'
            AND subject_id = 'order-terminal-unknown'
            AND context = 'operator'
         """
