@@ -44286,6 +44286,152 @@ def _rebuild_held_day0_shared_carrier(
     )
 
 
+def _pinned_station_extreme_providers_c(
+    *,
+    conn: sqlite3.Connection | None,
+    payload: Mapping[str, object],
+    family: object,
+    decision_time: datetime,
+    represented_models: Iterable[str],
+) -> tuple[dict[str, object], ...]:
+    """Read station-native final-extreme providers bound by the base posterior.
+
+    Station forecasts such as HKO FND predict the final daily extreme directly,
+    so they have no hourly vector.  Day0 must not silently discard a provider
+    already admitted by the immutable source-clock posterior; equally, it must
+    not splice a newer station issue onto that posterior.  The exact
+    ``raw_model_forecast_id`` in ``current_value_serving`` is the causal join.
+    """
+
+    execute = getattr(conn, "execute", None)
+    if not callable(execute):
+        return ()
+    binding = payload.get("_edli_global_day0_binding")
+    posterior_id = payload.get("posterior_id")
+    if posterior_id in (None, "") and isinstance(binding, Mapping):
+        posterior_id = binding.get("posterior_id")
+    if posterior_id in (None, ""):
+        return ()
+    try:
+        posterior_id = int(posterior_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_ID_INVALID") from exc
+    row = execute(
+        """
+        SELECT city, target_date, temperature_metric, provenance_json
+          FROM forecast_posteriors
+         WHERE posterior_id = ?
+         LIMIT 1
+        """,
+        (posterior_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_MISSING")
+    city = str(getattr(family, "city", "") or "")
+    target_date = str(getattr(family, "target_date", "") or "")
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    if (
+        str(row[0] or "") != city
+        or str(row[1] or "") != target_date
+        or str(row[2] or "").strip().lower() != metric
+    ):
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_SCOPE_MISMATCH")
+    try:
+        provenance = json.loads(str(row[3] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("DAY0_STATION_EXTREME_PROVENANCE_INVALID") from exc
+    fusion = (
+        provenance.get("bayes_precision_fusion")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if not isinstance(fusion, Mapping):
+        return ()
+    serving = fusion.get("current_value_serving")
+    used_models = fusion.get("used_models")
+    if not isinstance(serving, Mapping) or not isinstance(used_models, list):
+        return ()
+    from src.data.station_forecast_adapter import load_station_forecast_config
+
+    station_models = {
+        str(model).strip() for model in load_station_forecast_config()
+    }
+    represented = {str(model).strip() for model in represented_models}
+    requested = tuple(
+        model
+        for model in (str(value).strip() for value in used_models)
+        if model in station_models and model not in represented
+    )
+    evidence: list[dict[str, object]] = []
+    for model in requested:
+        serving_row = serving.get(model)
+        if not isinstance(serving_row, Mapping):
+            raise ValueError("DAY0_STATION_EXTREME_SERVING_IDENTITY_MISSING")
+        try:
+            raw_id = int(serving_row["raw_model_forecast_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_EXTREME_SERVING_IDENTITY_INVALID") from exc
+        raw = execute(
+            """
+            SELECT raw_model_forecast_id, model, city, target_date, metric,
+                   source_cycle_time, source_available_at, captured_at,
+                   forecast_value_c, source_id, coverage_status
+              FROM raw_model_forecasts
+             WHERE raw_model_forecast_id = ?
+             LIMIT 1
+            """,
+            (raw_id,),
+        ).fetchone()
+        if raw is None:
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_MISSING")
+        try:
+            source_cycle_time = datetime.fromisoformat(
+                str(raw[5]).replace("Z", "+00:00")
+            )
+            source_available_at = datetime.fromisoformat(
+                str(raw[6]).replace("Z", "+00:00")
+            )
+            captured_at = datetime.fromisoformat(
+                str(raw[7]).replace("Z", "+00:00")
+            )
+            value_c = float(raw[8])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_INVALID") from exc
+        decision_utc = decision_time.astimezone(UTC)
+        if (
+            int(raw[0]) != raw_id
+            or str(raw[1] or "") != model
+            or str(raw[2] or "") != city
+            or str(raw[3] or "") != target_date
+            or str(raw[4] or "").strip().lower() != metric
+            or str(raw[9] or "") != f"{model}_single_runs"
+            or str(raw[10] or "").strip().upper() != "COVERED"
+            or source_cycle_time.tzinfo is None
+            or source_available_at.tzinfo is None
+            or captured_at.tzinfo is None
+            or source_cycle_time.astimezone(UTC)
+            > source_available_at.astimezone(UTC)
+            or source_available_at.astimezone(UTC)
+            > captured_at.astimezone(UTC)
+            or source_available_at.astimezone(UTC) > decision_utc
+            or captured_at.astimezone(UTC) > decision_utc
+            or not math.isfinite(value_c)
+        ):
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_SCOPE_INVALID")
+        evidence.append(
+            {
+                "model": model,
+                "raw_model_forecast_id": raw_id,
+                "forecast_value_c": value_c,
+                "source_cycle_time": source_cycle_time.astimezone(UTC).isoformat(),
+                "source_available_at": source_available_at.astimezone(UTC).isoformat(),
+                "captured_at": captured_at.astimezone(UTC).isoformat(),
+                "posterior_id": posterior_id,
+            }
+        )
+    return tuple(evidence)
+
+
 def _day0_current_vector_witness(
     *,
     conn: sqlite3.Connection | None,
@@ -44902,9 +45048,10 @@ def _day0_remaining_day_members(
             represented_families.add(provider_family)
             provider_representatives.append(vector)
         vectors = provider_representatives
-        payload["_edli_day0_provider_representative_models"] = [
-            str(vector.model) for vector in vectors
-        ]
+        provider_models = [str(vector.model) for vector in vectors]
+        payload["_edli_day0_provider_representative_models"] = list(
+            provider_models
+        )
         if current_state is None:
             # Telemetry/test callers without the canonical world connection
             # retain the pure forecast seam. Live callers always pass it.
@@ -44949,6 +45096,36 @@ def _day0_remaining_day_members(
                 "current_state_aligned_trajectory_unavailable"
             )
             return None
+        station_extremes = _pinned_station_extreme_providers_c(
+            conn=forecast_conn,
+            payload=payload,
+            family=family,
+            decision_time=decision_time,
+            represented_models=provider_models,
+        )
+        if station_extremes:
+            boundary_native = _day0_probability_boundary_native(payload, metric)
+            boundary_c = (
+                boundary_native
+                if boundary_native is None or str(unit).upper() == "C"
+                else (boundary_native - 32.0) * 5.0 / 9.0
+            )
+            for evidence in station_extremes:
+                station_value = float(evidence["forecast_value_c"])
+                if boundary_c is not None:
+                    station_value = (
+                        max(station_value, boundary_c)
+                        if metric == "high"
+                        else min(station_value, boundary_c)
+                    )
+                extremes_c.append(station_value)
+                provider_models.append(str(evidence["model"]))
+            payload["_edli_day0_station_extreme_providers"] = [
+                dict(evidence) for evidence in station_extremes
+            ]
+            payload["_edli_day0_provider_representative_models"] = list(
+                provider_models
+            )
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
             values = values * 9.0 / 5.0 + 32.0
@@ -45038,9 +45215,7 @@ def _day0_remaining_day_members(
                 else np.minimum(values, float(probability_boundary))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
-        payload["_edli_day0_remaining_model_names"] = [
-            str(vector.model) for vector in vectors
-        ]
+        payload["_edli_day0_remaining_model_names"] = list(provider_models)
         captured_times: list[str] = []
         for vector in vectors:
             try:

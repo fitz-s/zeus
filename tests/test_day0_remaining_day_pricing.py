@@ -3138,6 +3138,165 @@ class TestRemainingDayMembers:
         )
         assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
 
+    def test_station_extreme_provider_uses_posterior_pinned_row(self):
+        """A later HKO issue cannot be spliced onto an older causal posterior."""
+        import src.engine.event_reactor_adapter as era
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            CREATE TABLE raw_model_forecasts (
+                raw_model_forecast_id INTEGER PRIMARY KEY,
+                model TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                source_cycle_time TEXT NOT NULL,
+                source_available_at TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                forecast_value_c REAL NOT NULL,
+                source_id TEXT,
+                coverage_status TEXT
+            );
+            """
+        )
+        serving = {
+            "used_models": ["ecmwf_ifs", "hko_fnd"],
+            "current_value_serving": {
+                "hko_fnd": {"raw_model_forecast_id": 11},
+            },
+        }
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?)",
+            (
+                7,
+                "Hong Kong",
+                "2026-08-28",
+                "high",
+                json.dumps({"bayes_precision_fusion": serving}),
+            ),
+        )
+        for raw_id, captured_at, value in (
+            (11, "2026-08-28T01:09:00+00:00", 32.0),
+            (12, "2026-08-28T06:00:00+00:00", 35.0),
+        ):
+            conn.execute(
+                "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    raw_id,
+                    "hko_fnd",
+                    "Hong Kong",
+                    "2026-08-28",
+                    "high",
+                    "2026-08-28T00:50:00+00:00",
+                    captured_at,
+                    captured_at,
+                    value,
+                    "hko_fnd_single_runs",
+                    "COVERED",
+                ),
+            )
+
+        evidence = era._pinned_station_extreme_providers_c(
+            conn=conn,
+            payload={"_edli_global_day0_binding": {"posterior_id": 7}},
+            family=SimpleNamespace(
+                city="Hong Kong", target_date="2026-08-28", metric="high"
+            ),
+            decision_time=datetime(2026, 8, 28, 7, 0, tzinfo=UTC),
+            represented_models=("ecmwf_ifs",),
+        )
+
+        assert len(evidence) == 1
+        assert evidence[0]["model"] == "hko_fnd"
+        assert evidence[0]["raw_model_forecast_id"] == 11
+        assert evidence[0]["forecast_value_c"] == 32.0
+        conn.close()
+
+    def test_remaining_members_keep_pinned_station_final_extreme(
+        self, monkeypatch
+    ):
+        """Hourly reconstruction retains the station-native final-extreme center."""
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            _vector(model="ecmwf_ifs", temps=[30.0] * 24),
+            _vector(model="icon_global", temps=[31.0] * 24),
+        ]
+        monkeypatch.setattr(
+            era, "runtime_cities_by_name", lambda: {"Paris": _paris()}
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **_kwargs: vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {
+                    "ecmwf_ifs": "ecmwf-vector",
+                    "icon_global": "icon-vector",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            era,
+            "_validate_day0_causal_bundle_successor",
+            lambda **kwargs: {
+                "carrier_vector_witness": kwargs["vector_witness"]
+            },
+        )
+        monkeypatch.setattr(
+            era,
+            "_pinned_station_extreme_providers_c",
+            lambda **_kwargs: (
+                {
+                    "model": "hko_fnd",
+                    "raw_model_forecast_id": 11,
+                    "forecast_value_c": 32.0,
+                    "posterior_id": 7,
+                },
+            ),
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 31.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            forecast_conn=object(),
+        )
+
+        assert members is not None
+        assert members.tolist() == [30.0, 31.0, 32.0]
+        assert payload["_edli_day0_provider_representative_models"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "hko_fnd",
+        ]
+        assert payload["_edli_day0_remaining_model_names"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "hko_fnd",
+        ]
+        assert payload["_edli_day0_station_extreme_providers"][0][
+            "raw_model_forecast_id"
+        ] == 11
+
     def test_current_vector_witness_mismatch_blocks_before_carrier_rebuild(
         self, monkeypatch, caplog
     ):
