@@ -2743,7 +2743,23 @@ def _recover_held_common_cycle_anchors_if_needed(
         "decision_time": now.isoformat(),
         "recoveries": [],
     }
+    anchor_hwm = _per_leg_downloaded_cycle(
+        forecast_db_path,
+        "openmeteo_ecmwf_ifs_9km",
+    )
+    rolled_past = 0
     for cycle, scopes in batches:
+        if anchor_hwm is not None and cycle < anchor_hwm:
+            rolled_past += 1
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "PROVIDER_CYCLE_ROLLED_PAST",
+                    "anchor_hwm": anchor_hwm.isoformat(),
+                }
+            )
+            continue
         try:
             result = download_current_target_openmeteo_inputs(
                 forecast_db=forecast_db_path,
@@ -2781,6 +2797,8 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "error": str(exc)[:200],
                 }
             )
+    if rolled_past == len(batches) and batches:
+        report["status"] = "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST"
     return report
 
 

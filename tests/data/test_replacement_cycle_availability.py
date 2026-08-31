@@ -395,8 +395,8 @@ class TestPollFetchDecision:
         report, fetched = self._run_poll(
             monkeypatch,
             tmp_path,
-            anchor_pub=_dt("2026-06-10T12:00:00"),
-            anchor_have=_dt("2026-06-10T12:00:00"),
+            anchor_pub=ensemble_cycle,
+            anchor_have=ensemble_cycle,
             recovery_batches=((ensemble_cycle, (scope,)),),
         )
 
@@ -417,6 +417,55 @@ class TestPollFetchDecision:
                 "written_manifest_count": None,
             }
         ]
+
+
+def test_held_common_cycle_recovery_does_not_retry_rolled_past_run(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    common_cycle = _dt("2026-06-10T06:00:00")
+    anchor_hwm = _dt("2026-06-10T12:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_anchor_gaps",
+        lambda *args, **kwargs: ((common_cycle, (scope,)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: anchor_hwm,
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("rolled-past provider run must not be retried")
+        ),
+    )
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report == {
+        "status": "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST",
+        "decision_time": "2026-06-10T22:30:00+00:00",
+        "recoveries": [
+            {
+                "cycle": common_cycle.isoformat(),
+                "scopes": [list(scope)],
+                "status": "PROVIDER_CYCLE_ROLLED_PAST",
+                "anchor_hwm": anchor_hwm.isoformat(),
+            }
+        ],
+    }
 
 
 def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
