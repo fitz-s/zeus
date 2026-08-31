@@ -2598,18 +2598,19 @@ def _current_target_anchor_gap_count(
         return None
 
 
-def _held_common_cycle_anchor_gaps(
+def _held_common_cycle_recovery_targets(
     forecast_db: Path,
     *,
     decision_time: datetime,
 ) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
-    """Return held scopes missing the anchor at their newest usable ENS cycle.
+    """Return held scopes whose posterior trails their newest common input cycle.
 
     The provider anchor can advance beyond ENS after a held scope missed one
     bounded download slice. Fetching only the newest anchor then cannot heal the
     posterior: same-cycle probability law rejects ``new anchor + older ENS``.
-    Recover the missing common cycle itself instead of waiting for another ENS
-    release. ``None`` means the evidence was unreadable and must be retried.
+    Recovery includes both missing anchors and already-committed anchors whose
+    reseed was lost across a crash/restart boundary. ``None`` means the evidence
+    was unreadable and must be retried.
     """
 
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
@@ -2693,8 +2694,27 @@ def _held_common_cycle_anchor_gaps(
         if conn is not None:
             conn.close()
 
+    return tuple(
+        (cycle, tuple(scopes))
+        for cycle, scopes in sorted(scopes_by_cycle.items())
+    )
+
+
+def _held_common_cycle_anchor_gaps(
+    forecast_db: Path,
+    *,
+    decision_time: datetime,
+) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
+    """Return only missing-anchor subsets of held common-cycle q debt."""
+
+    targets = _held_common_cycle_recovery_targets(
+        forecast_db,
+        decision_time=decision_time,
+    )
+    if targets is None:
+        return None
     batches: list[tuple[datetime, tuple[tuple[str, str, str], ...]]] = []
-    for cycle, scopes in sorted(scopes_by_cycle.items()):
+    for cycle, scopes in targets:
         missing = _critical_scopes_missing_current_anchor(
             forecast_db,
             scopes,
@@ -2724,7 +2744,7 @@ def _recover_held_common_cycle_anchors_if_needed(
 
     now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
     forecast_db_path = Path(str(forecast_db))
-    batches = _held_common_cycle_anchor_gaps(
+    batches = _held_common_cycle_recovery_targets(
         forecast_db_path,
         decision_time=now,
     )
@@ -2752,7 +2772,26 @@ def _recover_held_common_cycle_anchors_if_needed(
     rolled_past = 0
     committed_families: list[tuple[str, str, str]] = []
     for cycle, scopes in batches:
-        if anchor_hwm is not None and cycle < anchor_hwm:
+        missing_before = _critical_scopes_missing_current_anchor(
+            forecast_db_path,
+            scopes,
+            cycle,
+        )
+        if missing_before is None:
+            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "ANCHOR_EVIDENCE_UNREADABLE_RETRY",
+                    "committed_families": [],
+                }
+            )
+            continue
+        missing_set = set(missing_before)
+        ready_before = tuple(scope for scope in scopes if scope not in missing_set)
+        committed_families.extend(ready_before)
+        if missing_before and anchor_hwm is not None and cycle < anchor_hwm:
             rolled_past += 1
             report["recoveries"].append(  # type: ignore[union-attr]
                 {
@@ -2760,46 +2799,58 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "scopes": [list(scope) for scope in scopes],
                     "status": "PROVIDER_CYCLE_ROLLED_PAST",
                     "anchor_hwm": anchor_hwm.isoformat(),
-                    "committed_families": [],
+                    "committed_families": [
+                        list(scope) for scope in ready_before
+                    ],
                 }
             )
             continue
         try:
-            result = download_current_target_openmeteo_inputs(
-                forecast_db=forecast_db_path,
-                output_dir=Path(str(output_dir)),
-                cycle=cycle,
-                limit=None,
-                write_db=True,
-                release_lag_hours=float(
-                    cfg.get("download_release_lag_hours") or 14.0
-                ),
-                anchor_sigma_c=float(
-                    cfg.get("download_anchor_sigma_c") or 3.0
-                ),
-                required_scopes=scopes,
-                fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-                quota_priority=True,
-            )
-            # SCOPE: only exact held families requested in this recovery batch.
-            # DRAIN: re-read canonical exact-cycle coverage after the downloader
-            # commits; a count or sibling manifest is never family evidence.
-            # RESET: only families absent from the post-commit missing set may
-            # publish a reseed; unreadable evidence remains retryable.
-            missing_after = _critical_scopes_missing_current_anchor(
-                forecast_db_path,
-                scopes,
-                cycle,
-            )
-            recovered: tuple[tuple[str, str, str], ...] = ()
-            if missing_after is None:
-                report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
-            else:
-                missing_set = set(missing_after)
-                recovered = tuple(
-                    scope for scope in scopes if scope not in missing_set
+            recovered: tuple[tuple[str, str, str], ...] = ready_before
+            if missing_before:
+                result = download_current_target_openmeteo_inputs(
+                    forecast_db=forecast_db_path,
+                    output_dir=Path(str(output_dir)),
+                    cycle=cycle,
+                    limit=None,
+                    write_db=True,
+                    release_lag_hours=float(
+                        cfg.get("download_release_lag_hours") or 14.0
+                    ),
+                    anchor_sigma_c=float(
+                        cfg.get("download_anchor_sigma_c") or 3.0
+                    ),
+                    required_scopes=missing_before,
+                    fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                    quota_priority=True,
                 )
-                committed_families.extend(recovered)
+                # SCOPE: only exact held families requested in this recovery batch.
+                # DRAIN: re-read canonical exact-cycle coverage after the downloader
+                # commits; a count or sibling manifest is never family evidence.
+                # RESET: only families absent from the post-commit missing set may
+                # publish a reseed; unreadable evidence remains retryable.
+                missing_after = _critical_scopes_missing_current_anchor(
+                    forecast_db_path,
+                    missing_before,
+                    cycle,
+                )
+                if missing_after is None:
+                    report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+                else:
+                    missing_after_set = set(missing_after)
+                    newly_recovered = tuple(
+                        scope
+                        for scope in missing_before
+                        if scope not in missing_after_set
+                    )
+                    committed_families.extend(newly_recovered)
+                    recovered = (*ready_before, *newly_recovered)
+            else:
+                result = {
+                    "status": "ANCHOR_ALREADY_CURRENT_RESEED_REQUIRED",
+                    "written_manifest_count": 0,
+                    "written_manifests": [],
+                }
             recovery: dict[str, object] = {
                 "cycle": cycle.isoformat(),
                 "scopes": [list(scope) for scope in scopes],
@@ -2814,14 +2865,14 @@ def _recover_held_common_cycle_anchors_if_needed(
                     for path in (result.get("written_manifests") or ())
                     if str(path).strip()
                 )
+                reseed_kwargs: dict[str, object] = {"scopes": recovered}
+                if manifest_paths:
+                    reseed_kwargs["manifest_snapshot"] = {
+                        "manifest_paths": manifest_paths
+                    }
                 reseed = _enqueue_cycle_advance_reseeds_if_needed(
                     dict(cfg),
-                    scopes=recovered,
-                    manifest_snapshot=(
-                        {"manifest_paths": manifest_paths}
-                        if manifest_paths
-                        else {}
-                    ),
+                    **reseed_kwargs,
                 )
                 if reseed is not None:
                     recovery["reseed_status"] = reseed.get("status")
@@ -2844,7 +2895,9 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "scopes": [list(scope) for scope in scopes],
                     "status": "FETCH_FAILED_RETRY",
                     "error": str(exc)[:200],
-                    "committed_families": [],
+                    "committed_families": [
+                        list(scope) for scope in ready_before
+                    ],
                 }
             )
     if rolled_past == len(batches) and batches:

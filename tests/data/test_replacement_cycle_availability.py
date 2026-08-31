@@ -299,13 +299,22 @@ class TestPollFetchDecision:
         )
         monkeypatch.setattr(
             prod,
-            "_held_common_cycle_anchor_gaps",
+            "_held_common_cycle_recovery_targets",
             lambda db, *, decision_time: recovery_batches,
         )
+        coverage_reads = 0
+
+        def _critical_after_download(_db, scopes, _cycle):
+            nonlocal coverage_reads
+            if not recovery_batches:
+                return ()
+            coverage_reads += 1
+            return tuple(scopes) if coverage_reads == 1 else ()
+
         monkeypatch.setattr(
             prod,
             "_critical_scopes_missing_current_anchor",
-            lambda *_args, **_kwargs: (),
+            _critical_after_download,
         )
 
         class _NoSourceClockChange:
@@ -437,13 +446,18 @@ def test_held_common_cycle_recovery_does_not_retry_rolled_past_run(
     scope = ("Moscow", "2026-06-11", "high")
     monkeypatch.setattr(
         prod,
-        "_held_common_cycle_anchor_gaps",
+        "_held_common_cycle_recovery_targets",
         lambda *args, **kwargs: ((common_cycle, (scope,)),),
     )
     monkeypatch.setattr(
         prod,
         "_per_leg_downloaded_cycle",
         lambda *args, **kwargs: anchor_hwm,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (scope,),
     )
     monkeypatch.setattr(
         downloader,
@@ -488,7 +502,7 @@ def test_held_common_cycle_recovery_reseeds_only_reproven_families(
     still_missing = ("Tel Aviv", "2026-06-11", "high")
     monkeypatch.setattr(
         prod,
-        "_held_common_cycle_anchor_gaps",
+        "_held_common_cycle_recovery_targets",
         lambda *args, **kwargs: ((cycle, (recovered, still_missing)),),
     )
     monkeypatch.setattr(
@@ -540,6 +554,69 @@ def test_held_common_cycle_recovery_reseeds_only_reproven_families(
     ]
     assert report["recoveries"][0]["reseed_status"] == "CYCLE_ADVANCE_TRIGGER"
     assert report["recoveries"][0]["seeds_enqueued"] == 1
+
+
+def test_held_common_cycle_recovery_reseeds_preexisting_exact_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    cycle = _dt("2026-06-10T12:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *args, **kwargs: ((cycle, (scope,)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: cycle,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("preexisting exact anchor must not be downloaded again")
+        ),
+    )
+    reseeds: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: reseeds.append(kwargs)
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+    )
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report is not None
+    assert report["committed_families"] == (scope,)
+    assert reseeds == [{"scopes": (scope,)}]
+    assert report["recoveries"] == [
+        {
+            "cycle": cycle.isoformat(),
+            "scopes": [list(scope)],
+            "status": "ANCHOR_ALREADY_CURRENT_RESEED_REQUIRED",
+            "written_manifest_count": 0,
+            "written_manifests": [],
+            "committed_families": [list(scope)],
+            "reseed_status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 1,
+        }
+    ]
 
 
 def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
