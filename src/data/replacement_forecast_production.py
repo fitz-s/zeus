@@ -2898,7 +2898,13 @@ def _recover_held_common_cycle_anchors_if_needed(
                     ),
                     required_scopes=missing_before,
                     fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-                    quota_priority=True,
+                    # This recovery is exclusively for canonical open-held
+                    # families.  Local quota counters are telemetry here: they
+                    # must not manufacture authority loss for capital already
+                    # at risk.  The downloader's critical lane still obeys the
+                    # provider cooldown, terminal HTTP outcome, single-flight,
+                    # and bounded-request contracts.
+                    quota_critical=True,
                 )
                 # SCOPE: only exact held families requested in this recovery batch.
                 # DRAIN: re-read canonical exact-cycle coverage after the downloader

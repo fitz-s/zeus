@@ -460,7 +460,8 @@ class TestPollFetchDecision:
         assert recovered["cycle"] == ensemble_cycle
         assert recovered["required_scopes"] == (scope,)
         assert recovered["limit"] is None
-        assert recovered["quota_priority"] is True
+        assert recovered["quota_critical"] is True
+        assert recovered.get("quota_priority") is not True
         assert report["held_common_cycle_recovery_status"] == (
             "HELD_COMMON_CYCLE_GAPS_FOUND"
         )
