@@ -1383,6 +1383,39 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
     )
 
 
+def test_domain_limited_model_is_not_misclassified_as_global(tmp_path) -> None:
+    """An in-domain NBM gap is scoped source coverage, not a worldwide model outage."""
+    from src.data.bayes_precision_fusion_download import (
+        BayesPrecisionFusionDownloadTarget,
+        download_bayes_precision_fusion_extra_raw_inputs,
+    )
+
+    db = _forecast_db(tmp_path)
+    target = BayesPrecisionFusionDownloadTarget(
+        city="Denver",
+        metric="high",
+        target_date="2026-06-09",
+        lead_days=1,
+        latitude=39.856,
+        longitude=-104.676,
+        timezone_name="America/Denver",
+    )
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
+        targets=[target],
+        models=("ncep_nbm_conus",),
+        include_previous_runs=False,
+        single_runs_fetch=lambda **_kwargs: None,
+    )
+
+    assert "ncep_nbm_conus:single_runs" in report["dropped"]
+    assert report["domain_excluded"] == ()
+    assert report["global_models_expected"] == 0
+    assert report["global_models_unavailable"] == []
+
+
 def test_scoped_global_drop_does_not_fail_cycle_when_model_succeeds_elsewhere(tmp_path) -> None:
     """A global model with at least one successful row for the cycle is degraded by scope,
     not unavailable for the whole BPF capture job.
