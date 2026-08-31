@@ -28532,6 +28532,14 @@ class TestRecoveryResolutionTable:
             command_id="cmd-current-unknown",
             venue_order_id="vord-current-absent",
         )
+        record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="vord-current-absent",
+            context="ws_gap",
+            evidence={"reason": "exact_current_order_unobserved"},
+            recorded_at="2026-04-26T00:12:00Z",
+        )
         conn.commit()
 
         class CompleteVenue:
@@ -28575,6 +28583,7 @@ class TestRecoveryResolutionTable:
         proof = payload["venue_absence_proof"]
         assert proof["matching_open_order_count"] == 1
         assert proof["effective_current_submit_matching_open_order_count"] == 0
+        assert payload["resolved_m5_local_orphan_findings"] == 1
         assert proof["matching_open_orders_detached_from_current_submit"] == [
             {
                 "venue_order_id": "vord-old-ghost",
@@ -28591,6 +28600,12 @@ class TestRecoveryResolutionTable:
             "WHERE kind='exchange_ghost_order' AND subject_id='vord-old-ghost'"
         ).fetchone()
         assert ghost["resolved_at"] is None
+        current_orphan = conn.execute(
+            "SELECT resolved_at, resolution FROM exchange_reconcile_findings "
+            "WHERE kind='local_orphan_order' AND subject_id='vord-current-absent'"
+        ).fetchone()
+        assert current_orphan["resolved_at"] is not None
+        assert current_orphan["resolution"] == "command_recovery_exact_submit_absence"
 
     def test_unknown_side_effect_known_order_point_503_with_trade_stays_unknown(
         self, conn, mock_client

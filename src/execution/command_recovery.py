@@ -27015,6 +27015,13 @@ def _reconcile_row(
             sp_name = f"sp_submit_unknown_absence_{safe_command_id}"
             conn.execute(f"SAVEPOINT {sp_name}")
             try:
+                resolved_findings = _resolve_m5_local_orphan_findings(
+                    conn,
+                    command_id=cmd.command_id,
+                    venue_order_id=str(cmd.venue_order_id or ""),
+                    resolved_at=now,
+                    resolution="command_recovery_exact_submit_absence",
+                )
                 append_event(
                     conn,
                     command_id=cmd.command_id,
@@ -27028,6 +27035,7 @@ def _reconcile_row(
                         "age_seconds": age,
                         "lookup_method": lookup_method,
                         "venue_absence_proof": venue_absence_proof,
+                        "resolved_m5_local_orphan_findings": resolved_findings,
                     },
                 )
                 continuation = _release_submit_unknown_exit_after_authenticated_absence(
