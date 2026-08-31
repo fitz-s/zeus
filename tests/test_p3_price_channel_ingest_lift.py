@@ -7586,7 +7586,7 @@ def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_c
 
 
 def test_market_channel_snapshot_refresh_disables_autocheckpoint_before_refresh():
-    """The refresh writer must configure its own connection before any snapshot commit."""
+    """The refresh writer must bound SQLite and configure WAL before any commit."""
 
     tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
     refresh_action = next(
@@ -7616,6 +7616,13 @@ def test_market_channel_snapshot_refresh_disables_autocheckpoint_before_refresh(
         and isinstance(node.func, ast.Name)
         and node.func.id == "_disable_background_quote_autocheckpoint"
     )
+    busy_bound = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_bound_price_channel_sqlite_wait"
+    )
     refresh = next(
         node
         for node in ast.walk(refresh_action)
@@ -7630,4 +7637,49 @@ def test_market_channel_snapshot_refresh_disables_autocheckpoint_before_refresh(
     assert len(autocheckpoint.args) == 1
     assert isinstance(autocheckpoint.args[0], ast.Name)
     assert autocheckpoint.args[0].id == "trade_conn"
-    assert trade_open.lineno < autocheckpoint.lineno < refresh.lineno
+    busy_keywords = {keyword.arg: keyword.value for keyword in busy_bound.keywords}
+    assert isinstance(busy_keywords["timeout_ms"], ast.Name)
+    assert busy_keywords["timeout_ms"].id == "PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS"
+    assert trade_open.lineno < busy_bound.lineno < autocheckpoint.lineno < refresh.lineno
+
+
+def test_market_channel_snapshot_invalidation_bootstraps_before_write_lease():
+    """Connection setup cannot consume a background lease or block the monitor."""
+
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    invalidate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_invalidate_snapshot_action"
+    )
+    trade_open = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "get_trade_connection"
+    )
+    lease = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Call)
+            and isinstance(item.context_expr.func.func, ast.Name)
+            and item.context_expr.func.func.id
+            == "_edli_background_snapshot_trade_write_context_factory"
+            for item in node.items
+        )
+    )
+    background_bound = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_bound_background_price_channel_sqlite_wait"
+    )
+
+    assert trade_open.lineno < background_bound.lineno < lease.lineno

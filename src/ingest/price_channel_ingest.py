@@ -6082,12 +6082,27 @@ def _edli_market_channel_ingestor_cycle(
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.state.db import get_trade_connection
 
-                with _edli_background_snapshot_trade_write_context_factory(
-                    owner="price_channel_snapshot_invalidate"
-                )() as write_lease:
-                    trade_conn = get_trade_connection(write_class="live")
-                    before_changes = int(trade_conn.total_changes)
-                    try:
+                # Connection bootstrap executes PRAGMA journal_mode=WAL and may
+                # wait on an incumbent SQLite writer.  It is prerequisite work,
+                # not part of the invalidation write unit, so it must complete
+                # before this replayable background lane acquires the canonical
+                # TRADE lease.  Once admitted, bind SQLite's own busy handler to
+                # the same short hold budget; max_hold_ms is telemetry, not a
+                # preemptive timer.
+                trade_conn = get_trade_connection(
+                    write_class="live",
+                    deadline_monotonic=(
+                        time.monotonic()
+                        + PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS / 1000.0
+                    ),
+                )
+                _bound_background_price_channel_sqlite_wait(trade_conn)
+                _disable_background_quote_autocheckpoint(trade_conn)
+                try:
+                    with _edli_background_snapshot_trade_write_context_factory(
+                        owner="price_channel_snapshot_invalidate"
+                    )() as write_lease:
+                        before_changes = int(trade_conn.total_changes)
                         invalidated = invalidate_executable_snapshots_for_market_channel_action(
                             trade_conn,
                             action,
@@ -6103,8 +6118,10 @@ def _edli_market_channel_ingestor_cycle(
                                     int(trade_conn.total_changes) - before_changes,
                                 ),
                             )
-                    finally:
-                        trade_conn.close()
+                finally:
+                    if trade_conn.in_transaction:
+                        trade_conn.rollback()
+                    trade_conn.close()
 
             def _refresh_snapshot_action(
                 action: "MarketChannelAction",
@@ -6200,6 +6217,14 @@ def _edli_market_channel_ingestor_cycle(
                     turnstile_ctx.__exit__(None, None, None)
                     turnstile_entered = False
                     trade_conn = get_trade_connection(write_class="live")
+                    # The foreground snapshot write lease is capped at one
+                    # second.  SQLite must share that bound; otherwise its
+                    # process-wide 300 s busy_timeout can retain the coordinator
+                    # lease while held-position monitoring starves behind it.
+                    _bound_price_channel_sqlite_wait(
+                        trade_conn,
+                        timeout_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                    )
                     _disable_background_quote_autocheckpoint(trade_conn)
                     with PolymarketClient(
                         public_request_priority=RequestPriority.SUBMIT_JIT
