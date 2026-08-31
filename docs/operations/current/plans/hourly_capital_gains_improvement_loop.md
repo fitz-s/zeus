@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-30 — held common-cycle anchor提交必须同tick发布exact-family reseed
+- **实时反例:** Moscow 2026-08-31 HIGH有两笔held positions；18Z ENS于`01:27:44Z`提交，06Z posterior因same-cycle law正确失效。held common-cycle recovery随后在`01:39:53Z`提交exact `Moscow/2026-08-31/high/18Z` raw anchor，但`cycle_advance_enqueues`仍停在`01:11:03Z`，posterior仍停在06Z。原因是recovery只记录下载日志，必须等待broad maintenance；该maintenance多轮先在全局current-target/BPF extras耗尽deadline并写`REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE`，使一个无关全局数据缺口继续拖住已恢复的持仓q。
+- **修复合同:** recovery下载后重新读取canonical exact-cycle coverage，仅把本次由missing变为covered的`city/date/metric`写入`committed_families`；availability fast lane在同一tick立即对这些exact families分别运行fusion-upgrade与cycle-advance reseed。一个trigger异常只记录自身typed error，另一个仍运行；不依赖broad maintenance，不用`written_manifest_count`猜family，不构造stale q。
+- **SCOPE / DRAIN / RESET:** scope仅本tick刚被canonical DB证明已提交的held common-cycle families；drain是anchor commit→exact coverage re-read→两个独立scoped reseed→现有single-writer materialization；reset是durable reseed marker/current posterior HWM追上，或coverage re-read仍missing/不可读时保持retry且不发布。全局download、extras、其它城市和任一trigger错误均不得扩大scope。
+- **验收:** antibody证明多scope下载只发布after-read确已covered的family；fusion reseed抛错时cycle reseed仍执行。live要求出现晚于anchor commit的新Moscow 18Z seed、18Z current-revision posterior、held/global receipt重新评估两笔Moscow仓位；HOLD/SELL仍由current book上的expected-log-growth决定，不能强行负EV成交。严格资本evaluator继续独立判定，恢复q不是盈利PASS。
+
 ### 2026-08-30 — cancelled partial ENTRY必须关闭command-scoped capital obligation
 - **实时反例:** Tel Aviv command `df84f6142b994e02`已由authenticated order/trade facts证明`25.683169/30` shares成交、remainder取消，canonical position已吸收该增量且command为`CANCELLED`；但command-scoped `execution_fact.shares`仍停在较早的`17.746664`，导致`entry_exposure_obligations`保持`OPEN`。每个global auction因此把不存在的`$11.10` pending commitment同时从spendable cash扣除并加入terminal claim，污染wealth objective和BUY capacity。
 - **结构原因:** stale execution-fact repair对`CANCELLED` ENTRY要求整个position不存在任何entry execution fact。该条件只适用于缺失首笔事实的保守重建，却错误排除了已经有command-bound fact的same-token increment；后续obligation reducer正确拒绝不一致的`17.746664` vs `25.683169`。

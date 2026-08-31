@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-31
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -2733,6 +2733,7 @@ def _recover_held_common_cycle_anchors_if_needed(
             "status": "HELD_COMMON_CYCLE_EVIDENCE_UNREADABLE_RETRY",
             "decision_time": now.isoformat(),
             "recoveries": [],
+            "committed_families": (),
         }
     report: dict[str, object] = {
         "status": (
@@ -2742,12 +2743,14 @@ def _recover_held_common_cycle_anchors_if_needed(
         ),
         "decision_time": now.isoformat(),
         "recoveries": [],
+        "committed_families": (),
     }
     anchor_hwm = _per_leg_downloaded_cycle(
         forecast_db_path,
         "openmeteo_ecmwf_ifs_9km",
     )
     rolled_past = 0
+    committed_families: list[tuple[str, str, str]] = []
     for cycle, scopes in batches:
         if anchor_hwm is not None and cycle < anchor_hwm:
             rolled_past += 1
@@ -2757,6 +2760,7 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "scopes": [list(scope) for scope in scopes],
                     "status": "PROVIDER_CYCLE_ROLLED_PAST",
                     "anchor_hwm": anchor_hwm.isoformat(),
+                    "committed_families": [],
                 }
             )
             continue
@@ -2777,6 +2781,25 @@ def _recover_held_common_cycle_anchors_if_needed(
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
                 quota_priority=True,
             )
+            # SCOPE: only exact held families requested in this recovery batch.
+            # DRAIN: re-read canonical exact-cycle coverage after the downloader
+            # commits; a count or sibling manifest is never family evidence.
+            # RESET: only families absent from the post-commit missing set may
+            # publish a reseed; unreadable evidence remains retryable.
+            missing_after = _critical_scopes_missing_current_anchor(
+                forecast_db_path,
+                scopes,
+                cycle,
+            )
+            recovered: tuple[tuple[str, str, str], ...] = ()
+            if missing_after is None:
+                report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+            else:
+                missing_set = set(missing_after)
+                recovered = tuple(
+                    scope for scope in scopes if scope not in missing_set
+                )
+                committed_families.extend(recovered)
             report["recoveries"].append(  # type: ignore[union-attr]
                 {
                     "cycle": cycle.isoformat(),
@@ -2785,6 +2808,12 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "written_manifest_count": result.get(
                         "written_manifest_count"
                     ),
+                    "written_manifests": list(
+                        result.get("written_manifests") or ()
+                    ),
+                    "committed_families": [
+                        list(scope) for scope in recovered
+                    ],
                 }
             )
         except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
@@ -2795,10 +2824,12 @@ def _recover_held_common_cycle_anchors_if_needed(
                     "scopes": [list(scope) for scope in scopes],
                     "status": "FETCH_FAILED_RETRY",
                     "error": str(exc)[:200],
+                    "committed_families": [],
                 }
             )
     if rolled_past == len(batches) and batches:
         report["status"] = "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST"
+    report["committed_families"] = tuple(dict.fromkeys(committed_families))
     return report
 
 

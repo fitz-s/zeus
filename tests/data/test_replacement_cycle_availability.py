@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-08-31
 # Authority basis: operator directive 2026-06-11 ~03:40Z (automatic download, ahead of
 #   need, NO guessed numbers) and 2026-06-18 live/experiment separation. Relationship
 #   tests for probe-resolved anchor cycle selection and fetch decision.
@@ -302,6 +302,11 @@ class TestPollFetchDecision:
             "_held_common_cycle_anchor_gaps",
             lambda db, *, decision_time: recovery_batches,
         )
+        monkeypatch.setattr(
+            prod,
+            "_critical_scopes_missing_current_anchor",
+            lambda *_args, **_kwargs: (),
+        )
 
         class _NoSourceClockChange:
             updated_sources = ()
@@ -415,6 +420,8 @@ class TestPollFetchDecision:
                 "scopes": [list(scope)],
                 "status": "OK",
                 "written_manifest_count": None,
+                "written_manifests": [],
+                "committed_families": [list(scope)],
             }
         ]
 
@@ -457,15 +464,64 @@ def test_held_common_cycle_recovery_does_not_retry_rolled_past_run(
     assert report == {
         "status": "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST",
         "decision_time": "2026-06-10T22:30:00+00:00",
+        "committed_families": (),
         "recoveries": [
             {
                 "cycle": common_cycle.isoformat(),
                 "scopes": [list(scope)],
                 "status": "PROVIDER_CYCLE_ROLLED_PAST",
                 "anchor_hwm": anchor_hwm.isoformat(),
+                "committed_families": [],
             }
         ],
     }
+
+
+def test_held_common_cycle_recovery_publishes_only_reproven_families(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    cycle = _dt("2026-06-10T12:00:00")
+    recovered = ("Moscow", "2026-06-11", "high")
+    still_missing = ("Tel Aviv", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_anchor_gaps",
+        lambda *args, **kwargs: ((cycle, (recovered, still_missing)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: cycle,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (still_missing,),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "written_manifest_count": 1,
+            "written_manifests": ["/tmp/moscow-high.manifest.json"],
+        },
+    )
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report is not None
+    assert report["committed_families"] == (recovered,)
+    assert report["recoveries"][0]["committed_families"] == [list(recovered)]
 
 
 def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
@@ -582,6 +638,79 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
         (ensemble_cycle, (("Moscow", "2026-06-11", "high"),)),
     )
     assert checked == [(('Moscow', '2026-06-11', 'high'),)]
+
+
+def test_common_cycle_recovery_reseeds_exact_scope_and_isolates_trigger_failure(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    scope = ("Moscow", "2026-08-31", "high")
+    recovery: dict[str, object] = {
+        "status": "HELD_COMMON_CYCLE_GAPS_FOUND",
+        "committed_families": (scope,),
+        "recoveries": [],
+    }
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_recover_held_common_cycle_anchors_if_needed",
+        lambda _cfg: recovery,
+    )
+    monkeypatch.setattr(prod, "_ingest_station_forecasts_if_due", lambda _cfg: None)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def _fusion(_cfg, **kwargs):
+        calls.append(("fusion", kwargs))
+        raise RuntimeError("isolated fusion failure")
+
+    def _cycle(_cfg, **kwargs):
+        calls.append(("cycle", kwargs))
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _cycle)
+
+    class _DegradedNoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": "test",
+            }
+
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _DegradedNoChange(),
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["status"] == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+    assert calls == [
+        (
+            "fusion",
+            {"scopes": (scope,), "changed_sources": ("ecmwf_ifs",)},
+        ),
+        ("cycle", {"scopes": (scope,)}),
+    ]
+    assert recovery["fusion_upgrade_status"] == "FUSION_UPGRADE_RESEED_FAILSOFT"
+    assert recovery["cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert recovery["cycle_advance_seeds_enqueued"] == 1
+    assert recovery["retryable"] is True
+    assert recovery["reseed_errors"] == (
+        "fusion_upgrade:RuntimeError: isolated fusion failure",
+    )
 
 
 def test_ingest_poll_calls_held_common_cycle_recovery() -> None:

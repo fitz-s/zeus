@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-04-30; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -2990,17 +2990,143 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    def _attach_reseed_reports(
+        report: dict[str, object],
+        *,
+        scopes: tuple[tuple[str, str, str], ...] | None = None,
+        changed_sources: tuple[str, ...] | None = None,
+        include_cycle_advance: bool = True,
+        prepared_manifest_snapshot: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        manifest_snapshot = prepared_manifest_snapshot
+        reseed_errors = list(report.get("reseed_errors") or ())
+        try:
+            if scopes is None:
+                upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                    cfg,
+                    changed_sources=changed_sources,
+                )
+            else:
+                upgrade_kwargs: dict[str, object] = {
+                    "scopes": scopes,
+                    "changed_sources": changed_sources,
+                }
+                if manifest_snapshot is not None:
+                    upgrade_kwargs["manifest_snapshot"] = manifest_snapshot
+                upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                    cfg,
+                    **upgrade_kwargs,
+                )
+        except Exception as exc:  # noqa: BLE001 - cycle drain remains independent.
+            report["fusion_upgrade_status"] = "FUSION_UPGRADE_RESEED_FAILSOFT"
+            reseed_errors.append(
+                f"fusion_upgrade:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+        else:
+            if upgrade_report is not None:
+                report["fusion_upgrade_status"] = upgrade_report.get("status")
+                report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get(
+                    "seeds_enqueued"
+                )
+            upgrade_error = _replacement_reseed_error(
+                "fusion_upgrade",
+                upgrade_report,
+            )
+            if upgrade_error is not None:
+                reseed_errors.append(upgrade_error)
+        if not include_cycle_advance:
+            if reseed_errors:
+                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+                report["retryable"] = True
+            return report
+        try:
+            if scopes is None:
+                cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+            else:
+                cycle_kwargs: dict[str, object] = {"scopes": scopes}
+                if manifest_snapshot is not None:
+                    cycle_kwargs["manifest_snapshot"] = manifest_snapshot
+                cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(
+                    cfg,
+                    **cycle_kwargs,
+                )
+        except Exception as exc:  # noqa: BLE001 - one reseed organ cannot block the other.
+            report["cycle_advance_status"] = "CYCLE_ADVANCE_RESEED_FAILSOFT"
+            reseed_errors.append(
+                f"cycle_advance:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+        else:
+            if cycle_advance_report is not None:
+                report["cycle_advance_status"] = cycle_advance_report.get("status")
+                report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get(
+                    "seeds_enqueued"
+                )
+                if cycle_advance_report.get("advances_detected"):
+                    report["cycle_advance_detail"] = {
+                        k: cycle_advance_report.get(k)
+                        for k in (
+                            "freshest_materializable_cycle",
+                            "scopes_checked",
+                            "advances_detected",
+                            "held_advances_detected",
+                            "seeds_enqueued",
+                            "held_seeds_enqueued",
+                            "already_enqueued",
+                            "manifest_missing",
+                            "leg_artifact_missing",
+                            "family_cycle_missing",
+                            "family_cycle_not_newer",
+                            "day0_skipped",
+                            "comparison_failed",
+                            "family_scope_check_failed",
+                            "seed_build_failed",
+                            "enqueued",
+                        )
+                    }
+            cycle_error = _replacement_reseed_error(
+                "cycle_advance",
+                cycle_advance_report,
+            )
+            if cycle_error is not None:
+                reseed_errors.append(cycle_error)
+        if reseed_errors:
+            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+            report["retryable"] = True
+        return report
+
     try:
         common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(cfg)
-        if common_cycle_recovery and common_cycle_recovery.get("status") != (
-            "HELD_COMMON_CYCLE_CURRENT"
-        ):
-            logger.info(
-                "held common-cycle anchor recovery report: %s",
-                common_cycle_recovery,
+        if common_cycle_recovery:
+            committed_families = tuple(
+                dict.fromkeys(
+                    (str(city), str(target_date), str(metric))
+                    for city, target_date, metric in (
+                        common_cycle_recovery.get("committed_families") or ()
+                    )
+                )
             )
+            if committed_families:
+                # SCOPE: exact held families whose anchor commit was re-proven
+                # above. DRAIN: both scoped reseed organs run in this poll tick.
+                # RESET: their durable markers/current posterior HWM become
+                # current; either organ's failure remains local and retryable.
+                _attach_reseed_reports(
+                    common_cycle_recovery,
+                    scopes=committed_families,
+                    changed_sources=("ecmwf_ifs",),
+                )
+            if (
+                common_cycle_recovery.get("status")
+                != "HELD_COMMON_CYCLE_CURRENT"
+                or committed_families
+            ):
+                logger.info(
+                    "held common-cycle anchor recovery report: %s",
+                    common_cycle_recovery,
+                )
     except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
         logger.warning("held common-cycle anchor recovery failed: %s", exc)
+
     # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
@@ -3012,90 +3138,6 @@ def _replacement_availability_poll_tick():
             logger.info("station-forecast live ingest wrote rows: %s", _station_report)
     except Exception as exc:  # noqa: BLE001 - station ingest must never break the poll
         logger.warning("station-forecast live ingest skipped (fail-soft): %s", exc)
-
-    def _attach_reseed_reports(
-        report: dict[str, object],
-        *,
-        scopes: tuple[tuple[str, str, str], ...] | None = None,
-        changed_sources: tuple[str, ...] | None = None,
-        include_cycle_advance: bool = True,
-        prepared_manifest_snapshot: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        manifest_snapshot = None
-        if scopes is not None:
-            manifest_snapshot = prepared_manifest_snapshot or {}
-        reseed_errors = list(report.get("reseed_errors") or ())
-        upgrade_report = (
-            _enqueue_fusion_upgrade_reseeds_if_needed(
-                cfg,
-                changed_sources=changed_sources,
-            )
-            if scopes is None
-            else _enqueue_fusion_upgrade_reseeds_if_needed(
-                cfg,
-                scopes=scopes,
-                changed_sources=changed_sources,
-                manifest_snapshot=manifest_snapshot,
-            )
-        )
-        if upgrade_report is not None:
-            report["fusion_upgrade_status"] = upgrade_report.get("status")
-            report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
-        upgrade_error = _replacement_reseed_error(
-            "fusion_upgrade",
-            upgrade_report,
-        )
-        if upgrade_error is not None:
-            reseed_errors.append(upgrade_error)
-        if not include_cycle_advance:
-            if reseed_errors:
-                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
-                report["retryable"] = True
-            return report
-        cycle_advance_report = (
-            _enqueue_cycle_advance_reseeds_if_needed(cfg)
-            if scopes is None
-            else _enqueue_cycle_advance_reseeds_if_needed(
-                cfg,
-                scopes=scopes,
-                manifest_snapshot=manifest_snapshot,
-            )
-        )
-        if cycle_advance_report is not None:
-            report["cycle_advance_status"] = cycle_advance_report.get("status")
-            report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
-            if cycle_advance_report.get("advances_detected"):
-                report["cycle_advance_detail"] = {
-                    k: cycle_advance_report.get(k)
-                    for k in (
-                        "freshest_materializable_cycle",
-                        "scopes_checked",
-                        "advances_detected",
-                        "held_advances_detected",
-                        "seeds_enqueued",
-                        "held_seeds_enqueued",
-                        "already_enqueued",
-                        "manifest_missing",
-                        "leg_artifact_missing",
-                        "family_cycle_missing",
-                        "family_cycle_not_newer",
-                        "day0_skipped",
-                        "comparison_failed",
-                        "family_scope_check_failed",
-                        "seed_build_failed",
-                        "enqueued",
-                    )
-                }
-        cycle_error = _replacement_reseed_error(
-            "cycle_advance",
-            cycle_advance_report,
-        )
-        if cycle_error is not None:
-            reseed_errors.append(cycle_error)
-        if reseed_errors:
-            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
-            report["retryable"] = True
-        return report
 
     _station_reseed_report: dict[str, object] | None = None
     _station_rows_written = sum(
