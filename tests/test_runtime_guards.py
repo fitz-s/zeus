@@ -3896,11 +3896,94 @@ def test_stale_order_cleanup_durably_cancels_terminal_command_reappeared_open(tm
           FROM exchange_reconcile_findings
          WHERE kind = 'local_orphan_order'
            AND subject_id = 'order-terminal-reappeared'
-           AND context = 'periodic'
+           AND context = 'operator'
         """
     ).fetchone()
     assert finding["resolved_at"] is not None
     assert finding["resolution"] == "terminal_reappeared_order_cancel_confirmed"
+    conn.close()
+
+
+def test_terminal_reappeared_cancel_unknown_debt_survives_stale_terminal_fact(tmp_path):
+    from src.execution.command_recovery import reconcile_stale_terminal_no_fill_findings
+    from src.state.venue_command_repo import append_order_fact
+
+    conn = get_connection(tmp_path / "terminal-reappeared-unknown.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            'cmd-terminal-unknown', 'snap-terminal', 'env-terminal',
+            'pos-terminal', 'dec-terminal', 'idem-terminal', 'ENTRY',
+            'market-terminal', 'token-terminal', 'BUY', 10, 0.25,
+            'order-terminal-unknown', 'EXPIRED', NULL,
+            '2026-08-31T00:00:00+00:00', '2026-08-31T00:01:00+00:00', NULL
+        )
+        """
+    )
+    terminal_payload = {"reason": "historical_terminal_no_fill"}
+    append_order_fact(
+        conn,
+        venue_order_id="order-terminal-unknown",
+        command_id="cmd-terminal-unknown",
+        state="EXPIRED",
+        remaining_size="10",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-08-31T00:01:00+00:00",
+        raw_payload_hash=hashlib.sha256(
+            json.dumps(terminal_payload, sort_keys=True).encode()
+        ).hexdigest(),
+        raw_payload_json=terminal_payload,
+    )
+    conn.commit()
+
+    class RefusingClob:
+        def get_open_orders(self):
+            return [{"id": "order-terminal-unknown", "status": "LIVE"}]
+
+        def cancel_order(self, _order_id):
+            raise RuntimeError("cancels are disabled")
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        RefusingClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_terminal_unknown")),
+        conn=conn,
+    )
+    stale = reconcile_stale_terminal_no_fill_findings(conn)
+
+    assert cancelled_count == 0
+    assert stale["advanced"] == 0
+    finding = conn.execute(
+        """
+        SELECT resolved_at
+          FROM exchange_reconcile_findings
+         WHERE kind = 'local_orphan_order'
+           AND subject_id = 'order-terminal-unknown'
+           AND context = 'operator'
+        """
+    ).fetchone()
+    assert finding["resolved_at"] is None
+    provenance = conn.execute(
+        """
+        SELECT event_type
+          FROM provenance_envelope_events
+         WHERE subject_type = 'order' AND subject_id = 'order-terminal-unknown'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in provenance] == [
+        "EXPIRED",
+        "TERMINAL_ORDER_CANCEL_REQUESTED",
+        "TERMINAL_ORDER_CANCEL_UNKNOWN",
+    ]
     conn.close()
 
 

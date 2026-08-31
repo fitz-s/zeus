@@ -2211,7 +2211,7 @@ def _cancel_reappeared_terminal_order(
         conn,
         kind="local_orphan_order",
         subject_id=venue_order_id,
-        context="periodic",
+        context="operator",
         evidence=request_payload,
         recorded_at=observed_at,
     )
