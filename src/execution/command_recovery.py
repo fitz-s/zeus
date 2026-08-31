@@ -44,7 +44,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
@@ -11114,6 +11114,130 @@ def _existing_positive_position_for_entry_command(
             "incremental terminal no-fill command does not exactly match existing exposure"
         )
     return current
+
+
+def _existing_position_terminal_no_fill_cancel_command_ids(
+    conn: sqlite3.Connection,
+    candidates: Iterable[Mapping[str, object]],
+) -> frozenset[str]:
+    """Return cancel-pending top-ups already proven terminal with zero fill."""
+
+    command_ids: set[str] = set()
+    for candidate in candidates:
+        command_id = str(candidate.get("command_id") or "").strip()
+        if (
+            not command_id
+            or str(candidate.get("state") or "")
+            != CommandState.CANCEL_PENDING.value
+            or str(candidate.get("order_fact_state") or "")
+            not in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+            or not _decimal_is_zero(candidate.get("order_fact_matched_size"))
+        ):
+            continue
+        try:
+            existing = _existing_positive_position_for_entry_command(
+                conn,
+                command=dict(candidate),
+            )
+        except ValueError:
+            continue
+        if existing is not None:
+            command_ids.add(command_id)
+    return frozenset(command_ids)
+
+
+def reconcile_existing_position_terminal_no_fill_cancels(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: frozenset[str],
+) -> dict:
+    """Release a canceled zero-fill top-up without touching its existing lot.
+
+    SCOPE: one CANCEL_PENDING ENTRY whose latest exact-order fact is terminal,
+    zero-fill, and identity-bound to an already-positive position aggregate.
+    DRAIN: append the existing CANCEL_ACKED command event and release its
+    reservation in the same TRADE transaction; no venue read is required.
+    RESET: CANCELLED command state removes the row from this candidate set.
+    Pending-entry/unknown-position commands stay on the cross-DB lifecycle path.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not command_ids:
+        return summary
+    for candidate in _latest_terminal_order_fact_candidates(conn):
+        command_id = str(candidate.get("command_id") or "").strip()
+        if command_id not in command_ids:
+            continue
+        summary["scanned"] += 1
+        try:
+            command_order_id = str(candidate.get("venue_order_id") or "").strip()
+            fact_order_id = str(
+                candidate.get("order_fact_venue_order_id") or ""
+            ).strip()
+            if (
+                str(candidate.get("state") or "")
+                != CommandState.CANCEL_PENDING.value
+                or not command_order_id
+                or fact_order_id != command_order_id
+                or str(candidate.get("order_fact_state") or "")
+                not in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+                or not _decimal_is_zero(candidate.get("order_fact_matched_size"))
+                or _fill_trade_fact_count(conn, command_id) > 0
+                or _existing_positive_position_for_entry_command(
+                    conn,
+                    command=candidate,
+                )
+                is None
+            ):
+                summary["stayed"] += 1
+                continue
+            occurred_at = str(
+                candidate.get("order_fact_observed_at") or _now_iso()
+            )
+            resolved_findings = _resolve_m5_local_orphan_findings(
+                conn,
+                command_id=command_id,
+                venue_order_id=command_order_id,
+                resolved_at=occurred_at,
+                resolution="existing_position_terminal_no_fill_cancel",
+            )
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.CANCEL_ACKED.value,
+                occurred_at=occurred_at,
+                payload={
+                    "reason": "existing_position_terminal_no_fill",
+                    "proof_class": "terminal_zero_fill_increment_cancel",
+                    "venue_order_id": command_order_id,
+                    "venue_order_fact_id": candidate.get("order_fact_id"),
+                    "venue_order_fact_state": candidate.get("order_fact_state"),
+                    "matched_size": candidate.get("order_fact_matched_size"),
+                    "remaining_size": candidate.get("order_fact_remaining_size"),
+                    "source": candidate.get("order_fact_source"),
+                    "resolved_m5_local_orphan_findings": resolved_findings,
+                    "required_predicates": {
+                        "command_state_cancel_pending": True,
+                        "terminal_order_fact_zero_fill": True,
+                        "existing_positive_position_identity_exact": True,
+                        "no_positive_trade_fact": True,
+                    },
+                },
+            )
+            reconcile_terminal_entry_exposure_obligations(
+                conn,
+                command_id=command_id,
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: existing-position terminal no-fill cancel failed "
+                "for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 _WEATHER_EVENT_SLUG_RE = re.compile(
@@ -29941,6 +30065,24 @@ def _reconcile_passes_short_conn(
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
             terminal_fact_candidates = _latest_terminal_order_fact_candidates(conn)
+            existing_position_terminal_cancel_ids = (
+                _existing_position_terminal_no_fill_cancel_command_ids(
+                    conn,
+                    terminal_fact_candidates,
+                )
+            )
+            cancel_candidates = [
+                candidate
+                for candidate in cancel_candidates
+                if str(candidate.get("command_id") or "")
+                not in existing_position_terminal_cancel_ids
+            ]
+            terminal_fact_candidates = [
+                candidate
+                for candidate in terminal_fact_candidates
+                if str(candidate.get("command_id") or "")
+                not in existing_position_terminal_cancel_ids
+            ]
             stale_terminal_finding_candidates = (
                 _stale_local_orphan_terminal_no_fill_candidates(conn)
             )
@@ -30062,6 +30204,33 @@ def _reconcile_passes_short_conn(
                     exit_fill_result,
                     advanced_key="projected",
                     fold_stayed=False,
+                )
+        existing_position_terminal_cancel_result = None
+        if existing_position_terminal_cancel_ids:
+            terminal_cancel_deadline = _capital_deadline()
+            terminal_cancel_conn_factory = _capital_apply_conn_factory(
+                terminal_cancel_deadline,
+            )
+            existing_position_terminal_cancel_result = _run_capital_pass(
+                "existing_position_terminal_no_fill_cancels_fast",
+                lambda: run_db_only_pass(
+                    lambda conn: reconcile_existing_position_terminal_no_fill_cancels(
+                        conn,
+                        command_ids=existing_position_terminal_cancel_ids,
+                    ),
+                    conn_factory=terminal_cancel_conn_factory,
+                    label=(
+                        "recovery."
+                        "existing_position_terminal_no_fill_cancels_fast"
+                    ),
+                ),
+                deadline_monotonic=terminal_cancel_deadline,
+            )
+            if existing_position_terminal_cancel_result is not None:
+                _accumulate(
+                    summary,
+                    "existing_position_terminal_no_fill_cancels_fast",
+                    existing_position_terminal_cancel_result,
                 )
         preexisting_terminal_result = None
         if terminal_fact_candidates:
@@ -30279,6 +30448,7 @@ def _reconcile_passes_short_conn(
                 return (
                     terminal_fill_review_result
                     or exit_fill_result
+                    or existing_position_terminal_cancel_result
                     or preexisting_terminal_result
                     or identity_result
                     or terminal_late_fill_result
@@ -30289,6 +30459,7 @@ def _reconcile_passes_short_conn(
             return (
                 terminal_fill_review_result
                 or exit_fill_result
+                or existing_position_terminal_cancel_result
                 or preexisting_terminal_result
                 or stale_terminal_finding_result
                 or terminal_late_fill_result
@@ -30438,6 +30609,7 @@ def _reconcile_passes_short_conn(
         return (
             terminal_fill_review_result
             or exit_fill_result
+            or existing_position_terminal_cancel_result
             or preexisting_terminal_result
             or stale_terminal_finding_result
             or terminal_late_fill_result

@@ -35927,6 +35927,145 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
         verified.close()
 
 
+def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
+    tmp_path,
+    monkeypatch,
+):
+    """A WS-confirmed canceled top-up must not wait for a cross-DB writer."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "terminal-zero-fill-top-up.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(
+        seed,
+        command_id="cmd-top-up",
+        position_id="pos-active",
+        size=21.0,
+        price=0.51,
+    )
+    _advance_to_cancel_pending(
+        seed,
+        command_id="cmd-top-up",
+        venue_order_id="ord-top-up",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-active",
+        command_id="cmd-top-up",
+        order_id="ord-top-up",
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               shares = 5.0,
+               chain_shares = 5.0,
+               cost_basis_usd = 3.0,
+               size_usd = 3.0,
+               entry_price = 0.60
+         WHERE position_id = 'pos-active'
+        """
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-top-up",
+        order_id="ord-top-up",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="21",
+        source="WS_USER",
+    )
+    seed.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount, created_at
+        ) VALUES ('cmd-top-up', 'PUSD_BUY', NULL, 10710000, ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    seed.commit()
+    seed.close()
+
+    def _trade_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    full_factory_calls = []
+
+    def _full_factory(**_kwargs):
+        full_factory_calls.append(dict(_kwargs))
+        raise AssertionError("terminal top-up cancel must not acquire WORLD+TRADE")
+
+    _trade_factory.supports_nonblocking_flocks = True
+    _full_factory.supports_nonblocking_flocks = True
+    _full_factory.requires_writer_flocks = True
+    _full_factory.trade_only_factory = _trade_factory
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _full_factory,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_read_conn_factory",
+        _trade_factory,
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "durable terminal order fact must release capital before venue I/O"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["existing_position_terminal_no_fill_cancels_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert not full_factory_calls
+    verified = _trade_factory()
+    try:
+        assert _get_state(verified, "cmd-top-up") == "CANCELLED"
+        reservation = verified.execute(
+            """
+            SELECT released_at, release_reason
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-top-up'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CANCELLED"
+        position = verified.execute(
+            """
+            SELECT phase, shares, chain_shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-active'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 3.0,
+        }
+    finally:
+        verified.close()
+
+
 def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
     tmp_path,
     monkeypatch,
