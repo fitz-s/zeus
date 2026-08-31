@@ -5362,6 +5362,7 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
             "entries_paused",
             "live_health_entry_authority",
             "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE",
+            "CURRENT_WEALTH_COLLATERAL_EXPIRED",
             "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
         }
         for seg in segments
@@ -5371,9 +5372,14 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
 def _is_current_wealth_retry_reason(reason: str | None) -> bool:
     if not reason:
         return False
-    return "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS" in {
-        seg.strip() for seg in str(reason).split(":")
-    }
+    segments = {seg.strip() for seg in str(reason).split(":")}
+    return bool(
+        {
+            "CURRENT_WEALTH_COLLATERAL_EXPIRED",
+            "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+        }
+        & segments
+    )
 
 
 def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:

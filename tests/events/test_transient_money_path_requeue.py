@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-08-31
 # Authority basis: operator directive 2026-06-11 ~16:30Z — stale-decision-vs-fresh-book
 #   races were TERMINAL. Live evidence: Miami 16:22:35Z cleared EVERY gate and aborted at
 #   JIT recapture (SUBMIT_ABORTED_PRICE_MOVED: recaptured all-in 0.5136 > max 0.5025 +
@@ -502,6 +502,26 @@ def test_current_wealth_ambiguity_requeue_waits_for_recovery_cadence(monkeypatch
         conn,
         store,
         "GLOBAL_AUCTION_FAILED:ValueError:CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=60)
+    ).isoformat()
+
+
+def test_expired_collateral_requeue_waits_for_refresh_cadence(monkeypatch):
+    monkeypatch.delenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", raising=False)
+    conn, store = _store()
+    event = _event("snap-expired-collateral-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "GLOBAL_AUCTION_FAILED:ValueError:CURRENT_WEALTH_COLLATERAL_EXPIRED",
     )
 
     result = reactor.process_pending(decision_time=_DT, limit=10)
