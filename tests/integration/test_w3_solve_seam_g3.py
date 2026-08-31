@@ -27624,6 +27624,90 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
 
 
+def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch):
+    import src.runtime.reactor_wake as reactor_wake
+
+    captured = {}
+    routine_monitor_pending = [True]
+    wake_revision = [1]
+    wake_reason = ["held_position_monitor_pending"]
+    stable_receipt = EventSubmissionReceipt(
+        False,
+        "event-1",
+        "snapshot-1",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: wake_revision[0],
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: wake_reason[0],
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda *_args, **_kwargs: stable_receipt,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_authority_receipt",
+        lambda _event, receipt, **_kwargs: receipt,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_jit_receipt",
+        lambda _event, receipt, **_kwargs: receipt,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        selection_cancelled=lambda: routine_monitor_pending[0],
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
+    adapter.process_global_batch((event,), decision_at)
+    cancelled = captured["selection_cancelled"]
+    preflight = captured["preflight_winner"]
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=(("family-alpha", "q-1"),),
+        book_epoch_identity="book-1",
+        book_economics_manifest=(("family-alpha", "book-1"),),
+        wealth_witness_identity="wealth-1",
+        actuation_deadline=decision_at + _dt.timedelta(seconds=30),
+    )
+
+    assert cancelled() is True
+    result = preflight(
+        event,
+        SimpleNamespace(
+            actuation_identity="actuation-1",
+            decision=SimpleNamespace(candidate=SimpleNamespace(action="BUY")),
+        ),
+        decision_at,
+        authority,
+    )
+    assert result.status == "STABLE"
+    assert cancelled() is False
+
+    wake_revision[0] += 1
+    wake_reason[0] = "day0_extreme_event_committed"
+    assert cancelled() is True
+
+
 def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(
     monkeypatch,
 ):

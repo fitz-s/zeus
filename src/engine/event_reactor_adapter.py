@@ -8713,11 +8713,11 @@ def event_bound_live_adapter_from_trade_conn(
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if _stable_preflight_monitor_handoff[0]:
-                # A stable submit-time SELL proof owns the short final-actuation
+                # A stable submit-time proof owns the short final-actuation
                 # window. Periodic monitor pressure already has durable completion
-                # debt and cannot improve this exact globally ranked SELL. Keep
-                # probing above for a newer committed Day0 fact, which does revoke
-                # the capability before venue I/O.
+                # debt and the global solve already compared current held actions
+                # with this exact winner. Keep probing above for a newer committed
+                # Day0 fact, which does revoke the capability before venue I/O.
                 return False
             if selection_cancelled is not None:
                 try:
@@ -9078,12 +9078,11 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt.decision_proof_bundle is not None
                 or reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             ):
-                if reason == "GLOBAL_SELL_PREFLIGHT_STABLE":
-                    # The runtime probes cancellation immediately after this
-                    # submit-time proof. A routine held-position monitor must
-                    # not preempt the global SELL lane it cannot execute. A
-                    # newer committed Day0 fact still wins in the probe above.
-                    _stable_preflight_monitor_handoff[0] = True
+                # The runtime probes cancellation immediately after this exact
+                # submit-time proof. Routine held-monitor fairness must not
+                # starve either side of the globally ranked action; fresh wealth
+                # and hard Day0 authority are still checked before venue I/O.
+                _stable_preflight_monitor_handoff[0] = True
                 issued_at, expires_at = _global_preflight_token_window(
                     authority.actuation_deadline
                 )
