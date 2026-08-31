@@ -28482,6 +28482,116 @@ class TestRecoveryResolutionTable:
         assert proof["point_order_error_type"] == "RuntimeError"
         assert proof["venue_order_id"] == "vord-point-503"
 
+    def test_unknown_exact_absence_detaches_older_terminal_exchange_ghost(self, conn):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.execution.exchange_reconcile import record_finding
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-old-ghost",
+            position_id="pos-old-ghost",
+            price=0.49,
+            size=11.0,
+            created_at="2026-04-26T00:00:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-old-ghost",
+            venue_order_id="vord-old-ghost",
+        )
+        append_event(
+            conn,
+            command_id="cmd-old-ghost",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "vord-old-ghost"},
+        )
+        record_finding(
+            conn,
+            kind="exchange_ghost_order",
+            subject_id="vord-old-ghost",
+            context="operator",
+            evidence={
+                "reason": "terminal_command_venue_order_reappeared_open",
+                "command_id": "cmd-old-ghost",
+            },
+            recorded_at="2026-04-26T00:04:00Z",
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-current-unknown",
+            position_id="pos-current-unknown",
+            price=0.50,
+            size=10.0,
+            created_at="2026-04-26T00:10:00Z",
+        )
+        _advance_to_unknown_side_effect(
+            conn,
+            command_id="cmd-current-unknown",
+            venue_order_id="vord-current-absent",
+        )
+        conn.commit()
+
+        class CompleteVenue:
+            authenticated_point_reads_are_complete = True
+            venue_reads_are_complete = True
+
+            @staticmethod
+            def get_order(order_id):
+                assert order_id == "vord-current-absent"
+                return None
+
+            @staticmethod
+            def get_open_orders():
+                return [
+                    {
+                        "id": "vord-old-ghost",
+                        "status": "LIVE",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.49",
+                        "size": "11",
+                    }
+                ]
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        summary = reconcile_unresolved_commands(conn, CompleteVenue())
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-current-unknown") == "SUBMIT_REJECTED"
+        assert _get_state(conn, "cmd-old-ghost") == "EXPIRED"
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-current-unknown")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["lookup_method"] == "authenticated_exact_absence_detached_ghost"
+        proof = payload["venue_absence_proof"]
+        assert proof["matching_open_order_count"] == 1
+        assert proof["effective_current_submit_matching_open_order_count"] == 0
+        assert proof["matching_open_orders_detached_from_current_submit"] == [
+            {
+                "venue_order_id": "vord-old-ghost",
+                "owner_command_id": "cmd-old-ghost",
+                "owner_command_state": "EXPIRED",
+                "owner_created_at": "2026-04-26T00:00:00Z",
+                "exchange_ghost_finding_id": proof[
+                    "matching_open_orders_detached_from_current_submit"
+                ][0]["exchange_ghost_finding_id"],
+            }
+        ]
+        ghost = conn.execute(
+            "SELECT resolved_at FROM exchange_reconcile_findings "
+            "WHERE kind='exchange_ghost_order' AND subject_id='vord-old-ghost'"
+        ).fetchone()
+        assert ghost["resolved_at"] is None
+
     def test_unknown_side_effect_known_order_point_503_with_trade_stays_unknown(
         self, conn, mock_client
     ):

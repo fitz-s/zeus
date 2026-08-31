@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -1022,6 +1022,7 @@ def _is_positive_decimal(value: object) -> bool:
 
 
 def _lookup_unknown_side_effect_order(
+    conn: sqlite3.Connection,
     cmd: VenueCommand,
     client,
 ) -> tuple[str, dict | None, dict | None, str]:
@@ -1094,6 +1095,29 @@ def _lookup_unknown_side_effect_order(
             "point_order_error_type": point_error_type,
             "venue_order_id": cmd.venue_order_id,
         }
+    if (
+        venue_status == "unavailable"
+        and proof is not None
+        and point_read is not None
+        and point_read.query_complete
+        and point_read.absent
+        and proof.get("open_orders_query_complete") is True
+        and proof.get("trades_query_complete") is True
+        and int(proof.get("matching_trade_count") or 0) == 0
+    ):
+        detached = _detached_terminal_ghost_open_orders(
+            conn,
+            current_command=cmd,
+            matching_open_orders=proof.get("matching_open_orders") or (),
+        )
+        if detached is not None:
+            proof = {
+                **proof,
+                "current_submit_exact_order_absent": True,
+                "matching_open_orders_detached_from_current_submit": detached,
+                "effective_current_submit_matching_open_order_count": 0,
+            }
+            return "found", None, proof, "authenticated_exact_absence_detached_ghost"
     return venue_status, venue_resp, proof, "authenticated_venue_absence"
 
 
@@ -24085,6 +24109,83 @@ def _summarize_venue_match(raw: dict) -> dict:
     }
 
 
+def _detached_terminal_ghost_open_orders(
+    conn: sqlite3.Connection,
+    *,
+    current_command: VenueCommand,
+    matching_open_orders: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]] | None:
+    """Prove every exposure-level open match belongs to an older ghost.
+
+    SCOPE: only the exact matching open-order identities returned by the same
+    complete authenticated account snapshot used for the current unknown
+    submit. DRAIN: each older terminal command keeps its own unresolved
+    exchange-ghost cancel obligation. RESET: the current command may be
+    terminalized only while its exact point order is independently absent;
+    any unowned, nonterminal, same/newer, or trade-matched exposure fails closed.
+    """
+
+    matches = list(matching_open_orders)
+    if not matches:
+        return None
+    current_created = _epoch_seconds(current_command.created_at)
+    if current_created is None:
+        return None
+    detached: list[dict[str, object]] = []
+    for match in matches:
+        order_id = str(
+            match.get("id")
+            or match.get("order_id")
+            or match.get("orderID")
+            or ""
+        ).strip()
+        if not order_id or order_id == str(current_command.venue_order_id or ""):
+            return None
+        rows = conn.execute(
+            """
+            SELECT owner.command_id, owner.state, owner.market_id, owner.token_id,
+                   owner.side, owner.created_at, finding.finding_id
+              FROM venue_commands AS owner
+              JOIN exchange_reconcile_findings AS finding
+                ON finding.kind = 'exchange_ghost_order'
+               AND finding.subject_id = owner.venue_order_id
+               AND finding.resolved_at IS NULL
+               AND finding.context = 'operator'
+               AND json_valid(finding.evidence_json)
+               AND json_extract(finding.evidence_json, '$.reason') =
+                   'terminal_command_venue_order_reappeared_open'
+             WHERE owner.venue_order_id = ?
+               AND owner.state IN ('CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED')
+            """,
+            (order_id,),
+        ).fetchall()
+        owners = {_dict_row(row)["command_id"]: _dict_row(row) for row in rows}
+        if len(owners) != 1:
+            return None
+        owner = next(iter(owners.values()))
+        owner_created = _epoch_seconds(owner.get("created_at"))
+        if (
+            owner_created is None
+            or owner_created >= current_created
+            or str(owner.get("command_id") or "") == current_command.command_id
+            or str(owner.get("market_id") or "") != current_command.market_id
+            or str(owner.get("token_id") or "") != current_command.token_id
+            or str(owner.get("side") or "").upper()
+            != str(current_command.side or "").upper()
+        ):
+            return None
+        detached.append(
+            {
+                "venue_order_id": order_id,
+                "owner_command_id": str(owner["command_id"]),
+                "owner_command_state": str(owner["state"]),
+                "owner_created_at": str(owner["created_at"]),
+                "exchange_ghost_finding_id": str(owner["finding_id"]),
+            }
+        )
+    return detached
+
+
 def build_review_required_no_venue_exposure_proof(
     conn: sqlite3.Connection,
     command_id: str,
@@ -26585,7 +26686,7 @@ def _recover_no_venue_order_id_submit(
     """
 
     lookup_status, venue_resp, venue_absence_proof, lookup_method = (
-        _lookup_unknown_side_effect_order(cmd, client)
+        _lookup_unknown_side_effect_order(conn, cmd, client)
     )
     if lookup_status == "unavailable":
         logger.warning(
@@ -26820,7 +26921,7 @@ def _reconcile_row(
                 return "advanced"
 
             lookup_status, venue_resp, venue_absence_proof, lookup_method = (
-                _lookup_unknown_side_effect_order(cmd, client)
+                _lookup_unknown_side_effect_order(conn, cmd, client)
             )
             if lookup_status == "unavailable":
                 logger.warning(
