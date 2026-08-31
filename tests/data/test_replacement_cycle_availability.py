@@ -477,7 +477,7 @@ def test_held_common_cycle_recovery_does_not_retry_rolled_past_run(
     }
 
 
-def test_held_common_cycle_recovery_publishes_only_reproven_families(
+def test_held_common_cycle_recovery_reseeds_only_reproven_families(
     monkeypatch, tmp_path
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as downloader
@@ -501,20 +501,30 @@ def test_held_common_cycle_recovery_publishes_only_reproven_families(
         "_critical_scopes_missing_current_anchor",
         lambda *args, **kwargs: (still_missing,),
     )
+    manifest = tmp_path / "moscow-high.manifest.json"
     monkeypatch.setattr(
         downloader,
         "download_current_target_openmeteo_inputs",
         lambda **kwargs: {
             "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
             "written_manifest_count": 1,
-            "written_manifests": ["/tmp/moscow-high.manifest.json"],
+            "written_manifests": [str(manifest)],
         },
     )
+    reseeds: list[dict[str, object]] = []
+
+    def enqueue(_cfg, **kwargs):
+        reseeds.append(kwargs)
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", enqueue)
 
     report = prod._recover_held_common_cycle_anchors_if_needed(
         {
             "forecast_db": tmp_path / "forecasts.db",
             "download_output_dir": tmp_path / "raw",
+            "seed_dir": tmp_path / "seeds",
+            "raw_manifest_dir": tmp_path / "raw",
         },
         decision_time=_dt("2026-06-10T22:30:00"),
     )
@@ -522,6 +532,14 @@ def test_held_common_cycle_recovery_publishes_only_reproven_families(
     assert report is not None
     assert report["committed_families"] == (recovered,)
     assert report["recoveries"][0]["committed_families"] == [list(recovered)]
+    assert reseeds == [
+        {
+            "scopes": (recovered,),
+            "manifest_snapshot": {"manifest_paths": (str(manifest),)},
+        }
+    ]
+    assert report["recoveries"][0]["reseed_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert report["recoveries"][0]["seeds_enqueued"] == 1
 
 
 def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(

@@ -2800,22 +2800,42 @@ def _recover_held_common_cycle_anchors_if_needed(
                     scope for scope in scopes if scope not in missing_set
                 )
                 committed_families.extend(recovered)
-            report["recoveries"].append(  # type: ignore[union-attr]
-                {
-                    "cycle": cycle.isoformat(),
-                    "scopes": [list(scope) for scope in scopes],
-                    "status": result.get("status"),
-                    "written_manifest_count": result.get(
-                        "written_manifest_count"
+            recovery: dict[str, object] = {
+                "cycle": cycle.isoformat(),
+                "scopes": [list(scope) for scope in scopes],
+                "status": result.get("status"),
+                "written_manifest_count": result.get("written_manifest_count"),
+                "written_manifests": list(result.get("written_manifests") or ()),
+                "committed_families": [list(scope) for scope in recovered],
+            }
+            if recovered:
+                manifest_paths = tuple(
+                    str(path)
+                    for path in (result.get("written_manifests") or ())
+                    if str(path).strip()
+                )
+                reseed = _enqueue_cycle_advance_reseeds_if_needed(
+                    dict(cfg),
+                    scopes=recovered,
+                    manifest_snapshot=(
+                        {"manifest_paths": manifest_paths}
+                        if manifest_paths
+                        else {}
                     ),
-                    "written_manifests": list(
-                        result.get("written_manifests") or ()
-                    ),
-                    "committed_families": [
-                        list(scope) for scope in recovered
-                    ],
-                }
-            )
+                )
+                if reseed is not None:
+                    recovery["reseed_status"] = reseed.get("status")
+                    recovery["seeds_enqueued"] = reseed.get("seeds_enqueued")
+                    reseed_status = str(reseed.get("status") or "")
+                    reseed_error = (
+                        None
+                        if reseed_status == "CYCLE_ADVANCE_TRIGGER"
+                        else f"cycle_advance:{reseed_status or 'RESEED_STATUS_MISSING'}"
+                    )
+                    if reseed_error is not None:
+                        report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+                        recovery["reseed_error"] = reseed_error
+            report["recoveries"].append(recovery)  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
             report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
             report["recoveries"].append(  # type: ignore[union-attr]
