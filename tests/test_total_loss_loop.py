@@ -3389,6 +3389,44 @@ def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg
     assert hard[0]["crossing_evidence_id"] == "q-hard"
 
 
+@pytest.mark.parametrize("current_bid", (0.0, None))
+def test_incomplete_latest_cannot_hide_corroborated_no_bid_catchup(
+    cfg: dict,
+    current_bid: float | None,
+) -> None:
+    """Restart catch-up preserves a complete no-bid book under a newer scalar zero."""
+    _position(cfg, direction="buy_no")
+    _quote(
+        cfg,
+        "buy-no-bid",
+        "2026-08-22T09:00:01+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-zero",
+        "2026-08-22T09:00:02+00:00",
+        current_bid,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-zero'"
+        )
+
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_kind"] == "no_bid"
+    assert hard[0]["crossing_evidence_id"] == "buy-no-bid"
+    assert hard[0]["t_floor"] is None
+
+
 def test_precursor_uses_buy_no_carrier_when_sell_no_latest_is_incomplete(cfg: dict) -> None:
     _position(cfg, direction="buy_no")
     _quote(cfg, "old-sell", "2026-08-22T09:00:00+00:00", 0.60, token="no-token", direction="sell_no")

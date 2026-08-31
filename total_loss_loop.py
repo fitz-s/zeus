@@ -1480,6 +1480,54 @@ def _latest_quotes(
     return result
 
 
+def _incomplete_current_corroborates_floor(
+    authoritative: Mapping[str, Any],
+    current: Mapping[str, Any] | None,
+    floor: float,
+) -> bool:
+    """Return true when a newer scalar quote confirms an older full book loss.
+
+    The SELL latest projection can omit depth while the same held token's
+    current BUY-side evidence retains the authoritative book. Missing depth
+    alone must never invent a crossing, but it also must not erase a real one
+    when the newer scalar independently confirms there was no recovery.
+    """
+
+    if not isinstance(current, Mapping):
+        return False
+    if reconcile_held_quote(current)[0] != "quote_incomplete":
+        return False
+    authoritative_status, authoritative_bid = reconcile_held_quote(authoritative)
+    current_bid = _float(current.get("best_bid_before"))
+    current_ask = _float(current.get("best_ask_before"))
+    current_book_hash = str(current.get("book_hash_before") or "").strip()
+    current_at = parse_time(str(current.get("quote_seen_at") or ""))
+    authoritative_at = parse_time(str(authoritative.get("quote_seen_at") or ""))
+    if (
+        current_at is None
+        or authoritative_at is None
+        or current_at < authoritative_at
+    ):
+        return False
+    if authoritative_status == "no_bid":
+        return bool(
+            (current_bid is not None and current_bid <= 0)
+            or (
+                current_bid is None
+                and current_ask is not None
+                and 0 < current_ask <= 1
+                and current_book_hash
+            )
+        )
+    return bool(
+        authoritative_status == "executable"
+        and authoritative_bid is not None
+        and authoritative_bid < floor
+        and current_bid is not None
+        and current_bid < floor
+    )
+
+
 def _new_quote_rows(
     trades: sqlite3.Connection,
     cursor: int,
@@ -2374,7 +2422,16 @@ def _detect_trigger(
                     quote = latest.get(str(position["position_id"]))
                     if quote is None:
                         continue
-                    observed_quote = quote.get("_current_quote", quote)
+                    current_quote = quote.get("_current_quote")
+                    if _incomplete_current_corroborates_floor(
+                        quote,
+                        current_quote if isinstance(current_quote, Mapping) else None,
+                        floor,
+                    ):
+                        incident_id = _observe_quote(mem, position, quote, floor)
+                        if incident_id:
+                            created.append(incident_id)
+                    observed_quote = current_quote if current_quote is not None else quote
                     if observed_quote is None:
                         continue
                     incident_id = _observe_quote(mem, position, observed_quote, floor)
