@@ -483,6 +483,33 @@ def _json_file_valid(path: Path) -> bool:
         return False
 
 
+def _current_target_scoped_payload(
+    payload: object,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> dict:
+    """Bind canonical payload bytes to the target certificate identity.
+
+    One provider city/run payload spans several dates, so its unscoped bytes
+    share one SHA. ``raw_forecast_artifacts`` is content-addressed by that SHA,
+    while the anchor manifest and precision metadata are target-specific. The
+    namespaced scope keeps provider samples unchanged but prevents two valid
+    target certificates from collapsing onto one DB row.
+    """
+
+    if not isinstance(payload, dict):
+        raise TypeError("current-target Open-Meteo payload must be an object")
+    scoped = dict(payload)
+    scoped["_zeus_current_target_scope"] = {
+        "city": str(city),
+        "target_date": str(target_date),
+        "metric": str(metric),
+    }
+    return scoped
+
+
 def _current_target_payload_materializable(
     payload: object,
     *,
@@ -1689,6 +1716,8 @@ def download_current_target_raw_inputs(
                     cycle=cycle,
                 )
             )
+            if payload_is_materializable:
+                payload = json.loads(payload_path.read_text(encoding="utf-8"))
             if not payload_is_materializable:
                 try:
                     if target_key in unavailable_targets:
@@ -1758,7 +1787,15 @@ def download_current_target_raw_inputs(
                     )
                     processed_target_count += 1
                     continue
-                _write_json(payload_path, payload)
+            _write_json(
+                payload_path,
+                _current_target_scoped_payload(
+                    payload,
+                    city=target.city,
+                    target_date=target.target_date,
+                    metric=target.temperature_metric,
+                ),
+            )
             _write_json(
                 precision_path,
                 _precision_metadata(

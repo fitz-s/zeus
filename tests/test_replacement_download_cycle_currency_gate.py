@@ -1372,6 +1372,77 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
 
 
+def test_identical_run_payloads_persist_distinct_target_certificates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Content identity must not collapse two target dates onto one artifact row."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
+    fetches: list[tuple[tuple[str, str], ...]] = []
+
+    def _wave(requests, **_kwargs):
+        keys = tuple(requests)
+        fetches.append(keys)
+        captured_at = datetime.now(timezone.utc)
+        return {
+            key: (
+                _anchor_payload(),
+                {
+                    "openmeteo_endpoint": "single_runs_api",
+                    "run_authority": "run_pinned_single_runs",
+                },
+                captured_at,
+            )
+            for key in keys
+        }
+
+    monkeypatch.setattr(dl, "_fetch_run_pinned_anchor_wave", _wave)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(
+            ("Dallas", "2026-06-10", "high"),
+            ("Dallas", "2026-06-11", "high"),
+        ),
+    )
+
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT sha256, artifact_path, "
+        "json_extract(artifact_metadata_json, '$.target_date') "
+        "FROM raw_forecast_artifacts ORDER BY artifact_id"
+    ).fetchall()
+    conn.close()
+
+    assert len(fetches) == 1
+    assert report["written_manifest_count"] == 2
+    assert len(rows) == 2
+    assert len({row[0] for row in rows}) == 2
+    assert {row[2] for row in rows} == {"2026-06-10", "2026-06-11"}
+    for _sha, artifact_path, target_date in rows:
+        payload = json.loads(Path(artifact_path).read_text())
+        assert payload["_zeus_current_target_scope"] == {
+            "city": "Dallas",
+            "target_date": target_date,
+            "metric": "high",
+        }
+
+
 def test_current_cycle_wave_fetches_identical_city_run_once_and_fans_out_dates() -> None:
     import scripts.download_replacement_forecast_current_targets as dl
 
