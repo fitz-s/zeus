@@ -2598,6 +2598,94 @@ def _current_target_anchor_gap_count(
         return None
 
 
+def _held_common_cycle_anchor_gaps(
+    forecast_db: Path,
+    *,
+    decision_time: datetime,
+) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
+    """Return held scopes missing the anchor at their newest usable ENS cycle.
+
+    The provider anchor can advance beyond ENS after a held scope missed one
+    bounded download slice. Fetching only the newest anchor then cannot heal the
+    posterior: same-cycle probability law rejects ``new anchor + older ENS``.
+    Recover the missing common cycle itself instead of waiting for another ENS
+    release. ``None`` means the evidence was unreadable and must be retried.
+    """
+
+    from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        held_position_family_priorities,
+    )
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        SOURCE_ID,
+    )
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    held_scopes = tuple(sorted(held_position_family_priorities()))
+    if not held_scopes:
+        return ()
+    conn = None
+    try:
+        conn = _connect_read_only(forecast_db)
+        conn.execute("PRAGMA query_only=ON")
+        scopes_by_cycle: dict[datetime, list[tuple[str, str, str]]] = {}
+        for city, target_date, metric in held_scopes:
+            ensemble_cycle = latest_eligible_ensemble_input_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+            )
+            if ensemble_cycle is None:
+                continue
+            ensemble_cycle = ensemble_cycle.astimezone(timezone.utc)
+            row = conn.execute(
+                """
+                SELECT source_cycle_time
+                FROM forecast_posteriors
+                WHERE source_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                  AND runtime_layer = 'live'
+                ORDER BY computed_at DESC, posterior_id DESC
+                LIMIT 1
+                """,
+                (SOURCE_ID, city, target_date, metric),
+            ).fetchone()
+            posterior_cycle = None
+            if row is not None and row[0]:
+                posterior_cycle = datetime.fromisoformat(
+                    str(row[0]).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            if posterior_cycle is not None and posterior_cycle >= ensemble_cycle:
+                continue
+            scopes_by_cycle.setdefault(ensemble_cycle, []).append(
+                (city, target_date, metric)
+            )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    batches: list[tuple[datetime, tuple[tuple[str, str, str], ...]]] = []
+    for cycle, scopes in sorted(scopes_by_cycle.items()):
+        missing = _critical_scopes_missing_current_anchor(
+            forecast_db,
+            scopes,
+            cycle,
+        )
+        if missing is None:
+            return None
+        if missing:
+            batches.append((cycle, missing))
+    return tuple(batches)
+
+
 def _replacement_cycle_availability_poll_if_needed(
     cfg: dict[str, object],
     *,
@@ -2679,7 +2767,55 @@ def _replacement_cycle_availability_poll_if_needed(
     except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
         report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
         report["source_clock_error"] = str(exc)[:200]
-    if fetch_anchor_cycle is None:
+    recovery_batches = _held_common_cycle_anchor_gaps(
+        forecast_db_path,
+        decision_time=now,
+    )
+    if recovery_batches is None:
+        report["held_common_cycle_recovery_status"] = "EVIDENCE_UNREADABLE_RETRY"
+    else:
+        report["held_common_cycle_recovery_status"] = (
+            "GAPS_FOUND" if recovery_batches else "CURRENT"
+        )
+        report["held_common_cycle_recovery"] = []
+        for recovery_cycle, recovery_scopes in recovery_batches:
+            try:
+                recovery_result = download_current_target_openmeteo_inputs(
+                    forecast_db=forecast_db_path,
+                    output_dir=Path(str(output_dir)),
+                    cycle=recovery_cycle,
+                    limit=None,
+                    write_db=True,
+                    release_lag_hours=float(
+                        cfg.get("download_release_lag_hours") or 14.0
+                    ),
+                    anchor_sigma_c=float(
+                        cfg.get("download_anchor_sigma_c") or 3.0
+                    ),
+                    required_scopes=recovery_scopes,
+                    fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                    quota_priority=True,
+                )
+                report["held_common_cycle_recovery"].append(  # type: ignore[union-attr]
+                    {
+                        "cycle": recovery_cycle.isoformat(),
+                        "scopes": [list(scope) for scope in recovery_scopes],
+                        "status": recovery_result.get("status"),
+                        "written_manifest_count": recovery_result.get(
+                            "written_manifest_count"
+                        ),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
+                report["held_common_cycle_recovery"].append(  # type: ignore[union-attr]
+                    {
+                        "cycle": recovery_cycle.isoformat(),
+                        "scopes": [list(scope) for scope in recovery_scopes],
+                        "status": "FETCH_FAILED_RETRY",
+                        "error": str(exc)[:200],
+                    }
+                )
+    if fetch_anchor_cycle is None and not recovery_batches:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
         # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).

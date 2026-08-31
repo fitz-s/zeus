@@ -263,7 +263,16 @@ class TestProbeResolvedSelection:
 class TestPollFetchDecision:
     """The production poll layer: anchor high-water vs probed publication."""
 
-    def _run_poll(self, monkeypatch, tmp_path, *, anchor_pub, anchor_have, anchor_gaps=0):
+    def _run_poll(
+        self,
+        monkeypatch,
+        tmp_path,
+        *,
+        anchor_pub,
+        anchor_have,
+        anchor_gaps=0,
+        recovery_batches=(),
+    ):
         import scripts.download_replacement_forecast_current_targets as dl
         import src.data.replacement_cycle_availability as rca
         import src.data.replacement_forecast_production as prod
@@ -287,6 +296,11 @@ class TestPollFetchDecision:
             prod,
             "_current_target_anchor_gap_count",
             lambda db, cycle: anchor_gaps,
+        )
+        monkeypatch.setattr(
+            prod,
+            "_held_common_cycle_anchor_gaps",
+            lambda db, *, decision_time: recovery_batches,
         )
 
         class _NoSourceClockChange:
@@ -371,6 +385,116 @@ class TestPollFetchDecision:
         assert fetched[0][1]["include_covered"] is False
         assert fetched[0][1]["missing_manifests_only"] is True
         assert fetched[0][1]["quota_priority"] is True
+
+    def test_held_scope_recovers_missing_newest_common_cycle(
+        self, monkeypatch, tmp_path
+    ):
+        ensemble_cycle = _dt("2026-06-10T06:00:00")
+        scope = ("Moscow", "2026-06-11", "high")
+
+        report, fetched = self._run_poll(
+            monkeypatch,
+            tmp_path,
+            anchor_pub=_dt("2026-06-10T12:00:00"),
+            anchor_have=_dt("2026-06-10T12:00:00"),
+            recovery_batches=((ensemble_cycle, (scope,)),),
+        )
+
+        assert len(fetched) == 1
+        recovered = fetched[0][1]
+        assert recovered["cycle"] == ensemble_cycle
+        assert recovered["required_scopes"] == (scope,)
+        assert recovered["limit"] is None
+        assert recovered["quota_priority"] is True
+        assert report["held_common_cycle_recovery_status"] == "GAPS_FOUND"
+        assert report["held_common_cycle_recovery"] == [
+            {
+                "cycle": ensemble_cycle.isoformat(),
+                "scopes": [list(scope)],
+                "status": "OK",
+                "written_manifest_count": None,
+            }
+        ]
+
+
+def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    import sqlite3
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.replacement_input_hwm as input_hwm
+    from src.data.replacement_forecast_current_target_plan import SOURCE_ID
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO forecast_posteriors(
+            source_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, runtime_layer
+        ) VALUES (?, ?, '2026-06-11', 'high', ?, ?, 'live')
+        """,
+        (
+            (
+                SOURCE_ID,
+                "Moscow",
+                "2026-06-10T00:00:00+00:00",
+                "2026-06-10T08:00:00+00:00",
+            ),
+            (
+                SOURCE_ID,
+                "Tel Aviv",
+                "2026-06-10T06:00:00+00:00",
+                "2026-06-10T14:00:00+00:00",
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    ensemble_cycle = _dt("2026-06-10T06:00:00")
+    held = {
+        ("Moscow", "2026-06-11", "high"): 0,
+        ("Tel Aviv", "2026-06-11", "high"): 0,
+    }
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda: held)
+    monkeypatch.setattr(
+        input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: ensemble_cycle,
+    )
+    checked: list[tuple[tuple[str, str, str], ...]] = []
+
+    def missing(_db, scopes, cycle):
+        assert cycle == ensemble_cycle
+        checked.append(tuple(scopes))
+        return tuple(scopes)
+
+    monkeypatch.setattr(prod, "_critical_scopes_missing_current_anchor", missing)
+
+    assert prod._held_common_cycle_anchor_gaps(
+        db,
+        decision_time=_dt("2026-06-10T22:30:00"),
+    ) == (
+        (ensemble_cycle, (("Moscow", "2026-06-11", "high"),)),
+    )
+    assert checked == [(('Moscow', '2026-06-11', 'high'),)]
 
     def test_flag_off_is_inert(self, tmp_path):
         import src.data.replacement_forecast_production as prod
