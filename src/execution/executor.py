@@ -525,9 +525,17 @@ def _entry_terminal_no_fill_redecision_proof(
         return None
     if not isinstance(payload, dict):
         return None
-    if (
-        payload.get("reason") == "V2_PRE_SUBMIT_EXCEPTION"
+    rejection_reason = str(payload.get("reason") or "")
+    pre_submit_redecision_proof = (
+        "pre_submit_transport"
+        if rejection_reason == "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+        else "pre_submit_db_lock"
+        if rejection_reason == "V2_PRE_SUBMIT_EXCEPTION"
         and "database is locked" in str(payload.get("detail") or "").lower()
+        else None
+    )
+    if (
+        pre_submit_redecision_proof is not None
         and not str(venue_order_id or "").strip()
         and _table_exists(conn, "venue_order_facts")
         and not _entry_has_positive_trade_fact(conn, command_id=command_id)
@@ -536,10 +544,10 @@ def _entry_terminal_no_fill_redecision_proof(
             (command_id,),
         ).fetchone()
     ):
-        # The adapter emits V2_PRE_SUBMIT_EXCEPTION only while post_started is
-        # false. With no bound/order/trade identity, the lock created no venue
-        # exposure and a fresh decision may retry the same executable price.
-        return "pre_submit_db_lock"
+        # These typed reasons are emitted only while post_started is false.
+        # With no bound/order/trade identity, local lock/transport loss created
+        # no venue exposure and a fresh decision may retry the same price.
+        return pre_submit_redecision_proof
     proof_class = str(payload.get("proof_class") or "")
     if proof_class == "deterministic_venue_fak_no_match_400":
         payload_order_id = str(payload.get("venue_order_id") or "").strip()
@@ -2360,7 +2368,10 @@ def _entry_same_token_cooldown_component(
         if terminal_no_fill
         else None
     )
-    if no_fill_redecision_proof == "pre_submit_db_lock":
+    if no_fill_redecision_proof in {
+        "pre_submit_db_lock",
+        "pre_submit_transport",
+    }:
         # The exact proof says the adapter never crossed POST and canonical
         # order/trade facts are absent. Re-decision must therefore recapture a
         # fresh quote immediately; applying the generic terminal-no-fill
@@ -2368,7 +2379,9 @@ def _entry_same_token_cooldown_component(
         return {
             "component": "entry_same_token_cooldown",
             "allowed": True,
-            "reason": "allowed_terminal_pre_submit_db_lock_no_fill_redecision",
+            "reason": (
+                f"allowed_terminal_{no_fill_redecision_proof}_no_fill_redecision"
+            ),
             "terminal_no_fill_redecision_proof": no_fill_redecision_proof,
             "cooldown_seconds": 0,
             "age_seconds": int(age_seconds),

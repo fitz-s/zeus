@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-08-20
+# Last reused or audited: 2026-09-01
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
