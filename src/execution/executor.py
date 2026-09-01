@@ -10006,7 +10006,7 @@ def _live_order(
         # a race may lose here without rolling back the already-durable venue fact.
         from src.execution.command_recovery import ensure_live_entry_projection_for_command
 
-        try:
+        def _persist_entry_projection() -> None:
             ensure_live_entry_projection_for_command(
                 conn,
                 command_id=command_id,
@@ -10025,6 +10025,13 @@ def _live_order(
                 # Command terminalization remains the sole collateral owner.
                 _release_entry_risk_reservation(conn, command_id=command_id)
             conn.commit()
+
+        try:
+            _retry_persist_on_db_lock(
+                conn,
+                _persist_entry_projection,
+                what="entry_position_projection",
+            )
         except Exception as projection_exc:
             try:
                 conn.rollback()
