@@ -5043,6 +5043,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # The V2 adapter proved the order POST boundary was not crossed, but an SDK
+    # metadata/auth transport read failed before local signing completed. Re-run
+    # the full current q/book/wealth decision; never replay the old envelope.
+    "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION",
     # Synchronous Polymarket 400 submit rejection with no venue order id. The
     # submit crossed the HTTP boundary but the venue rejected before creating an
     # order. This is a stale maker-price/mode race; release the command/cap and

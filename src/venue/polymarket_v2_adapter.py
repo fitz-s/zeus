@@ -1057,7 +1057,7 @@ class PolymarketV2Adapter:
         except Exception as exc:
             return _rejected_submit_result(
                 envelope,
-                error_code="V2_PRE_SUBMIT_EXCEPTION",
+                error_code=_pre_submit_exception_code(exc),
                 error_message=str(exc),
             )
         signed_order = None
@@ -1229,7 +1229,7 @@ class PolymarketV2Adapter:
                 error_code = (
                     "SUBMIT_ABORTED_PRICE_MOVED"
                     if str(exc).startswith("SUBMIT_ABORTED_PRICE_MOVED:")
-                    else "V2_PRE_SUBMIT_EXCEPTION"
+                    else _pre_submit_exception_code(exc)
                 )
                 return _rejected_submit_result(
                     envelope,
@@ -1410,14 +1410,14 @@ class PolymarketV2Adapter:
                 signed_orders[i] = signed_bytes
                 post_orders_args.append(PostOrdersV2Args(order=local_signed_order, orderType=envelope.order_type))
         except Exception as exc:
-            # Pre-network signing failure -- no side effect crossed for
-            # ANY envelope in this call. Reject the whole batch (matches
-            # single-order submit()'s V2_PRE_SUBMIT_EXCEPTION when
-            # signed_order is None).
+            # Pre-POST setup/signing failure -- no order side effect crossed for
+            # ANY envelope in this call. SDK metadata reads may still fail at
+            # transport, so preserve that retryable class instead of collapsing
+            # it into a terminal local build error.
             return [
                 _rejected_submit_result(
                     e,
-                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_code=_pre_submit_exception_code(exc),
                     error_message=str(exc),
                     signed_order=signed_orders[i] if i < len(signed_orders) else None,
                     signed_order_hash=signed_hashes[i] if i < len(signed_hashes) else None,
@@ -3641,6 +3641,18 @@ def _is_polymarket_deterministic_request_400_error(exc: BaseException) -> bool:
     """True only for a synchronous typed venue request rejection."""
 
     return isinstance(exc, PolyApiException) and exc.status_code == 400
+
+
+def _pre_submit_exception_code(exc: BaseException) -> str:
+    """Separate safe pre-POST transport loss from terminal local defects."""
+
+    if (
+        isinstance(exc, PolyApiException)
+        and exc.status_code is None
+        and "request exception" in " ".join(str(exc).lower().split())
+    ):
+        return "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+    return "V2_PRE_SUBMIT_EXCEPTION"
 
 
 def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:

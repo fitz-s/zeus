@@ -145,6 +145,14 @@ class FakeCreateOrderFailureClient(FakeTwoStepClient):
         raise RuntimeError("local signing failed")
 
 
+class FakeCreateOrderTransportFailureClient(FakeTwoStepClient):
+    def create_order(self, order_args, options=None):
+        self.calls.append(("create_order", order_args, options))
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        raise PolyApiException(error_msg="Request exception!")
+
+
 class FakePostOrderFailureClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -2495,6 +2503,21 @@ def test_two_step_signing_failure_is_typed_pre_submit_rejection(tmp_path):
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
     assert "local signing failed" in (result.error_message or "")
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_two_step_pre_submit_transport_failure_is_retryable_typed_rejection(tmp_path):
+    fake = FakeCreateOrderTransportFailureClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FOK", post_only=False
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+    assert result.envelope.order_id is None
     assert not any(call[0] == "post_order" for call in fake.calls)
 
 

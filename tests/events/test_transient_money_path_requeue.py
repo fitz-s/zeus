@@ -35,6 +35,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
+    _is_explicitly_transient_money_path_reason,
     _is_executable_snapshot_refresh_reason,
     _is_transient_money_path_reason,
     _runtime_authority_retry_delay_seconds,
@@ -113,6 +114,41 @@ def test_db_lock_certificate_failure_still_transient():
     assert _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED: database is locked"
     )
+
+
+def test_pre_submit_transport_failure_is_explicitly_transient():
+    reason = "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+
+    assert _is_transient_money_path_reason(reason)
+    assert _is_explicitly_transient_money_path_reason(reason)
+
+
+def test_winner_target_pre_submit_transport_failure_requeues_not_dead_letters():
+    conn, store = _store()
+    original = _event("snap-pre-submit-transport")
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=original.entity_key,
+        source=f"global_auction_winner_target:{original.event_id}:economic-v1",
+        observed_at=original.observed_at,
+        available_at=original.available_at,
+        received_at=original.received_at,
+        causal_snapshot_id=original.causal_snapshot_id,
+        payload=_payload("snap-pre-submit-transport"),
+        priority=original.priority,
+    )
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.dead_lettered == 0
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_pre_submit_book_authority_gap_is_transient():
