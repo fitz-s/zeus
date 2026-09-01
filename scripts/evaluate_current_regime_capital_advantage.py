@@ -588,15 +588,17 @@ def _realized_proof_sample(
     )
     loss_before = loss_wealth - loss_payoff
     win_before = win_wealth - win_payoff
+    shares = _decimal(winner.get("shares"), "winner_shares")
+    cost = _decimal(winner.get("cost_usd"), "winner_cost")
     tolerance = Decimal("0.000001")
     if (
         loss_payoff >= 0
         or win_payoff <= 0
+        or shares <= 0
         or loss_before <= 0
         or win_before <= 0
-        or abs(loss_before - win_before) > tolerance
-        or abs(_decimal(winner.get("cost_usd"), "winner_cost") + loss_payoff)
-        > tolerance
+        or abs(cost + loss_payoff) > tolerance
+        or abs((win_payoff - loss_payoff) - shares) > tolerance
     ):
         raise ValueError("proof winner after-cost terminal wealth inconsistent")
     settlement = _verified_settlement(
@@ -620,7 +622,8 @@ def _realized_proof_sample(
     token_won = condition_yes if side == "YES" else not condition_yes
     payoff = win_payoff if token_won else loss_payoff
     wealth_after = win_wealth if token_won else loss_wealth
-    delta_log = math.log(float(wealth_after / loss_before))
+    wealth_before = win_before if token_won else loss_before
+    delta_log = math.log(float(wealth_after / wealth_before))
     if not math.isfinite(delta_log):
         raise ValueError("proof winner realized delta-log wealth invalid")
     return {

@@ -105,6 +105,7 @@ def _proof_summary(*, city: str, target_date: str, condition_id: str) -> dict[st
             "condition_id": condition_id,
             "side": "YES",
             "execution_mode": "TAKER_LIMIT",
+            "shares": "10",
             "cost_usd": "4",
             "probability_semantics_revision": (
                 evaluator.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -407,6 +408,54 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
     assert sample["realized_after_cost_payoff_usd"] == "6"
     assert sample["realized_delta_log_wealth"] == pytest.approx(
         evaluator.math.log(106 / 100)
+    )
+
+
+def test_proof_sample_uses_realized_state_endowment_for_correlated_portfolio():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    terminal = summary["proof_counterfactual"]["winner"]["evaluation"][
+        "expected_terminal_wealth"
+    ]
+    terminal["wealth_after_win_usd"] = "156"
+    summary["proof_counterfactual_sha256"] = evaluator.hashlib.sha256(
+        evaluator._canonical_json_bytes(summary["proof_counterfactual"])
+    ).hexdigest()
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+
+    sample = evaluator._realized_proof_sample(
+        sqlite3.connect(":memory:"),
+        forecasts,
+        decision_log_id=17,
+        summary=summary,
+    )
+
+    assert sample["token_won"] is True
+    assert sample["realized_delta_log_wealth"] == pytest.approx(
+        evaluator.math.log(156 / 150)
     )
 
 
