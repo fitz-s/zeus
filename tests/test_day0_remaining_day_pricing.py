@@ -2796,6 +2796,46 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
     ] == run.isoformat()
 
 
+def test_direct_entry_carrier_binds_source_clock_cap_without_readiness():
+    from src.engine.event_reactor_adapter import (
+        _direct_day0_source_clock_bound_identity,
+    )
+
+    samples = np.asarray([[0.2, 0.8], [0.3, 0.7]], dtype=float)
+    caps = (("bin-a", "condition-a", "YES", "buy_yes", 0.15),)
+    payload = {
+        "_edli_day0_direct_current_entry_authority": True,
+        "_edli_day0_causal_evidence_bundle": {
+            "bundle_identity": "causal-bundle"
+        },
+        "_edli_day0_source_clock_predictive_sigma_basis": (
+            "hourly_ifs025_within_plus_center_delta_plus_provider_between_v1"
+        ),
+    }
+
+    carrier_identity, bound_identity = (
+        _direct_day0_source_clock_bound_identity(
+            payload=payload,
+            carrier={"carrier_identity": "hourly-ens-carrier"},
+            samples=samples,
+            candidate_payoff_q_lcb_caps=caps,
+        )
+    )
+
+    assert carrier_identity == "hourly-ens-carrier"
+    assert len(bound_identity) == 64
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_DIRECT_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE",
+    ):
+        _direct_day0_source_clock_bound_identity(
+            payload={**payload, "_edli_day0_causal_evidence_bundle": {}},
+            carrier={"carrier_identity": "hourly-ens-carrier"},
+            samples=samples,
+            candidate_payoff_q_lcb_caps=caps,
+        )
+
+
 # ===========================================================================
 # R9 — persistence: roundtrip, idempotency, retention, freshness gate
 # ===========================================================================
