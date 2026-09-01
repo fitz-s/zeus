@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-31
+# Last reused or audited: 2026-09-01
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -3845,19 +3845,21 @@ def test_background_seed_window_starts_outside_current_priority_scope(tmp_path):
     assert ordered == (broad, held_a, held_b)
 
 
-def test_priority_seed_window_drains_ready_tail_past_ens_waiting_scope(
+def test_priority_seed_waiters_yield_ready_current_tail_on_next_poll(
     tmp_path, monkeypatch
 ):
-    """ENS-waiting current families cannot consume every priority inspection."""
+    """ENS-waiting current families cannot hide actionable current q."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     seed_dir = tmp_path / "seeds"
     request_dir = tmp_path / "requests"
     seed_dir.mkdir()
     request_dir.mkdir()
-    current_families = frozenset(
+    waiting_families = frozenset(
         (f"Current {index}", "2026-08-31", "high") for index in range(8)
     )
+    ready_family = ("Ready Tail", "2026-08-29", "low")
+    current_families = waiting_families | {ready_family}
 
     def write_seed(path: Path, family: tuple[str, str, str]) -> None:
         path.write_text(
@@ -3872,7 +3874,7 @@ def test_priority_seed_window_drains_ready_tail_past_ens_waiting_scope(
             encoding="utf-8",
         )
 
-    for family in current_families:
+    for family in waiting_families:
         write_seed(
             seed_dir
             / (
@@ -3880,7 +3882,6 @@ def test_priority_seed_window_drains_ready_tail_past_ens_waiting_scope(
             ),
             family,
         )
-    ready_family = ("Ready Tail", "2026-08-29", "low")
     ready = seed_dir / "Ready_Tail.2026-08-29.low.json"
     write_seed(ready, ready_family)
 
@@ -3936,6 +3937,21 @@ def test_priority_seed_window_drains_ready_tail_past_ens_waiting_scope(
         "_blocked_attempt_state",
         lambda **_kwargs: (None, "current-inputs", False),
     )
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not processed
+    assert not failed
+    assert ready.exists()
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" in reasons
 
     processed, failed, reasons = queue_mod._prepare_seed_requests(
         seed_dir=seed_dir,
@@ -5884,6 +5900,38 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     assert report.status == "NO_REQUESTS"
     assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY" in report.reason_codes
     assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes
+
+
+def test_ens_waiting_seed_backoff_yields_and_resets_on_new_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    """A missing-ENS cache entry cannot hide actionable current-q work."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    waiting = tmp_path / "Waiting.2026-09-01.high.json"
+    actionable = tmp_path / "Actionable.2026-09-01.high.json"
+    waiting.write_text("{}", encoding="utf-8")
+    actionable.write_text("{}", encoding="utf-8")
+    now = [100.0]
+    hwm = [(str(tmp_path / "forecasts.db"), 10)]
+    monkeypatch.setattr(queue_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(queue_mod, "_ensemble_snapshot_hwm", lambda _db: hwm[0])
+    monkeypatch.setattr(queue_mod, "_AWAITING_ENSEMBLE_RECHECK_AT", {})
+    monkeypatch.setattr(queue_mod, "_AWAITING_ENSEMBLE_CACHE_HWM", hwm[0])
+
+    queue_mod._defer_awaiting_ensemble_seed(waiting)
+    reordered = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
+        (waiting, actionable), forecast_db=tmp_path / "forecasts.db"
+    )
+    assert reordered == (actionable, waiting)
+    assert waiting.exists()
+
+    hwm[0] = (hwm[0][0], 11)
+    reset = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
+        (waiting, actionable), forecast_db=tmp_path / "forecasts.db"
+    )
+    assert reset == (waiting, actionable)
 
 
 def test_current_capital_seed_precedes_backlog_before_bounded_inspection(

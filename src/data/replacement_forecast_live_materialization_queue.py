@@ -75,6 +75,10 @@ _AWAITING_ENSEMBLE_HWM_REASON = (
 _AWAITING_ENSEMBLE_HWM_STATUS = (
     "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
 )
+_AWAITING_ENSEMBLE_RECHECK_SECONDS = 5.0
+_AWAITING_ENSEMBLE_RECHECK_AT: dict[str, float] = {}
+_AWAITING_ENSEMBLE_CACHE_HWM: tuple[str, int] | None = None
+_AWAITING_ENSEMBLE_CACHE_LOCK = threading.Lock()
 _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
 _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
 _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
@@ -164,6 +168,85 @@ def _queue_read_only_connection(db_path: Path) -> sqlite3.Connection:
         raise
     current.timers.append(timer)
     return conn
+
+
+def _ensemble_snapshot_hwm(
+    forecast_db: Path | str | None,
+) -> tuple[str, int] | None:
+    """Return the DB-scoped ENS append frontier used to reset seed backoff."""
+
+    if forecast_db is None:
+        return None
+    path = Path(forecast_db)
+    if not path.exists():
+        return None
+    try:
+        conn = _queue_read_only_connection(path)
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(snapshot_id), 0) FROM ensemble_snapshots"
+            ).fetchone()
+        finally:
+            conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
+    except (sqlite3.Error, OSError):
+        return None
+    return (str(path.resolve()), int(row[0] or 0) if row is not None else 0)
+
+
+def _defer_awaiting_ensemble_seed(path: Path) -> None:
+    """Keep one known ENS-waiting seed off the next bounded priority window."""
+
+    with _AWAITING_ENSEMBLE_CACHE_LOCK:
+        _AWAITING_ENSEMBLE_RECHECK_AT[str(path)] = (
+            time.monotonic() + _AWAITING_ENSEMBLE_RECHECK_SECONDS
+        )
+
+
+def _deprioritize_recently_waiting_ensemble_seeds(
+    paths: Sequence[Path],
+    *,
+    forecast_db: Path | str | None,
+) -> tuple[Path, ...]:
+    """Let actionable current-q seeds pass a recently verified ENS wait.
+
+    SCOPE: one exact seed filename whose requested carrier cycle is ahead of
+    its current ENS frontier. DRAIN: actionable seeds retain the bounded queue
+    window while that filename waits. RESET: any new ENS snapshot clears every
+    DB-scoped defer immediately; otherwise the seed is rechecked within five
+    seconds. The seed remains in its authoritative queue throughout.
+    """
+
+    global _AWAITING_ENSEMBLE_CACHE_HWM
+
+    ordered = tuple(paths)
+    if not ordered:
+        return ordered
+    now = time.monotonic()
+    hwm = _ensemble_snapshot_hwm(forecast_db)
+    with _AWAITING_ENSEMBLE_CACHE_LOCK:
+        if hwm is not None and hwm != _AWAITING_ENSEMBLE_CACHE_HWM:
+            _AWAITING_ENSEMBLE_RECHECK_AT.clear()
+            _AWAITING_ENSEMBLE_CACHE_HWM = hwm
+        expired = tuple(
+            key
+            for key, retry_at in _AWAITING_ENSEMBLE_RECHECK_AT.items()
+            if retry_at <= now
+        )
+        for key in expired:
+            _AWAITING_ENSEMBLE_RECHECK_AT.pop(key, None)
+        ready = tuple(
+            path
+            for path in ordered
+            if str(path) not in _AWAITING_ENSEMBLE_RECHECK_AT
+        )
+        waiting = tuple(
+            path
+            for path in ordered
+            if str(path) in _AWAITING_ENSEMBLE_RECHECK_AT
+        )
+    return (*ready, *waiting)
 
 
 def _raise_if_claim_read_expired() -> None:
@@ -3979,6 +4062,11 @@ def _prepare_seed_requests(
             rotated_raw_snapshot,
             current_priority_scope,
         )
+    if lane == MATERIALIZATION_LANE_PRIORITY:
+        prioritized_raw_snapshot = _deprioritize_recently_waiting_ensemble_seeds(
+            prioritized_raw_snapshot,
+            forecast_db=forecast_db,
+        )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
     # make deterministic progress across passes without unbounded queue-lock I/O.
@@ -4128,6 +4216,7 @@ def _prepare_seed_requests(
                 # owned seed also keeps discovery/cycle/fusion deduplication
                 # active; terminally moving it would let every producer recreate
                 # the same unmaterializable debt on its next poll.
+                _defer_awaiting_ensemble_seed(seed_json)
                 reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
                 continue
             if cycle_boundary is not None:
