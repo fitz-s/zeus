@@ -28897,6 +28897,11 @@ def capital_blocking_command_scope(
         _terminal_filled_entry_projection_blocker_count(conn)
         + _terminal_filled_exit_projection_blocker_count(conn)
         + authenticated_entry_projection_count
+        + len(
+            _exchange_reconcile.persisted_terminal_late_entry_fill_command_ids(
+                conn
+            )
+        )
     )
     scoped_markets = tuple(
         sorted(

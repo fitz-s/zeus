@@ -35190,6 +35190,23 @@ def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
     assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
 
 
+def test_capital_blocker_prioritizes_terminal_late_entry_fill(conn, monkeypatch):
+    """Late authenticated fill projection debt cannot yield to monitor I/O."""
+    import src.execution.command_recovery as recovery
+
+    monkeypatch.setattr(
+        recovery._exchange_reconcile,
+        "persisted_terminal_late_entry_fill_command_ids",
+        lambda _conn: ["cmd-terminal-late-fill"],
+    )
+
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 1
+    assert scope.projection_count == 1
+    assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
+
+
 def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
     from src.execution.command_recovery import (
         _recorded_exit_fill_projection_candidates,
