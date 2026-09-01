@@ -35536,59 +35536,13 @@ def _global_probability_action_content_mismatches(
     current: object,
     monitored: object,
 ) -> tuple[str, ...]:
-    """Compare the q facts that can change one fixed action's economics.
+    """Use the global auction's one action-content comparison law."""
 
-    ENTRY and HELD_MONITOR may serialize different causal provenance while
-    producing the exact same current probability distribution. That provenance
-    distinction remains in each immutable witness, but it cannot by itself make
-    an immediately monitored BUY economically divergent. A type, semantics,
-    topology, band, sample, binding, or point-q change still fails closed.
-    """
-
-    from src.solve.solver import DeterministicBinPayoffWitness
-
-    mismatches: tuple[str, ...] = ()
-    if type(current) is not type(monitored):
-        mismatches += ("witness_type",)
-    mismatches += tuple(
-        field
-        for field in _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS
-        if getattr(current, field, None) != getattr(monitored, field, None)
+    from src.engine.global_batch_runtime import (
+        _probability_action_content_mismatches,
     )
-    if not str(getattr(current, "sample_matrix_identity", "") or "").strip():
-        if "sample_matrix_identity" not in mismatches:
-            mismatches += ("sample_matrix_identity",)
-    if tuple(getattr(current, "bindings", ()) or ()) != tuple(
-        getattr(monitored, "bindings", ()) or ()
-    ):
-        mismatches += ("bindings",)
-    current_q_version = str(getattr(current, "q_version", "") or "")
-    monitored_q_version = str(getattr(monitored, "q_version", "") or "")
-    if current_q_version != monitored_q_version:
-        if isinstance(current, DeterministicBinPayoffWitness) and isinstance(
-            monitored, DeterministicBinPayoffWitness
-        ):
-            mismatches += ("q_version",)
-        else:
-            from src.events.day0_authority import day0_probability_semantics_revision
 
-            current_revision = day0_probability_semantics_revision(current_q_version)
-            monitored_revision = day0_probability_semantics_revision(
-                monitored_q_version
-            )
-            if current_revision is None or current_revision != monitored_revision:
-                mismatches += ("q_version",)
-    if isinstance(current, DeterministicBinPayoffWitness) and isinstance(
-        monitored, DeterministicBinPayoffWitness
-    ):
-        mismatches += tuple(
-            field
-            for field in ("posterior_identity_hash", "source_truth_identity")
-            if getattr(current, field, None) != getattr(monitored, field, None)
-        )
-    if not _global_probability_point_q_matches(current, monitored):
-        mismatches += ("yes_point_q",)
-    return mismatches
+    return _probability_action_content_mismatches(current, monitored)
 
 
 def _global_probability_point_q_matches(left: object, right: object) -> bool:

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-31
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -26157,6 +26157,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
                 **vars(witness),
                 "witness_identity": "entry-q",
                 "probability_content_identity": "entry-q-content",
+                "sample_matrix_identity": "entry-samples-moved",
             }
         )
         entry_prepared = SimpleNamespace(probability_witness=entry_witness)
@@ -26206,9 +26207,37 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             family_key: "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
         }
 
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        lane_entry_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "entry-lane-q",
+                "probability_content_identity": "entry-lane-content",
+                "q_version": (
+                    f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:entry"
+                ),
+                "posterior_identity_hash": "run-a",
+                "source_truth_identity": "entry-lane-source",
+                "yes_point_q": np.asarray((0.2, 0.8), dtype=np.float64),
+            }
+        )
+        lane_held_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "held-lane-q",
+                "probability_content_identity": "held-lane-content",
+                "q_version": (
+                    f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:held"
+                ),
+                "posterior_identity_hash": "held-lane-posterior",
+                "source_truth_identity": "held-lane-source",
+                "yes_point_q": np.asarray((0.2, 0.8), dtype=np.float64),
+            }
+        )
         same_entry = bridge.PreparedGlobalFamily(
             decision_id="entry-decision",
-            probability_witness=witness,
+            probability_witness=lane_entry_witness,
             candidate_seeds=("entry-seed",),
             day0_exit_authority_status="unavailable",
             day0_exit_authority_reason="entry-authority",
@@ -26216,7 +26245,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
         same_held = bridge.PreparedGlobalFamily(
             decision_id="held-decision",
-            probability_witness=witness,
+            probability_witness=lane_held_witness,
             candidate_seeds=(),
             day0_exit_authority_status="immature",
             day0_exit_authority_reason="held-current-authority",
@@ -26254,6 +26283,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
 
         merged = next(iter(selected_kwargs["prepared_by_event"].values()))
+        assert merged.probability_witness is lane_entry_witness
         assert merged.candidate_seeds == same_entry.candidate_seeds
         assert merged.day0_exit_authority_status == "immature"
         assert merged.day0_exit_authority_reason == "held-current-authority"

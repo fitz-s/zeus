@@ -20,6 +20,8 @@ import zlib
 from types import SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
+import numpy as np
+
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.contracts.global_auction_receipt import (
@@ -72,6 +74,7 @@ from src.events.reactor import (
 from src.solve.solver import (
     CurrentMakerFillWitness,
     CurrentFamilyProbabilityAuthority,
+    DeterministicBinPayoffWitness,
     ExecutableSellCurve,
     MakerFillOutcome,
     current_maker_fill_witness_identity,
@@ -742,6 +745,87 @@ def _probability_content_identity(witness: object) -> str:
     return str(
         getattr(witness, "probability_content_identity", "") or ""
     ).strip()
+
+
+_PROBABILITY_ACTION_CONTENT_FIELDS = (
+    "family_key",
+    "resolution_identity",
+    "topology_identity",
+    "band_alpha",
+    "band_basis",
+    "sample_matrix_identity",
+)
+
+
+def _probability_action_content_mismatches(
+    entry: object,
+    held: object,
+) -> tuple[str, ...]:
+    """Name probability differences that can change one fixed action's economics.
+
+    ENTRY and HELD_MONITOR may bind the same current Day0 distribution through
+    lane-specific causal provenance. That provenance remains immutable in each
+    witness, while the global auction compares the payoff distribution it would
+    buy and immediately monitor. Any type, semantics, topology, band, sample,
+    binding, or point-q difference still fails closed.
+    """
+
+    mismatches: tuple[str, ...] = ()
+    if type(entry) is not type(held):
+        mismatches += ("witness_type",)
+    mismatches += tuple(
+        field
+        for field in _PROBABILITY_ACTION_CONTENT_FIELDS
+        if getattr(entry, field, None) != getattr(held, field, None)
+    )
+    if not str(getattr(entry, "sample_matrix_identity", "") or "").strip():
+        if "sample_matrix_identity" not in mismatches:
+            mismatches += ("sample_matrix_identity",)
+    if tuple(getattr(entry, "bindings", ()) or ()) != tuple(
+        getattr(held, "bindings", ()) or ()
+    ):
+        mismatches += ("bindings",)
+
+    entry_q_version = str(getattr(entry, "q_version", "") or "")
+    held_q_version = str(getattr(held, "q_version", "") or "")
+    if entry_q_version != held_q_version:
+        if isinstance(entry, DeterministicBinPayoffWitness) and isinstance(
+            held,
+            DeterministicBinPayoffWitness,
+        ):
+            mismatches += ("q_version",)
+        else:
+            entry_revision = day0_probability_semantics_revision(entry_q_version)
+            held_revision = day0_probability_semantics_revision(held_q_version)
+            if entry_revision is None or entry_revision != held_revision:
+                mismatches += ("q_version",)
+    if isinstance(entry, DeterministicBinPayoffWitness) and isinstance(
+        held,
+        DeterministicBinPayoffWitness,
+    ):
+        mismatches += tuple(
+            field
+            for field in ("posterior_identity_hash", "source_truth_identity")
+            if getattr(entry, field, None) != getattr(held, field, None)
+        )
+
+    entry_point = getattr(entry, "yes_point_q", None)
+    held_point = getattr(held, "yes_point_q", None)
+    if entry_point is None or held_point is None:
+        point_matches = entry_point is None and held_point is None
+    else:
+        try:
+            entry_array = np.asarray(entry_point, dtype=np.float64)
+            held_array = np.asarray(held_point, dtype=np.float64)
+            point_matches = (
+                entry_array.shape == held_array.shape
+                and np.array_equal(entry_array, held_array)
+            )
+        except (TypeError, ValueError):
+            point_matches = False
+    if not point_matches:
+        mismatches += ("yes_point_q",)
+    return mismatches
 
 
 def _holding_coverage_partition_complete(
@@ -7743,12 +7827,17 @@ def process_current_global_batch(
                             ),
                             proof_accepted=False,
                         )
-                    elif entry_content != held_content:
+                    elif _probability_action_content_mismatches(
+                        prepared.probability_witness,
+                        held_prepared.probability_witness,
+                    ):
                         # The held-capital action must consume the same current q
                         # as its monitor. A broader ENTRY witness may still be
                         # valid for adding risk, but it cannot price SELL/HOLD.
-                        # Use the held witness for this family and remove BUY so
-                        # relaxed held-only evidence cannot authorize new risk.
+                        # Lane-specific provenance is allowed only when the
+                        # action distribution itself is exact-equal. Otherwise
+                        # use held q and remove BUY so relaxed held-only evidence
+                        # cannot authorize new risk.
                         prepared = held_prepared
                         held_only_family_keys.add(family_key)
                         held_only_buy_disabled_reasons[family_key] = (
