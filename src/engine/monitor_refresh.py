@@ -5621,6 +5621,50 @@ def _materialize_current_global_day0_probability(
     is_deterministic_bin_payoff = (
         snapshot.probability_authority == "day0_deterministic_bin_payoff_v1"
     )
+    observation = snapshot.day0_payload.get("_edli_global_day0_binding")
+    causal_bundle_validation = snapshot.day0_payload.get(
+        "_edli_day0_causal_evidence_bundle_validation"
+    )
+    if is_remaining_day or is_held_pinned_recompute:
+        bundle = (
+            observation.get("day0_causal_evidence_bundle")
+            if isinstance(observation, Mapping)
+            else None
+        )
+        remaining_witness = (
+            observation.get("day0_remaining_vector_witness")
+            if isinstance(observation, Mapping)
+            else None
+        )
+        identity_pairs = (
+            ("bundle_identity", "actual_bundle_identity"),
+            ("carrier_vector_identity", "actual_carrier_vector_identity"),
+            ("carrier_vector_hash", "actual_carrier_vector_hash"),
+        )
+        provenance_complete = bool(
+            isinstance(observation, Mapping)
+            and str(observation.get("posterior_id") or "").strip()
+            and isinstance(bundle, Mapping)
+            and isinstance(remaining_witness, Mapping)
+            and remaining_witness == bundle.get("carrier_vector_witness")
+            and isinstance(causal_bundle_validation, Mapping)
+            and causal_bundle_validation.get("reason") is None
+            and all(
+                str(bundle.get(bundle_key) or "").strip()
+                and bundle.get(bundle_key)
+                == causal_bundle_validation.get(validation_key)
+                == causal_bundle_validation.get(
+                    validation_key.replace("actual_", "expected_")
+                )
+                for bundle_key, validation_key in identity_pairs
+            )
+        )
+        if not provenance_complete:
+            # SCOPE: this held city/date/metric snapshot only. DRAIN: the next
+            # normal monitor build reads a complete current posterior + causal
+            # vector bundle. RESET: that exact bundle validates and materializes
+            # normally; other families and deterministic hard facts continue.
+            raise ValueError("GLOBAL_DAY0_STATISTICAL_PROVENANCE_INCOMPLETE")
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
@@ -5722,10 +5766,6 @@ def _materialize_current_global_day0_probability(
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
     setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
 
-    observation = snapshot.day0_payload.get("_edli_global_day0_binding")
-    causal_bundle_validation = snapshot.day0_payload.get(
-        "_edli_day0_causal_evidence_bundle_validation"
-    )
     setattr(
         refreshed,
         "_day0_monitor_probability_receipt",

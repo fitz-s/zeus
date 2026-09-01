@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-09-01
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-05-20; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -970,6 +970,13 @@ def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() ->
         band_basis="current_coherent_settlement_simplex_v1",
         band_alpha=0.05,
     )
+    vector_witness = {"vector_id": "current-vector"}
+    causal_bundle = {
+        "bundle_identity": "current-bundle",
+        "carrier_vector_identity": "current-vector-identity",
+        "carrier_vector_hash": "current-vector-hash",
+        "carrier_vector_witness": vector_witness,
+    }
     snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
         witness=witness,
         token_pairs=((condition_id, "yes-25", "no-25"),),
@@ -990,6 +997,20 @@ def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() ->
             "_edli_day0_exit_authority_reason": (
                 "day0_low_extreme_terminal_window"
             ),
+            "_edli_global_day0_binding": {
+                "posterior_id": 77,
+                "day0_causal_evidence_bundle": causal_bundle,
+                "day0_remaining_vector_witness": vector_witness,
+            },
+            "_edli_day0_causal_evidence_bundle_validation": {
+                "reason": None,
+                "actual_bundle_identity": "current-bundle",
+                "expected_bundle_identity": "current-bundle",
+                "actual_carrier_vector_identity": "current-vector-identity",
+                "expected_carrier_vector_identity": "current-vector-identity",
+                "actual_carrier_vector_hash": "current-vector-hash",
+                "expected_carrier_vector_hash": "current-vector-hash",
+            },
         },
         metric="low",
         probability_authority="day0_remaining_day_global_probability_v1",
@@ -1028,6 +1049,67 @@ def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() ->
         "day0_absorbing_hard_fact" not in validation
         for validation in refreshed.applied_validations
     )
+
+
+def test_remaining_day_monitor_rejects_incomplete_statistical_provenance() -> None:
+    """A transient q cannot become executable without its exact carrier."""
+    import numpy as np
+
+    condition_id = "0x" + "79" * 32
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="29C",
+                condition_id=condition_id,
+                yes_token_id="yes-29",
+                no_token_id="no-29",
+            ),
+        ),
+        yes_q_samples=np.zeros((500, 1)),
+        yes_point_q=np.array([0.0]),
+        witness_identity="incomplete-current-witness",
+        probability_content_identity="incomplete-current-content",
+        q_version="incomplete-current-q",
+        source_truth_identity="incomplete-current-truth",
+        band_basis="current_coherent_day0_fast_residual_remaining_model_bootstrap_v6",
+        band_alpha=0.05,
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-29", "no-29"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={
+            "_edli_global_day0_binding": {
+                "observed_extreme_native": 28.4,
+                "probability_base_identity": "transient-base",
+            },
+            "_edli_day0_causal_evidence_bundle_validation": {
+                "reason": None,
+                "actual_bundle_identity": "detached-bundle",
+                "expected_bundle_identity": "detached-bundle",
+                "actual_carrier_vector_identity": "detached-vector",
+                "expected_carrier_vector_identity": "detached-vector",
+                "actual_carrier_vector_hash": "detached-hash",
+                "expected_carrier_vector_hash": "detached-hash",
+            },
+        },
+        metric="high",
+        probability_authority="day0_remaining_day_global_probability_v1",
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = "buy_yes"
+    pos.token_id = "yes-29"
+    pos.no_token_id = "no-29"
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_STATISTICAL_PROVENANCE_INCOMPLETE",
+    ):
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
 
 
 @pytest.mark.parametrize(
