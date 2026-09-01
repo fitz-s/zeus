@@ -2193,6 +2193,76 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     )
 
 
+def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
+    monkeypatch,
+):
+    """A confirmed FILLED increment projects before general recovery work."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _authenticated(_conn, *, command_id=None):
+        calls.append(("authenticated_terminal_entry_projection_fast", command_id))
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _later_review(_conn):
+        calls.append(("review_required_matched_submit_trade_fact", None))
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_bounded_authenticated_entry_trade_fact_candidates",
+        lambda _conn, *, states: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_filled_entry_projection_blocker_command_ids",
+        lambda _conn: ("cmd-current-filled",),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _authenticated,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _later_review,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-01T22:22:59+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        ("authenticated_terminal_entry_projection_fast", "cmd-current-filled"),
+        ("review_required_matched_submit_trade_fact", None),
+    ]
+    assert summary["authenticated_terminal_entry_projection_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["db_budget_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
+
+
 def test_recorded_exit_projection_candidate_excludes_completed_partial_reduction():
     from src.execution import command_recovery
 

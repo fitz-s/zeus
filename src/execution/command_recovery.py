@@ -28632,10 +28632,10 @@ def _capital_blocking_cancel_commands(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
-def _terminal_filled_entry_projection_blocker_count(
+def _terminal_filled_entry_projection_blocker_command_ids(
     conn: sqlite3.Connection,
-) -> int:
-    """Count confirmed ENTRY fills that canonical position truth has not absorbed."""
+) -> tuple[str, ...]:
+    """Return confirmed ENTRY fills canonical position truth has not absorbed."""
 
     required = {
         "venue_commands",
@@ -28645,7 +28645,7 @@ def _terminal_filled_entry_projection_blocker_count(
         "execution_fact",
     }
     if not all(_table_exists(conn, table) for table in required):
-        return 0
+        return ()
     # SCOPE: one recent terminal FILLED ENTRY command, or a REVIEW_REQUIRED
     # matched submit whose authenticated trade has since become CONFIRMED, with
     # positive fill truth but incomplete command-bound position/execution
@@ -28656,9 +28656,9 @@ def _terminal_filled_entry_projection_blocker_count(
     # capital I/O. RESET: the exact positive position row (including a later
     # legitimate close/settlement phase), ENTRY_ORDER_FILLED event, and
     # execution_fact all exist for that command.
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT COUNT(*)
+        SELECT cmd.command_id
           FROM venue_commands cmd
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
@@ -28714,8 +28714,16 @@ def _terminal_filled_entry_projection_blocker_count(
            )
         """,
         (f"-{_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS} seconds",),
-    ).fetchone()
-    return int(row[0] or 0) if row is not None else 0
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows if str(row[0] or "").strip())
+
+
+def _terminal_filled_entry_projection_blocker_count(
+    conn: sqlite3.Connection,
+) -> int:
+    """Count confirmed ENTRY fills that canonical position truth has not absorbed."""
+
+    return len(_terminal_filled_entry_projection_blocker_command_ids(conn))
 
 
 def _terminal_filled_exit_projection_blocker_command_ids(
@@ -30066,6 +30074,13 @@ def _reconcile_passes_short_conn(
                 if str(row.get("state") or "")
                 == CommandState.REVIEW_REQUIRED.value
             }
+            terminal_entry_projection_command_ids = tuple(
+                command_id
+                for command_id in (
+                    _terminal_filled_entry_projection_blocker_command_ids(conn)
+                )
+                if command_id not in terminal_fill_review_command_ids
+            )
             identity_submit_candidates, identity_submit_deferred = (
                 _identity_bound_submitting_candidates(conn)
             )
@@ -30186,6 +30201,46 @@ def _reconcile_passes_short_conn(
                     summary,
                     "authenticated_terminal_fill_review_fast",
                     terminal_fill_review_result,
+                )
+        terminal_entry_projection_result = None
+        if terminal_entry_projection_command_ids:
+            # A FILLED command with authenticated trade truth but no matching
+            # position event/execution fact is current exposure, not historical
+            # repair. Process only the exact blocker identities before monitor
+            # traffic or a broad recovery scan can consume this tick.
+            entry_projection_deadline = _capital_deadline()
+            entry_projection_conn_factory = _capital_apply_conn_factory(
+                entry_projection_deadline
+            )
+
+            def _fold_terminal_entry_projections(conn):
+                folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+                for command_id in terminal_entry_projection_command_ids:
+                    result = reconcile_authenticated_entry_trade_facts(
+                        conn,
+                        command_id=command_id,
+                    )
+                    for key in folded:
+                        folded[key] += int(result.get(key, 0) or 0)
+                return folded
+
+            terminal_entry_projection_result = _run_capital_pass(
+                "authenticated_terminal_entry_projection_fast",
+                lambda: run_db_only_pass(
+                    _fold_terminal_entry_projections,
+                    conn_factory=entry_projection_conn_factory,
+                    label=(
+                        "recovery."
+                        "authenticated_terminal_entry_projection_fast"
+                    ),
+                ),
+                deadline_monotonic=entry_projection_deadline,
+            )
+            if terminal_entry_projection_result is not None:
+                _accumulate(
+                    summary,
+                    "authenticated_terminal_entry_projection_fast",
+                    terminal_entry_projection_result,
                 )
         exit_fill_result = None
         if exit_fill_projection_open:
