@@ -35146,6 +35146,15 @@ def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_f
 
     assert capital_blocking_command_count(conn) == 2
 
+    # A later legitimate close must not resurrect already-complete ENTRY
+    # projection debt and globally preempt every unrelated family.
+    conn.execute(
+        "UPDATE position_current SET phase = 'economically_closed' "
+        "WHERE position_id = 'pos-filled-unprojected'"
+    )
+
+    assert capital_blocking_command_count(conn) == 2
+
 
 def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
     """A known confirmed fill cannot yield forever behind monitor bootstrap."""

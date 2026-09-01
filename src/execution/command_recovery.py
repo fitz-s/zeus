@@ -28653,8 +28653,9 @@ def _terminal_filled_entry_projection_blocker_count(
     # DRAIN: scheduled command recovery runs the existing filled-entry projection
     # repair under current-capital priority for one hour (sixty normal cadences);
     # older debt remains in background recovery rather than monopolizing current
-    # capital I/O. RESET: the exact positive position row, ENTRY_ORDER_FILLED
-    # event, and execution_fact all exist for that command.
+    # capital I/O. RESET: the exact positive position row (including a later
+    # legitimate close/settlement phase), ENTRY_ORDER_FILLED event, and
+    # execution_fact all exist for that command.
     row = conn.execute(
         """
         SELECT COUNT(*)
@@ -28680,7 +28681,8 @@ def _terminal_filled_entry_projection_blocker_count(
                       FROM position_current pc
                      WHERE pc.position_id = cmd.position_id
                        AND pc.phase IN (
-                            'active', 'day0_window', 'pending_exit'
+                            'active', 'day0_window', 'pending_exit',
+                            'economically_closed', 'settled', 'admin_closed'
                        )
                        AND CAST(COALESCE(pc.shares, '0') AS REAL) > 0
                        AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) > 0
