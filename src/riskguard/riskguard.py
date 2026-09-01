@@ -3165,6 +3165,8 @@ def _live_realized_capital_curve(
         "realized_position_count": 0,
         "excluded_superseded_position_count": 0,
         "blocked_position_count": 0,
+        "settled_entry_projection_reconstruction_count": 0,
+        "terminal_projection_pnl_mismatch_count": 0,
         "capital_committed_usd": 0.0,
         "realized_capital_committed_usd": 0.0,
         "gross_realized_pnl_usd": 0.0,
@@ -3458,12 +3460,29 @@ def _live_realized_capital_curve(
                 abs_tol=0.011,
             )
         )
+        settled_entry_projection_subset = (
+            str(position["phase"]) == "settled"
+            and not bool(position["has_filled_exit"])
+            and math.isfinite(projected_shares)
+            and entry_shares > 0.0
+            and 0.0 < projected_shares < entry_shares
+            and math.isclose(
+                projected_cost,
+                entry_notional * projected_shares / entry_shares,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            )
+        )
         if (
             not valid
             or not entry_times
             or not math.isfinite(projected_cost)
             or projected_cost <= 0.0
-            or not (original_cost_matches or residual_cost_matches)
+            or not (
+                original_cost_matches
+                or residual_cost_matches
+                or settled_entry_projection_subset
+            )
         ):
             block("entry_capital_identity_incomplete")
             continue
@@ -3473,6 +3492,7 @@ def _live_realized_capital_curve(
             entry_fee_bound_usd=entry_fee,
             capital_committed_usd=entry_notional + entry_fee,
             entered_at=min(entry_times),
+            settled_entry_projection_subset=settled_entry_projection_subset,
         )
         current_positions[position_id] = position
 
@@ -3511,6 +3531,7 @@ def _live_realized_capital_curve(
     exit_summaries: dict[str, dict[str, object]] = {
         position_id: {
             "filled_shares": 0.0,
+            "gross_proceeds_usd": 0.0,
             "first_filled_at": None,
             "last_filled_at": None,
         }
@@ -3540,6 +3561,10 @@ def _live_realized_capital_curve(
             filled_at = filled_at.replace(tzinfo=timezone.utc)
         summary = exit_summaries[position_id]
         summary["filled_shares"] = float(summary["filled_shares"]) + filled_shares
+        summary["gross_proceeds_usd"] = (
+            float(summary["gross_proceeds_usd"])
+            + float(raw[1]) * filled_shares
+        )
         first_filled_at = summary["first_filled_at"]
         last_filled_at = summary["last_filled_at"]
         if first_filled_at is None or filled_at < first_filled_at:
@@ -3583,10 +3608,61 @@ def _live_realized_capital_curve(
             continue
         if realized_at.tzinfo is None:
             realized_at = realized_at.replace(tzinfo=timezone.utc)
+        exit_summary = exit_summaries[position_id]
+        entry_filled_shares = float(position["entry_filled_shares"])
+        exit_filled_shares = float(exit_summary["filled_shares"])
+        remaining_after_exit_shares = max(
+            0.0,
+            entry_filled_shares - exit_filled_shares,
+        )
+        terminal_economics_source = "position_event_projection"
+        if position.get("settled_entry_projection_subset") is True:
+            settlement_price: float | None = None
+            if isinstance(payload.get("position_won"), bool):
+                settlement_price = 1.0 if payload["position_won"] else 0.0
+            else:
+                try:
+                    outcome = float(payload["outcome"])
+                except (KeyError, TypeError, ValueError):
+                    outcome = math.nan
+                if outcome in {0.0, 1.0}:
+                    settlement_price = outcome
+            if settlement_price is None:
+                block("settled_entry_projection_payout_incomplete")
+                continue
+            event_pnl = (
+                float(exit_summary["gross_proceeds_usd"])
+                + remaining_after_exit_shares * settlement_price
+                - float(position["entry_notional_usd"])
+            )
+            terminal_economics_source = (
+                "exact_execution_plus_settlement_payout"
+            )
+            status["settled_entry_projection_reconstruction_count"] = (
+                int(status["settled_entry_projection_reconstruction_count"])
+                + 1
+            )
+            if not math.isclose(
+                event_pnl,
+                projected_pnl,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            ):
+                status["terminal_projection_pnl_mismatch_count"] = (
+                    int(status["terminal_projection_pnl_mismatch_count"]) + 1
+                )
         if (
             not math.isfinite(event_pnl)
             or not math.isfinite(projected_pnl)
-            or not math.isclose(event_pnl, projected_pnl, rel_tol=0.0, abs_tol=0.011)
+            or (
+                terminal_economics_source == "position_event_projection"
+                and not math.isclose(
+                    event_pnl,
+                    projected_pnl,
+                    rel_tol=0.0,
+                    abs_tol=0.011,
+                )
+            )
             or realized_at < position["entered_at"]
             or realized_at > evaluated_at
         ):
@@ -3597,13 +3673,6 @@ def _live_realized_capital_curve(
             block("exit_fee_identity_incomplete")
             continue
         fee_bound = float(position["entry_fee_bound_usd"]) + float(exit_fee)
-        exit_summary = exit_summaries[position_id]
-        entry_filled_shares = float(position["entry_filled_shares"])
-        exit_filled_shares = float(exit_summary["filled_shares"])
-        remaining_after_exit_shares = max(
-            0.0,
-            entry_filled_shares - exit_filled_shares,
-        )
         close_type = expected_event
         if phase == "settled" and exit_filled_shares > 0.0:
             close_type = "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
@@ -3615,6 +3684,7 @@ def _live_realized_capital_curve(
                 "metric": position["metric"],
                 "close_type": close_type,
                 "terminal_event_type": expected_event,
+                "terminal_economics_source": terminal_economics_source,
                 "entry_filled_shares": entry_filled_shares,
                 "exit_filled_shares": exit_filled_shares,
                 "exit_fill_fraction": (

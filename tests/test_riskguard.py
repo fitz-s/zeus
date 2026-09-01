@@ -5541,6 +5541,139 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["net_realized_pnl_usd"] == pytest.approx(3.5615)
         conn.close()
 
+    def test_settlement_reconstructs_late_entry_fill_missing_from_projection(self):
+        """Exact fills + payout outrank a stale settled position projection."""
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        conn = self._live_capital_conn(
+            phase="settled",
+            gross_pnl=-1.56,
+            exit_price=None,
+        )
+        fee_json = json.dumps({"fee_rate_fraction": 0.05})
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?,?,?)",
+            ("late-entry-envelope", 1, fee_json),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                "late-entry-command",
+                "current-trial",
+                "ENTRY",
+                bind_day0_probability_semantics("late-entry-q"),
+                "late-entry-envelope",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+            (
+                "late-entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:30:00+00:00",
+                "partial",
+                0.25,
+                2.0,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                "current-trial",
+                2,
+                "SETTLED",
+                "2026-08-11T16:52:07+00:00",
+                json.dumps(
+                    {
+                        "pnl": -1.56,
+                        "outcome": 0,
+                        "position_won": False,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "nonpositive"
+        assert curve["blocked_position_count"] == 0
+        assert curve["settled_entry_projection_reconstruction_count"] == 1
+        assert curve["terminal_projection_pnl_mismatch_count"] == 1
+        assert curve["realized_position_count"] == 1
+        assert curve["gross_realized_pnl_usd"] == pytest.approx(-2.06)
+        assert curve["curve"][0]["entry_filled_shares"] == pytest.approx(8.24)
+        assert curve["curve"][0]["terminal_economics_source"] == (
+            "exact_execution_plus_settlement_payout"
+        )
+        conn.close()
+
+    def test_settled_projection_mismatch_without_binary_payout_stays_blocked(self):
+        """A projection mismatch cannot be excused without exact payout truth."""
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        conn = self._live_capital_conn(
+            phase="settled",
+            gross_pnl=-1.56,
+            exit_price=None,
+        )
+        fee_json = json.dumps({"fee_rate_fraction": 0.05})
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?,?,?)",
+            ("late-entry-envelope", 1, fee_json),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                "late-entry-command",
+                "current-trial",
+                "ENTRY",
+                bind_day0_probability_semantics("late-entry-q"),
+                "late-entry-envelope",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+            (
+                "late-entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:30:00+00:00",
+                "partial",
+                0.25,
+                2.0,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                "current-trial",
+                2,
+                "SETTLED",
+                "2026-08-11T16:52:07+00:00",
+                json.dumps({"pnl": -1.56}),
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "capital_truth_degraded"
+        assert curve["blocked_position_count"] == 1
+        assert curve["blocked_reasons"] == {
+            "settled_entry_projection_payout_incomplete": 1
+        }
+        conn.close()
+
     def test_live_capital_prefers_canonical_command_fact_over_bridge_alias(self):
         conn = self._live_capital_conn(
             phase="day0_window",
