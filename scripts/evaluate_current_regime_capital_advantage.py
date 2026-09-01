@@ -2361,6 +2361,17 @@ def _build_verdict(
     return ("PASS" if not failures else "FAIL", failures)
 
 
+def _order_ledger_proof_failures(
+    ledger: Mapping[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    if ledger.get("capital_truth_complete") is not True:
+        failures.append("ORDER_CAPITAL_LEDGER_INCOMPLETE")
+    if int(ledger.get("gain_truth_incomplete_command_count") or 0) > 0:
+        failures.append("ORDER_GAIN_LEDGER_INCOMPLETE")
+    return failures
+
+
 def evaluate(
     *,
     world_path: Path,
@@ -2473,8 +2484,9 @@ def evaluate(
             shadows=shadows,
         )
     )
-    if order_capital_ledger.get("capital_truth_complete") is not True:
-        failures.append("ORDER_CAPITAL_LEDGER_INCOMPLETE")
+    order_ledger_failures = _order_ledger_proof_failures(order_capital_ledger)
+    if order_ledger_failures:
+        failures.extend(order_ledger_failures)
         verdict = "FAIL"
     if total_portfolio_capital.get("ready") is not True:
         failures.append("CURRENT_TOTAL_PORTFOLIO_CAPITAL_TRUTH_DEGRADED")
@@ -2499,6 +2511,7 @@ def evaluate(
             "live_capital_weighted_return_must_exceed": 0.0,
             "absolute_small_dollar_pnl_is_not_advantage_proof": True,
             "every_venue_command_must_have_atomic_capital_disposition": True,
+            "every_realized_exit_must_have_atomic_gain_disposition": True,
             "total_portfolio_not_cash_is_required": True,
             "global_selection_revision": (
                 CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION

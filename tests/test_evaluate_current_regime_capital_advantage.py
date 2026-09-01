@@ -1536,6 +1536,24 @@ def test_order_ledger_prefers_canonical_trade_and_partial_gain_journal():
     assert order["realized_accounting_gain_after_exit_fee_usd"] == pytest.approx(0.4)
 
 
+def test_order_ledger_proof_gate_separates_capital_and_gain_gaps():
+    assert evaluator._order_ledger_proof_failures(
+        {
+            "capital_truth_complete": True,
+            "gain_truth_incomplete_command_count": 1,
+        }
+    ) == ["ORDER_GAIN_LEDGER_INCOMPLETE"]
+    assert evaluator._order_ledger_proof_failures(
+        {
+            "capital_truth_complete": False,
+            "gain_truth_incomplete_command_count": 1,
+        }
+    ) == [
+        "ORDER_CAPITAL_LEDGER_INCOMPLETE",
+        "ORDER_GAIN_LEDGER_INCOMPLETE",
+    ]
+
+
 def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
