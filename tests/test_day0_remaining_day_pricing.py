@@ -1934,7 +1934,7 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
     )
 
     assert likelihood["semantics"] == (
-        "wu_applied_changed_payload_retraction_beta_jeffreys_prior_only_v2"
+        "wu_applied_changed_payload_retraction_beta_jeffreys_adaptive_prior_only_v3"
     )
     assert likelihood["transition_count"] == 0
     assert likelihood["retraction_count"] == 0
@@ -1966,6 +1966,52 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
             **kwargs,
             allow_prior_only=True,
         )
+    conn.close()
+
+
+def test_wu_revision_history_expands_causally_before_blocking_entry():
+    """A quiet seven-day slice must not hide recent same-city history."""
+
+    from src.data.day0_observation_reader import (
+        wu_provisional_revision_likelihood,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_revisions ("
+        "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, reason TEXT, "
+        "recorded_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1,
+            "observation_instants",
+            "Jinan",
+            "2026-08-24",
+            "wu_icao_history",
+            json.dumps({"running_max": 35.0, "running_min": 24.0}),
+            json.dumps({"running_max": 36.0, "running_min": 23.0}),
+            "payload_hash_mismatch_monotone_widening_applied",
+            "2026-08-24T03:00:00+00:00",
+        ),
+    )
+
+    likelihood = wu_provisional_revision_likelihood(
+        conn,
+        city="Jinan",
+        timezone_name="Asia/Shanghai",
+        target_date="2026-09-01",
+        temperature_metric="low",
+        decision_time=datetime(2026, 9, 1, 2, 30, tzinfo=UTC),
+    )
+
+    assert likelihood["semantics"].endswith("adaptive_v3")
+    assert likelihood["lookback_days"] == 30
+    assert likelihood["lookback_start"] == "2026-08-02"
+    assert likelihood["transition_count"] == 1
+    assert likelihood["retraction_count"] == 0
     conn.close()
 
 
