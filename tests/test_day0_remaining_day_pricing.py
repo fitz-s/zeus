@@ -2456,6 +2456,299 @@ class TestParsePayload:
         assert parse_openmeteo_hourly_payload(None, city=_paris(), models=["icon_d2"], captured_at="x") == []
         assert parse_openmeteo_hourly_payload({"hourly": "no"}, city=_paris(), models=["icon_d2"], captured_at="x") == []
 
+    def test_hourly_ensemble_requires_complete_control_plus_50_members(self):
+        from src.data.day0_hourly_vectors import (
+            _day0_provider_run_meta,
+            day0_source_clock_ensemble_member_models,
+            parse_openmeteo_ensemble_hourly_payload,
+        )
+
+        now = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
+        models = day0_source_clock_ensemble_member_models()
+        meta = {
+            model: _day0_provider_run_meta(
+                model=model,
+                model_api_id="ecmwf_ifs025",
+                run=now - timedelta(hours=2),
+                available_at=now - timedelta(minutes=30),
+                modified_at=now - timedelta(minutes=29),
+                authority="provider_meta_declared",
+                endpoint_mode="ensemble_meta_stamped",
+                request_params={"endpoint": "ensemble"},
+                request_hash="sha256:test",
+                fetch_started_at=now - timedelta(minutes=2),
+                fetch_finished_at=now - timedelta(minutes=1),
+            )
+            for model in models
+        }
+        hourly = {"time": ["2026-08-31T22:00", "2026-08-31T23:00"]}
+        hourly["temperature_2m"] = [20.0, 19.0]
+        for index in range(1, 51):
+            hourly[f"temperature_2m_member{index:02d}"] = [
+                20.0 + index / 100.0,
+                19.0 + index / 100.0,
+            ]
+        vectors = parse_openmeteo_ensemble_hourly_payload(
+            {"hourly": hourly},
+            city=_paris(),
+            captured_at=now.isoformat(),
+            source_meta_by_member=meta,
+        )
+        assert len(vectors) == 51
+        assert vectors[0].model == "ecmwf_ifs025_member00"
+        assert vectors[-1].model == "ecmwf_ifs025_member50"
+
+        del hourly["temperature_2m_member50"]
+        assert parse_openmeteo_ensemble_hourly_payload(
+            {"hourly": hourly},
+            city=_paris(),
+            captured_at=now.isoformat(),
+            source_meta_by_member=meta,
+        ) == []
+
+
+def test_hourly_ensemble_fetch_binds_one_provider_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.day0_hourly_vectors import (
+        fetch_day0_source_clock_ensemble_vectors,
+    )
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs025",
+        last_run_initialisation_time=now - timedelta(hours=2),
+        last_run_availability_time=now - timedelta(minutes=30),
+        last_run_modification_time=now - timedelta(minutes=29),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (update,),
+    )
+    hourly = {"time": [f"2026-08-31T{hour:02d}:00" for hour in range(24)]}
+    hourly["temperature_2m"] = [20.0] * 24
+    for index in range(1, 51):
+        hourly[f"temperature_2m_member{index:02d}"] = [
+            20.0 + index / 100.0
+        ] * 24
+    monkeypatch.setattr(
+        openmeteo_client,
+        "fetch",
+        lambda *_args, **_kwargs: {"hourly": hourly},
+    )
+
+    vectors, request_hash = fetch_day0_source_clock_ensemble_vectors(
+        _paris(), now=now
+    )
+
+    assert len(vectors) == 51
+    assert request_hash.startswith("sha256:")
+    metadata = json.loads(vectors[0].source_run_meta_json or "{}")
+    assert metadata["model_api_id"] == "ecmwf_ifs025"
+    assert metadata["endpoint_mode"] == "ensemble_meta_stamped"
+    assert metadata["provider_source_cycle_time_utc"] == (
+        now - timedelta(hours=2)
+    ).isoformat()
+
+
+def test_direct_entry_carrier_binds_persisted_51_member_paths():
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import (
+        OPENMETEO_ENSEMBLE_URL,
+        _day0_provider_run_meta,
+        day0_source_clock_ensemble_member_models,
+        parse_openmeteo_ensemble_hourly_payload,
+        persist_day0_hourly_vectors,
+    )
+    from src.engine.event_reactor_adapter import (
+        _day0_direct_entry_source_clock_carrier,
+    )
+
+    decision_time = datetime(2026, 9, 1, 2, 30, tzinfo=UTC)
+    city = runtime_cities_by_name()["Jinan"]
+    models = day0_source_clock_ensemble_member_models()
+    request_hash = "sha256:" + "a" * 64
+    run = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+    available = datetime(2026, 9, 1, 1, 4, tzinfo=UTC)
+    captured = decision_time - timedelta(minutes=5)
+    times = [
+        (datetime(2026, 9, 1, 10, 0) + timedelta(hours=index)).isoformat(
+            timespec="minutes"
+        )
+        for index in range(48)
+    ]
+    hourly = {"time": times, "temperature_2m": [20.0] * len(times)}
+    for index in range(1, 51):
+        hourly[f"temperature_2m_member{index:02d}"] = [
+            20.0 + index / 100.0
+        ] * len(times)
+    metadata = {
+        model: _day0_provider_run_meta(
+            model=model,
+            model_api_id="ecmwf_ifs025",
+            run=run,
+            available_at=available,
+            modified_at=available - timedelta(minutes=1),
+            authority="provider_meta_declared",
+            endpoint_mode="ensemble_meta_stamped",
+            request_params={"endpoint": OPENMETEO_ENSEMBLE_URL},
+            request_hash=request_hash,
+            fetch_started_at=captured + timedelta(seconds=1),
+            fetch_finished_at=captured + timedelta(seconds=2),
+        )
+        for model in models
+    }
+    vectors = parse_openmeteo_ensemble_hourly_payload(
+        {"hourly": hourly},
+        city=city,
+        captured_at=captured.isoformat(),
+        source_meta_by_member=metadata,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY,
+            city TEXT,
+            publish_ts_utc TEXT,
+            value_native REAL,
+            unit TEXT,
+            station_id TEXT,
+            source_channel TEXT,
+            raw_report TEXT,
+            fetched_at_utc TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO observation_prints
+            (city, publish_ts_utc, value_native, unit, station_id,
+             source_channel, raw_report, fetched_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Jinan",
+            "2026-09-01T02:00:00+00:00",
+            27.0,
+            "C",
+            "ZSJN",
+            "wu_icao_history",
+            "",
+            "2026-09-01T02:01:00+00:00",
+        ),
+    )
+    assert persist_day0_hourly_vectors(
+        vectors,
+        target_date="2026-09-01",
+        conn=conn,
+        request_hash=request_hash,
+        endpoint=OPENMETEO_ENSEMBLE_URL,
+        now=decision_time,
+    ) == 51
+    family = SimpleNamespace(city="Jinan", target_date="2026-09-01", metric="low")
+
+    carrier = _day0_direct_entry_source_clock_carrier(
+        forecast_conn=conn,
+        family=family,
+        decision_time=decision_time,
+    )
+
+    assert carrier is not None
+    assert carrier["member_count"] == 51
+    assert carrier["provider_source_cycle_time_utc"] == run.isoformat()
+    assert len(carrier["future_extremes_c"]) == 51
+    assert len(str(carrier["carrier_identity"])) == 64
+
+    deterministic_models = [
+        "ecmwf_ifs",
+        "icon_global",
+        "ukmo_global_deterministic_10km",
+    ]
+    deterministic_vectors = []
+    for index, model in enumerate(deterministic_models):
+        deterministic_vectors.append(
+            Day0HourlyVector(
+                model=model,
+                city="Jinan",
+                target_date="",
+                timezone_name="Asia/Shanghai",
+                captured_at=captured.isoformat(),
+                times=tuple(times),
+                temps_c=tuple(20.0 + index for _ in times),
+                source_run_meta_json=json.dumps(
+                    _day0_provider_run_meta(
+                        model=model,
+                        model_api_id=model,
+                        run=run,
+                        available_at=available,
+                        modified_at=available - timedelta(minutes=1),
+                        authority="provider_meta_declared",
+                        endpoint_mode="standard_meta_stamped",
+                        request_params={
+                            "endpoint": "https://api.open-meteo.com/v1/forecast"
+                        },
+                        request_hash="sha256:" + "b" * 64,
+                        fetch_started_at=captured + timedelta(seconds=1),
+                        fetch_finished_at=captured + timedelta(seconds=2),
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    assert persist_day0_hourly_vectors(
+        deterministic_vectors,
+        target_date="2026-09-01",
+        conn=conn,
+        request_hash="sha256:" + "b" * 64,
+        now=decision_time,
+    ) == 3
+    payload = {
+        "city": "Jinan",
+        "target_date": "2026-09-01",
+        "metric": "low",
+        "settlement_source": "wu_icao_history",
+        "station_id": "ZSJN",
+        "settlement_unit": "C",
+        "observation_time": "2026-09-01T02:00:00+00:00",
+        "observation_available_at": "2026-09-01T02:01:00+00:00",
+        "raw_value": 19.0,
+        "rounded_value": 19.0,
+        "low_so_far": 19.0,
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_direct_current_entry_authority": True,
+        "_edli_day0_direct_entry_source_clock_carrier": dict(carrier),
+        "_edli_day0_provisional_revision_likelihood": {
+            "identity_hash": "revision-likelihood",
+            "boundary_survival_probability": 0.95,
+        },
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+    }
+    from src.engine.event_reactor_adapter import _day0_remaining_day_members
+
+    remaining = _day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=decision_time,
+        probability_time=decision_time,
+        world_conn=conn,
+        forecast_conn=conn,
+        entry_authority=True,
+    )
+
+    assert remaining is not None and remaining.shape == (3,)
+    assert payload["_edli_day0_source_clock_predictive_sigma_native"] > 0.0
+    assert payload["_edli_day0_causal_evidence_bundle_authority"] == (
+        "entry_current_remaining_hourly_ens_v1"
+    )
+    assert payload["_edli_day0_remaining_vector_witness"][
+        "provider_source_cycle_time_utc"
+    ] == run.isoformat()
+
 
 # ===========================================================================
 # R9 — persistence: roundtrip, idempotency, retention, freshness gate

@@ -33527,6 +33527,104 @@ def _candidate_min_tick_size(proof: _CandidateProof) -> float | None:
     return None
 
 
+def _direct_day0_entry_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    family: object,
+    forecast_conn: sqlite3.Connection,
+    observation_conn: sqlite3.Connection,
+    native_costs: dict[
+        tuple[str, str],
+        tuple[
+            dict[str, Any] | None,
+            ExecutionPrice | None,
+            float,
+            float | None,
+            str | None,
+        ],
+    ],
+    decision_time: datetime,
+    provenance_capture: dict[str, Any] | None = None,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+] | None:
+    """Reproduce the direct hourly-ENS witness for the legacy proof seam."""
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.solve.solver import _lower_cvar
+
+    day0_payload: dict[str, object] = {}
+    prepared = _prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast_conn,
+        topology_conn=forecast_conn,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        max_age=FRESHNESS_WINDOW_DEFAULT,
+        day0_payload_out=day0_payload,
+        allow_partial_deterministic=True,
+        allow_provisional_day0_replacement=True,
+        probability_use=_CurrentProbabilityUse.ENTRY,
+    )
+    if day0_payload.get("_edli_day0_direct_current_entry_authority") is not True:
+        return None
+    payload.update(day0_payload)
+    witness = prepared.probability_witness
+    samples = np.asarray(
+        getattr(witness, "yes_q_samples", ()), dtype=np.float64
+    )
+    point_q = np.asarray(
+        getattr(witness, "yes_point_q", ()), dtype=np.float64
+    )
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    if (
+        samples.ndim != 2
+        or samples.shape[1] != len(bindings)
+        or point_q.shape != (len(bindings),)
+        or not np.isfinite(samples).all()
+        or not np.isfinite(point_q).all()
+    ):
+        raise ValueError("DAY0_DIRECT_ENTRY_PROOF_WITNESS_INVALID")
+    weights = np.ones(samples.shape[0], dtype=np.float64)
+    q_by_condition: dict[str, float] = {}
+    lcb_by_condition: dict[tuple[str, str], float] = {}
+    evidence: dict[str, str] = {}
+    for index, binding in enumerate(bindings):
+        condition_id = str(getattr(binding, "condition_id", "") or "").strip()
+        if not condition_id or condition_id in q_by_condition:
+            raise ValueError("DAY0_DIRECT_ENTRY_PROOF_BINDING_INVALID")
+        q_by_condition[condition_id] = float(point_q[index])
+        lcb_by_condition[(condition_id, "buy_yes")] = _lower_cvar(
+            samples[:, index], weights, float(witness.band_alpha)
+        )
+        lcb_by_condition[(condition_id, "buy_no")] = _lower_cvar(
+            1.0 - samples[:, index], weights, float(witness.band_alpha)
+        )
+        evidence[condition_id] = "DAY0_DIRECT_CURRENT_HOURLY_ENS"
+    masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
+        payload=payload,
+        family=family,
+        q_by_condition=q_by_condition,
+        lcb_by_condition=lcb_by_condition,
+        decision_time=decision_time,
+    )
+    p_values, prefilter = _day0_hard_fact_fdr_maps(
+        family=family,
+        native_costs=native_costs,
+        masked_lcb_by_condition=masked_lcb,
+    )
+    if provenance_capture is not None:
+        probability_block = _global_day0_probability_authority_payload(payload)
+        payload["day0_probability_authority"] = probability_block
+        provenance_capture["day0_probability_authority"] = probability_block
+    return masked_q, masked_lcb, p_values, prefilter, evidence
+
+
 def _live_yes_probabilities(
     *,
     event: OpportunityEvent,
@@ -33609,15 +33707,32 @@ def _live_yes_probabilities(
                 )
                 payload.update(current_observation)
             capture = provenance_capture if provenance_capture is not None else {}
-            replacement = _replacement_authority_probability_and_fdr_proof(
-                event=event,
-                payload=payload,
-                family=family,
-                conn=conn,
-                native_costs=native_costs,
-                decision_time=decision_time,
-                provenance_capture=capture,
-            )
+            try:
+                replacement = _replacement_authority_probability_and_fdr_proof(
+                    event=event,
+                    payload=payload,
+                    family=family,
+                    conn=conn,
+                    native_costs=native_costs,
+                    decision_time=decision_time,
+                    provenance_capture=capture,
+                )
+            except ValueError as exc:
+                if str(exc) != "REPLACEMENT_0_1_LIVE_READINESS_MISSING":
+                    raise
+                direct = _direct_day0_entry_probability_and_fdr_proof(
+                    event=event,
+                    payload=payload,
+                    family=family,
+                    forecast_conn=conn,
+                    observation_conn=calibration_conn,
+                    native_costs=native_costs,
+                    decision_time=decision_time,
+                    provenance_capture=capture,
+                )
+                if direct is None:
+                    raise
+                return direct
             if replacement is None:
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
@@ -37526,6 +37641,7 @@ def _prepare_current_global_probability_family(
             raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_INCOMPLETE")
     day0_source_clock_bound_identity = ""
     current_day0_redecision_only = False
+    direct_day0_entry_carrier: Mapping[str, object] | None = None
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -37847,50 +37963,91 @@ def _prepare_current_global_probability_family(
             if readiness is None:
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
-                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
-            result = read_replacement_forecast_bundle(
-                forecast_conn,
-                baseline_bundle=None,
-                readiness=readiness,
-                city=family.city,
-                target_date=family.target_date,
-                temperature_metric=family.metric,
-                decision_time=decision_time,
-                require_baseline_bundle=False,
-                current_bin_topology_hash=current_topology_hash,
-                enforce_raw_input_hwm=True,
-                raw_input_hwm_conn=raw_input_hwm_conn,
-                raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
-                raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
-                authority_purpose=bundle_authority_purpose,
-            )
-            if not result.ok or result.bundle is None:
+                if (
+                    entry_authority
+                    and provisional_day0_fact is not None
+                    and provisional_day0_observation
+                    and local_target == local_now.date()
+                ):
+                    direct_day0_entry_carrier = (
+                        _day0_direct_entry_source_clock_carrier(
+                            forecast_conn=forecast_conn,
+                            family=family,
+                            decision_time=decision_time,
+                        )
+                    )
+                if direct_day0_entry_carrier is None:
+                    raise ValueError(
+                        "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"
+                    )
+                payload.update(
+                    {
+                        "_edli_day0_direct_current_entry_authority": True,
+                        "_edli_day0_direct_entry_source_clock_carrier": dict(
+                            direct_day0_entry_carrier
+                        ),
+                    }
+                )
+                source_cycle_raw = str(
+                    direct_day0_entry_carrier[
+                        "provider_source_cycle_time_utc"
+                    ]
+                )
+                source_available_at = str(
+                    direct_day0_entry_carrier["fetch_finished_at_utc"]
+                )
+                day0_base_identity = str(
+                    direct_day0_entry_carrier["carrier_identity"]
+                )
+                # Continue into the same current-observation and remaining-path
+                # builder. No full-day replacement q or rejected extrema row is
+                # consumed on this route.
+                result = None
+            else:
+                result = read_replacement_forecast_bundle(
+                    forecast_conn,
+                    baseline_bundle=None,
+                    readiness=readiness,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    require_baseline_bundle=False,
+                    current_bin_topology_hash=current_topology_hash,
+                    enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=bundle_authority_purpose,
+                )
+            if result is not None and (not result.ok or result.bundle is None):
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
                 raise ValueError(
                     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
                     f"{result.reason_code}"
                 )
-            bundle = result.bundle
-            _bind_day0_causal_evidence_bundle(payload, bundle)
-            posterior_identity_hash = str(
-                bundle.posterior_identity_hash or ""
-            ).strip()
-            dependency_hash = str(bundle.dependency_hash or "").strip()
-            posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
-            if not all(
-                (posterior_identity_hash, dependency_hash, posterior_config_hash)
-            ):
-                raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
-            source_cycle_raw = bundle.source_cycle_time
-            source_available_at = str(bundle.source_available_at or "").strip()
-            day0_base_identity = posterior_identity_hash
-            probability_conditioning_is_provisional = (
-                _replacement_uses_provisional_day0_conditioning(bundle)
-            )
-            fast_residual_conditioning = _fast_residual_day0_conditioning(
-                bundle
-            )
+            if result is not None:
+                bundle = result.bundle
+                _bind_day0_causal_evidence_bundle(payload, bundle)
+                posterior_identity_hash = str(
+                    bundle.posterior_identity_hash or ""
+                ).strip()
+                dependency_hash = str(bundle.dependency_hash or "").strip()
+                posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
+                if not all(
+                    (posterior_identity_hash, dependency_hash, posterior_config_hash)
+                ):
+                    raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+                source_cycle_raw = bundle.source_cycle_time
+                source_available_at = str(bundle.source_available_at or "").strip()
+                day0_base_identity = posterior_identity_hash
+                probability_conditioning_is_provisional = (
+                    _replacement_uses_provisional_day0_conditioning(bundle)
+                )
+                fast_residual_conditioning = _fast_residual_day0_conditioning(
+                    bundle
+                )
             if fast_residual_conditioning is not None:
                 if (
                     str(fast_residual_conditioning.get("metric") or "")
@@ -38144,9 +38301,21 @@ def _prepare_current_global_probability_family(
                     "_edli_day0_redecision_authority_scope"
                 ] = redecision_scope
             if provisional_day0_observation and bundle is None:
-                if not current_day0_redecision_only:
+                if (
+                    not current_day0_redecision_only
+                    and direct_day0_entry_carrier is None
+                ):
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                    )
+                if direct_day0_entry_carrier is not None:
+                    current_day0_payload.update(
+                        {
+                            "_edli_day0_direct_current_entry_authority": True,
+                            "_edli_day0_direct_entry_source_clock_carrier": dict(
+                                direct_day0_entry_carrier
+                            ),
+                        }
                     )
             elif probability_conditioning_is_provisional:
                 if fast_residual_conditioning is not None:
@@ -38994,6 +39163,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_causal_evidence_bundle_successor_materialized",
             "_edli_day0_causal_evidence_bundle_authority",
             "_edli_day0_direct_current_redecision_authority",
+            "_edli_day0_direct_current_entry_authority",
+            "_edli_day0_direct_entry_source_clock_carrier",
+            "_edli_day0_direct_entry_source_clock_sigma_components_c",
             "_edli_day0_source_clock_carrier_provenance",
             "_edli_day0_decision_carrier_rebuild_basis",
             "_edli_day0_held_carrier_rebuild_basis",
@@ -39106,6 +39278,12 @@ def _prepare_current_global_probability_family(
             ),
             "source_clock_predictive_sigma_basis": payload.get(
                 "_edli_day0_source_clock_predictive_sigma_basis"
+            ),
+            "direct_entry_source_clock_carrier": payload.get(
+                "_edli_day0_direct_entry_source_clock_carrier"
+            ),
+            "direct_entry_source_clock_sigma_components_c": payload.get(
+                "_edli_day0_direct_entry_source_clock_sigma_components_c"
             ),
             "provisional_revision_likelihood": payload.get(
                 "_edli_day0_provisional_revision_likelihood"
@@ -44764,6 +44942,181 @@ def _validate_day0_causal_bundle_successor(
     return actual
 
 
+def _day0_direct_entry_source_clock_carrier(
+    *,
+    forecast_conn: sqlite3.Connection,
+    family: object,
+    decision_time: datetime,
+) -> Mapping[str, object] | None:
+    """Build an exact current hourly-ENS carrier for an ambiguous Day0 LOW.
+
+    This does not legalize the rejected full-day extrema product.  It binds the
+    unresolved-hour 51-member IFS025 paths, their provider-run metadata, the
+    latest causal current-temperature state, and the complete persisted vector
+    rows that will be reproduced at submit.
+    """
+
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        OPENMETEO_ENSEMBLE_URL,
+        day0_source_clock_ensemble_member_models,
+        read_freshest_day0_hourly_vectors,
+    )
+
+    if decision_time.tzinfo is None or str(getattr(family, "metric", "")) != "low":
+        return None
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if city is None:
+        return None
+    current_state = _latest_day0_current_temperature_native(
+        world_conn=forecast_conn,
+        family=family,
+        decision_time=decision_time,
+    )
+    if current_state is None:
+        return None
+    current_native, current_observed_at, current_source = current_state
+    expected_models = day0_source_clock_ensemble_member_models()
+    vectors = read_freshest_day0_hourly_vectors(
+        city=str(family.city),
+        target_date=str(family.target_date),
+        now=decision_time,
+        expected_models=expected_models,
+        require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=current_observed_at,
+        require_complete_remaining_window=True,
+        conn=forecast_conn,
+    )
+    if len(vectors) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+        return None
+    witness = _day0_current_vector_witness(
+        conn=forecast_conn,
+        vectors=vectors,
+        family=family,
+        expected_models=expected_models,
+        decision_time=decision_time,
+    )
+    if not isinstance(witness, Mapping):
+        return None
+
+    def _one_map_value(key: str) -> str | None:
+        values = witness.get(key)
+        if not isinstance(values, Mapping) or set(values) != set(expected_models):
+            return None
+        unique = {str(value or "").strip() for value in values.values()}
+        return next(iter(unique)) if len(unique) == 1 and "" not in unique else None
+
+    request_hash = _one_map_value("request_hash_by_model")
+    provider_cycle_text = _one_map_value(
+        "provider_source_cycle_time_by_model_utc"
+    )
+    provider_available_text = _one_map_value(
+        "provider_source_available_at_by_model_utc"
+    )
+    provider_modified_text = _one_map_value(
+        "provider_source_modified_at_by_model_utc"
+    )
+    fetch_finished_text = _one_map_value("fetch_finished_times_by_model_utc")
+    capture_text = _one_map_value("capture_times_by_model_utc")
+    if not all(
+        (
+            request_hash,
+            provider_cycle_text,
+            provider_available_text,
+            provider_modified_text,
+            fetch_finished_text,
+            capture_text,
+        )
+    ):
+        return None
+    exact_fields = {
+        "provider_by_model": "openmeteo",
+        "endpoint_by_model": OPENMETEO_ENSEMBLE_URL,
+        "model_api_id_by_model": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        "source_run_authority_by_model": "provider_meta_declared",
+        "endpoint_mode_by_model": "ensemble_meta_stamped",
+    }
+    if any(_one_map_value(key) != value for key, value in exact_fields.items()):
+        return None
+    try:
+        provider_cycle = datetime.fromisoformat(
+            provider_cycle_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        provider_available = datetime.fromisoformat(
+            provider_available_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        provider_modified = datetime.fromisoformat(
+            provider_modified_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        fetch_finished = datetime.fromisoformat(
+            fetch_finished_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        captured_at = datetime.fromisoformat(
+            capture_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+    decision_utc = decision_time.astimezone(UTC)
+    if (
+        provider_cycle > provider_available
+        or provider_available > fetch_finished
+        or provider_modified > fetch_finished
+        or fetch_finished > decision_utc
+        or captured_at > decision_utc
+        or decision_utc - fetch_finished
+        > timedelta(hours=float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS))
+    ):
+        return None
+    current_c = (
+        float(current_native)
+        if str(getattr(city, "settlement_unit", "") or "").upper() == "C"
+        else (float(current_native) - 32.0) * 5.0 / 9.0
+    )
+    future_extremes_c, _innovations = (
+        _remaining_day_extremes_c_with_current_state_evidence(
+            vectors,
+            target_date=str(family.target_date),
+            decision_time=decision_time,
+            observation_time=current_observed_at,
+            current_temp_c=current_c,
+            metric="low",
+        )
+    )
+    values = np.asarray(future_extremes_c, dtype=np.float64)
+    if (
+        values.shape != (DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,)
+        or not np.isfinite(values).all()
+    ):
+        return None
+    carrier_content = {
+        "schema": "day0_direct_entry_hourly_ens_carrier_v1",
+        "model": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        "member_count": DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+        "city": str(family.city),
+        "target_date": str(family.target_date),
+        "metric": "low",
+        "provider_source_cycle_time_utc": provider_cycle.isoformat(),
+        "provider_source_available_at_utc": provider_available.isoformat(),
+        "provider_source_modified_at_utc": provider_modified.isoformat(),
+        "fetch_finished_at_utc": fetch_finished.isoformat(),
+        "captured_at_utc": captured_at.isoformat(),
+        "request_hash": request_hash,
+        "current_temperature_native": float(current_native),
+        "current_temperature_observed_at_utc": current_observed_at.isoformat(),
+        "current_temperature_source": str(current_source),
+        "future_extremes_c": [float(value) for value in values.tolist()],
+        "vector_witness": dict(witness),
+    }
+    return {
+        **carrier_content,
+        "carrier_identity": stable_hash(carrier_content),
+    }
+
+
 def _build_direct_current_day0_causal_bundle(
     *,
     payload: dict[str, object],
@@ -44772,23 +45125,55 @@ def _build_direct_current_day0_causal_bundle(
     decision_time: datetime,
     vector_witness: Mapping[str, object],
 ) -> Mapping[str, object]:
-    """Bind held-only current evidence without inventing a source-clock q.
+    """Bind direct current evidence without inventing a full-day extrema q.
 
     The remaining-window probability is recomputed in this invocation from
-    the exact persisted vector rows and current observation state.  When a
-    target-day LOW ENS product is intrinsically boundary-ambiguous, no valid
-    posterior successor can carry those inputs.  This certificate freezes the
-    inputs that actually produce the held/reduce-only q; it never authorizes an
-    entry or relabels a rejected ENS snapshot as eligible.
+    exact persisted vector rows and current observation state. Existing capital
+    may use the held-only direct carrier. New capital additionally requires a
+    complete 51-member hourly ENS carrier whose same provider cycle matches the
+    ECMWF deterministic path. Neither route relabels a rejected full-day ENS
+    snapshot as eligible.
     """
 
-    if (
+    held_direct = bool(
         payload.get("_edli_day0_redecision_authority_scope")
-        != "held_exposure_current_day0_only_v1"
-        or payload.get("_edli_day0_direct_current_redecision_authority")
-        is not True
-    ):
+        == "held_exposure_current_day0_only_v1"
+        and payload.get("_edli_day0_direct_current_redecision_authority")
+        is True
+    )
+    entry_carrier = payload.get(
+        "_edli_day0_direct_entry_source_clock_carrier"
+    )
+    entry_direct = bool(
+        payload.get("_edli_day0_redecision_authority_scope") is None
+        and payload.get("_edli_day0_direct_current_entry_authority") is True
+        and isinstance(entry_carrier, Mapping)
+    )
+    if not held_direct and not entry_direct:
         raise ValueError("DAY0_DIRECT_CURRENT_REDECISION_AUTHORITY_REQUIRED")
+    direct_authority = (
+        "entry_current_remaining_hourly_ens_v1"
+        if entry_direct
+        else "held_current_redecision_direct_v1"
+    )
+    if entry_direct:
+        provider_cycles = vector_witness.get(
+            "provider_source_cycle_time_by_model_utc"
+        )
+        deterministic_ecmwf_cycle = (
+            str(provider_cycles.get("ecmwf_ifs") or "").strip()
+            if isinstance(provider_cycles, Mapping)
+            else ""
+        )
+        carrier_cycle = str(
+            entry_carrier.get("provider_source_cycle_time_utc") or ""
+        ).strip()
+        if (
+            not deterministic_ecmwf_cycle
+            or deterministic_ecmwf_cycle != carrier_cycle
+            or not str(entry_carrier.get("carrier_identity") or "").strip()
+        ):
+            raise ValueError("DAY0_DIRECT_ENTRY_SAME_CYCLE_CARRIER_MISMATCH")
     metric = str(
         payload.get("metric")
         or payload.get("temperature_metric")
@@ -44839,7 +45224,7 @@ def _build_direct_current_day0_causal_bundle(
         else ""
     )
     observation_context = {
-        "authority": "held_current_redecision_direct_v1",
+        "authority": direct_authority,
         "source": source,
         "station_id": str(payload.get("station_id") or "").strip() or None,
         "observation_time": observed_at.astimezone(UTC).isoformat(),
@@ -44859,6 +45244,14 @@ def _build_direct_current_day0_causal_bundle(
         "evidence_finality": payload.get("evidence_finality"),
         "revision_likelihood_identity": revision_identity or None,
         "raw_payload_sha256": payload.get("raw_payload_sha256"),
+        "source_clock_entry_carrier_identity": (
+            entry_carrier.get("carrier_identity") if entry_direct else None
+        ),
+        "source_clock_predictive_sigma_native": (
+            payload.get("_edli_day0_source_clock_predictive_sigma_native")
+            if entry_direct
+            else None
+        ),
     }
     from src.data.day0_hourly_vectors import (
         build_day0_causal_evidence_bundle,
@@ -44887,7 +45280,7 @@ def _build_direct_current_day0_causal_bundle(
             ),
             "_edli_day0_causal_evidence_bundle_successor_materialized": False,
             "_edli_day0_causal_evidence_bundle_authority": (
-                "held_current_redecision_direct_v1"
+                direct_authority
             ),
         }
     )
@@ -45018,7 +45411,17 @@ def _day0_remaining_day_members(
                 "current_vector_witness_unavailable"
             )
             return None
-        if payload.get("_edli_day0_direct_current_redecision_authority") is True:
+        direct_entry_authority = bool(
+            entry_authority
+            and payload.get("_edli_day0_direct_current_entry_authority") is True
+        )
+        validated_bundle = None
+        if direct_entry_authority:
+            # The entry certificate additionally binds the predictive sigma
+            # computed below from this deterministic path set and the exact
+            # hourly ENS carrier. Build it only after that decomposition exists.
+            pass
+        elif payload.get("_edli_day0_direct_current_redecision_authority") is True:
             validated_bundle = _build_direct_current_day0_causal_bundle(
                 payload=payload,
                 family=family,
@@ -45037,9 +45440,10 @@ def _day0_remaining_day_members(
                 decision_time=decision_time,
                 vector_witness=current_vector_witness,
             )
-        payload["_edli_day0_remaining_vector_witness"] = dict(
-            validated_bundle["carrier_vector_witness"]
-        )
+        if validated_bundle is not None:
+            payload["_edli_day0_remaining_vector_witness"] = dict(
+                validated_bundle["carrier_vector_witness"]
+            )
         from src.strategy.live_inference.source_clock_vnext import (
             provider_family_for_source,
         )
@@ -45134,6 +45538,102 @@ def _day0_remaining_day_members(
             ]
             payload["_edli_day0_provider_representative_models"] = list(
                 provider_models
+            )
+        if direct_entry_authority:
+            entry_carrier = payload.get(
+                "_edli_day0_direct_entry_source_clock_carrier"
+            )
+            if not isinstance(entry_carrier, Mapping):
+                raise ValueError("DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISSING")
+            try:
+                ensemble_extremes_c = np.asarray(
+                    entry_carrier["future_extremes_c"], dtype=np.float64
+                )
+                provider_extremes_c = np.asarray(extremes_c, dtype=np.float64)
+                carrier_current_native = float(
+                    entry_carrier["current_temperature_native"]
+                )
+                carrier_current_time = str(
+                    entry_carrier["current_temperature_observed_at_utc"]
+                )
+                carrier_current_source = str(
+                    entry_carrier["current_temperature_source"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_INVALID"
+                ) from exc
+            if (
+                ensemble_extremes_c.shape != (51,)
+                or provider_extremes_c.size < 2
+                or not np.isfinite(ensemble_extremes_c).all()
+                or not np.isfinite(provider_extremes_c).all()
+                or not math.isclose(
+                    carrier_current_native,
+                    float(payload.get("_edli_day0_current_temperature_native")),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                or carrier_current_time
+                != str(
+                    payload.get(
+                        "_edli_day0_current_temperature_observed_at_utc"
+                    )
+                )
+                or carrier_current_source
+                != str(payload.get("_edli_day0_current_temperature_source"))
+            ):
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISMATCH"
+                )
+            within_c = float(np.std(ensemble_extremes_c, ddof=0))
+            center_delta_c = abs(
+                float(np.mean(ensemble_extremes_c))
+                - float(np.mean(provider_extremes_c))
+            )
+            between_c = float(np.std(provider_extremes_c, ddof=0))
+            predictive_sigma_c = float(
+                np.sqrt(
+                    within_c**2 + center_delta_c**2 + between_c**2
+                )
+            )
+            predictive_sigma_native = (
+                predictive_sigma_c * 9.0 / 5.0
+                if str(unit).upper() == "F"
+                else predictive_sigma_c
+            )
+            if not (
+                predictive_sigma_native > 0.0
+                and math.isfinite(predictive_sigma_native)
+            ):
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                )
+            payload.update(
+                {
+                    "_edli_day0_source_clock_predictive_sigma_native": (
+                        predictive_sigma_native
+                    ),
+                    "_edli_day0_source_clock_predictive_sigma_basis": (
+                        "hourly_ifs025_within_plus_center_delta_plus_provider_between_v1"
+                    ),
+                    "_edli_day0_direct_entry_source_clock_sigma_components_c": {
+                        "within_ens_spread": within_c,
+                        "ens_center_delta": center_delta_c,
+                        "between_provider_spread": between_c,
+                        "predictive_sigma": predictive_sigma_c,
+                    },
+                }
+            )
+            validated_bundle = _build_direct_current_day0_causal_bundle(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
+            )
+            payload["_edli_day0_remaining_vector_witness"] = dict(
+                validated_bundle["carrier_vector_witness"]
             )
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
