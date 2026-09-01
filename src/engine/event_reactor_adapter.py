@@ -38014,6 +38014,7 @@ def _prepare_current_global_probability_family(
                     direct_day0_entry_carrier = (
                         _day0_direct_entry_source_clock_carrier(
                             forecast_conn=forecast_conn,
+                            world_conn=day0_observation_conn,
                             family=family,
                             decision_time=decision_time,
                         )
@@ -45014,6 +45015,7 @@ def _validate_day0_causal_bundle_successor(
 def _day0_direct_entry_source_clock_carrier(
     *,
     forecast_conn: sqlite3.Connection,
+    world_conn: sqlite3.Connection | None = None,
     family: object,
     decision_time: datetime,
 ) -> Mapping[str, object] | None:
@@ -45041,7 +45043,7 @@ def _day0_direct_entry_source_clock_carrier(
     if city is None:
         return None
     current_state = _latest_day0_current_temperature_native(
-        world_conn=forecast_conn,
+        world_conn=world_conn or forecast_conn,
         family=family,
         decision_time=decision_time,
     )

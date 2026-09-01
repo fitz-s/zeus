@@ -2652,8 +2652,9 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
         captured_at=captured.isoformat(),
         source_meta_by_member=metadata,
     )
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
+    forecast_conn = sqlite3.connect(":memory:")
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.execute(
         """
         CREATE TABLE observation_prints (
             id INTEGER PRIMARY KEY,
@@ -2668,7 +2669,7 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
         )
         """
     )
-    conn.execute(
+    world_conn.execute(
         """
         INSERT INTO observation_prints
             (city, publish_ts_utc, value_native, unit, station_id,
@@ -2689,7 +2690,7 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
     assert persist_day0_hourly_vectors(
         vectors,
         target_date="2026-09-01",
-        conn=conn,
+        conn=forecast_conn,
         request_hash=request_hash,
         endpoint=OPENMETEO_ENSEMBLE_URL,
         now=decision_time,
@@ -2697,7 +2698,8 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
     family = SimpleNamespace(city="Jinan", target_date="2026-09-01", metric="low")
 
     carrier = _day0_direct_entry_source_clock_carrier(
-        forecast_conn=conn,
+        forecast_conn=forecast_conn,
+        world_conn=world_conn,
         family=family,
         decision_time=decision_time,
     )
@@ -2748,7 +2750,7 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
     assert persist_day0_hourly_vectors(
         deterministic_vectors,
         target_date="2026-09-01",
-        conn=conn,
+        conn=forecast_conn,
         request_hash="sha256:" + "b" * 64,
         now=decision_time,
     ) == 3
@@ -2781,8 +2783,8 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
         unit="C",
         decision_time=decision_time,
         probability_time=decision_time,
-        world_conn=conn,
-        forecast_conn=conn,
+        world_conn=world_conn,
+        forecast_conn=forecast_conn,
         entry_authority=True,
     )
 
