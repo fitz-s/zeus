@@ -1631,18 +1631,6 @@ def _replacement_forecast_materialize_interval_minutes() -> int:
     return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 1)
 
 
-def _replacement_forecast_materialize_poll_seconds() -> int:
-    return max(
-        1,
-        int(
-            _replacement_forecast_live_cfg().get(
-                "materialization_queue_poll_seconds"
-            )
-            or 1
-        ),
-    )
-
-
 def _register_replacement_forecast_production_jobs(
     scheduler: object, *, startup_run_date: datetime | None = None
 ) -> None:
@@ -1654,12 +1642,13 @@ def _register_replacement_forecast_production_jobs(
     lane. The download wrapper remains importable for explicit operator inspection.
     """
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
-    materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
-    # Light materialize: interval (consumes already-downloaded manifests; no download).
+    # Background cache/catch-up cannot share the one-second cadence with current
+    # money. It still drains on the configured materialization interval; the
+    # priority lane alone owns second-scale q production.
     scheduler.add_job(  # type: ignore[attr-defined]
         _replacement_forecast_materialize_job,
         "interval",
-        seconds=materialize_poll_seconds,
+        minutes=materialize_minutes,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
         max_instances=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES,
@@ -1706,8 +1695,8 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
-        "materialize background=%ds priority=1s discovery=%dmin; lanes=%s,%s)",
-        materialize_poll_seconds,
+        "materialize background=%dmin priority=1s discovery=%dmin; lanes=%s,%s)",
+        materialize_minutes,
         materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
         REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,

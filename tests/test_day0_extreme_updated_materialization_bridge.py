@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-08-29
-# Lifecycle: created=2026-07-19; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Last reused/audited: 2026-09-01
+# Lifecycle: created=2026-07-19; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -2899,7 +2899,6 @@ def test_scheduler_registers_independent_background_and_priority_jobs(monkeypatc
             jobs.append((fn, trigger, kwargs))
 
     monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 5)
-    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 1)
     forecast_live_daemon._register_replacement_forecast_production_jobs(Scheduler())
     selected = {
         job[2]["id"]: job
@@ -2917,6 +2916,8 @@ def test_scheduler_registers_independent_background_and_priority_jobs(monkeypatc
     assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
     assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
     assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["seconds"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["minutes"] == 5
+    assert "seconds" not in selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]
     assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["executor"] != selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["executor"]
 
 

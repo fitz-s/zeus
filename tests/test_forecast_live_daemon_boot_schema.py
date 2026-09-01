@@ -1,5 +1,5 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-09-01
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
@@ -98,12 +98,6 @@ def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> 
         "_replacement_forecast_materialize_interval_minutes",
         lambda: 5,
     )
-    monkeypatch.setattr(
-        daemon,
-        "_replacement_forecast_materialize_poll_seconds",
-        lambda: 1,
-    )
-
     daemon._register_replacement_forecast_production_jobs(Scheduler())
 
     materialize = next(

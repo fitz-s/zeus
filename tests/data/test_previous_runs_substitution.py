@@ -5902,7 +5902,7 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes
 
 
-def test_ens_waiting_seed_backoff_yields_and_resets_on_new_snapshot(
+def test_ens_waiting_seed_backoff_yields_and_expires_exactly(
     tmp_path, monkeypatch
 ) -> None:
     """A missing-ENS cache entry cannot hide actionable current-q work."""
@@ -5914,22 +5914,19 @@ def test_ens_waiting_seed_backoff_yields_and_resets_on_new_snapshot(
     waiting.write_text("{}", encoding="utf-8")
     actionable.write_text("{}", encoding="utf-8")
     now = [100.0]
-    hwm = [(str(tmp_path / "forecasts.db"), 10)]
     monkeypatch.setattr(queue_mod.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(queue_mod, "_ensemble_snapshot_hwm", lambda _db: hwm[0])
     monkeypatch.setattr(queue_mod, "_AWAITING_ENSEMBLE_RECHECK_AT", {})
-    monkeypatch.setattr(queue_mod, "_AWAITING_ENSEMBLE_CACHE_HWM", hwm[0])
 
     queue_mod._defer_awaiting_ensemble_seed(waiting)
     reordered = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
-        (waiting, actionable), forecast_db=tmp_path / "forecasts.db"
+        (waiting, actionable)
     )
     assert reordered == (actionable, waiting)
     assert waiting.exists()
 
-    hwm[0] = (hwm[0][0], 11)
+    now[0] += queue_mod._AWAITING_ENSEMBLE_RECHECK_SECONDS
     reset = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
-        (waiting, actionable), forecast_db=tmp_path / "forecasts.db"
+        (waiting, actionable)
     )
     assert reset == (waiting, actionable)
 
