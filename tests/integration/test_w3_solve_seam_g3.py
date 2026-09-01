@@ -17908,6 +17908,105 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch(monke
     assert provider.fetches == 0
 
 
+def test_global_jit_snapshot_persist_avoids_stale_shared_wal_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    writer = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=0")
+    writer.execute("PRAGMA busy_timeout=0")
+    init_snapshot_schema(conn)
+    conn.commit()
+    captured = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    snapshot = ExecutableMarketSnapshot(
+        snapshot_id="jit-snapshot",
+        gamma_market_id="gamma-a",
+        event_id="market-event-a",
+        event_slug="event-a",
+        condition_id="condition-a",
+        question_id="question-a",
+        yes_token_id="token-yes-a",
+        no_token_id="token-no-a",
+        selected_outcome_token_id="token-no-a",
+        outcome_label="NO",
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.0},
+            source="fixture",
+            token_id="token-no-a",
+        ),
+        token_map_raw={},
+        rfqe=None,
+        neg_risk=False,
+        orderbook_top_bid=Decimal("0.39"),
+        orderbook_top_ask=Decimal("0.40"),
+        orderbook_depth_jsonb=json.dumps(
+            {
+                "bids": [{"price": "0.39", "size": "100"}],
+                "asks": [{"price": "0.40", "size": "100"}],
+            }
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured,
+        freshness_deadline=captured + _dt.timedelta(seconds=30),
+    )
+
+    conn.execute("BEGIN")
+    conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()
+    insert_snapshot(
+        writer,
+        replace(
+            snapshot,
+            snapshot_id="other-snapshot",
+            raw_orderbook_hash="d" * 64,
+        ),
+    )
+    writer.commit()
+
+    from src.state import db as state_db
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    isolated_persist = era._persist_global_jit_authority_snapshot_isolated
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        era,
+        "_persist_global_jit_authority_snapshot_isolated",
+        lambda authority, **kwargs: isolated_persist(
+            authority,
+            coordinator=coordinator,
+            **kwargs,
+        ),
+    )
+    persisted = era._persist_global_jit_authority_snapshot_for_preflight(
+        conn,
+        SimpleNamespace(snapshot=snapshot),
+    )
+
+    assert persisted == snapshot
+    assert conn.in_transaction is True
+    conn.rollback()
+    assert get_snapshot(conn, snapshot.snapshot_id) == snapshot
+    conn.close()
+    writer.close()
+
+
 def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatch):
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)

@@ -590,11 +590,11 @@ class _GlobalJitHandoff:
             raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
         return book
 
-def _persist_global_jit_authority_snapshot(
+def _ensure_global_jit_authority_snapshot(
     trade_conn: sqlite3.Connection,
     authority: _CurrentGlobalMarketAuthority,
 ) -> object:
-    """Append the exact Gamma+CLOB+raw-book snapshot before submit."""
+    """Insert or validate one exact JIT snapshot without owning commit policy."""
 
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
@@ -612,8 +612,96 @@ def _persist_global_jit_authority_snapshot(
         or existing.captured_at != snapshot.captured_at
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+    return snapshot
+
+
+def _persist_global_jit_authority_snapshot(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+) -> object:
+    """Append the exact Gamma+CLOB+raw-book snapshot on a caller-owned connection."""
+
+    snapshot = _ensure_global_jit_authority_snapshot(trade_conn, authority)
     trade_conn.commit()
     return snapshot
+
+
+def _persist_global_jit_authority_snapshot_isolated(
+    authority: _CurrentGlobalMarketAuthority,
+    *,
+    coordinator: object | None = None,
+    priority: str = "standard",
+) -> object:
+    """Persist and read back JIT authority in one isolated TRADE write unit.
+
+    SCOPE is this exact global winner's preflight provenance. DRAIN is the
+    bounded coordinator transaction; contention returns to the existing fresh
+    global redecision path. RESET is the next cut's new q/book/wealth witness.
+    """
+
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLeaseTimeout,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+    from src.state.db import _connect_existing_db_without_journal_bootstrap
+
+    writer = coordinator or default_runtime_write_coordinator()
+    write_priority = WritePriority(priority)
+    try:
+        with writer.transaction(
+            (DBIdentity.TRADE,),
+            owner="global_jit_authority_snapshot",
+            priority=write_priority,
+            deadline_ms=1_500,
+            max_hold_ms=500,
+            connection_factory=_connect_existing_db_without_journal_bootstrap,
+        ) as transaction:
+            snapshot = _ensure_global_jit_authority_snapshot(
+                transaction.connection,
+                authority,
+            )
+            from src.state.snapshot_repo import get_snapshot
+
+            persisted = get_snapshot(transaction.connection, snapshot.snapshot_id)
+            if persisted is None:
+                raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+            return persisted
+    except WriteLeaseTimeout as exc:
+        raise sqlite3.OperationalError(
+            "database is busy: global JIT snapshot write deferred"
+        ) from exc
+
+
+def _persist_global_jit_authority_snapshot_for_preflight(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+    *,
+    priority: str = "standard",
+) -> object:
+    """Use an isolated writer for canonical live preflight provenance."""
+
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    main_path = next(
+        (
+            str(row[2] or "").strip()
+            for row in trade_conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main"
+        ),
+        "",
+    )
+    if main_path and Path(main_path).resolve(strict=False) == _zeus_trade_db_path().resolve(
+        strict=False
+    ):
+        return _persist_global_jit_authority_snapshot_isolated(
+            authority,
+            priority=priority,
+        )
+    return _persist_global_jit_authority_snapshot(trade_conn, authority)
 
 
 def _canonical_global_jit_raw_book(raw_book: Mapping[str, object]) -> str:
@@ -13920,7 +14008,11 @@ def _submit_current_global_sell(
                         proof_accepted=False,
                         jit_handoff=jit_handoff,
                     )
-            _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+            _persist_global_jit_authority_snapshot_for_preflight(
+                trade_conn,
+                market_authority,
+                priority="monitor",
+            )
             jit_handoff = jit_handoff or _GlobalJitHandoff(
                 candidate=current_candidate,
                 authority=market_authority,
@@ -14823,14 +14915,20 @@ def _rebind_global_jit_receipt_snapshot(
     handoff: _GlobalJitHandoff,
     *,
     trade_conn: sqlite3.Connection,
+    persisted_snapshot: object | None = None,
 ) -> EventSubmissionReceipt:
     """Rebind every executor-facing BUY reference to one exact JIT row."""
 
     from src.state.snapshot_repo import get_snapshot
 
-    snapshot = get_snapshot(trade_conn, handoff.authority.snapshot.snapshot_id)
+    snapshot = persisted_snapshot or get_snapshot(
+        trade_conn,
+        handoff.authority.snapshot.snapshot_id,
+    )
     if snapshot is None:
         raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+    if snapshot != handoff.authority.snapshot:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_READBACK_MISMATCH")
     bundle = receipt.decision_proof_bundle
     if bundle is None:
         return receipt
@@ -15377,8 +15475,12 @@ def _global_preflight_entry_jit_receipt(
                 )
         if handoff is None:
             raise ValueError("GLOBAL_JIT_HANDOFF_MISSING")
+        persisted_snapshot = None
         if trade_conn is not None:
-            _persist_global_jit_authority_snapshot(trade_conn, handoff.authority)
+            persisted_snapshot = _persist_global_jit_authority_snapshot_for_preflight(
+                trade_conn,
+                handoff.authority,
+            )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         reason = str(exc)
         if _is_global_jit_authority_failure(reason):
@@ -15400,6 +15502,7 @@ def _global_preflight_entry_jit_receipt(
                 receipt,
                 handoff,
                 trade_conn=trade_conn,
+                persisted_snapshot=persisted_snapshot,
             )
         except Exception as exc:  # noqa: BLE001 - final JIT binding is fail closed
             reason = str(exc)
