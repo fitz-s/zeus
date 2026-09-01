@@ -7778,6 +7778,11 @@ def event_bound_live_adapter_from_trade_conn(
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
                 allow_partial_deterministic=True,
+                # Provisional source truth remains statistical: its empirical
+                # revision likelihood is carried inside q and cannot emit an
+                # exact payoff.  It may still compete as an ENTRY witness when
+                # current ENTRY and immediate HELD content reproduce at submit.
+                allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             failure_type = type(exc).__name__
@@ -17627,7 +17632,11 @@ def _current_global_actuation_prepared_family(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         allow_provisional_day0_replacement=(
-            probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+            probability_use
+            in {
+                _CurrentProbabilityUse.ENTRY,
+                _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+            }
         ),
         probability_use=probability_use,
         pinned_complete_bundle=pinned_complete_bundle,

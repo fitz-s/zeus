@@ -5408,7 +5408,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     assert preparation_calls[0]["required_condition_id"] == "c0"
     assert preparation_calls[0]["allow_partial_deterministic"] is False
     assert preparation_calls[0]["allow_unobserved_day0_replacement"] is False
-    assert preparation_calls[0]["allow_provisional_day0_replacement"] is False
+    assert preparation_calls[0]["allow_provisional_day0_replacement"] is True
 
     sell_curve = ExecutableSellCurve(
         token_id="sell-token",
@@ -5581,6 +5581,7 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
         era._CurrentProbabilityUse.ENTRY,
         era._CurrentProbabilityUse.HELD_MONITOR,
     ]
+    assert calls[0]["allow_provisional_day0_replacement"] is True
     assert calls[1]["required_condition_id"] == "c0"
     assert calls[1]["allow_partial_deterministic"] is False
     assert calls[1]["allow_unobserved_day0_replacement"] is True
@@ -10308,6 +10309,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
     assert all(
         kwargs["allow_partial_deterministic"] is True
+        for kwargs in prepared_with
+    )
+    assert all(
+        kwargs["allow_provisional_day0_replacement"] is True
         for kwargs in prepared_with
     )
 
