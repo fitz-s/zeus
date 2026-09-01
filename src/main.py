@@ -8730,6 +8730,21 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 # un-checkpointed remainder grows without bound; 512 MiB of un-drained WAL is the
 # early-warning line, comfortably above the healthy 95-373 MB partial-drain band.
 _WAL_STARVATION_BACKLOG_BYTES = 512 * 1024 * 1024  # 512 MiB of un-checkpointed WAL
+# PASSIVE copies safe frames but deliberately leaves the WAL allocation in
+# place.  Bound that otherwise monotonic volume claim without making TRUNCATE a
+# normal checkpoint mode: only an already-fully-drained WAL at or above this
+# size gets one fail-fast reset attempt.  At most three canonical WALs can hold
+# this maintenance band between the staggered 90-second jobs.
+_WAL_IDLE_TRUNCATE_BYTES = 64 * 1024 * 1024
+
+
+def _wal_allocated_bytes(db_path: Path) -> int:
+    """Return current WAL file allocation, or zero when it is absent."""
+    wal_path = Path(f"{db_path}-wal")
+    try:
+        return wal_path.stat().st_size
+    except FileNotFoundError:
+        return 0
 
 
 def _wal_checkpoint_is_starved(
@@ -8797,6 +8812,7 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
             "forecasts": lambda: _db.ZEUS_FORECASTS_DB_PATH,
         }[db_name]()
         busy, log_frames, ckpt_frames, page_size = _db.checkpoint_wal(db_path)
+        wal_bytes = _wal_allocated_bytes(db_path)
         if busy != 0:
             logger.info(
                 "%s WAL checkpoint(PASSIVE): CONTENDED busy=%d log_frames=%d "
@@ -8817,9 +8833,34 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
             )
         else:
             logger.info(
-                "%s WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d page_size=%d",
+                "%s WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d "
+                "page_size=%d allocated=%.0fMiB",
                 db_name, busy, log_frames, ckpt_frames, page_size,
+                wal_bytes / (1024 * 1024),
             )
+
+        if (
+            busy == 0
+            and log_frames >= 0
+            and log_frames == ckpt_frames
+            and wal_bytes >= _WAL_IDLE_TRUNCATE_BYTES
+        ):
+            truncate_busy, truncate_log, truncate_ckpt = (
+                _db.truncate_checkpointed_wal(db_path)
+            )
+            if truncate_busy == 0:
+                logger.info(
+                    "%s WAL checkpoint(TRUNCATE): RECLAIMED prior_allocated=%.0fMiB "
+                    "log_frames=%d checkpointed=%d",
+                    db_name, wal_bytes / (1024 * 1024), truncate_log, truncate_ckpt,
+                )
+            else:
+                logger.info(
+                    "%s WAL checkpoint(TRUNCATE): DEFERRED busy=%d "
+                    "prior_allocated=%.0fMiB log_frames=%d checkpointed=%d",
+                    db_name, truncate_busy, wal_bytes / (1024 * 1024),
+                    truncate_log, truncate_ckpt,
+                )
 
     _cycle.__name__ = f"_{db_name}_wal_checkpoint_cycle"
     _cycle.__qualname__ = _cycle.__name__
@@ -10884,19 +10925,14 @@ def main():
         coalesce=True,
         executor="observability",
     )
-    # WAL checkpoint-starvation backstop (2026-06-04, part 2; comment corrected
-    # 2026-07-21 per audit finding W5-3 — this previously said TRUNCATE, but the
-    # implementation has always run PASSIVE): periodic
-    # PRAGMA wal_checkpoint(PASSIVE) on zeus-world.db so frames behind the WAL
-    # floor get reclaimed as soon as a transient reader releases it (part-1
-    # per-cycle releases). PASSIVE is intentional, not a downgrade: unlike
-    # TRUNCATE/FULL/RESTART it never waits behind or blocks a live writer.
-    # Design tension (W5-3, unresolved): PASSIVE alone does not BOUND the file —
-    # it drains frames but never truncates — so the -wal can still float in a
-    # wide healthy range (observed 95-373 MB) instead of converging to ~0;
-    # truly bounding it would need a periodic TRUNCATE/FULL during a
-    # demonstrated low-traffic window. Flagged for operator/consult review
-    # rather than risking a blocking checkpoint on the live write path here.
+    # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic PASSIVE
+    # copies every currently safe frame as soon as transient readers release.
+    # PASSIVE remains the normal mode and never waits behind a live writer. Once
+    # it proves the WAL fully drained, an allocated file above the maintenance
+    # threshold gets one zero-busy-timeout TRUNCATE attempt; any intervening
+    # reader/writer makes that attempt defer to the next cycle. This closes the
+    # former W5-3 gap where a healthy, fully-drained WAL could retain hundreds of
+    # MiB and consume the same volume reserve that gates new entries.
     # Mode-independent (the WAL bloat afflicts every mode), so registered
     # unconditionally. ~90s cadence (> the 60s reactor interval so it does not
     # fight an in-flight reactor read every tick; coalesce/max=1 so a slow
@@ -10906,10 +10942,9 @@ def main():
         id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
         max_instances=1, coalesce=True,
     )
-    # zeus_trades.db WAL PASSIVE checkpoint backstop (2026-06-16, the 810MB -wal
-    # incident; comment corrected 2026-07-21 — previously said TRUNCATE, the
-    # impl has always run PASSIVE; see the world job's comment above for the
-    # unresolved W5-3 bounding tension). The trade DB had no checkpoint backstop
+    # zeus_trades.db WAL checkpoint backstop (2026-06-16, the 810MB -wal
+    # incident; see the world job's comment above for PASSIVE-first, fail-fast
+    # idle truncation). The trade DB had no checkpoint backstop
     # (only zeus-world.db did), so a reader pinning the floor let
     # zeus_trades.db-wal grow unbounded → snapshot-capture writes failed
     # `database is locked` → fresh_executable_city_count=0 → the spine starved

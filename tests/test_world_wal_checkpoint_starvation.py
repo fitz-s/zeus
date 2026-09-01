@@ -12,8 +12,8 @@
 # Purpose: RED→GREEN relationship test for the WAL checkpoint-starvation fix.
 #   Proves the MECHANISM (a reader that never ends its read transaction pins
 #   the WAL floor so TRUNCATE returns BUSY and the WAL stays large) AND the FIX
-#   (releasing the snapshot per-cycle + a wal_checkpoint(TRUNCATE) backstop
-#   truncates the WAL to ~zero).
+#   (releasing the snapshot per-cycle + a fail-fast TRUNCATE after PASSIVE has
+#   fully drained the WAL truncates the file to ~zero).
 # Reuse: run on any PR touching src/state/db.py checkpoint helpers, the EDLI
 #   reactor read-connection lifecycle, or the checkpoint scheduler job.
 
@@ -30,22 +30,22 @@ The fix has two parts:
   1. Each long-lived world-DB READ connection that polls in a loop ends its read
      transaction between cycles (conn.rollback()/commit()) so its WAL read-mark
      advances WITHOUT closing the connection.
-  2. A periodic scheduler job runs PRAGMA wal_checkpoint(TRUNCATE) as a backstop.
+  2. A periodic scheduler job runs PASSIVE, then attempts a fail-fast TRUNCATE
+     only after PASSIVE fully drains a materially allocated WAL.
 
 This test reproduces the disease at the raw-SQLite level (no production import
 needed for the mechanism proof) using literal TRUNCATE calls, since TRUNCATE is
 the mode where "BUSY while a reader pins the floor" / "shrinks once released"
 is easiest to observe directly. Probe 3 then asserts what the production
-helper (``checkpoint_wal``) actually runs — PASSIVE, not TRUNCATE (W5-3,
-2026-07-21: this file previously assumed TRUNCATE; the implementation has
-always run PASSIVE, for live-writer-priority reasons — see that function's
-docstring): it drains the log fully once no reader pins the floor, but unlike
-TRUNCATE it never shrinks the -wal file itself.
+helper (``checkpoint_wal``) runs PASSIVE for live-writer priority. Probe 4
+covers the separate fail-fast TRUNCATE helper, and the scheduler probes prove
+it is called only for an already-drained, materially allocated WAL.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -218,7 +218,51 @@ def test_checkpoint_wal_helper_drains_without_truncating(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Probe 4: the scheduler job runs the checkpoint helper and LOGS its triple.
+# Probe 4: the fail-fast helper reclaims an already-drained WAL.
+# ---------------------------------------------------------------------------
+
+def test_truncate_checkpointed_wal_reclaims_drained_file(tmp_path: Path) -> None:
+    from src.state import db as db_module
+
+    world_db = tmp_path / "zeus-world.db"
+    writer = _open_wal(world_db)
+    _write_many_frames(writer, n=2000)
+    wal_before = _wal_size_bytes(world_db)
+    assert wal_before > 0
+
+    passive = db_module.checkpoint_wal(world_db)
+    assert passive[0] == 0 and passive[1] == passive[2] > 0
+
+    truncate = db_module.truncate_checkpointed_wal(world_db)
+    assert truncate[0] == 0, f"drained WAL should truncate immediately: {truncate!r}"
+    assert _wal_size_bytes(world_db) == 0
+    writer.close()
+
+
+def test_truncate_checkpointed_wal_defers_to_pinned_reader(tmp_path: Path) -> None:
+    from src.state import db as db_module
+
+    world_db = tmp_path / "zeus-world.db"
+    writer = _open_wal(world_db)
+    _write_many_frames(writer, n=2000)
+    reader = _open_wal(world_db)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM t").fetchone()
+    wal_before = _wal_size_bytes(world_db)
+
+    started = time.monotonic()
+    result = db_module.truncate_checkpointed_wal(world_db)
+    elapsed = time.monotonic() - started
+
+    assert result[0] == 1, f"pinned reader must make fail-fast TRUNCATE defer: {result!r}"
+    assert elapsed < 1.0, f"TRUNCATE waited behind a reader for {elapsed:.3f}s"
+    assert _wal_size_bytes(world_db) >= wal_before * 0.5
+    reader.close()
+    writer.close()
+
+
+# ---------------------------------------------------------------------------
+# Probe 5: the scheduler job runs the checkpoint helper and LOGS its triple.
 # ---------------------------------------------------------------------------
 
 def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
@@ -239,6 +283,7 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
         return (0, 5, 5, 4096)  # PASSIVE busy=0, fully drained -> healthy
 
     monkeypatch.setattr(db_module, "checkpoint_wal", _fake_checkpoint, raising=True)
+    monkeypatch.setattr(main_module, "_wal_allocated_bytes", lambda _path: 0)
 
     with caplog.at_level(logging.INFO):
         main_module._world_wal_checkpoint_cycle()
@@ -285,3 +330,48 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
         f"a busy=1 concurrent checkpointer must log CONTENDED; got: {text!r}"
     )
     assert "BACKLOG" not in text, "busy=1 must NOT be evaluated as a backlog sample"
+
+
+def test_checkpoint_job_truncates_only_fully_drained_large_wal(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    from src import main as main_module
+    from src.state import db as db_module
+
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        main_module,
+        "_wal_allocated_bytes",
+        lambda _path: main_module._WAL_IDLE_TRUNCATE_BYTES,
+    )
+    monkeypatch.setattr(
+        db_module,
+        "truncate_checkpointed_wal",
+        lambda path: (calls.append(path) or (0, 0, 0)),
+        raising=True,
+    )
+
+    monkeypatch.setattr(
+        db_module, "checkpoint_wal", lambda _path: (0, 10, 10, 4096), raising=True
+    )
+    with caplog.at_level(logging.INFO):
+        main_module._forecasts_wal_checkpoint_cycle()
+    assert len(calls) == 1
+    assert "checkpoint(TRUNCATE): RECLAIMED" in caplog.text
+
+    calls.clear()
+    caplog.clear()
+    monkeypatch.setattr(
+        db_module, "checkpoint_wal", lambda _path: (0, 10, 9, 4096), raising=True
+    )
+    main_module._forecasts_wal_checkpoint_cycle()
+    assert calls == [], "a WAL with any uncheckpointed frame must never truncate"
+
+    monkeypatch.setattr(main_module, "_wal_allocated_bytes", lambda _path: 1)
+    monkeypatch.setattr(
+        db_module, "checkpoint_wal", lambda _path: (0, 10, 10, 4096), raising=True
+    )
+    main_module._forecasts_wal_checkpoint_cycle()
+    assert calls == [], "a small healthy WAL must not incur TRUNCATE contention"

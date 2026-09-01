@@ -1107,6 +1107,41 @@ def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
         conn.close()
 
 
+def truncate_checkpointed_wal(db_path: Path) -> tuple[int, int, int]:
+    """Fail-fast TRUNCATE for a WAL already drained by ``checkpoint_wal``.
+
+    The scheduler calls this only after PASSIVE reported every frame copied and
+    the allocated WAL file crossed its maintenance threshold.  A zero busy
+    timeout preserves live-writer priority: if a reader, writer, or concurrent
+    checkpointer owns a conflicting lock, SQLite returns ``busy=1`` immediately
+    and the next scheduler cycle retries.  The precondition makes the normal
+    success path metadata-only file reclamation rather than a second bulk
+    checkpoint.
+
+    A new writer can race between PASSIVE and this call.  SQLite remains the
+    authority in that race; this helper never assumes the earlier frame counts
+    are still current and returns TRUNCATE's own ``(busy, log, checkpointed)``
+    result for the caller to record.
+    """
+    path = db_path.resolve(strict=True)
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
+        path.as_uri() + "?mode=rw",
+        canonical_db_path=path,
+        uri=True,
+        timeout=0.0,
+    )
+    try:
+        _apply_busy_timeout(conn, busy_timeout_ms=0)
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None:
+            return (1, -1, -1)
+        return (int(row[0]), int(row[1]), int(row[2]))
+    finally:
+        conn.close()
+
+
 @contextlib.contextmanager
 def get_forecasts_connection_with_world(
     *,
