@@ -1353,7 +1353,7 @@ def test_order_capital_ledger_accounts_every_attempt_and_exact_fill_fee():
     conn.executescript(
         "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
         "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
-        "price REAL,state TEXT,created_at TEXT,updated_at TEXT);"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT,venue_order_id TEXT);"
         "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
         "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
         "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
@@ -1368,22 +1368,22 @@ def test_order_capital_ledger_accounts_every_attempt_and_exact_fill_fee():
         [("entry-env", "YES", 0, fee), ("exit-env", "YES", 1, fee)],
     )
     conn.executemany(
-        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (
                 "entry", "entry-env", "position", "decision-entry", "ENTRY",
                 "BUY", 5.0, 0.4, "FILLED", "2026-09-01T00:00:00+00:00",
-                "2026-09-01T00:00:02+00:00",
+                "2026-09-01T00:00:02+00:00", "entry-order",
             ),
             (
                 "exit", "exit-env", "position", "decision-exit", "EXIT",
                 "SELL", 2.0, 0.7, "CANCELLED", "2026-09-01T00:01:00+00:00",
-                "2026-09-01T00:01:02+00:00",
+                "2026-09-01T00:01:02+00:00", "exit-order",
             ),
             (
                 "rejected", "entry-env", "other", "decision-reject", "ENTRY",
                 "BUY", 5.0, 0.3, "REJECTED", "2026-09-01T00:02:00+00:00",
-                "2026-09-01T00:02:01+00:00",
+                "2026-09-01T00:02:01+00:00", "rejected-order",
             ),
         ],
     )
@@ -1433,7 +1433,7 @@ def test_order_capital_ledger_fails_closed_on_filled_command_without_fact():
     conn.executescript(
         "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
         "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
-        "price REAL,state TEXT,created_at TEXT,updated_at TEXT);"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT,venue_order_id TEXT);"
         "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
         "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
         "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
@@ -1443,11 +1443,11 @@ def test_order_capital_ledger_fails_closed_on_filled_command_without_fact():
         "event_type TEXT,sequence_no INTEGER,occurred_at TEXT,payload_json TEXT);"
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "missing", "env", "position", "decision", "ENTRY", "BUY", 5.0,
             0.4, "FILLED", "2026-09-01T00:00:00+00:00",
-            "2026-09-01T00:00:01+00:00",
+            "2026-09-01T00:00:01+00:00", "missing-order",
         ),
     )
 
@@ -1461,6 +1461,79 @@ def test_order_capital_ledger_fails_closed_on_filled_command_without_fact():
         "FILLED_COMMAND_EXECUTION_FACT_MISSING": 1
     }
     assert ledger["orders"][0]["after_cost_cash_flow_usd"] is None
+
+
+def test_order_ledger_prefers_canonical_trade_and_partial_gain_journal():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
+        "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT,venue_order_id TEXT);"
+        "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
+        "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
+        "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
+        "order_role TEXT,fill_price REAL,shares REAL,filled_at TEXT,"
+        "terminal_exec_status TEXT);"
+        "CREATE TABLE venue_trade_facts (trade_fact_id INTEGER,command_id TEXT,"
+        "trade_id TEXT,state TEXT,filled_size REAL,local_sequence INTEGER,"
+        "venue_timestamp TEXT,observed_at TEXT,tx_hash TEXT,raw_payload_json TEXT,"
+        "venue_order_id TEXT,fill_price REAL,fee_paid_micro INTEGER);"
+        "CREATE TABLE position_events (event_id TEXT,position_id TEXT,"
+        "command_id TEXT,order_id TEXT,event_type TEXT,sequence_no INTEGER,"
+        "occurred_at TEXT,caused_by TEXT,payload_json TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?,?,?,?)",
+        ("env", "YES", 1, "{}"),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "command", "env", "position", "decision", "EXIT", "SELL", 5.0,
+            0.5, "FILLED", "2026-09-01T00:00:00+00:00",
+            "2026-09-01T00:00:02+00:00", "venue-order",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            1, "command", "trade", "CONFIRMED", 2.0, 1,
+            "2026-09-01T00:00:01+00:00", "2026-09-01T00:00:02+00:00",
+            "", "{}", "venue-order", 0.6, 0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            2, "command", "trade", "CONFIRMED", 5.0, 2,
+            "2026-09-01T02:00:00+00:00", "2026-09-01T02:00:00+00:00",
+            "", "{}", "venue-order", 0.9, 0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "partial", "position", None, "venue-order", "MONITOR_REFRESHED", 1,
+            "2026-09-01T00:00:02+00:00", "partial_exit_fill",
+            json.dumps({"realized_pnl_delta_usd": "0.4"}),
+        ),
+    )
+
+    ledger = evaluator._order_capital_ledger(
+        conn,
+        as_of=datetime(2026, 9, 1, 1, tzinfo=timezone.utc),
+    )
+
+    order = ledger["orders"][0]
+    assert ledger["capital_truth_complete"] is True
+    assert ledger["gain_truth_incomplete_command_count"] == 0
+    assert order["fill_truth_source"] == "CANONICAL_ECONOMIC_VENUE_TRADE_FACT"
+    assert order["canonical_trade_fact_count"] == 1
+    assert order["execution_fact_count"] == 0
+    assert order["after_cost_cash_flow_usd"] == pytest.approx(1.2)
+    assert order["gain_status"] == "PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
+    assert order["realized_accounting_gain_after_exit_fee_usd"] == pytest.approx(0.4)
 
 
 def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():

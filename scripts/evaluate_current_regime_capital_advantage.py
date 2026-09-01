@@ -53,6 +53,10 @@ from src.state.db import (  # noqa: E402
     get_trade_connection_read_only,
     get_world_connection_read_only,
 )
+from src.state.fill_dedup import (  # noqa: E402
+    canonical_trade_fact_cte,
+    economic_trade_fact_cte,
+)
 from src.types.market import Bin  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -1149,20 +1153,55 @@ def _order_capital_ledger(
     """Reproduce every current-window venue command and its exact cash flow."""
 
     cutoff = as_of - timedelta(days=WINDOW_DAYS)
+    canonical_facts: dict[str, list[dict[str, object]]] = {}
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='venue_trade_facts'"
+    ).fetchone():
+        source_scope = (
+            "JOIN venue_commands scope ON scope.command_id=fact.command_id "
+            "WHERE datetime(scope.created_at)>=datetime(?) "
+            "AND datetime(scope.created_at)<=datetime(?) "
+            "AND datetime(fact.observed_at)<=datetime(?)"
+        )
+        trade_rows = conn.execute(
+            f"WITH {canonical_trade_fact_cte(source_clause_sql=source_scope)},"
+            f"{economic_trade_fact_cte()} "
+            "SELECT command_id,trade_id,filled_size,fill_price,state,execution_ts "
+            "FROM economic_trade_fact "
+            "WHERE UPPER(COALESCE(state,'')) IN ('MATCHED','MINED','CONFIRMED') "
+            "AND CAST(COALESCE(filled_size,'0') AS REAL)>0 "
+            "AND CAST(COALESCE(fill_price,'0') AS REAL)>0 "
+            "ORDER BY command_id,execution_ts,trade_id",
+            (cutoff.isoformat(), as_of.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        for row in trade_rows:
+            command_id = str(row["command_id"] or "").strip()
+            canonical_facts.setdefault(command_id, []).append(
+                {
+                    "fact_id": str(row["trade_id"] or ""),
+                    "fill_price": row["fill_price"],
+                    "fill_shares": row["filled_size"],
+                    "filled_at": str(row["execution_ts"] or ""),
+                    "terminal_exec_status": str(row["state"] or ""),
+                }
+            )
     rows = conn.execute(
         "SELECT vc.command_id,vc.position_id,vc.decision_id,vc.intent_kind,"
         "vc.side,vc.size,vc.price,vc.state,vc.created_at,vc.updated_at,"
-        "vc.envelope_id,vse.outcome_label,vse.post_only,vse.fee_details_json,"
+        "vc.envelope_id,vc.venue_order_id,vse.outcome_label,vse.post_only,"
+        "vse.fee_details_json,"
         "ef.intent_id AS fact_id,ef.order_role,ef.fill_price,ef.shares AS fill_shares,"
         "ef.filled_at,ef.terminal_exec_status "
         "FROM venue_commands AS vc "
         "LEFT JOIN venue_submission_envelopes AS vse "
         "ON vse.envelope_id=vc.envelope_id "
         "LEFT JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "AND (ef.filled_at IS NULL OR datetime(ef.filled_at)<=datetime(?)) "
         "WHERE datetime(vc.created_at)>=datetime(?) "
         "AND datetime(vc.created_at)<=datetime(?) "
         "ORDER BY datetime(vc.created_at),vc.command_id,datetime(ef.filled_at),ef.intent_id",
-        (cutoff.isoformat(), as_of.isoformat()),
+        (as_of.isoformat(), cutoff.isoformat(), as_of.isoformat()),
     ).fetchall()
     grouped: dict[str, dict[str, object]] = {}
     for row in rows:
@@ -1173,6 +1212,7 @@ def _order_capital_ledger(
                 "command_id": command_id,
                 "position_id": str(row["position_id"] or ""),
                 "decision_id": str(row["decision_id"] or ""),
+                "venue_order_id": str(row["venue_order_id"] or ""),
                 "intent_kind": str(row["intent_kind"] or ""),
                 "side": str(row["side"] or ""),
                 "outcome_label": str(row["outcome_label"] or ""),
@@ -1185,6 +1225,8 @@ def _order_capital_ledger(
                     float(row["size"] or 0.0) * float(row["price"] or 0.0),
                     9,
                 ),
+                "post_only": row["post_only"],
+                "fee_details_json": row["fee_details_json"],
                 "facts": [],
             },
         )
@@ -1220,7 +1262,18 @@ def _order_capital_ledger(
     realized_exit_accounting_pnl = 0.0
     gain_truth_incomplete = 0
     for item in grouped.values():
-        facts = tuple(item.pop("facts"))
+        execution_facts = tuple(item.pop("facts"))
+        command_id = str(item["command_id"])
+        authoritative_facts = tuple(canonical_facts.get(command_id, ()))
+        facts = authoritative_facts or execution_facts
+        if authoritative_facts:
+            fill_truth_source = "CANONICAL_ECONOMIC_VENUE_TRADE_FACT"
+        elif execution_facts:
+            fill_truth_source = "EXECUTION_FACT"
+        else:
+            fill_truth_source = "NO_FILL_FACT"
+        post_only = item.pop("post_only")
+        fee_details_json = item.pop("fee_details_json")
         state = str(item["state"])
         intent = str(item["intent_kind"])
         state_counts[state] = state_counts.get(state, 0) + 1
@@ -1233,12 +1286,13 @@ def _order_capital_ledger(
         fill_times: list[str] = []
         expected_role = intent.lower()
         for fact in facts:
-            if fact["order_role"] != expected_role:
+            fact_role = str(fact.get("order_role") or expected_role)
+            if fact_role != expected_role:
                 reasons.append("ORDER_ROLE_MISMATCH")
                 continue
             fee = rg._submission_schedule_fee_usd(
-                post_only=fact["post_only"],
-                fee_details_json=fact["fee_details_json"],
+                post_only=post_only,
+                fee_details_json=fee_details_json,
                 fill_price=fact["fill_price"],
                 shares=fact["fill_shares"],
             )
@@ -1304,8 +1358,13 @@ def _order_capital_ledger(
             raw_exit_events = conn.execute(
                 "SELECT payload_json FROM position_events "
                 "WHERE position_id=? AND event_type='EXIT_ORDER_FILLED' "
-                "AND command_id=? ORDER BY sequence_no LIMIT 2",
-                (str(item["position_id"]), str(item["command_id"])),
+                "AND command_id=? AND datetime(occurred_at)<=datetime(?) "
+                "ORDER BY sequence_no LIMIT 2",
+                (
+                    str(item["position_id"]),
+                    str(item["command_id"]),
+                    as_of.isoformat(),
+                ),
             ).fetchall()
             exit_events: list[Mapping[str, object]] = []
             for event in raw_exit_events:
@@ -1319,28 +1378,76 @@ def _order_capital_ledger(
                 raw_pnl = exit_events[0].get("pnl")
                 if raw_pnl is None:
                     raw_pnl = exit_events[0].get("realized_pnl_usd")
+            gain_status = "EXIT_ACCOUNTING_GAIN_UNAVAILABLE"
+            if raw_pnl is None and str(item["venue_order_id"]):
+                raw_partial_events = conn.execute(
+                    "SELECT payload_json FROM position_events "
+                    "WHERE position_id=? "
+                    "AND caused_by IN "
+                    "('partial_exit_fill','partial_exit_economics_repair') "
+                    "AND datetime(occurred_at)<=datetime(?) "
+                    "AND (command_id=? OR lower(COALESCE(order_id,''))=lower(?) "
+                    "OR json_extract(payload_json,'$.command_id')=? "
+                    "OR lower(COALESCE(json_extract(payload_json,'$.venue_order_id'),''))"
+                    "=lower(?)) ORDER BY sequence_no,event_id",
+                    (
+                        str(item["position_id"]),
+                        as_of.isoformat(),
+                        command_id,
+                        str(item["venue_order_id"]),
+                        command_id,
+                        str(item["venue_order_id"]),
+                    ),
+                ).fetchall()
+                partial_deltas: list[float] = []
+                partial_complete = bool(raw_partial_events)
+                for event in raw_partial_events:
+                    try:
+                        payload = json.loads(str(event["payload_json"] or ""))
+                        delta = float(payload["realized_pnl_delta_usd"])
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
+                        partial_complete = False
+                        continue
+                    if not math.isfinite(delta):
+                        partial_complete = False
+                        continue
+                    partial_deltas.append(delta)
+                if partial_complete:
+                    raw_pnl = sum(partial_deltas)
+                    gain_status = "PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
+                elif raw_partial_events:
+                    gain_status = "LEGACY_PARTIAL_EXIT_GAIN_UNAVAILABLE"
             try:
                 realized_pnl = float(raw_pnl) - fees
             except (TypeError, ValueError):
                 realized_pnl = None
             if realized_pnl is None or not math.isfinite(realized_pnl):
                 realized_pnl = None
-                gain_status = "EXIT_ACCOUNTING_GAIN_UNAVAILABLE"
             else:
                 realized_exit_accounting_pnl += realized_pnl
-                gain_status = "EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
+                if gain_status != "PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE":
+                    gain_status = "EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
         else:
             realized_pnl = None
             gain_status = "GAIN_TRUTH_DEGRADED"
         if gain_status in {
             "GAIN_TRUTH_DEGRADED",
             "EXIT_ACCOUNTING_GAIN_UNAVAILABLE",
+            "LEGACY_PARTIAL_EXIT_GAIN_UNAVAILABLE",
         }:
             gain_truth_incomplete += 1
         orders.append(
             {
                 **item,
                 "fill_fact_count": len(facts),
+                "canonical_trade_fact_count": len(authoritative_facts),
+                "execution_fact_count": len(execution_facts),
+                "fill_truth_source": fill_truth_source,
                 "filled_shares": round(filled_shares, 9),
                 "filled_gross_notional_usd": round(gross, 9),
                 "fee_usd": round(fees, 9) if not reasons else None,
@@ -1366,7 +1473,7 @@ def _order_capital_ledger(
         "evaluated_at": as_of.isoformat(),
         "command_count": len(orders),
         "capital_affecting_command_count": sum(
-            bool(row["fill_fact_count"]) for row in orders
+            float(row["filled_shares"] or 0.0) > 0.0 for row in orders
         ),
         "capital_truth_complete": not incomplete_reasons,
         "capital_truth_incomplete_command_count": sum(
@@ -2270,6 +2377,7 @@ def evaluate(
                 "decision_log",
                 "venue_commands",
                 "venue_submission_envelopes",
+                "venue_trade_facts",
                 "execution_fact",
                 "execution_feasibility_evidence",
                 "position_events",
