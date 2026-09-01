@@ -34007,6 +34007,7 @@ def _conditioning_names_physical_frontier(
     if conditioned == physical:
         return conditioned in {
             "aviationweather_metar",
+            "hko_rhrread_spot",
             "same_station_fast_tail",
             "wu_api",
         }

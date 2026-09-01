@@ -6903,6 +6903,79 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
     conn.close()
 
 
+def test_global_day0_hko_held_conditioning_uses_spot_physical_frontier(
+    monkeypatch,
+):
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    settlement_fact = {
+        "observed_extreme_native": 27.8,
+        "observation_time": "2026-09-01T01:40:00+00:00",
+        "observation_available_at": "2026-09-01T01:49:00+00:00",
+        "sample_count": 58,
+        "observation_source": "hko_hourly_accumulator",
+        "station_id": "HKO",
+        "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"hko-settlement-fact").hexdigest(),
+    }
+    physical_fact = {
+        "observed_extreme_native": 28.0,
+        "observation_time": "2026-09-01T01:02:00+00:00",
+        "observation_available_at": "2026-09-01T01:05:00+00:00",
+        "sample_count": 10,
+        "observation_source": "hko_rhrread_spot",
+        "station_id": "HKO",
+        "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"hko-physical-fact").hexdigest(),
+    }
+    monkeypatch.setattr(
+        current_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, require_settlement_channel=False, **_kwargs: (
+            settlement_fact if require_settlement_channel else physical_fact
+        ),
+    )
+
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Hong Kong",
+            target_date="2026-09-01",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="HKO"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-09-01T01:02:00+00:00",
+            "observed_extreme_c": 28.0,
+            "sample_count": 10,
+            "source": "hko_rhrread_spot",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026,
+            9,
+            1,
+            2,
+            0,
+            tzinfo=_dt.timezone.utc,
+        ),
+        posterior_id=471886,
+    )
+
+    assert rebound["settlement_source"] == "hko_hourly_accumulator"
+    assert rebound["_edli_day0_probability_boundary_native"] == pytest.approx(28.0)
+    binding = rebound["_edli_global_day0_binding"]
+    assert binding["observed_extreme_native"] == pytest.approx(27.8)
+    assert binding["statistical_physical_boundary"]["source"] == (
+        "hko_rhrread_spot"
+    )
+    conn.close()
+
+
 def test_global_day0_settlement_conditioning_ignores_older_same_source_physical_view(
     monkeypatch,
 ):
