@@ -1,6 +1,6 @@
-# Lifecycle: created=2026-07-18; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-07-18; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Created: 2026-07-18
-# Last reused/audited: 2026-08-04
+# Last reused/audited: 2026-08-31
 # Authority basis: live Polymarket HTTP attempt governance and first-principles capital-preservation task
 
 from __future__ import annotations
@@ -1117,6 +1117,114 @@ def test_clob_discovery_embargo_does_not_block_held_risk_market_probe(
             "https://gamma-api.polymarket.com/markets",
             endpoint_class_override=EndpointClass.HELD_RISK,
         )
+
+
+def test_held_book_attempt_bypasses_shared_market_data_embargo(tmp_path: Path) -> None:
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    url = "https://clob.polymarket.com/book"
+    params = {"token_id": "held-token"}
+
+    failed = governor.acquire(
+        "GET",
+        url,
+        params=params,
+        priority=RequestPriority.SUBMIT_JIT,
+    )
+    assert governor.record_failure(failed) is True
+    with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
+        governor.acquire(
+            "GET",
+            url,
+            params={"token_id": "other-token"},
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+        )
+
+    held = governor.acquire(
+        "GET",
+        url,
+        params=params,
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+        endpoint_class_override=EndpointClass.HELD_RISK,
+    )
+    assert held.endpoint == "clob.polymarket.com:clob-held-risk:held-token"
+    assert governor.record_success(held) is True
+
+
+def test_held_risk_attempt_bypasses_local_route_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setitem(
+        governor_module._ROUTE_LIMITS,
+        "clob.polymarket.com:/book",
+        2,
+    )
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    url = "https://clob.polymarket.com/book"
+    for index in range(2):
+        lease = governor.acquire(
+            "GET",
+            url,
+            params={"token_id": f"ordinary-{index}"},
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+        )
+        assert governor.record_success(lease) is True
+    with pytest.raises(RequestAdmissionDenied, match="ROUTE_LIMIT"):
+        governor.acquire(
+            "GET",
+            url,
+            params={"token_id": "ordinary-over-limit"},
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+        )
+
+    held = governor.acquire(
+        "GET",
+        url,
+        params={"token_id": "held-over-limit"},
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+        endpoint_class_override=EndpointClass.HELD_RISK,
+    )
+    assert governor.record_success(held) is True
+
+
+def test_held_client_routes_book_reads_to_exact_held_risk_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.data import polymarket_client as client_module
+
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    monkeypatch.setattr(client_module, "polymarket_request_governor", governor)
+    monkeypatch.setattr(
+        client_module.httpx,
+        "get",
+        lambda url, **_kwargs: httpx.Response(
+            200,
+            json={"asset_id": "held-one", "bids": [], "asks": []},
+            request=httpx.Request("GET", url),
+        ),
+    )
+    monkeypatch.setattr(
+        client_module.httpx,
+        "post",
+        lambda url, **_kwargs: httpx.Response(
+            200,
+            json=[{"asset_id": "held-one", "bids": [], "asks": []}],
+            request=httpx.Request("POST", url),
+        ),
+    )
+
+    client = object.__new__(client_module.PolymarketClient)
+    client._public_request_priority = RequestPriority.HELD_REDUCE_ONLY
+    assert client.get_orderbook_snapshot("held-one")["asset_id"] == "held-one"
+    assert set(client.get_orderbook_snapshots(["held-one"])) == {"held-one"}
+
+    endpoints = json.loads((tmp_path / "governor.json").read_text())["endpoints"]
+    assert "clob.polymarket.com:clob-held-risk:held-one" in endpoints
+    assert any(
+        key.startswith("clob.polymarket.com:clob-held-risk:books-")
+        for key in endpoints
+    )
 
 
 def test_cancel_priority_preempts_submit_jit_under_contention(tmp_path: Path) -> None:

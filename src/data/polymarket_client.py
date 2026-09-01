@@ -611,6 +611,7 @@ class PolymarketClient:
         *,
         json_body: Any,
         timeout: "float | httpx.Timeout | None" = None,
+        endpoint_class_override: EndpointClass | None = None,
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
@@ -627,6 +628,15 @@ class PolymarketClient:
             url,
             json_body=json_body,
             priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
+            endpoint_class_override=endpoint_class_override,
+        )
+
+    def _held_risk_endpoint_class(self) -> EndpointClass | None:
+        return (
+            EndpointClass.HELD_RISK
+            if getattr(self, "_public_request_priority", RequestPriority.SCAN)
+            is RequestPriority.HELD_REDUCE_ONLY
+            else None
         )
 
     def _ensure_client(self):
@@ -778,12 +788,17 @@ class PolymarketClient:
             else None
         )
         if request_timeout is None:
-            resp = self._public_get("/book", params={"token_id": token_id})
+            resp = self._public_get(
+                "/book",
+                params={"token_id": token_id},
+                endpoint_class_override=self._held_risk_endpoint_class(),
+            )
         else:
             resp = self._public_get(
                 "/book",
                 params={"token_id": token_id},
                 timeout=request_timeout,
+                endpoint_class_override=self._held_risk_endpoint_class(),
             )
         resp.raise_for_status()
         data = resp.json()
@@ -842,12 +857,17 @@ class PolymarketClient:
             else None
         )
         if request_timeout is None:
-            resp = self._public_post("/books", json_body=body)
+            resp = self._public_post(
+                "/books",
+                json_body=body,
+                endpoint_class_override=self._held_risk_endpoint_class(),
+            )
         else:
             resp = self._public_post(
                 "/books",
                 json_body=body,
                 timeout=request_timeout,
+                endpoint_class_override=self._held_risk_endpoint_class(),
             )
         resp.raise_for_status()
         payload = resp.json()
@@ -1053,7 +1073,11 @@ class PolymarketClient:
         """Fetch raw CLOB market facts for executable snapshot capture."""
 
         request_timeout = self._bounded_public_http_timeout(timeout) if timeout is not None else None
-        resp = self._public_get(f"/markets/{condition_id}", timeout=request_timeout)
+        resp = self._public_get(
+            f"/markets/{condition_id}",
+            timeout=request_timeout,
+            endpoint_class_override=self._held_risk_endpoint_class(),
+        )
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict):
