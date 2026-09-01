@@ -1,6 +1,9 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-09-01
+# Lifecycle: created=2026-08-12; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Authority: current-regime capital proof must fail closed before entry reopens.
+# Purpose: Exact-revision capital proof, per-order disposition, and total-portfolio truth antibodies.
+# Reuse: Run whenever the capital evaluator, order facts, or portfolio valuation contract changes.
 
 from __future__ import annotations
 
@@ -1342,3 +1345,240 @@ def test_schema_22_binding_covers_selection_revision_and_portfolio_wealth():
     missing_wealth.pop("portfolio_wealth")
     with pytest.raises(ValueError, match="PORTFOLIO_WEALTH_MISSING"):
         global_auction_execution_binding_hash(missing_wealth)
+
+
+def test_order_capital_ledger_accounts_every_attempt_and_exact_fill_fee():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
+        "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT);"
+        "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
+        "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
+        "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
+        "order_role TEXT,fill_price REAL,shares REAL,filled_at TEXT,"
+        "terminal_exec_status TEXT);"
+        "CREATE TABLE position_events (position_id TEXT,command_id TEXT,"
+        "event_type TEXT,sequence_no INTEGER,occurred_at TEXT,payload_json TEXT);"
+    )
+    fee = json.dumps({"fee_rate_fraction": 0.05})
+    conn.executemany(
+        "INSERT INTO venue_submission_envelopes VALUES (?,?,?,?)",
+        [("entry-env", "YES", 0, fee), ("exit-env", "YES", 1, fee)],
+    )
+    conn.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "entry", "entry-env", "position", "decision-entry", "ENTRY",
+                "BUY", 5.0, 0.4, "FILLED", "2026-09-01T00:00:00+00:00",
+                "2026-09-01T00:00:02+00:00",
+            ),
+            (
+                "exit", "exit-env", "position", "decision-exit", "EXIT",
+                "SELL", 2.0, 0.7, "CANCELLED", "2026-09-01T00:01:00+00:00",
+                "2026-09-01T00:01:02+00:00",
+            ),
+            (
+                "rejected", "entry-env", "other", "decision-reject", "ENTRY",
+                "BUY", 5.0, 0.3, "REJECTED", "2026-09-01T00:02:00+00:00",
+                "2026-09-01T00:02:01+00:00",
+            ),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+        (
+            "position", "exit", "EXIT_ORDER_FILLED", 1,
+            "2026-09-01T00:01:01+00:00", json.dumps({"pnl": 0.6}),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+        [
+            (
+                "entry-fact", "entry", "entry", 0.4, 5.0,
+                "2026-09-01T00:00:02+00:00", "filled",
+            ),
+            (
+                "exit-fact", "exit", "exit", 0.7, 2.0,
+                "2026-09-01T00:01:01+00:00", "partial",
+            ),
+        ],
+    )
+
+    ledger = evaluator._order_capital_ledger(
+        conn,
+        as_of=datetime(2026, 9, 1, 1, tzinfo=timezone.utc),
+    )
+
+    by_id = {row["command_id"]: row for row in ledger["orders"]}
+    assert ledger["command_count"] == 3
+    assert ledger["capital_truth_complete"] is True
+    assert by_id["entry"]["capital_effect"] == "CAPITAL_COMMITTED_BY_FILL"
+    assert by_id["entry"]["after_cost_cash_flow_usd"] == pytest.approx(-2.06)
+    assert by_id["exit"]["capital_effect"] == "CAPITAL_RELEASED_BY_FILL"
+    assert by_id["exit"]["after_cost_cash_flow_usd"] == pytest.approx(1.4)
+    assert by_id["exit"][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] == pytest.approx(0.6)
+    assert by_id["rejected"]["capital_effect"] == "ZERO_CAPITAL_EFFECT_NO_FILL"
+    assert by_id["rejected"]["after_cost_cash_flow_usd"] == 0.0
+
+
+def test_order_capital_ledger_fails_closed_on_filled_command_without_fact():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
+        "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT);"
+        "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
+        "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
+        "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
+        "order_role TEXT,fill_price REAL,shares REAL,filled_at TEXT,"
+        "terminal_exec_status TEXT);"
+        "CREATE TABLE position_events (position_id TEXT,command_id TEXT,"
+        "event_type TEXT,sequence_no INTEGER,occurred_at TEXT,payload_json TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "missing", "env", "position", "decision", "ENTRY", "BUY", 5.0,
+            0.4, "FILLED", "2026-09-01T00:00:00+00:00",
+            "2026-09-01T00:00:01+00:00",
+        ),
+    )
+
+    ledger = evaluator._order_capital_ledger(
+        conn,
+        as_of=datetime(2026, 9, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert ledger["capital_truth_complete"] is False
+    assert ledger["incomplete_reasons"] == {
+        "FILLED_COMMAND_EXECUTION_FACT_MISSING": 1
+    }
+    assert ledger["orders"][0]["after_cost_cash_flow_usd"] is None
+
+
+def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE collateral_ledger_snapshots (id INTEGER,"
+        "pusd_balance_micro INTEGER,reserved_pusd_for_buys_micro INTEGER,"
+        "captured_at TEXT,authority_tier TEXT);"
+        "CREATE TABLE collateral_reservations (amount INTEGER,released_at TEXT);"
+        "CREATE TABLE collateral_unsettled_proceeds (amount_micro INTEGER,"
+        "settled_at TEXT);"
+        "CREATE TABLE position_current (position_id TEXT,phase TEXT,city TEXT,"
+        "target_date TEXT,temperature_metric TEXT,direction TEXT,chain_state TEXT,"
+        "chain_shares REAL,token_id TEXT,no_token_id TEXT);"
+        "CREATE TABLE execution_feasibility_evidence (token_id TEXT,direction TEXT,"
+        "quote_seen_at TEXT,depth_before_json TEXT);"
+        "CREATE TABLE execution_feasibility_latest (token_id TEXT,direction TEXT,"
+        "quote_seen_at TEXT,depth_before_json TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots VALUES (1,100000000,10000000,?,?)",
+        ("2026-09-01T00:00:00+00:00", "CHAIN"),
+    )
+    conn.execute("INSERT INTO collateral_reservations VALUES (10000000,NULL)")
+    conn.execute(
+        "INSERT INTO collateral_unsettled_proceeds VALUES (2000000,NULL)"
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "yes", "active", "Paris", "2026-09-02", "high", "buy_yes",
+                "synced", 5.0, "yes-token", "yes-no-token",
+            ),
+            (
+                "no", "active", "Paris", "2026-09-02", "high", "buy_no",
+                "synced", 3.0, "other-yes-token", "no-token",
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?)",
+        [
+            (
+                "yes-token", "buy_yes", "2026-09-01T00:00:30+00:00",
+                json.dumps({"bids": [[0.4, 10.0]]}),
+            ),
+            (
+                "no-token", "buy_no", "2026-09-01T00:00:30+00:00",
+                json.dumps({"bids": [[0.03, 10.0]]}),
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?)",
+        [
+            (
+                "yes-token", "buy_yes", "2026-09-01T00:02:00+00:00",
+                json.dumps({"bids": [[0.9, 10.0]]}),
+            ),
+            (
+                "no-token", "buy_no", "2026-09-01T00:02:00+00:00",
+                json.dumps({"bids": [[0.9, 10.0]]}),
+            ),
+        ],
+    )
+
+    capital = evaluator._current_total_portfolio_capital(
+        conn,
+        as_of=datetime(2026, 9, 1, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert capital["ready"] is True
+    assert capital["chain_cash_usd"] == 100.0
+    assert capital["spendable_cash_usd"] == 90.0
+    assert capital["unsettled_exit_proceeds_usd"] == 2.0
+    assert capital["total_portfolio_terminal_floor_usd"] == 102.0
+    assert capital[
+        "total_portfolio_current_executable_gross_usd_before_exit_fee"
+    ] == pytest.approx(104.0)
+    assert capital["total_portfolio_binary_payoff_ceiling_usd"] == 110.0
+    assert capital["book_status_counts"] == {
+        "BEST_BID_OUTSIDE_LIVE_SUBMIT_BAND": 1,
+        "FULL_POSITION_EXECUTABLE": 1,
+    }
+    by_position = {row["position_id"]: row for row in capital["positions"]}
+    assert by_position["no"]["selected_token_id"] == "no-token"
+    assert by_position["no"]["executable_prefix_gross_usd_before_exit_fee"] == 0.0
+
+
+def test_portfolio_curve_tracks_total_capital_change_not_cash_only():
+    prior = {
+        "evaluated_at": "2026-09-01T00:00:00+00:00",
+        "observation_identity": "prior",
+        "ready": True,
+        "chain_cash_usd": 100.0,
+        "total_portfolio_current_executable_gross_usd_before_exit_fee": 120.0,
+        "total_portfolio_binary_payoff_ceiling_usd": 140.0,
+    }
+    current = {
+        **prior,
+        "evaluated_at": "2026-09-01T00:05:00+00:00",
+        "observation_identity": "current",
+        "chain_cash_usd": 95.0,
+        "total_portfolio_current_executable_gross_usd_before_exit_fee": 125.0,
+        "total_portfolio_binary_payoff_ceiling_usd": 145.0,
+    }
+
+    trajectory = evaluator._portfolio_observation_curve(
+        current,
+        prior=(prior,),
+        as_of=datetime(2026, 9, 1, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert trajectory["observation_count"] == 2
+    assert trajectory["latest_delta"]["chain_cash_delta_usd"] == -5.0
+    assert trajectory["latest_delta"][
+        "current_executable_gross_capital_delta_usd"
+    ] == 5.0
+    assert trajectory["profit_proof_eligible"] is False
