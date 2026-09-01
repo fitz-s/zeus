@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-09-01 — blind Day0 refresh不得重复购买同一 immutable provider revision
+- **实时反例:** `state/openmeteo_quota.json`在`20:59Z`已计`9448`次；最近request ledger中同一`bayes_precision_fusion_single_runs_locations_batched` exact request在成功后仍重复`29–80`次，且held-critical重复会按设计越过local cap继续计数，最终挤空priority/recovery lane。同期Jinan/Moscow current Day0 family均为`available_models=[]`，live日志连续记录`DAY0_HOURLY_PRIORITY_RECOVERY_EXHAUSTED`；provider没有先给出429或terminal refusal。
+- **最小修复:** blind Day0 hourly-vector refresh从每30分钟改为每1小时，与provider run更新尺度对齐。current observations继续重条件化已持久化trajectory，不需要重新HTTP；provider-run HWM检测到新revision、exact held release-due和现有critical provider-authoritative lane仍绕过blind interval，因此不增加新revision响应延迟，也不允许stale q进入BUY。
+- **SCOPE / DRAIN / RESET:** scope仅同一进程内没有新provider HWM的blind refresh cadence；drain为现有persisted vector→current observation reconditioning→posterior/redecision，reset为新provider-run HWM立即bypass或1小时fallback到期。provider 429 cooldown、single-flight、terminal HTTP cache、source identity、remaining-window completeness和held-critical local-cap bypass均不变。
+- **验收:** default-cadence与reactor传递antibody必须固定3600秒；显式interval、HWM release bypass、critical quota与strict remaining-window测试继续通过。live部署后同request-key attempts增长斜率下降，UTC reset后的daily count不再提前撞cap，Jinan/Moscow等servable priority scope恢复完整bundle与current q；这些是数据链恢复证据，不是资本利得PASS。
+
 ### 2026-08-30 — local quota不得替provider拒绝held；past exposure不得污染forecast lane
 - **实时反例:** `state/openmeteo_quota.json`在UTC日切后约三小时已计`2140`次；前一日live日志证明local hard cap到`9500/9500`后，held Day0 hourly refresh连续`skipped_quota=1/cities_attempted=0`。同一时点10个exact held families中6个Hong Kong exposure的target date已过去，却仍被每分钟送入current 18Z anchor repair；canonical gap probe对无artifact子集永远列missing，造成无解重试。local cap因此既掩盖了provider真相，也让错误模块拖累可服务的Moscow current scope。
 - **修复合同:** ordinary/maintenance/source-clock/recovery lane继续严格受本地daily/hourly/minute reserve约束。仅canonical `day0_window/pending_exit` exact held-critical context可越过local count cap并继续一个bounded provider request；single-flight、exact-request retry embargo、terminal HTTP cache与provider 429 cooldown均不变。current-target repair在读canonical gap前按source-cycle/local-day geometry剔除past或unknown-city scope；这些position继续属于observation/settlement/exit monitor，不再伪装成可由current forecast cycle修复的数据缺口。可服务siblings继续独立下载。

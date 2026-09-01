@@ -92,7 +92,11 @@ GLOBAL_DAY0_HOURLY_MODELS: tuple[str, ...] = (
 )
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
-DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
+# Provider-run HWM wakes bypass this blind fallback interval. Current
+# observations recondition persisted trajectories without another HTTP fetch,
+# so polling the same immutable run twice per hour spends quota without adding
+# decision-time information.
+DEFAULT_REFRESH_INTERVAL_S = 3600.0
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3

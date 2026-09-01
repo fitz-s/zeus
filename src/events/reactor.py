@@ -10832,6 +10832,8 @@ def _edli_prune_pending_working_set(
         _restore_busy_timeout()
 
 def _reactor_day0_hourly_refresh_interval_seconds() -> float:
+    from src.data.day0_hourly_vectors import DEFAULT_REFRESH_INTERVAL_S
+
     raw = os.environ.get(
         "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS",
         # Current observations recondition the already-persisted trajectories
@@ -10839,12 +10841,12 @@ def _reactor_day0_hourly_refresh_interval_seconds() -> float:
         # bypasses its interval when a new model run is published, so a
         # five-minute blind refetch of the same run only burns the finite API
         # budget needed by held capital later in the local day.
-        "1800.0",
+        str(DEFAULT_REFRESH_INTERVAL_S),
     )
     try:
         return max(1.0, float(raw))
     except (TypeError, ValueError):
-        return 1800.0
+        return DEFAULT_REFRESH_INTERVAL_S
 
 def _reactor_day0_hourly_refresh_budget_seconds() -> float:
     raw = os.environ.get(

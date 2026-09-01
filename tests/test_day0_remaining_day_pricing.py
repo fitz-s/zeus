@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-30
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-30; last_reused=2026-08-30
+# Last reused or audited: 2026-09-01
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -6644,7 +6644,7 @@ class TestRequestHashProvenance:
         (
             (1, 0, 600.0),
             (0, 1, 600.0),
-            (0, 0, 1800.0),
+            (0, 0, 3600.0),
         ),
         ids=("held-capital", "missing-authority", "ordinary-authority"),
     )
@@ -6668,7 +6668,7 @@ class TestRequestHashProvenance:
         hv._INCOMPLETE_RETRY_STREAK.clear()
         decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
 
-        for expected_streak in range(1, 8):
+        for expected_streak in range(1, 9):
             stats = hv.maybe_refresh_day0_hourly_vectors(
                 [city],
                 decision_time=decision_time,
@@ -7677,7 +7677,7 @@ class TestRequestHashProvenance:
         assert reactor._day0_hourly_refresh_budget_seconds() == 6.0
         assert reactor._day0_hourly_fetch_timeout_seconds() == 4.0
         assert reactor._reactor_day0_hourly_fetch_timeout_seconds() == 4.0
-        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 1800.0
+        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 3600.0
 
     def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
         self, monkeypatch
@@ -7708,7 +7708,7 @@ class TestRequestHashProvenance:
         )
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
-        assert captured["interval_s"] == 1800.0
+        assert captured["interval_s"] == 3600.0
         assert captured["max_cities"] == 1
         assert captured["quota_critical_cities"] == 0
         assert captured["persist_lock_blocking"] is False
