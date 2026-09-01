@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-28
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Last reused/audited: 2026-09-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -7622,7 +7622,10 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     }
 
 
-def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypatch):
+def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(
+    conn,
+    monkeypatch,
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
@@ -7645,10 +7648,56 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
         env="test",
     )
     portfolio = PortfolioState(positions=[position])
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, target_date, bin_label,
+            direction, size_usd, shares, cost_basis_usd, entry_price,
+            strategy_key, chain_state, token_id, no_token_id, condition_id,
+            updated_at, temperature_metric
+        ) VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, ?, ?, ?, 'high')
+        """,
+        (
+            position.trade_id,
+            position.market_id,
+            position.city,
+            position.target_date,
+            position.bin_label,
+            position.direction,
+            position.size_usd,
+            position.shares,
+            position.cost_basis_usd,
+            position.entry_price,
+            position.strategy_key,
+            position.token_id,
+            position.no_token_id,
+            position.condition_id,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        outcome_label="NO",
+        snapshot_id="snap-exact-submit-exit",
+        orderbook_top_bid="0.74",
+        orderbook_top_ask="0.75",
+        captured_at=datetime.now(timezone.utc),
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_hash": _snapshot_hash(conn, snapshot_id),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+            "executable_snapshot_orderbook_top_bid": "0.74",
+        },
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7659,6 +7708,11 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_existing_canonical_entry_event_types",
+        lambda *_args, **_kwargs: set(exit_lifecycle._CANONICAL_ENTRY_EVENT_TYPES),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7699,7 +7753,7 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
             close_position=True,
         ),
         NoSecondPoll(),
-        conn=None,
+        conn=conn,
         execution_evidence=None,
         is_red_force_exit=False,
         exit_intent_already_recorded=True,
@@ -7709,6 +7763,24 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
     assert position.state == "economically_closed"
     assert position.exit_state == "sell_filled"
     assert position.exit_price == pytest.approx(0.74)
+    assert conn.in_transaction is False
+    filled = conn.execute(
+        """
+        SELECT command_id, phase_after
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert filled["command_id"] == "cmd-exact-submit-exit"
+    assert filled["phase_after"] == "economically_closed"
+    projection = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert projection["phase"] == "economically_closed"
+    assert projection["shares"] == pytest.approx(12.0)
 
 
 def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_token(

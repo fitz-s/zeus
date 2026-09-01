@@ -8319,6 +8319,7 @@ def _execute_live_exit(
                         conn,
                         closed,
                         phase_before=phase_before,
+                        command_id=sell_result.command_id,
                     )
                     if conn is not None:
                         log_exit_fill_event(
@@ -8330,6 +8331,13 @@ def _execute_live_exit(
                             best_bid=best_bid,
                             timestamp=getattr(closed, "last_exit_at", None),
                         )
+                        # The executor has already committed the venue ACK and
+                        # FILL_CONFIRMED fact.  Commit the command-bound
+                        # economic-close projection before returning so a
+                        # long-lived monitor connection cannot retain sold
+                        # shares as private, uncommitted state while portfolio
+                        # readers count the released cash.
+                        conn.commit()
                     # Slice P5-1 (PR #19 closeout completion, 2026-04-26):
                     # construct typed RealizedFill at the fill-receipt seam.
                     # P3.3 commit message promised this; P3.3b delivered the
