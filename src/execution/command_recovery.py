@@ -11120,7 +11120,7 @@ def _existing_position_terminal_no_fill_cancel_command_ids(
     conn: sqlite3.Connection,
     candidates: Iterable[Mapping[str, object]],
 ) -> frozenset[str]:
-    """Return cancel-pending top-ups already proven terminal with zero fill."""
+    """Return in-flight top-ups already proven terminal with zero fill."""
 
     command_ids: set[str] = set()
     for candidate in candidates:
@@ -11128,7 +11128,7 @@ def _existing_position_terminal_no_fill_cancel_command_ids(
         if (
             not command_id
             or str(candidate.get("state") or "")
-            != CommandState.CANCEL_PENDING.value
+            not in (_ACKED_ORDER_STATES | {CommandState.CANCEL_PENDING.value})
             or str(candidate.get("order_fact_state") or "")
             not in _TERMINAL_NO_FILL_ORDER_FACT_STATES
             or not _decimal_is_zero(candidate.get("order_fact_matched_size"))
@@ -11151,13 +11151,14 @@ def reconcile_existing_position_terminal_no_fill_cancels(
     *,
     command_ids: frozenset[str],
 ) -> dict:
-    """Release a canceled zero-fill top-up without touching its existing lot.
+    """Release a terminal zero-fill top-up without touching its existing lot.
 
-    SCOPE: one CANCEL_PENDING ENTRY whose latest exact-order fact is terminal,
-    zero-fill, and identity-bound to an already-positive position aggregate.
-    DRAIN: append the existing CANCEL_ACKED command event and release its
-    reservation in the same TRADE transaction; no venue read is required.
-    RESET: CANCELLED command state removes the row from this candidate set.
+    SCOPE: one ACKED/POST_ACKED/CANCEL_PENDING ENTRY whose latest exact-order
+    fact is terminal, zero-fill, and identity-bound to an already-positive
+    position aggregate. DRAIN: append EXPIRED for an ACKED command or
+    CANCEL_ACKED for a cancel-pending command and release its reservation in
+    the same TRADE transaction; no venue read is required. RESET: the terminal
+    command state removes the row from this candidate set.
     Pending-entry/unknown-position commands stay on the cross-DB lifecycle path.
     """
 
@@ -11170,13 +11171,14 @@ def reconcile_existing_position_terminal_no_fill_cancels(
             continue
         summary["scanned"] += 1
         try:
+            command_state = str(candidate.get("state") or "")
             command_order_id = str(candidate.get("venue_order_id") or "").strip()
             fact_order_id = str(
                 candidate.get("order_fact_venue_order_id") or ""
             ).strip()
             if (
-                str(candidate.get("state") or "")
-                != CommandState.CANCEL_PENDING.value
+                command_state
+                not in (_ACKED_ORDER_STATES | {CommandState.CANCEL_PENDING.value})
                 or not command_order_id
                 or fact_order_id != command_order_id
                 or str(candidate.get("order_fact_state") or "")
@@ -11204,11 +11206,15 @@ def reconcile_existing_position_terminal_no_fill_cancels(
             append_event(
                 conn,
                 command_id=command_id,
-                event_type=CommandEventType.CANCEL_ACKED.value,
+                event_type=(
+                    CommandEventType.CANCEL_ACKED.value
+                    if command_state == CommandState.CANCEL_PENDING.value
+                    else CommandEventType.EXPIRED.value
+                ),
                 occurred_at=occurred_at,
                 payload={
                     "reason": "existing_position_terminal_no_fill",
-                    "proof_class": "terminal_zero_fill_increment_cancel",
+                    "proof_class": "terminal_zero_fill_increment",
                     "venue_order_id": command_order_id,
                     "venue_order_fact_id": candidate.get("order_fact_id"),
                     "venue_order_fact_state": candidate.get("order_fact_state"),
@@ -11217,7 +11223,7 @@ def reconcile_existing_position_terminal_no_fill_cancels(
                     "source": candidate.get("order_fact_source"),
                     "resolved_m5_local_orphan_findings": resolved_findings,
                     "required_predicates": {
-                        "command_state_cancel_pending": True,
+                        "command_state_in_flight": True,
                         "terminal_order_fact_zero_fill": True,
                         "existing_positive_position_identity_exact": True,
                         "no_positive_trade_fact": True,

@@ -35927,11 +35927,21 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
         verified.close()
 
 
+@pytest.mark.parametrize(
+    ("command_state", "expected_state", "expected_release_reason"),
+    (
+        ("ACKED", "EXPIRED", "EXPIRED"),
+        ("CANCEL_PENDING", "CANCELLED", "CANCELLED"),
+    ),
+)
 def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
     tmp_path,
     monkeypatch,
+    command_state,
+    expected_state,
+    expected_release_reason,
 ):
-    """A WS-confirmed canceled top-up must not wait for a cross-DB writer."""
+    """A proven terminal top-up must not wait for a cross-DB writer."""
     from src.execution import command_recovery, venue_sync_contract
     from src.state.db import init_schema, init_schema_trade_only
 
@@ -35947,11 +35957,18 @@ def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
         size=21.0,
         price=0.51,
     )
-    _advance_to_cancel_pending(
-        seed,
-        command_id="cmd-top-up",
-        venue_order_id="ord-top-up",
-    )
+    if command_state == "CANCEL_PENDING":
+        _advance_to_cancel_pending(
+            seed,
+            command_id="cmd-top-up",
+            venue_order_id="ord-top-up",
+        )
+    else:
+        _advance_to_acked(
+            seed,
+            command_id="cmd-top-up",
+            venue_order_id="ord-top-up",
+        )
     _seed_pending_entry_projection(
         seed,
         position_id="pos-active",
@@ -36039,7 +36056,7 @@ def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
     assert not full_factory_calls
     verified = _trade_factory()
     try:
-        assert _get_state(verified, "cmd-top-up") == "CANCELLED"
+        assert _get_state(verified, "cmd-top-up") == expected_state
         reservation = verified.execute(
             """
             SELECT released_at, release_reason
@@ -36048,7 +36065,7 @@ def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
             """
         ).fetchone()
         assert reservation["released_at"] is not None
-        assert reservation["release_reason"] == "CANCELLED"
+        assert reservation["release_reason"] == expected_release_reason
         position = verified.execute(
             """
             SELECT phase, shares, chain_shares, cost_basis_usd
