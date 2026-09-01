@@ -1554,6 +1554,24 @@ def test_order_ledger_proof_gate_separates_capital_and_gain_gaps():
     ]
 
 
+def test_capital_artifact_write_cannot_regress_evaluated_at(tmp_path):
+    artifact = tmp_path / "capital.json"
+    newer = {
+        "evaluated_at": "2026-09-01T01:00:01+00:00",
+        "verdict": "FAIL",
+        "marker": "newer",
+    }
+    older = {
+        "evaluated_at": "2026-09-01T01:00:00+00:00",
+        "verdict": "FAIL",
+        "marker": "older",
+    }
+
+    assert evaluator._atomic_write(artifact, newer) is True
+    assert evaluator._atomic_write(artifact, older) is False
+    assert json.loads(artifact.read_text())["marker"] == "newer"
+
+
 def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import math
@@ -2411,6 +2412,9 @@ def evaluate(
         frozenset({"edli_live_order_events"}),
         connection_factory=get_world_connection_read_only,
     )
+    for connection in (trades, forecasts, world):
+        connection.execute("BEGIN")
+        connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
 
     try:
         receipt = _latest_proof_receipt_coverage(trades)
@@ -2539,13 +2543,40 @@ def evaluate(
     }
 
 
-def _atomic_write(path: Path, payload: dict[str, object]) -> None:
+def _atomic_write(path: Path, payload: dict[str, object]) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(temp, path)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                existing_at = _parse_aware(existing.get("evaluated_at"))
+                candidate_at = _parse_aware(payload.get("evaluated_at"))
+            except (
+                AttributeError,
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                existing_at = None
+                candidate_at = None
+            if (
+                existing_at is not None
+                and candidate_at is not None
+                and existing_at > candidate_at
+            ):
+                return False
+        temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+    return True
 
 
 def _prior_proof_registry(path: Path) -> tuple[Mapping[str, object], ...]:
@@ -2613,7 +2644,8 @@ def main() -> int:
             ],
             "failures": [f"CAPITAL_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"],
         }
-    _atomic_write(args.artifact, artifact)
+    if not _atomic_write(args.artifact, artifact):
+        artifact = json.loads(args.artifact.read_text(encoding="utf-8"))
     print(json.dumps(artifact, indent=2, sort_keys=True))
     return 0 if artifact["verdict"] == "PASS" else 1
 
