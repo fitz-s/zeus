@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-09-01 — terminal partial不能吞掉之后才到齐的authenticated fill
+- **实时反例:** ENTRY command `e418e599605742a5`在`20:35Z`仅投影`0.01` share后以`EXPIRED`关闭remainder并转换`$0.0039` reservation；同一bound order在`20:59–21:00Z`又产生三笔authenticated `CONFIRMED` fills，累计达到`30` shares、chain pUSD精确减少`$11.695844`，但command仍`EXPIRED`、execution fact仍`0.01`、position projection仍旧，导致total portfolio把真实token acquisition漏算成资本缩减。既有fast repair只接受terminal **no-fill**，不能排出terminal **partial-fill** debt。
+- **最小修复:** 复用现有terminal-late-fill command grammar与fast capital pass；只有typed terminal-partial event、更新且authenticated `CONFIRMED` trade、同order cumulative matched arithmetic和已投影partial prefix共同闭合时，才允许`EXPIRED/CANCELLED/... -> PARTIAL/FILLED`。position/execution projection继续走现有command-bound cumulative fold；reservation先恢复原额、按新的cumulative fill重新转换，并仅在partial时保留真实remainder。
+- **SCOPE / DRAIN / RESET:** scope仅一个已有positive partial projection、随后出现更晚exact-order confirmed fact的terminal ENTRY command；drain为user-channel/REST fact持久化触发的`terminal_late_entry_fill_fast`，不等待broad historical sweep；reset为command进入`PARTIAL/FILLED`且execution/position/reservation重现新的cumulative fill。terminal zero-fill、terminal partial、EXIT与无authenticated-newer-fact的commands继续分别验证，任何identity/causality/arithmetic不闭合均保持terminal并fail closed。
+- **验收:** antibody必须复现`partial -> EXPIRED -> later full CONFIRMED`，证明command=`FILLED`、execution/position累计shares与cost正确、reservation converted amount为完整notional、unsettled deduction不会停留在旧partial；existing terminal-no-fill correction与非法pre-terminal-positive-fact rejection继续通过。部署后以该exact command及最新total-portfolio evaluator复核，不把cash下降或process uptime单独当PnL。
+
 ### 2026-09-01 — blind Day0 refresh不得重复购买同一 immutable provider revision
 - **实时反例:** `state/openmeteo_quota.json`在`20:59Z`已计`9448`次；最近request ledger中同一`bayes_precision_fusion_single_runs_locations_batched` exact request在成功后仍重复`29–80`次，且held-critical重复会按设计越过local cap继续计数，最终挤空priority/recovery lane。同期Jinan/Moscow current Day0 family均为`available_models=[]`，live日志连续记录`DAY0_HOURLY_PRIORITY_RECOVERY_EXHAUSTED`；provider没有先给出429或terminal refusal。
 - **最小修复:** blind Day0 hourly-vector refresh从每30分钟改为每1小时，与provider run更新尺度对齐。current observations继续重条件化已持久化trajectory，不需要重新HTTP；provider-run HWM检测到新revision、exact held release-due和现有critical provider-authoritative lane仍绕过blind interval，因此不增加新revision响应延迟，也不允许stale q进入BUY。

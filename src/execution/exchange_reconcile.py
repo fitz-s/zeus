@@ -4675,12 +4675,58 @@ def _canonical_event_filled_size(
     return _decimal_text(aggregate) if aggregate > Decimal("0") else fallback
 
 
+def _terminal_entry_fill_boundary(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+) -> tuple[str, Decimal | None]:
+    """Classify the exact terminal boundary defeated by newer fill truth."""
+
+    command_id = str(command.get("command_id") or "")
+    terminal_state = str(command.get("state") or "")
+    row = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+           AND state_after = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id, terminal_state),
+    ).fetchone()
+    if row is None:
+        return "", None
+    event_type = str(row["event_type"] or "")
+    payload = _json_mapping(row["payload_json"])
+    if (
+        event_type
+        in {
+            "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+            "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+        }
+        or payload.get("terminal_no_fill") is True
+    ):
+        return "no_fill", Decimal("0")
+    if (
+        payload.get("proof_class")
+        == "confirmed_fill_plus_point_order_terminal_remainder"
+        and payload.get("reason")
+        == "partial_remainder_absent_from_exchange_open_orders"
+    ):
+        partial = _positive_decimal_or_none(
+            payload.get("filled_size") or payload.get("positive_fill_size")
+        )
+        if partial is not None:
+            return "partial_fill", partial
+    return "", None
+
+
 def persisted_terminal_late_entry_fill_command_ids(
     conn: sqlite3.Connection,
     *,
     command_id: str | None = None,
 ) -> list[str]:
-    """Return open exposure whose terminal no-fill command contradicts facts."""
+    """Return open exposure whose terminal command trails newer fill facts."""
 
     required = {
         "position_current",
@@ -4696,7 +4742,11 @@ def persisted_terminal_late_entry_fill_command_ids(
     scope_sql = " AND command.command_id = ?" if scoped else ""
     params = (scoped,) if scoped else ()
     rows = conn.execute(
-        f"""
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + f"""
         SELECT command.command_id
           FROM venue_commands command
           JOIN position_current position
@@ -4731,6 +4781,47 @@ def persisted_terminal_late_entry_fill_command_ids(
                               terminal.payload_json,
                               '$.terminal_no_fill'
                           ) = 'true'
+                      )
+                      OR (
+                          json_valid(terminal.payload_json)
+                          AND json_extract(
+                              terminal.payload_json,
+                              '$.proof_class'
+                          ) = 'confirmed_fill_plus_point_order_terminal_remainder'
+                          AND json_extract(
+                              terminal.payload_json,
+                              '$.reason'
+                          ) = 'partial_remainder_absent_from_exchange_open_orders'
+                          AND CAST(COALESCE(
+                              json_extract(terminal.payload_json, '$.filled_size'),
+                              json_extract(terminal.payload_json, '$.positive_fill_size'),
+                              '0'
+                          ) AS REAL) > 0
+                          AND (
+                              SELECT COALESCE(SUM(
+                                  CAST(COALESCE(economic.filled_size, '0') AS REAL)
+                              ), 0)
+                                FROM economic_trade_fact economic
+                               WHERE economic.command_id = command.command_id
+                                 AND economic.venue_order_id = command.venue_order_id
+                                 AND economic.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                                 AND economic.source IN ('REST', 'WS_USER')
+                          ) > CAST(COALESCE(
+                              json_extract(terminal.payload_json, '$.filled_size'),
+                              json_extract(terminal.payload_json, '$.positive_fill_size'),
+                              '0'
+                          ) AS REAL) + 0.000001
+                          AND EXISTS (
+                              SELECT 1
+                                FROM venue_trade_facts later_trade
+                               WHERE later_trade.command_id = command.command_id
+                                 AND later_trade.venue_order_id = command.venue_order_id
+                                 AND later_trade.state = 'CONFIRMED'
+                                 AND later_trade.source IN ('REST', 'WS_USER')
+                                 AND CAST(COALESCE(later_trade.filled_size, '0') AS REAL) > 0
+                                 AND julianday(later_trade.observed_at) >
+                                     julianday(terminal.occurred_at)
+                          )
                       )
                   )
            )
@@ -4779,7 +4870,7 @@ def reconcile_persisted_terminal_late_entry_fills(
     if not candidate_ids:
         return summary
 
-    from src.state.venue_command_repo import append_event, get_command
+    from src.state.venue_command_repo import append_event, append_order_fact, get_command
 
     occurred_at = _coerce_dt(observed_at).isoformat()
     for candidate_id in candidate_ids:
@@ -4822,6 +4913,33 @@ def reconcile_persisted_terminal_late_entry_fills(
             command_id=candidate_id,
             fallback=filled_size,
         )
+        economics = _entry_fill_economics_for_command(
+            conn,
+            command_id=candidate_id,
+            fallback_filled_size=canonical_filled_size,
+            fallback_fill_price=str(trade_map.get("fill_price") or "0"),
+        )
+        if economics is None:
+            summary["stayed"] += 1
+            continue
+        cumulative_shares, cumulative_price, _ = economics
+        canonical_filled_size = _decimal_text(cumulative_shares)
+        boundary, terminal_partial_size = _terminal_entry_fill_boundary(
+            conn,
+            command,
+        )
+        if (
+            not boundary
+            or (
+                boundary == "partial_fill"
+                and (
+                    terminal_partial_size is None
+                    or cumulative_shares <= terminal_partial_size
+                )
+            )
+        ):
+            summary["stayed"] += 1
+            continue
         event_type = _fill_event_for_command(
             command,
             canonical_filled_size,
@@ -4830,26 +4948,107 @@ def reconcile_persisted_terminal_late_entry_fills(
         if event_type is None:
             summary["stayed"] += 1
             continue
+        remaining = max(
+            Decimal("0"),
+            _decimal(command.get("size")) - cumulative_shares,
+        )
+        safe_id = "".join(ch if ch.isalnum() else "_" for ch in candidate_id)
+        savepoint = f"sp_terminal_late_entry_fill_{safe_id}"
+        conn.execute(f"SAVEPOINT {savepoint}")
         try:
+            order_state = (
+                "MATCHED" if event_type == "FILL_CONFIRMED" else "PARTIALLY_MATCHED"
+            )
+            order_payload = {
+                "schema_version": 1,
+                "reason": "canonical_confirmed_trade_facts_aggregate",
+                "command_id": candidate_id,
+                "venue_order_id": str(trade_map.get("venue_order_id") or ""),
+                "trade_id": str(trade_map.get("trade_id") or ""),
+                "canonical_filled_size": canonical_filled_size,
+                "remaining_size": _decimal_text(remaining),
+                "source": "terminal_late_entry_fill_fast",
+            }
+            append_order_fact(
+                conn,
+                venue_order_id=str(trade_map.get("venue_order_id") or ""),
+                command_id=candidate_id,
+                state=order_state,
+                remaining_size=_decimal_text(remaining),
+                matched_size=canonical_filled_size,
+                source="REST",
+                observed_at=occurred_at,
+                venue_timestamp=occurred_at,
+                raw_payload_hash=sha256(
+                    json.dumps(order_payload, sort_keys=True).encode()
+                ).hexdigest(),
+                raw_payload_json=order_payload,
+            )
             append_event(
                 conn,
                 command_id=candidate_id,
                 event_type=event_type,
                 occurred_at=occurred_at,
                 payload=_fill_event_payload_for_command(
+                    conn,
                     command,
                     event_type=event_type,
                     venue_order_id=str(trade_map.get("venue_order_id") or ""),
                     trade_id=str(trade_map.get("trade_id") or ""),
                     filled_size=filled_size,
                     canonical_filled_size=canonical_filled_size,
-                    fill_price=str(trade_map.get("fill_price") or "0"),
+                    fill_price=_decimal_text(cumulative_price),
                 ),
             )
+            _ensure_entry_fill_position_event(
+                conn,
+                command=command,
+                venue_order_id=str(trade_map.get("venue_order_id") or ""),
+                filled_size=canonical_filled_size,
+                fill_price=_decimal_text(cumulative_price),
+                observed_at=_coerce_dt(occurred_at),
+                command_event=event_type,
+                order_fact_source="REST",
+            )
+            execution = conn.execute(
+                """
+                SELECT shares, fill_price
+                  FROM execution_fact
+                 WHERE command_id = ?
+                   AND position_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                 ORDER BY filled_at DESC, intent_id
+                 LIMIT 1
+                """,
+                (candidate_id, str(command.get("position_id") or "")),
+            ).fetchone()
+            if (
+                execution is None
+                or abs(_decimal(execution["shares"]) - cumulative_shares)
+                > Decimal("0.000001")
+                or abs(_decimal(execution["fill_price"]) - cumulative_price)
+                > Decimal("0.000001")
+            ):
+                raise RuntimeError(
+                    "terminal late entry fill execution projection did not converge"
+                )
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         except ValueError as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             summary["stayed"] += 1
             summary.setdefault("rejection_reasons", []).append(
                 {"command_id": candidate_id, "reason": str(exc)}
+            )
+            continue
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            summary["errors"] += 1
+            logger.exception(
+                "terminal late entry fill projection failed command_id=%s",
+                candidate_id,
             )
             continue
         summary["advanced"] += 1
@@ -4975,6 +5174,7 @@ def _append_linkable_trade_fact_if_missing(
                         event_type=existing_event,
                         occurred_at=observed_at.isoformat(),
                         payload=_fill_event_payload_for_command(
+                            conn,
                             command,
                             event_type=existing_event,
                             venue_order_id=order_id,
@@ -5177,6 +5377,7 @@ def _append_linkable_trade_fact_if_missing(
             event_type=event,
             occurred_at=observed_at.isoformat(),
             payload=_fill_event_payload_for_command(
+                conn,
                 latest,
                 event_type=event,
                 venue_order_id=order_id,
@@ -7499,6 +7700,7 @@ def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
 
 
 def _fill_event_payload_for_command(
+    conn: sqlite3.Connection,
     command: Mapping[str, Any],
     *,
     event_type: str,
@@ -7523,8 +7725,12 @@ def _fill_event_payload_for_command(
         "REJECTED",
         "SUBMIT_REJECTED",
     }:
-        payload.update(
-            {
+        boundary, terminal_partial_size = _terminal_entry_fill_boundary(
+            conn,
+            command,
+        )
+        if boundary == "no_fill":
+            payload.update({
                 "schema_version": 1,
                 "reason": "authenticated_fill_after_terminal_no_fill",
                 "proof_class": "terminal_command_late_fill_correction",
@@ -7539,8 +7745,28 @@ def _fill_event_payload_for_command(
                     "bound_venue_order_identity": True,
                     "order_matched_remainder_arithmetic": True,
                 },
-            }
-        )
+            })
+        elif boundary == "partial_fill" and terminal_partial_size is not None:
+            payload.update({
+                "schema_version": 1,
+                "reason": "authenticated_fill_after_terminal_partial",
+                "proof_class": "terminal_command_late_fill_correction",
+                "command_id": str(command.get("command_id") or ""),
+                "terminal_state_before": terminal_state,
+                "terminal_partial_filled_size": _decimal_text(
+                    terminal_partial_size
+                ),
+                "correction_event": event_type,
+                "required_predicates": {
+                    "terminal_event_was_partial": True,
+                    "terminal_event_precedes_trade_fact": True,
+                    "terminal_event_precedes_order_fact": True,
+                    "authenticated_confirmed_trade_fact": True,
+                    "bound_venue_order_identity": True,
+                    "order_matched_remainder_arithmetic": True,
+                    "cumulative_fill_exceeds_terminal_partial": True,
+                },
+            })
     return payload
 
 
@@ -7562,16 +7788,18 @@ def _fill_event_for_command(
         return None
     size = _decimal(command.get("size", 0))
     filled = _decimal(filled_size)
+    residual = size - filled
+    complete = residual <= Decimal("0.01")
     if (
         trade_state in {"MATCHED", "MINED"}
         and str(command.get("intent_kind") or "").upper() == "EXIT"
         and str(command.get("side") or "").upper() == "SELL"
-        and filled >= size
+        and complete
     ):
         return "FILL_CONFIRMED"
     if trade_state != "CONFIRMED":
         return "PARTIAL_FILL_OBSERVED"
-    if filled >= size:
+    if complete:
         return "FILL_CONFIRMED"
     return "PARTIAL_FILL_OBSERVED"
 

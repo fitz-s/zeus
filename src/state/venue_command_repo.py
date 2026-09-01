@@ -2816,22 +2816,33 @@ def _validate_terminal_late_fill_correction_payload(
         return False
     if not isinstance(payload, dict):
         raise ValueError("terminal late-fill correction requires proof payload")
+    reason = str(payload.get("reason") or "")
+    terminal_no_fill_correction = reason == "authenticated_fill_after_terminal_no_fill"
+    terminal_partial_correction = (
+        reason == "authenticated_fill_after_terminal_partial"
+    )
     if (
         payload.get("proof_class") != "terminal_command_late_fill_correction"
-        or payload.get("reason") != "authenticated_fill_after_terminal_no_fill"
+        or not (terminal_no_fill_correction or terminal_partial_correction)
         or payload.get("command_id") != command_id
         or payload.get("terminal_state_before") != current_state
     ):
         raise ValueError("terminal late-fill correction proof identity is invalid")
     required = payload.get("required_predicates")
     required_names = (
-        "terminal_event_was_no_fill",
+        (
+            "terminal_event_was_no_fill"
+            if terminal_no_fill_correction
+            else "terminal_event_was_partial"
+        ),
         "terminal_event_precedes_trade_fact",
         "terminal_event_precedes_order_fact",
         "authenticated_confirmed_trade_fact",
         "bound_venue_order_identity",
         "order_matched_remainder_arithmetic",
     )
+    if terminal_partial_correction:
+        required_names += ("cumulative_fill_exceeds_terminal_partial",)
     if not isinstance(required, Mapping) or any(
         required.get(name) is not True for name in required_names
     ):
@@ -2843,7 +2854,7 @@ def _validate_terminal_late_fill_correction_payload(
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT size, venue_order_id, intent_kind, side
+            SELECT size, venue_order_id, intent_kind, side, position_id
               FROM venue_commands
              WHERE command_id = ?
             """,
@@ -2881,6 +2892,18 @@ def _validate_terminal_late_fill_correction_payload(
             """,
             (command_id, venue_order_id),
         ).fetchone()
+        execution_fact = conn.execute(
+            """
+            SELECT shares
+              FROM execution_fact
+             WHERE command_id = ?
+               AND order_role = 'entry'
+               AND voided_at IS NULL
+             ORDER BY filled_at DESC, intent_id
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
         prior_positive_trades = conn.execute(
             """
             SELECT observed_at
@@ -2917,6 +2940,18 @@ def _validate_terminal_late_fill_correction_payload(
             "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
         }
     )
+    terminal_partial_size = _decimal_or_none(
+        terminal_payload.get("filled_size")
+        or terminal_payload.get("positive_fill_size")
+    )
+    terminal_partial = bool(
+        terminal_payload.get("proof_class")
+        == "confirmed_fill_plus_point_order_terminal_remainder"
+        and terminal_payload.get("reason")
+        == "partial_remainder_absent_from_exchange_open_orders"
+        and terminal_partial_size is not None
+        and terminal_partial_size > 0
+    )
     terminal_at = _review_clearance_parse_utc(terminal_event["occurred_at"])
     prior_trade_times = [
         _review_clearance_parse_utc(row["observed_at"])
@@ -2930,8 +2965,31 @@ def _validate_terminal_late_fill_correction_payload(
         observed_at is None or observed_at <= terminal_at
         for observed_at in (*prior_trade_times, *prior_order_times)
     )
-    if not terminal_no_fill or prior_positive_before_terminal:
-        raise ValueError("terminal late-fill correction terminal was not no-fill truth")
+    if terminal_no_fill_correction:
+        if not terminal_no_fill or prior_positive_before_terminal:
+            raise ValueError(
+                "terminal late-fill correction terminal was not no-fill truth"
+            )
+    else:
+        payload_partial_size = _decimal_or_none(
+            payload.get("terminal_partial_filled_size")
+        )
+        execution_shares = (
+            _decimal_or_none(execution_fact["shares"])
+            if execution_fact is not None
+            else None
+        )
+        if (
+            not terminal_partial
+            or terminal_partial_size is None
+            or payload_partial_size != terminal_partial_size
+            or execution_shares != terminal_partial_size
+            or canonical_filled is None
+            or canonical_filled <= terminal_partial_size
+        ):
+            raise ValueError(
+                "terminal late-fill correction terminal partial proof is invalid"
+            )
     if (
         str(command["venue_order_id"] or "") != venue_order_id
         or not venue_order_id
@@ -2988,8 +3046,8 @@ def _validate_terminal_late_fill_correction_payload(
         return True
     if (
         str(order_fact["state"] or "").upper() not in {"MATCHED", "FILLED"}
-        or remaining != 0
-        or canonical_filled != requested
+        or remaining > Decimal("0.01")
+        or requested - canonical_filled > Decimal("0.01")
     ):
         raise ValueError("terminal late full correction does not cover command")
     return False
