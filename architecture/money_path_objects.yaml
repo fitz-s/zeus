@@ -1059,6 +1059,7 @@ state_machines:
       lifecycle, venue-command, order, or fill state.
     states:
       - PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED
+      - GLOBAL_JIT_SNAPSHOT_READBACK_MISMATCH
     invariant_tests:
       - tests/engine/test_final_submit_mode_authority.py
       - tests/events/test_reactor.py
@@ -1159,6 +1160,9 @@ state_machines:
       - EXIT_SUBMIT_NO_VENUE_SIDE_EFFECT
       - SUBMIT_TIMEOUT_UNKNOWN
       - HOLD_TO_REDEEM
+      - PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED
+      - REVIEW_CLEARED_NO_VENUE_EXPOSURE
+      - REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT
     invariant_tests:
       - tests/test_command_recovery.py
       - tests/test_exit_safety.py
@@ -1173,6 +1177,7 @@ state_machines:
     states:
       - UNRESOLVED_PRE_SUBMIT_FUNDER
       - V2_PRE_SUBMIT_EXCEPTION
+      - V2_PRE_SUBMIT_TRANSPORT_EXCEPTION
       - INTENT_RECORDED
     invariant_tests:
       - tests/test_v2_adapter.py
@@ -1205,6 +1210,65 @@ state_machines:
       - REVIEW
     invariant_tests:
       - tests/test_run_mode_failure_surfaces.py
+
+  capital_evidence_classification_labels:
+    owner: scripts/evaluate_current_regime_capital_advantage.py
+    description: >
+      Read-only classifications emitted while reconciling executable quotes,
+      command facts, and partial-exit economics into capital evidence. They do
+      not authorize orders or mutate lifecycle, command, order, or fill state.
+    states:
+      - BEST_BID_OUTSIDE_LIVE_SUBMIT_BAND
+      - FILLED_COMMAND_EXECUTION_FACT_MISSING
+      - INTENT_KIND_UNSUPPORTED
+      - PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE
+      - LEGACY_PARTIAL_EXIT_GAIN_UNAVAILABLE
+    invariant_tests:
+      - tests/test_evaluate_current_regime_capital_advantage.py
+
+  source_evidence_boundary_status:
+    owner: src/contracts/snapshot_ingest_contract.py
+    description: >
+      Typed source-ingest classification for a boundary that cannot be proven
+      accepted or rejected. It is source evidence, not trading lifecycle or
+      venue state.
+    states:
+      - REJECTED_BOUNDARY_AMBIGUOUS
+    invariant_tests:
+      - tests/test_runtime_guards.py
+
+  held_common_cycle_recovery_status:
+    owner: src/data/replacement_forecast_production.py
+    description: >
+      Replacement forecast recovery result when the held-position common-cycle
+      refresh advances only part of its requested scope. It is a producer
+      status and cannot authorize entry or exit by itself.
+    states:
+      - HELD_COMMON_CYCLE_RECOVERY_PARTIAL
+    invariant_tests:
+      - tests/test_replacement_forecast_materializer.py
+
+  terminal_order_cancel_receipt_status:
+    owner: src/engine/cycle_runtime.py
+    description: >
+      Exact terminal-order cancel receipt outcomes used by cycle recovery.
+      ACKED proves venue acknowledgement; UNKNOWN preserves scoped debt. They
+      do not alter command or position lifecycle without canonical follow-up.
+    states:
+      - TERMINAL_ORDER_CANCEL_ACKED
+      - TERMINAL_ORDER_CANCEL_UNKNOWN
+    invariant_tests:
+      - tests/test_command_recovery.py
+
+  capital_counterfactual_evidence_role:
+    owner: src/engine/global_batch_runtime.py
+    description: >
+      Receipt role proving that confidence-cost output is observational
+      evidence only and contributes to neither selection nor submit authority.
+    states:
+      - OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY
+    invariant_tests:
+      - tests/integration/test_w3_solve_seam_g3.py
 
 schema_objects:
   authority_fabricating_defaults:
@@ -1328,7 +1392,11 @@ external_truth_sources:
     required_tests: [tests/test_executable_market_snapshot.py, tests/test_order_truth_reducer.py]
   ecmwf:
     authority_tier: forecast_source
-    endpoint_patterns: [ecmwf, open-data, tigge]
+    endpoint_patterns:
+      - ecmwf
+      - open-data
+      - tigge
+      - https://ensemble-api.open-meteo.com/v1/ensemble
     required_tests: [tests/test_tigge_schema_contract.py, tests/test_executable_forecast_reader_member_floor.py]
   weather_observation:
     authority_tier: settlement_observation
