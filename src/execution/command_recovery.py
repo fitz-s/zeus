@@ -28872,6 +28872,46 @@ def capital_blocking_command_scope(
                 (CommandState.SUBMITTING.value,),
             ).fetchall()
         )
+    if all(
+        _table_exists(conn, table)
+        for table in ("entry_exposure_obligations", "venue_commands")
+    ):
+        # SCOPE: only OPEN entry obligations whose command already carries a
+        # terminal no-fill state. DRAIN: the DB-only terminal-obligation pass
+        # proves its no-fill event/facts and resolves the exact obligation.
+        # RESET: RESOLVED removes the row from this selector immediately.
+        # Without this selector, the scheduler classified the command itself as
+        # terminal, yielded forever to held monitoring, and left its cash bound
+        # deducted from every subsequent global auction.
+        terminal_no_fill_states = tuple(
+            sorted(_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES)
+        )
+        existing_command_ids = {
+            str(row.get("command_id") or "").strip()
+            for row in command_rows
+        }
+        command_rows.extend(
+            row
+            for raw in conn.execute(
+                f"""
+                SELECT command.command_id, command.market_id
+                  FROM entry_exposure_obligations obligation
+                  JOIN venue_commands command
+                    ON command.command_id = obligation.command_id
+                 WHERE obligation.status = 'OPEN'
+                   AND command.intent_kind = 'ENTRY'
+                   AND command.state IN (
+                       {','.join('?' for _ in terminal_no_fill_states)}
+                   )
+                 ORDER BY obligation.created_at, obligation.command_id
+                """,
+                terminal_no_fill_states,
+            ).fetchall()
+            if (
+                (row := _dict_row(raw))["command_id"]
+                not in existing_command_ids
+            )
+        )
     authenticated_entry_projection_count = 0
     authenticated_nonterminal_states = (
         CommandState.SUBMITTING.value,

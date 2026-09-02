@@ -35226,6 +35226,49 @@ def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_f
     assert capital_blocking_command_count(conn) == 2
 
 
+def test_capital_blocker_counts_terminal_no_fill_open_obligation_until_release(conn):
+    """A rejected entry cannot leave its cash bound hidden behind monitor debt."""
+    from src.execution.command_recovery import (
+        capital_blocking_command_scope,
+        reconcile_terminal_entry_exposure_obligations,
+    )
+    from src.state.venue_command_repo import append_event
+
+    command_id = _insert(
+        conn,
+        command_id="cmd-terminal-obligation",
+        market_id="mkt-terminal-obligation",
+    )
+    _open_test_entry_obligation(conn, command_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-09-02T01:50:06Z",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-09-02T02:05:20Z",
+        payload={"reason": "authenticated_venue_absence"},
+    )
+
+    scope = capital_blocking_command_scope(conn)
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("mkt-terminal-obligation",)
+    assert scope.projection_count == 0
+
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert capital_blocking_command_scope(conn).total_count == 0
+
+
 def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
     """A known confirmed fill cannot yield forever behind monitor bootstrap."""
     from src.execution.command_recovery import capital_blocking_command_scope
