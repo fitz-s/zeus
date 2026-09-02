@@ -806,6 +806,50 @@ def test_noaa_prior_only_is_entry_blocked_but_held_allowed():
     conn.close()
 
 
+def test_probability_conditioning_source_outranks_settlement_channel_for_revision_model():
+    import src.engine.event_reactor_adapter as era
+
+    payload = {
+        "settlement_source": "wu_icao_history",
+        "statistical_probability_conditioning": {
+            "source": "aviationweather_metar",
+            "observed_extreme_c": 31.0,
+        },
+    }
+
+    assert era._day0_probability_conditioning_source(payload) == (
+        "aviationweather_metar"
+    )
+    assert payload["settlement_source"] == "wu_icao_history"
+
+
+def test_noaa_probability_conditioning_keeps_survival_scenarios_with_wu_settlement():
+    import src.engine.event_reactor_adapter as era
+
+    payload = {
+        "metric": "high",
+        "rounded_value": 31.0,
+        "high_so_far": 31.0,
+        "settlement_source": "wu_icao_history",
+        "_edli_day0_provisional_revision_likelihood": {
+            "boundary_survival_probability": 0.5,
+        },
+        "_edli_global_day0_binding": {
+            "statistical_probability_conditioning": {
+                "source": "aviationweather_metar",
+            },
+        },
+    }
+
+    scenarios = era._day0_probability_boundary_scenarios_native(
+        payload,
+        metric="high",
+        unit="C",
+    )
+
+    assert scenarios == ((31.0, 0.5), (None, 0.5))
+
+
 def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
     monkeypatch: pytest.MonkeyPatch,
 ):

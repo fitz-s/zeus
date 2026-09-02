@@ -34698,6 +34698,39 @@ def _assert_day0_post_local_vector_witness(
         raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
 
 
+def _day0_probability_conditioning_source(
+    payload: Mapping[str, object],
+) -> str:
+    """Return the source role that actually conditioned the action q.
+
+    A provisional receipt can carry settlement-channel truth at the top level
+    while a faster same-station channel supplies the statistical probability
+    update.  Revision-model and carrier validation must follow the latter; the
+    former remains settlement authority and is never overwritten.
+    """
+
+    binding = payload.get("_edli_global_day0_binding")
+    candidates = (
+        payload.get("statistical_probability_conditioning"),
+        (
+            binding.get("statistical_probability_conditioning")
+            if isinstance(binding, Mapping)
+            else None
+        ),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        source = str(candidate.get("source") or "").strip()
+        if source:
+            return source
+    return str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or ""
+    ).strip()
+
+
 def _provisional_day0_revision_likelihood(
     conn: sqlite3.Connection,
     *,
@@ -38503,9 +38536,9 @@ def _prepare_current_global_probability_family(
             day0_payload_out.update(current_day0_payload)
         if provisional_day0_observation:
             try:
-                provisional_source = str(
-                    current_day0_payload.get("settlement_source") or ""
-                ).strip().lower()
+                provisional_source = _day0_probability_conditioning_source(
+                    current_day0_payload
+                ).lower()
                 revision_likelihood = _provisional_day0_revision_likelihood(
                     day0_observation_conn,
                     source=provisional_source,
@@ -43022,11 +43055,7 @@ def _day0_remaining_p_raw_vector(
     if decision_time is None:
         from src.events.day0_authority import day0_is_noaa_preliminary_source
 
-        source_hint = str(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
-        )
+        source_hint = _day0_probability_conditioning_source(payload)
         if day0_is_noaa_preliminary_source(source_hint):
             raise ValueError(
                 "DAY0_NOAA_PRELIMINARY_CARRIER_DECISION_TIME_MISSING"
@@ -43090,9 +43119,7 @@ def _day0_remaining_p_raw_vector(
     noaa_preliminary = (
         finality in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
         and day0_is_noaa_preliminary_source(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
+            _day0_probability_conditioning_source(payload)
         )
     )
     if noaa_preliminary:
@@ -43685,11 +43712,7 @@ def _day0_probability_boundary_scenarios_native(
         likelihood = payload.get("_edli_day0_provisional_revision_likelihood")
         if not isinstance(likelihood, Mapping) and isinstance(binding, Mapping):
             likelihood = binding.get("provisional_revision_likelihood")
-        source = str(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
-        ).strip().lower()
+        source = _day0_probability_conditioning_source(payload).lower()
         from src.events.day0_authority import (
             DAY0_MONOTONE_SETTLEMENT_BOUND,
             day0_evidence_finality,
@@ -44457,9 +44480,7 @@ def _rebuild_decision_time_day0_carrier(
     )
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
-    source = str(
-        payload.get("settlement_source") or payload.get("observation_source") or ""
-    ).strip().lower()
+    source = _day0_probability_conditioning_source(payload).lower()
     finality = day0_evidence_finality(payload)
     if not day0_is_noaa_preliminary_source(source) or finality not in {
         "PROVISIONAL_CURRENT_SNAPSHOT",
@@ -45310,11 +45331,7 @@ def _build_direct_current_day0_causal_bundle(
     ).strip().lower()
     city = str(getattr(family, "city", "") or "").strip()
     target_date = str(getattr(family, "target_date", "") or "").strip()
-    source = str(
-        payload.get("settlement_source")
-        or payload.get("observation_source")
-        or ""
-    ).strip()
+    source = _day0_probability_conditioning_source(payload)
     observation_time_text = str(
         payload.get("observation_time")
         or payload.get("_edli_day0_probability_boundary_observation_time")
@@ -45772,9 +45789,7 @@ def _day0_remaining_day_members(
         from src.events.day0_authority import day0_is_noaa_preliminary_source
 
         is_noaa_preliminary = day0_is_noaa_preliminary_source(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
+            _day0_probability_conditioning_source(payload)
         )
         has_likelihood = isinstance(
             payload.get("_edli_day0_provisional_revision_likelihood"), Mapping
