@@ -207,7 +207,9 @@ def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatc
         authority_tier="CHAIN",
     )
     emitted = []
-    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    trade_db = tmp_path / "trades.db"
+    CollateralLedger(db_path=trade_db)
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: trade_db)
     monkeypatch.setattr(
         "src.runtime.timeout_guard.run_with_timeout",
         lambda *_args, **_kwargs: ({}, None, ""),
@@ -653,6 +655,7 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
 
     trade_db = tmp_path / "trades.db"
     wake_path = tmp_path / "edli-reactor-wake.json"
+    CollateralLedger(db_path=trade_db)
     payload = {
         "pusd_balance_micro": 17_000_000,
         "pusd_allowance_micro": 17_000_000,
@@ -1024,6 +1027,7 @@ def test_post_trade_collateral_wake_cross_process_relationship(
     case_root.mkdir()
     trade_db = case_root / "trades.db"
     wake_path = case_root / "edli-reactor-wake.json"
+    CollateralLedger(db_path=trade_db)
 
     producer = _run_relationship_subprocess(
         _COLLATERAL_PRODUCER_SOURCE,
@@ -1150,18 +1154,22 @@ def test_warm_cycle_failsoft_on_missing_collateral_snapshot(monkeypatch):
 
 
 def test_missing_current_collateral_revokes_prior_execution_authority():
+    from src.control.heartbeat_supervisor import HeartbeatHealth
     from src.risk_allocator import (
         RiskAllocator,
         assert_global_submit_allows,
         configure_global_allocator,
         snapshot_global_auction_capital_authority,
     )
-    from src.risk_allocator.governor import AllocationDenied
+    from src.risk_allocator.governor import AllocationDenied, GovernorState
 
     try:
         _set_cache(value_usd=199.40, fetched_age_seconds=300.0)
         configure_global_ledger(None)
-        configure_global_allocator(RiskAllocator(), None)
+        configure_global_allocator(
+            RiskAllocator(),
+            GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0),
+        )
         snapshot_global_auction_capital_authority()
 
         main_module._edli_bankroll_warm_cycle()

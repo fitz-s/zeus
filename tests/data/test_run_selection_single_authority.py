@@ -93,7 +93,9 @@ def test_probe_resolved_authority_returns_newest_pair_complete_cycle(monkeypatch
     )
 
 
-def test_bpf_extras_probe_uses_single_runs_transport_not_anchor_bucket(monkeypatch) -> None:
+def test_bpf_extras_uses_free_provider_cycle_then_real_download_proves_transport(
+    monkeypatch,
+) -> None:
     import src.data.replacement_cycle_availability as availability
     import src.data.replacement_forecast_production as production
 
@@ -101,9 +103,14 @@ def test_bpf_extras_probe_uses_single_runs_transport_not_anchor_bucket(monkeypat
     cycle_18z = datetime(2026, 6, 11, 18, 0, tzinfo=UTC)
 
     monkeypatch.setattr(
+        availability, "probe_anchor_available_any", lambda c, **kw: c <= cycle_12z
+    )
+    monkeypatch.setattr(
         availability,
         "probe_openmeteo_single_run_available",
-        lambda c, **kw: c <= cycle_12z,
+        lambda c, **kw: (_ for _ in ()).throw(
+            AssertionError("paid preflight must not run")
+        ),
     )
 
     class _FrozenDatetime(datetime):

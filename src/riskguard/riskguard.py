@@ -14,9 +14,6 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
-#   2026-08-19 Day0 revision admission: an established Day0 strategy whose
-#   current probability semantics lacks causal capital proof is revision-gated
-#   before BUY while its no-money shadow continues to drain evidence.
 #   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
 #   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
 #   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
@@ -1356,6 +1353,9 @@ RISK_COMPONENT_ORDER: tuple[str, ...] = (
     "collateral_identity",
     "portfolio_consistency",
     "unresolved_exposure",
+    "probability_semantics",
+    "storage_capacity",
+    "host_power",
 )
 
 
@@ -2601,473 +2601,10 @@ def _bind_entry_market_benchmarks(
     return output
 
 
-def _settled_market_relative_alpha_shadow_rows(
-    conn: sqlite3.Connection,
-    *,
-    strategy_key: str,
-    window_days: float,
-    as_of: datetime | None = None,
-    forecasts_connection_factory=get_forecasts_connection_read_only,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
-    """Bind frozen no-money decisions to later verified venue outcomes."""
-
-    from src.events.day0_authority import (
-        DAY0_PROBABILITY_SEMANTICS_REVISION,
-        day0_probability_semantics_revision,
-    )
-
-    if strategy_key == "day0_nowcast_entry":
-        expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
-        expected_source_status = "current_day0_probability_authority"
-    elif strategy_key == "forecast_qkernel_entry":
-        expected_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
-        expected_source_status = "current_qkernel_probability_authority"
-    else:
-        raise ValueError("market-relative alpha shadow strategy is not canonical")
-    expected_reason = f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}"
-
-    evaluated_at = as_of or datetime.now(timezone.utc)
-    if evaluated_at.tzinfo is None:
-        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
-    database_names = {
-        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
-    }
-    schema = "world" if "world" in database_names else "main"
-    table_ready = conn.execute(
-        f"SELECT 1 FROM {schema}.sqlite_master "
-        "WHERE type='table' AND name='no_trade_regret_events' LIMIT 1"
-    ).fetchone()
-    status: dict[str, object] = {
-        "status": "no_shadow_evidence",
-        "strategy_key": strategy_key,
-        "source_schema": schema,
-        "shadow_candidate_count": 0,
-        "certificate_ready_count": 0,
-        "settlement_ready_count": 0,
-        "blocked_reasons": {},
-    }
-    if table_ready is None:
-        status["status"] = "shadow_table_unavailable"
-        return [], status
-
-    cutoff = evaluated_at - timedelta(days=window_days + 2.0)
-    column_names = (
-        "regret_event_id",
-        "event_id",
-        "rejection_stage",
-        "rejection_reason",
-        "condition_id",
-        "token_id",
-        "decision_time",
-        "city",
-        "target_date",
-        "metric",
-        "family_id",
-        "bin_label",
-        "direction",
-        "q_live",
-        "c_fee_adjusted",
-        "native_quote_available",
-        "source_status",
-        "family_complete",
-        "hypothetical_order_type",
-        "hypothetical_fill_status",
-        "hypothetical_fill_price",
-        "causal_snapshot_id",
-        "executable_snapshot_id",
-        "envelope_json",
-        "created_at",
-    )
-    raw_rows = conn.execute(
-        f"SELECT {','.join(column_names)} "
-        f"FROM {schema}.no_trade_regret_events "
-        "INDEXED BY idx_no_trade_regret_stage "
-        "WHERE rejection_stage='RISK_GUARD' "
-        "AND rejection_reason=? AND created_at>=? "
-        "ORDER BY created_at,regret_event_id",
-        (
-            expected_reason,
-            cutoff.isoformat(),
-        ),
-    ).fetchall()
-    status["shadow_candidate_count"] = len(raw_rows)
-    blocked: dict[str, int] = {}
-
-    def block(reason: str) -> None:
-        blocked[reason] = blocked.get(reason, 0) + 1
-
-    certificates: list[dict[str, object]] = []
-    for raw in raw_rows:
-        row = dict(zip(column_names, raw))
-        try:
-            envelope = json.loads(str(row["envelope_json"] or ""))
-        except (TypeError, ValueError):
-            block("envelope_invalid")
-            continue
-        if not isinstance(envelope, Mapping):
-            block("envelope_invalid")
-            continue
-        revision = str(
-            envelope.get("probability_semantics_revision") or ""
-        )
-        q_version = str(envelope.get("q_version") or "")
-        posterior_identity_hash = str(
-            envelope.get("posterior_identity_hash") or ""
-        )
-        side = str(envelope.get("side") or "").upper()
-        expected_fields = {
-            "family_key": row["family_id"],
-            "city": row["city"],
-            "target_date": row["target_date"],
-            "metric": row["metric"],
-            "bin_id": row["bin_label"],
-            "condition_id": row["condition_id"],
-            "token_id": row["token_id"],
-        }
-        if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
-            block("superseded_decision_law")
-            continue
-        if (
-            envelope.get("global_selection_revision")
-            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-        ):
-            block("global_selection_revision_mismatch")
-            continue
-        revision_identity_ready = (
-            day0_probability_semantics_revision(q_version) == revision
-            if strategy_key == "day0_nowcast_entry"
-            else bool(q_version and posterior_identity_hash)
-        )
-        if (
-            envelope.get("schema_version") != 3
-            or envelope.get("strategy_key") != strategy_key
-            or envelope.get("selection_rule")
-            != (
-                "earliest_complete_global_cut_exact_global_posterior_mean_"
-                "expected_growth_winner_v3"
-            )
-            or revision not in expected_revisions
-            or not revision_identity_ready
-            or side not in {"YES", "NO"}
-            or any(
-                str(envelope.get(key) or "") != str(value or "")
-                for key, value in expected_fields.items()
-            )
-            or str(row["direction"] or "") != f"buy_{side.lower()}"
-            or str(row["causal_snapshot_id"] or "")
-            != str(envelope.get("probability_witness_identity") or "")
-            or str(row["executable_snapshot_id"] or "")
-            != str(envelope.get("book_snapshot_id") or "")
-            or int(row["native_quote_available"] or 0) != 1
-            or int(row["family_complete"] or 0) != 1
-            or row["source_status"] != expected_source_status
-            or row["hypothetical_order_type"] != "MARKETABLE_LIMIT"
-            or row["hypothetical_fill_status"] != "EXECUTABLE_AT_DECISION"
-        ):
-            block("certificate_identity_mismatch")
-            continue
-        try:
-            q = float(row["q_live"])
-            market = float(row["hypothetical_fill_price"])
-            envelope_q = float(envelope["q"])
-            envelope_market = float(envelope["raw_min_order_vwap"])
-            fee_adjusted_cost = float(envelope["fee_adjusted_min_order_cost"])
-            row_fee_adjusted_cost = float(row["c_fee_adjusted"])
-            min_order_size = float(envelope["min_order_size"])
-            expected_net_edge = float(envelope["expected_net_edge_per_share"])
-            proof_candidate_id = str(envelope["global_proof_candidate_id"])
-            proof_execution_mode = str(
-                envelope["global_proof_execution_mode"]
-            )
-            proof_shares = float(envelope["global_proof_shares"])
-            proof_cost = float(envelope["global_proof_cost_usd"])
-            proof_delta_log_wealth = float(
-                envelope["global_proof_expected_delta_log_wealth"]
-            )
-            proof_ev_usd = float(envelope["global_proof_expected_ev_usd"])
-            decision_time = datetime.fromisoformat(
-                str(row["decision_time"] or "").replace("Z", "+00:00")
-            )
-            created_at = datetime.fromisoformat(
-                str(row["created_at"] or "").replace("Z", "+00:00")
-            )
-        except (KeyError, TypeError, ValueError):
-            block("certificate_value_invalid")
-            continue
-        if decision_time.tzinfo is None:
-            decision_time = decision_time.replace(tzinfo=timezone.utc)
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        if (
-            not all(
-                math.isfinite(value)
-                for value in (
-                    q,
-                    market,
-                    fee_adjusted_cost,
-                    min_order_size,
-                    expected_net_edge,
-                    proof_shares,
-                    proof_cost,
-                    proof_delta_log_wealth,
-                    proof_ev_usd,
-                )
-            )
-            or not 0.0 <= q <= 1.0
-            or not 0.0 < market < 1.0
-            or not 0.0 < fee_adjusted_cost < 1.0
-            or min_order_size <= 0.0
-            or expected_net_edge <= 0.0
-            or envelope.get("global_proof_winner") is not True
-            or not proof_candidate_id
-            or proof_execution_mode != "TAKER_LIMIT"
-            or proof_shares <= 0.0
-            or proof_cost <= 0.0
-            or not 0.0 < proof_cost / proof_shares < 1.0
-            or proof_delta_log_wealth <= 0.0
-            or proof_ev_usd <= 0.0
-            or not math.isclose(
-                q - fee_adjusted_cost,
-                expected_net_edge,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            )
-            or not math.isclose(
-                row_fee_adjusted_cost,
-                fee_adjusted_cost,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            )
-            or not math.isclose(q, envelope_q, rel_tol=0.0, abs_tol=1e-12)
-            or not math.isclose(
-                market, envelope_market, rel_tol=0.0, abs_tol=1e-12
-            )
-            or str(envelope.get("decision_at_utc") or "")
-            != str(row["decision_time"] or "")
-            or decision_time > evaluated_at
-            or created_at > evaluated_at
-        ):
-            block("certificate_value_mismatch")
-            continue
-        certificates.append(
-            {
-                **row,
-                "envelope": envelope,
-                "q": q,
-                "market": market,
-                "fee_adjusted_cost": fee_adjusted_cost,
-                "min_order_size": min_order_size,
-                "expected_net_edge": expected_net_edge,
-                "side": side,
-                "decision_time_parsed": decision_time,
-                "created_at_parsed": created_at,
-            }
-        )
-    if not certificates:
-        status["certificate_ready_count"] = 0
-        status["blocked_reasons"] = blocked
-        return [], status
-    if strategy_key == "forecast_qkernel_entry":
-        probes = [
-            {
-                "trade_id": str(row["regret_event_id"]),
-                "strategy": strategy_key,
-                "entry_q_versions": (
-                    str(row["envelope"]["posterior_identity_hash"]),
-                ),
-            }
-            for row in certificates
-        ]
-        classified, semantics_binding = _bind_qkernel_probability_semantics(
-            probes,
-            forecasts_connection_factory=forecasts_connection_factory,
-        )
-        status["probability_semantics_binding"] = semantics_binding
-        current_revisions = {
-            str(row["trade_id"]): tuple(
-                str(revision)
-                for revision in (row.get("probability_semantics_revisions") or ())
-            )
-            for row in classified
-            if row.get("probability_semantics_ready") is True
-        }
-        current_certificates = []
-        for row in certificates:
-            revisions = current_revisions.get(str(row["regret_event_id"]))
-            certificate_revision = str(
-                row["envelope"].get("probability_semantics_revision") or ""
-            )
-            if revisions != (certificate_revision,):
-                block("probability_semantics_not_current")
-                continue
-            row["probability_semantics_revisions"] = revisions
-            current_certificates.append(row)
-        certificates = current_certificates
-    else:
-        for row in certificates:
-            row["probability_semantics_revisions"] = (
-                str(row["envelope"]["probability_semantics_revision"]),
-            )
-    status["certificate_ready_count"] = len(certificates)
-    if not certificates:
-        status["blocked_reasons"] = blocked
-        return [], status
-
-    condition_ids = sorted(
-        {str(row["condition_id"]) for row in certificates}
-    )
-    settlement_by_condition: dict[str, list[tuple[object, ...]]] = {}
-    forecasts_conn: sqlite3.Connection | None = None
-    try:
-        forecasts_conn = forecasts_connection_factory()
-        forecasts_conn.execute("PRAGMA query_only=ON")
-        forecasts_conn.execute("PRAGMA busy_timeout=250")
-        for start in range(0, len(condition_ids), 500):
-            chunk = condition_ids[start : start + 500]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = forecasts_conn.execute(
-                "SELECT me.condition_id,me.city,me.target_date,"
-                "me.temperature_metric,me.outcome,so.settled_at "
-                "FROM market_events me JOIN settlement_outcomes so "
-                "ON so.city=me.city AND so.target_date=me.target_date "
-                "AND so.temperature_metric=me.temperature_metric "
-                f"WHERE me.condition_id IN ({placeholders}) "
-                "AND me.outcome IN ('YES','NO') "
-                "AND so.authority='VERIFIED'",
-                tuple(chunk),
-            ).fetchall()
-            for outcome_row in rows:
-                settlement_by_condition.setdefault(
-                    str(outcome_row[0]), []
-                ).append(tuple(outcome_row))
-    except (OSError, sqlite3.Error) as exc:
-        status.update(
-            status="settlement_authority_unavailable",
-            blocked_reasons={
-                **blocked,
-                f"settlement_authority_{type(exc).__name__}": len(certificates),
-            },
-        )
-        return [], status
-    finally:
-        if forecasts_conn is not None:
-            forecasts_conn.close()
-
-    output: list[dict[str, object]] = []
-    for row in certificates:
-        matches = settlement_by_condition.get(str(row["condition_id"]), [])
-        exact = [
-            match
-            for match in matches
-            if (
-                str(match[1]) == str(row["city"])
-                and str(match[2]) == str(row["target_date"])
-                and str(match[3]).lower() == str(row["metric"]).lower()
-            )
-        ]
-        if len(exact) != 1:
-            block("settlement_missing_or_ambiguous")
-            continue
-        _condition_id, _city, _date, _metric, venue_outcome, settled_at_raw = exact[0]
-        try:
-            settled_at = datetime.fromisoformat(
-                str(settled_at_raw or "").replace("Z", "+00:00")
-            )
-        except ValueError:
-            block("settlement_time_invalid")
-            continue
-        if settled_at.tzinfo is None:
-            settled_at = settled_at.replace(tzinfo=timezone.utc)
-        if (
-            settled_at <= row["decision_time_parsed"]
-            or settled_at <= row["created_at_parsed"]
-            or settled_at > evaluated_at
-        ):
-            block("settlement_not_strictly_later")
-            continue
-        output.append(
-            {
-                "trade_id": str(row["regret_event_id"]),
-                "strategy": strategy_key,
-                "probability_semantics_ready": True,
-                "probability_semantics_revisions": row[
-                    "probability_semantics_revisions"
-                ],
-                "decision_law_id": "executable_min_order_capital_gain_v2",
-                "global_selection_revision": (
-                    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-                ),
-                "settled_at": settled_at.isoformat(),
-                "entry_market_benchmark_ready": True,
-                "entry_market_benchmark": row["market"],
-                "entry_market_benchmark_family": (
-                    str(row["city"]),
-                    str(row["target_date"]),
-                    str(row["metric"]),
-                ),
-                "p_posterior": row["q"],
-                "outcome": int(str(venue_outcome).upper() == row["side"]),
-                "capital_gain_proof_ready": True,
-                "hypothetical_min_order_size": row["min_order_size"],
-                "hypothetical_capital_committed_usd": (
-                    row["fee_adjusted_cost"] * row["min_order_size"]
-                ),
-                "hypothetical_settlement_payout_usd": (
-                    int(str(venue_outcome).upper() == row["side"])
-                    * row["min_order_size"]
-                ),
-                "hypothetical_realized_pnl_usd": (
-                    (
-                        int(str(venue_outcome).upper() == row["side"])
-                        - row["fee_adjusted_cost"]
-                    )
-                    * row["min_order_size"]
-                ),
-                "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v3"
-                    if strategy_key == "day0_nowcast_entry"
-                    else "no_trade_regret_events_qkernel_shadow_v3"
-                ),
-            }
-        )
-    status.update(
-        status="ok" if output else "awaiting_verified_settlement",
-        settlement_ready_count=len(output),
-        blocked_reasons=blocked,
-    )
-    return output, status
 
 
-def _settled_day0_market_relative_alpha_shadow_rows(
-    conn: sqlite3.Connection,
-    *,
-    window_days: float,
-    as_of: datetime | None = None,
-    forecasts_connection_factory=get_forecasts_connection_read_only,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
-    return _settled_market_relative_alpha_shadow_rows(
-        conn,
-        strategy_key="day0_nowcast_entry",
-        window_days=window_days,
-        as_of=as_of,
-        forecasts_connection_factory=forecasts_connection_factory,
-    )
 
 
-def _settled_qkernel_market_relative_alpha_shadow_rows(
-    conn: sqlite3.Connection,
-    *,
-    window_days: float,
-    as_of: datetime | None = None,
-    forecasts_connection_factory=get_forecasts_connection_read_only,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
-    return _settled_market_relative_alpha_shadow_rows(
-        conn,
-        strategy_key="forecast_qkernel_entry",
-        window_days=window_days,
-        as_of=as_of,
-        forecasts_connection_factory=forecasts_connection_factory,
-    )
 
 
 def _submission_schedule_fee_usd(
@@ -3150,6 +2687,11 @@ def _live_realized_capital_curve(
             if strategy_key == "day0_nowcast_entry"
             else CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        # This raw curve spans every selector that used the current probability
+        # semantics. Exact current-selector binding is performed separately from
+        # immutable entry certificates by _bind_actual_global_capital_evidence.
+        "selection_revision_bound": False,
         "window_days": window_days,
         "evaluated_at": evaluated_at.isoformat(),
         "filled_position_count": 0,
@@ -3157,6 +2699,8 @@ def _live_realized_capital_curve(
         "realized_position_count": 0,
         "excluded_superseded_position_count": 0,
         "blocked_position_count": 0,
+        "settled_entry_projection_reconstruction_count": 0,
+        "terminal_projection_pnl_mismatch_count": 0,
         "capital_committed_usd": 0.0,
         "realized_capital_committed_usd": 0.0,
         "gross_realized_pnl_usd": 0.0,
@@ -3450,12 +2994,29 @@ def _live_realized_capital_curve(
                 abs_tol=0.011,
             )
         )
+        settled_entry_projection_subset = (
+            str(position["phase"]) == "settled"
+            and not bool(position["has_filled_exit"])
+            and math.isfinite(projected_shares)
+            and entry_shares > 0.0
+            and 0.0 < projected_shares < entry_shares
+            and math.isclose(
+                projected_cost,
+                entry_notional * projected_shares / entry_shares,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            )
+        )
         if (
             not valid
             or not entry_times
             or not math.isfinite(projected_cost)
             or projected_cost <= 0.0
-            or not (original_cost_matches or residual_cost_matches)
+            or not (
+                original_cost_matches
+                or residual_cost_matches
+                or settled_entry_projection_subset
+            )
         ):
             block("entry_capital_identity_incomplete")
             continue
@@ -3465,6 +3026,7 @@ def _live_realized_capital_curve(
             entry_fee_bound_usd=entry_fee,
             capital_committed_usd=entry_notional + entry_fee,
             entered_at=min(entry_times),
+            settled_entry_projection_subset=settled_entry_projection_subset,
         )
         current_positions[position_id] = position
 
@@ -3503,6 +3065,7 @@ def _live_realized_capital_curve(
     exit_summaries: dict[str, dict[str, object]] = {
         position_id: {
             "filled_shares": 0.0,
+            "gross_proceeds_usd": 0.0,
             "first_filled_at": None,
             "last_filled_at": None,
         }
@@ -3532,6 +3095,10 @@ def _live_realized_capital_curve(
             filled_at = filled_at.replace(tzinfo=timezone.utc)
         summary = exit_summaries[position_id]
         summary["filled_shares"] = float(summary["filled_shares"]) + filled_shares
+        summary["gross_proceeds_usd"] = (
+            float(summary["gross_proceeds_usd"])
+            + float(raw[1]) * filled_shares
+        )
         first_filled_at = summary["first_filled_at"]
         last_filled_at = summary["last_filled_at"]
         if first_filled_at is None or filled_at < first_filled_at:
@@ -3575,10 +3142,61 @@ def _live_realized_capital_curve(
             continue
         if realized_at.tzinfo is None:
             realized_at = realized_at.replace(tzinfo=timezone.utc)
+        exit_summary = exit_summaries[position_id]
+        entry_filled_shares = float(position["entry_filled_shares"])
+        exit_filled_shares = float(exit_summary["filled_shares"])
+        remaining_after_exit_shares = max(
+            0.0,
+            entry_filled_shares - exit_filled_shares,
+        )
+        terminal_economics_source = "position_event_projection"
+        if position.get("settled_entry_projection_subset") is True:
+            settlement_price: float | None = None
+            if isinstance(payload.get("position_won"), bool):
+                settlement_price = 1.0 if payload["position_won"] else 0.0
+            else:
+                try:
+                    outcome = float(payload["outcome"])
+                except (KeyError, TypeError, ValueError):
+                    outcome = math.nan
+                if outcome in {0.0, 1.0}:
+                    settlement_price = outcome
+            if settlement_price is None:
+                block("settled_entry_projection_payout_incomplete")
+                continue
+            event_pnl = (
+                float(exit_summary["gross_proceeds_usd"])
+                + remaining_after_exit_shares * settlement_price
+                - float(position["entry_notional_usd"])
+            )
+            terminal_economics_source = (
+                "exact_execution_plus_settlement_payout"
+            )
+            status["settled_entry_projection_reconstruction_count"] = (
+                int(status["settled_entry_projection_reconstruction_count"])
+                + 1
+            )
+            if not math.isclose(
+                event_pnl,
+                projected_pnl,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            ):
+                status["terminal_projection_pnl_mismatch_count"] = (
+                    int(status["terminal_projection_pnl_mismatch_count"]) + 1
+                )
         if (
             not math.isfinite(event_pnl)
             or not math.isfinite(projected_pnl)
-            or not math.isclose(event_pnl, projected_pnl, rel_tol=0.0, abs_tol=0.011)
+            or (
+                terminal_economics_source == "position_event_projection"
+                and not math.isclose(
+                    event_pnl,
+                    projected_pnl,
+                    rel_tol=0.0,
+                    abs_tol=0.011,
+                )
+            )
             or realized_at < position["entered_at"]
             or realized_at > evaluated_at
         ):
@@ -3589,13 +3207,6 @@ def _live_realized_capital_curve(
             block("exit_fee_identity_incomplete")
             continue
         fee_bound = float(position["entry_fee_bound_usd"]) + float(exit_fee)
-        exit_summary = exit_summaries[position_id]
-        entry_filled_shares = float(position["entry_filled_shares"])
-        exit_filled_shares = float(exit_summary["filled_shares"])
-        remaining_after_exit_shares = max(
-            0.0,
-            entry_filled_shares - exit_filled_shares,
-        )
         close_type = expected_event
         if phase == "settled" and exit_filled_shares > 0.0:
             close_type = "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
@@ -3607,6 +3218,7 @@ def _live_realized_capital_curve(
                 "metric": position["metric"],
                 "close_type": close_type,
                 "terminal_event_type": expected_event,
+                "terminal_economics_source": terminal_economics_source,
                 "entry_filled_shares": entry_filled_shares,
                 "exit_filled_shares": exit_filled_shares,
                 "exit_fill_fraction": (
@@ -4560,14 +4172,15 @@ def _revision_probation_gate_reason(
 ) -> tuple[str | None, tuple[str, ...]]:
     """Bound an unproven probability revision by realized capital truth.
 
-    SCOPE: only the exact current strategy probability revision. DRAIN: existing
-    monitor/exit/settlement lanes close realized positions while the no-money
-    counterfactual lane keeps accumulating exact-selector evidence. RESET:
-    validated same-revision capital evidence removes the bound; before
-    validation, entry stays open unless realized truth is degraded or a
+    SCOPE: only the exact current strategy probability revision under the exact
+    current global selection revision. DRAIN: existing monitor/exit/settlement
+    lanes close realized positions while the no-money counterfactual lane keeps
+    accumulating exact-selector evidence. RESET: validated same-revision
+    capital evidence removes the bound; before validation, entry stays open
+    unless selection-revision-bound realized truth is degraded or a
     minimum-sample cohort (>= _PROBATION_MIN_REALIZED_SAMPLE realized closes)
-    is net-nonpositive. A new probability revision starts its own empty
-    probation cohort.
+    is net-nonpositive. A new probability or global selection revision starts
+    its own empty probation cohort.
 
     2026-08-28 operator directive (continuous decision throughput): the former
     in-flight arm counted every pre-existing open position as "the one
@@ -4592,6 +4205,22 @@ def _revision_probation_gate_reason(
     if not curve_revision or curve_revision not in unproven_revisions:
         return None, ()
     revision = curve_revision
+
+    # A probability revision can span several materially different selection
+    # laws.  Old selector losses and an unbound open-position accounting dispute
+    # are observability facts, but neither is evidence about the current global
+    # expected-growth selector.  SCOPE: only a curve explicitly bound to the
+    # current selection revision may gate this revision. DRAIN: actual fills and
+    # proof receipts bind on their immutable entry certificates. RESET: the
+    # first exact-bound curve re-enables ordinary degraded/nonpositive probation
+    # checks below. Explicit current-law alpha rejection remains independently
+    # enforced by _market_relative_alpha_rejection_gate_reason.
+    if (
+        capital_curve.get("selection_revision_bound") is not True
+        or str(capital_curve.get("global_selection_revision") or "").strip()
+        != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ):
+        return None, ()
 
     status = str(capital_curve.get("status") or "").strip()
     try:
@@ -5810,14 +5439,6 @@ def _tick_once() -> RiskLevel:
             thresholds.get("market_relative_alpha_window_days", 7.0)
         )
         market_relative_alpha_as_of = datetime.now(timezone.utc)
-        (
-            qkernel_market_relative_alpha_shadow_rows,
-            qkernel_market_relative_alpha_shadow_status,
-        ) = _settled_qkernel_market_relative_alpha_shadow_rows(
-            zeus_conn,
-            window_days=market_relative_alpha_window_days,
-            as_of=market_relative_alpha_as_of,
-        )
         qkernel_live_realized_capital_curve = (
             _qkernel_live_realized_capital_curve(
                 zeus_conn,
@@ -5835,16 +5456,14 @@ def _tick_once() -> RiskLevel:
             capital_curve=qkernel_live_realized_capital_curve,
         )
         market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
-            qkernel_actual_global_capital_rows
-            + qkernel_market_relative_alpha_shadow_rows,
+            qkernel_actual_global_capital_rows,
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
         qkernel_market_relative_alpha_gate_evidence = (
             _market_relative_alpha_evidence(
-                qkernel_actual_global_capital_rows
-                + qkernel_market_relative_alpha_shadow_rows,
+                qkernel_actual_global_capital_rows,
                 strategy_key="forecast_qkernel_entry",
                 rejection_evalue=market_relative_alpha_evalue,
                 window_days=market_relative_alpha_window_days,
@@ -5883,14 +5502,6 @@ def _tick_once() -> RiskLevel:
         qkernel_revision_probation_gate_required = (
             qkernel_revision_probation_gate_reason is not None
         )
-        (
-            day0_market_relative_alpha_shadow_rows,
-            day0_market_relative_alpha_shadow_status,
-        ) = _settled_day0_market_relative_alpha_shadow_rows(
-            zeus_conn,
-            window_days=market_relative_alpha_window_days,
-            as_of=market_relative_alpha_as_of,
-        )
         day0_live_realized_capital_curve = _day0_live_realized_capital_curve(
             zeus_conn,
             window_days=market_relative_alpha_window_days,
@@ -5906,8 +5517,7 @@ def _tick_once() -> RiskLevel:
             capital_curve=day0_live_realized_capital_curve,
         )
         day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
-            day0_actual_global_capital_rows
-            + day0_market_relative_alpha_shadow_rows,
+            day0_actual_global_capital_rows,
             strategy_key="day0_nowcast_entry",
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
@@ -6643,9 +6253,6 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_admission_role": (
                     "revision_scoped_rejection_gate"
                 ),
-                "qkernel_market_relative_alpha_shadow": (
-                    qkernel_market_relative_alpha_shadow_status
-                ),
                 "qkernel_actual_global_capital_binding": (
                     qkernel_actual_global_capital_binding
                 ),
@@ -6672,9 +6279,6 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
-                ),
-                "day0_market_relative_alpha_shadow": (
-                    day0_market_relative_alpha_shadow_status
                 ),
                 "day0_actual_global_capital_binding": (
                     day0_actual_global_capital_binding
@@ -6902,6 +6506,8 @@ def _tick_once() -> RiskLevel:
             "portfolio_consistency": portfolio_consistency_level,
             "unresolved_exposure": unresolved_exposure_level,
             "probability_semantics": probability_semantics_level,
+            "storage_capacity": storage_capacity_level,
+            "host_power": host_power_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -6932,6 +6538,19 @@ def _tick_once() -> RiskLevel:
                 f"superseded={probability_semantics_binding.get('superseded_count')} "
                 f"missing={probability_semantics_binding.get('missing_count')} "
                 f"mixed={probability_semantics_binding.get('mixed_count')}"
+            ),
+            "storage_capacity": (
+                f"status={storage_capacity.get('status')} "
+                f"reason={storage_capacity.get('reason')} "
+                f"free_bytes={storage_capacity.get('free_bytes')} "
+                f"free_ratio={storage_capacity.get('free_ratio')}"
+            ),
+            "host_power": (
+                f"status={host_power.get('status')} "
+                f"reason={host_power.get('reason')} "
+                f"power_source={host_power.get('power_source')} "
+                f"battery_percent={host_power.get('battery_percent')} "
+                f"remaining_minutes={host_power.get('remaining_minutes')}"
             ),
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)

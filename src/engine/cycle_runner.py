@@ -54,6 +54,7 @@ from src.state.canonical_write import commit_then_export
 from src.state.db import (
     _zeus_trade_db_path,
     connect_or_degrade,
+    get_trade_connection_read_only,
     record_token_suppression,
     ZEUS_WORLD_DB_PATH,
 )
@@ -141,6 +142,26 @@ def get_connection(*, deadline_monotonic: float | None = None):
         conn.close()
         return None
     return conn
+
+
+def get_held_monitor_bootstrap_connection(
+    *,
+    deadline_monotonic: float,
+) -> sqlite3.Connection | None:
+    """Open the held-monitor bootstrap read unit on TRADE truth only.
+
+    Bootstrap hydrates open held exposure and allocator lots before the monitor
+    establishes its later cross-DB/write authority.  It must therefore never
+    inherit ``get_connection``'s WORLD/FORECASTS ATTACH work.
+    """
+    try:
+        return get_trade_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= float(deadline_monotonic):
+            return None
+        raise exc
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (

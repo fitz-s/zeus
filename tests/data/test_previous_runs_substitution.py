@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-24
+# Last reused or audited: 2026-09-01
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -912,6 +912,88 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     assert not (request_dir / nonheld_seed.name).exists()
 
 
+def test_day0_enqueue_owner_isolated_by_target_cycle(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    from src.data.replacement_cycle_advance_trigger import _day0_conditioning_identity
+
+    forecast_db = tmp_path / "forecasts.db"
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle_18_seed = seed_dir / "Jinan.2026-09-02.high.18z.json"
+    cycle_12_seed = seed_dir / "Jinan.2026-09-02.high.12z-day0.json"
+    observation = {
+        "source": "wu_icao_history",
+        "observation_time": "2026-09-02T01:00:00+00:00",
+        "observed_extreme_c": 22.0,
+        "unit": "C",
+    }
+    conditioning_identity = _day0_conditioning_identity(**observation)
+    assert conditioning_identity is not None
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            day0_conditioning_identity_json TEXT
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO cycle_advance_enqueues (
+            city, target_date, metric, target_cycle_time, seed_file,
+            day0_conditioning_identity_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "Jinan",
+                "2026-09-02",
+                "high",
+                "2026-09-01T18:00:00+00:00",
+                str(cycle_18_seed),
+                conditioning_identity,
+            ),
+            (
+                "Jinan",
+                "2026-09-02",
+                "high",
+                "2026-09-01T12:00:00+00:00",
+                str(cycle_12_seed),
+                conditioning_identity,
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    seed = {
+        "city": "Jinan",
+        "target_date": "2026-09-02",
+        "temperature_metric": "high",
+        "cycle_advance_enqueue_owner": True,
+        "day0_observed_extreme_source": observation["source"],
+        "day0_observed_extreme_observation_time": observation["observation_time"],
+        "day0_observed_extreme_c": observation["observed_extreme_c"],
+        "day0_observed_extreme_unit": observation["unit"],
+    }
+
+    ownership = queue_mod._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=forecast_db,
+        seed_file=cycle_18_seed,
+        seed=seed,
+    )
+
+    assert ownership.ownership is queue_mod._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is not None
+    assert ownership.witness["target_cycle_time"] == "2026-09-01T18:00:00+00:00"
+
+
 def test_cycle_priority_reads_only_queued_forecast_scopes(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
@@ -1076,14 +1158,57 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
         encoding="utf-8",
     )
 
-    priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, tokyo))
+    priority_names: set[str] = set()
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (paris, tokyo),
+        priority_names=priority_names,
+    )
 
     assert priority[tokyo.name][0] == -2
     assert priority[paris.name][0] == 0
+    assert priority_names == {tokyo.name}
     assert priority[tokyo.name] < priority[paris.name]
     sort_key_tokyo = queue_mod._cycle_advance_file_sort_key(tokyo, priority)
     sort_key_paris = queue_mod._cycle_advance_file_sort_key(paris, priority)
     assert sort_key_tokyo < sort_key_paris
+
+
+def test_never_priced_enqueued_seed_families_reads_canonical_scope(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            seed_file TEXT
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            runtime_layer TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        );
+        INSERT INTO cycle_advance_enqueues VALUES
+            ('Hong Kong', '2099-08-31', 'HIGH', 'hong-kong.json'),
+            ('Istanbul', '2099-08-31', 'low', 'istanbul.json');
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, 'live', 'Istanbul', '2099-08-31', 'low')",
+        (queue_mod.SOURCE_ID,),
+    )
+    conn.commit()
+    conn.close()
+
+    assert queue_mod._never_priced_enqueued_seed_families(forecast_db) == frozenset(
+        {("Hong Kong", "2099-08-31", "high")}
+    )
 
 
 def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path) -> None:
@@ -1875,6 +2000,110 @@ def test_request_drain_skips_cycle_below_current_ensemble_hwm_before_subprocess(
         "request_source_cycle_time": "2026-08-21T00:00:00+00:00",
         "current_cycle_time": "2026-08-21T12:00:00+00:00",
     }
+
+
+def test_request_drain_skips_stale_baseline_below_current_ensemble_hwm(
+    tmp_path, monkeypatch
+) -> None:
+    """A current carrier cannot conceal an older superseded ENS shape."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT,
+            runtime_layer TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, source_id, city, target_date,
+                temperature_metric, computed_at
+            );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT, status TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Tel Aviv",
+            "2026-08-31",
+            "high",
+            "2026-08-29T06:00:00+00:00",
+            "2026-08-29T13:44:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO source_run VALUES (?, ?, 'SUCCESS')",
+        ("baseline:00z", "2026-08-29T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    from src.data import replacement_input_hwm
+
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: datetime(
+            2026, 8, 29, 6, tzinfo=timezone.utc
+        ),
+    )
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Tel Aviv",
+        "target_date": "2026-08-31",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-29T06:00:00+00:00",
+        "computed_at": "2026-08-29T12:17:27+00:00",
+        "baseline_source_run_id": "baseline:00z",
+        "openmeteo_source_run_id": "anchor:06z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    (request_dir / "stale-baseline.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert spawned == []
+    receipt = next((tmp_path / "superseded_latest").glob("*.json"))
+    evidence = json.loads(receipt.read_text(encoding="utf-8"))
+    assert evidence["reason_codes"] == [
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+    ]
+    assert evidence["result_evidence"]["regression_basis"] == (
+        "baseline_input_hwm"
+    )
 
 
 def test_request_drain_defers_cycle_ahead_of_current_ensemble_hwm_before_subprocess(
@@ -2968,6 +3197,60 @@ def test_materialization_queue_releases_lock_before_family_compute(
     assert not tuple(request_dir.glob("*.json"))
 
 
+def test_seed_prepare_cannot_hold_global_queue_lock_past_claim_deadline(
+    tmp_path, monkeypatch
+) -> None:
+    import time
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    monkeypatch.setattr(queue_mod, "_MATERIALIZATION_CLAIM_DEADLINE_SECONDS", 0.01)
+
+    def slow_claim(**_kwargs):
+        time.sleep(0.02)
+        return queue_mod._MaterializationQueueClaim(
+            request_path=request_dir,
+            batch_path=None,
+            processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed",
+            claimed_count=0,
+            skipped_count=0,
+            inflight_deferred_count=0,
+            timeout_retry_deferred_count=0,
+            processed_files=(),
+            failed_files=(),
+            seed_processed_files=(),
+            seed_failed_files=(),
+            seed_reasons=(),
+            discovery_report=None,
+        )
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_claim_replacement_forecast_live_materialization_queue_locked",
+        slow_claim,
+    )
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=tmp_path / "seeds",
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        seed_limit=1,
+        discover=False,
+        limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
+    )
+
+    assert report.status == "DEFERRED"
+    assert report.reason_codes == (queue_mod._CLAIM_READ_DEFERRED_REASON,)
+    with queue_mod._queue_lock(tmp_path / ".materialization_queue.lock") as acquired:
+        assert acquired
+
+
 def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path, monkeypatch):
     """Current held identity claims without waiting behind discovery/retry flock work."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -3008,7 +3291,7 @@ def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path,
             request_dir=request_dir, processed_dir=tmp_path / "processed",
             failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
             seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-            seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+            seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
             limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY, runner=_runner,
         )
 
@@ -3104,6 +3387,941 @@ def test_priority_empty_request_queue_bridges_day0_seed(tmp_path, monkeypatch):
     assert not tuple(request_dir.glob("*.json"))
 
 
+def test_priority_seed_bridge_drains_ready_day0_before_timeout_retry(
+    tmp_path, monkeypatch
+):
+    """A same-family Day0 successor outranks retry debt without bypassing HWM."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    family = ("Beijing", "2026-06-12", "high")
+    day0 = {
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-11T14:50:00+00:00",
+        "day0_observed_extreme_c": 30.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    retry_path = request_dir / "Held.timeout-retry-1-1.json"
+    retry_path.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "computed_at": "2026-06-11T14:49:00+00:00",
+                "source_cycle_time": "2026-06-11T06:00:00+00:00",
+                "day0_observed_extreme_observation_time": "2026-06-11T14:45:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ready_seed = seed_dir / "00-ready.json"
+    ready_seed.write_text(
+        json.dumps({**_minimal_seed(upgrade=False), **day0}), encoding="utf-8"
+    )
+    ahead_seed = seed_dir / "99-ahead.json"
+    ahead_seed.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": "Ahead City",
+                "source_cycle_time": "2026-06-11T18:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_scopes",
+        lambda families, **_kwargs: frozenset({family}) & families,
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset({family}),
+    )
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (retry_path, ready_seed),
+    )
+    assert priority[ready_seed.name][0] == -11.0
+    assert priority[retry_path.name][0] == -10.0
+    monkeypatch.setattr(
+        queue_mod,
+        "_seed_source_cycle_boundary",
+        lambda *, seed, **_kwargs: (
+            ("awaiting_current_ensemble_hwm", "2026-06-11T12:00:00+00:00")
+            if seed["city"] == "Ahead City"
+            else None
+        ),
+    )
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_validate_request_payload",
+        lambda _path: (True, "", ""),
+    )
+    started: list[str] = []
+    inflight_sizes: list[int] = []
+
+    def runner(argv):
+        input_path = Path(argv[argv.index("--input-json") + 1])
+        started.append(input_path.name)
+        inflight_sizes.append(
+            len(
+                tuple(
+                    path
+                    for path in (tmp_path / "inflight").glob("*/*.json")
+                    if path.name != queue_mod._CLAIM_METADATA_NAME
+                )
+            )
+        )
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"committed":true,"posterior_id":42,'
+                '"reactor_wake_published":true}\n'
+            ),
+            stderr="",
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=1,
+        discover=False,
+        limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        runner=runner,
+    )
+
+    assert report.status == "PROCESSED"
+    assert started == [ready_seed.name]
+    assert inflight_sizes == [1]
+    assert retry_path.exists()
+    assert ahead_seed.exists()
+
+
+def test_current_probability_debt_promotes_any_exact_day0_seed_trigger(
+    tmp_path, monkeypatch
+):
+    """A fresh-cycle held seed must not starve behind repeated sibling updates."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    low_family = ("Hong Kong", "2026-08-28", "low")
+    high_family = ("Hong Kong", "2026-08-29", "high")
+    day0 = {
+        "day0_observed_extreme_source": "hko_hourly_accumulator",
+        "day0_observed_extreme_observation_time": "2026-08-28T15:50:00+00:00",
+        "day0_observed_extreme_c": 28.6,
+        "day0_observed_extreme_unit": "C",
+    }
+    low = tmp_path / "Hong_Kong.2026-08-28.low.enqueue.json"
+    low.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": low_family[0],
+                "target_date": low_family[1],
+                "temperature_metric": low_family[2],
+                "upgrade_trigger": "newer_cycle_ingested",
+                "computed_at": "2026-08-28T16:04:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    high = tmp_path / "Hong_Kong.2026-08-29.high.enqueue.json"
+    high.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": high_family[0],
+                "target_date": high_family[1],
+                "temperature_metric": high_family[2],
+                "upgrade_trigger": "day0_observation_advanced",
+                "computed_at": "2026-08-28T17:20:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_low = tmp_path / "Hong_Kong.2026-08-28.low.stale.json"
+    stale_low.write_text(
+        json.dumps(
+            {
+                **_minimal_seed(upgrade=False),
+                **day0,
+                "city": low_family[0],
+                "target_date": low_family[1],
+                "temperature_metric": low_family[2],
+                "upgrade_trigger": "instrument_set_expansion",
+                "day0_observed_extreme_observation_time": (
+                    "2026-08-28T13:20:00+00:00"
+                ),
+                "computed_at": "2026-08-28T13:32:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_scopes",
+        lambda families, **_kwargs: frozenset({low_family, high_family}) & families,
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset({low_family}),
+    )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (high, stale_low, low),
+    )
+    ranked = sorted(
+        (high, stale_low, low),
+        key=lambda path: queue_mod._cycle_advance_file_sort_key(path, priority),
+    )
+
+    assert priority[low.name][0] == -11.0
+    assert priority[stale_low.name][0] == -11.0
+    assert priority[high.name][0] == -4.0
+    assert ranked[0] == low
+
+
+def test_current_money_seed_window_starts_with_newest_seed_per_family(tmp_path):
+    """One noisy held family cannot hide another held family's current seed."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-28", "low"),
+            ("Istanbul", "2026-08-29", "high"),
+            ("Tel Aviv", "2026-08-29", "low"),
+        }
+    )
+    names = (
+        "Hong_Kong.2026-08-28.low.20260828T120000Z.json",
+        "Zurich.2026-08-29.high.20260828T170000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T130000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T140000Z.json",
+        "Istanbul.2026-08-29.high.20260828T120000Z.json",
+        "Istanbul.2026-08-29.high.20260828T150000Z.json",
+        "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
+    )
+    paths = tuple(tmp_path / name for name in names)
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(
+        paths, families
+    )
+
+    assert [path.name for path in prioritized[:3]] == [
+        "Hong_Kong.2026-08-28.low.20260828T140000Z.json",
+        "Istanbul.2026-08-29.high.20260828T150000Z.json",
+        "Tel_Aviv.2026-08-29.low.20260828T160000Z.json",
+    ]
+    assert set(prioritized) == set(paths)
+    assert [path.name for path in prioritized[3:]] == [
+        "Hong_Kong.2026-08-28.low.20260828T120000Z.json",
+        "Zurich.2026-08-29.high.20260828T170000Z.json",
+        "Hong_Kong.2026-08-28.low.20260828T130000Z.json",
+        "Istanbul.2026-08-29.high.20260828T120000Z.json",
+    ]
+
+
+def test_current_money_seed_window_keeps_one_witness_per_source_cycle(tmp_path):
+    """An ENS-waiting carrier cannot hide the prior executable carrier."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    family = ("Hong Kong", "2026-08-31", "high")
+    seed_paths = tuple(
+        tmp_path / name
+        for name in (
+            "Hong_Kong.2026-08-31.high.20260829T130000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T140000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T140100Z.json",
+        )
+    )
+    for path, cycle in zip(
+        seed_paths,
+        (
+            "2026-08-29T06:00:00+00:00",
+            "2026-08-29T12:00:00+00:00",
+            "2026-08-29T12:00:00+00:00",
+        ),
+        strict=True,
+    ):
+        path.write_text(
+            json.dumps({"source_cycle_time": cycle}), encoding="utf-8"
+        )
+    ordinary = tmp_path / "Istanbul.2026-08-31.high.20260829T135000Z.json"
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(
+        (*seed_paths, ordinary), frozenset({family})
+    )
+
+    assert prioritized[:2] == (seed_paths[2], seed_paths[0])
+    assert prioritized[2:] == (seed_paths[1], ordinary)
+
+
+def test_probability_debt_precedes_broader_priority_scopes_before_window(tmp_path):
+    """A broad global scope cannot push a stale held q outside the raw bound."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    debt_family = ("Istanbul", "2026-08-30", "high")
+    held_family = ("Moscow", "2026-08-30", "high")
+    global_family = ("Taipei", "2026-09-01", "high")
+    never_family = ("Zurich", "2026-09-01", "low")
+    paths = tuple(
+        tmp_path / name
+        for name in (
+            "Zurich.2026-09-01.low.20260830T050000Z.json",
+            "Taipei.2026-09-01.high.20260830T050000Z.json",
+            "Moscow.2026-08-30.high.20260830T050000Z.json",
+            "Istanbul.2026-08-30.high.20260830T050000Z.json",
+        )
+    )
+    for path in paths:
+        path.write_text(
+            json.dumps({"source_cycle_time": "2026-08-29T18:00:00+00:00"}),
+            encoding="utf-8",
+        )
+
+    prioritized = queue_mod._prioritize_seed_files_by_capital_tier(
+        paths,
+        never_priced_scope=frozenset({never_family}),
+        current_global_scope=frozenset({global_family}),
+        current_money_risk=frozenset({held_family, debt_family}),
+        current_probability_debt=frozenset({debt_family}),
+    )
+    window = queue_mod._bounded_seed_inspection_window(
+        prioritized,
+        current_priority_scope=frozenset(
+            {debt_family, held_family, global_family, never_family}
+        ),
+        inspection_cap=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert prioritized == (paths[3], paths[2], paths[1], paths[0])
+    assert paths[3] in window
+
+
+def test_priority_raw_window_reserves_global_only_family_before_bound(tmp_path):
+    """Held volume and an ENS-waiting carrier cannot hide global ready work."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_families = frozenset(
+        ("Tel Aviv", "2026-08-30", metric) for metric in ("high", "low")
+    )
+    global_family = ("Hong Kong", "2026-08-31", "high")
+    held = tuple(
+        tmp_path / f"Tel_Aviv.2026-08-30.{metric}.{stamp}.json"
+        for metric in ("high", "low")
+        for stamp in (
+            "20260830T010000Z",
+            "20260830T020000Z",
+            "20260830T030000Z",
+        )
+    )
+    global_waiting = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260830T010000Z.json"
+    )
+    global_ready = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260829T230000Z.json"
+    )
+    global_duplicate = (
+        tmp_path / "Hong_Kong.2026-08-31.high.20260829T220000Z.json"
+    )
+    global_waiting.write_text(
+        json.dumps({"source_cycle_time": "2026-08-30T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    global_ready.write_text(
+        json.dumps({"source_cycle_time": "2026-08-29T18:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    global_duplicate.write_text(
+        json.dumps({"source_cycle_time": "2026-08-30T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    interleaved = queue_mod._interleave_current_priority_seed_files_by_name(
+        (*held, global_waiting, global_duplicate, global_ready),
+        current_money_risk=held_families,
+        current_global_scope=frozenset({*held_families, global_family}),
+        limit=2,
+    )
+    window = queue_mod._bounded_seed_inspection_window(
+        interleaved,
+        current_priority_scope=frozenset({*held_families, global_family}),
+        inspection_cap=3,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert window == (held[0], global_waiting, global_ready)
+
+
+def test_day0_seed_older_than_current_posterior_observation_is_regression(
+    tmp_path, monkeypatch
+):
+    """An old same-cycle transition cannot overwrite a newer Day0 frontier."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            runtime_layer TEXT,
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT,
+            provenance_json TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "live",
+            queue_mod.SOURCE_ID,
+            "Istanbul",
+            "2026-08-30",
+            "high",
+            "2026-08-29T18:00:00+00:00",
+            "2026-08-30T06:25:12+00:00",
+            json.dumps(
+                {
+                    "day0_provisional_observation": {
+                        "active": True,
+                        "metric": "high",
+                        "source": "aviationweather_metar",
+                        "observation_time": "2026-08-30T06:20:00+00:00",
+                        "observed_extreme_c": 24.0,
+                        "unit": "C",
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: None,
+    )
+
+    boundary = queue_mod._seed_source_cycle_boundary(
+        forecast_db=db_path,
+        seed={
+            "city": "Istanbul",
+            "target_date": "2026-08-30",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-29T18:00:00+00:00",
+            "computed_at": "2026-08-30T06:21:25+00:00",
+            "baseline_source_run_id": "",
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": (
+                "2026-08-30T05:50:00+00:00"
+            ),
+            "day0_observed_extreme_c": 23.0,
+            "day0_observed_extreme_unit": "C",
+        },
+    )
+
+    assert boundary == (
+        "current_day0_observation",
+        "2026-08-30T06:20:00+00:00",
+    )
+
+
+def test_current_money_seed_window_follows_rotated_cursor_order(tmp_path):
+    """A bounded priority window advances with the durable seed cursor."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-31", "high"),
+            ("Istanbul", "2026-08-31", "high"),
+            ("Tel Aviv", "2026-08-31", "high"),
+        }
+    )
+    paths = tuple(
+        tmp_path / name
+        for name in (
+            "Tel_Aviv.2026-08-31.high.20260829T120000Z.json",
+            "Hong_Kong.2026-08-31.high.20260829T120000Z.json",
+            "Istanbul.2026-08-31.high.20260829T120000Z.json",
+        )
+    )
+
+    prioritized = queue_mod._prioritize_current_money_risk_seed_files(paths, families)
+
+    assert prioritized == paths
+
+
+def test_background_seed_window_starts_outside_current_priority_scope(tmp_path):
+    """A broad seed cannot wait behind priority seeds the background lane cannot own."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    families = frozenset(
+        {
+            ("Hong Kong", "2026-08-31", "high"),
+            ("Istanbul", "2026-08-31", "high"),
+        }
+    )
+    held_a = tmp_path / "Hong_Kong.2026-08-31.high.a.json"
+    held_b = tmp_path / "Istanbul.2026-08-31.high.b.json"
+    broad = tmp_path / "Zurich.2026-09-02.high.c.json"
+
+    ordered = queue_mod._deprioritize_current_money_risk_seed_files(
+        (held_a, held_b, broad), families
+    )
+
+    assert ordered == (broad, held_a, held_b)
+
+
+def test_priority_seed_waiters_yield_ready_current_tail_on_next_poll(
+    tmp_path, monkeypatch
+):
+    """ENS-waiting current families cannot hide actionable current q."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+    waiting_families = frozenset(
+        (f"Current {index}", "2026-08-31", "high") for index in range(8)
+    )
+    ready_family = ("Ready Tail", "2026-08-29", "low")
+    current_families = waiting_families | {ready_family}
+
+    def write_seed(path: Path, family: tuple[str, str, str]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    **_minimal_seed(upgrade=False),
+                    "city": family[0],
+                    "target_date": family[1],
+                    "temperature_metric": family[2],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    for family in waiting_families:
+        write_seed(
+            seed_dir
+            / (
+                f"{family[0].replace(' ', '_')}.{family[1]}.{family[2]}.json"
+            ),
+            family,
+        )
+    ready = seed_dir / "Ready_Tail.2026-08-29.low.json"
+    write_seed(ready, ready_family)
+
+    monkeypatch.setattr(
+        queue_mod, "_current_money_risk_families", lambda: current_families
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_global_auction_scope_families",
+        lambda _paths: current_families,
+    )
+    monkeypatch.setattr(
+        queue_mod, "_never_priced_enqueued_seed_families", lambda _db: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_priority_map_with_names",
+        lambda _db, paths, *_args, **_kwargs: (
+            {path.name: (0, path.name) for path in paths},
+            {path.name for path in paths},
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_seed_source_cycle_boundary",
+        lambda *, seed, **_kwargs: (
+            None
+            if seed["city"] == ready_family[0]
+            else ("awaiting_current_ensemble_hwm", "2026-08-29T18:00:00+00:00")
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not processed
+    assert not failed
+    assert ready.exists()
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" in reasons
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert (request_dir / ready.name).is_file()
+    assert not ready.exists()
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" in reasons
+
+
+def test_priority_seed_inspection_stays_bounded_by_actionable_tranche(
+    tmp_path, monkeypatch
+):
+    """Thirty current families do not expand one priority lock hold to thirty reads."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+    families = frozenset(
+        (f"City {index:02d}", "2026-08-31", "high") for index in range(30)
+    )
+    for city, target_date, metric in families:
+        name = city.replace(" ", "_")
+        (seed_dir / f"{name}.{target_date}.{metric}.json").write_text(
+            "{}", encoding="utf-8"
+        )
+
+    observed: list[tuple[Path, ...]] = []
+
+    def _capture(paths, **_kwargs):
+        snapshot = tuple(paths)
+        observed.append(snapshot)
+        return snapshot, (), {path: {} for path in snapshot}, {}
+
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: families)
+    monkeypatch.setattr(
+        queue_mod, "_current_global_auction_scope_families", lambda _paths: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod, "_never_priced_enqueued_seed_families", lambda _db: frozenset()
+    )
+    monkeypatch.setattr(
+        queue_mod, "_coalesce_superseded_materialization_seeds", _capture
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_priority_map_with_names",
+        lambda _db, paths, *_args, **_kwargs: (
+            {path.name: (0, path.name) for path in paths},
+            {path.name for path in paths},
+        ),
+    )
+
+    queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert len(observed) == 1
+    assert len(observed[0]) == queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS
+
+
+def test_complete_global_receipt_scope_maps_exact_queued_families(tmp_path, monkeypatch):
+    """A schema-22 full cut maps family ids back to current queue identities."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    from src.events.candidate_binding import weather_family_id
+
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)"
+    )
+    families = {
+        ("Istanbul", "2026-08-29", "high"),
+        ("Tel Aviv", "2026-08-30", "low"),
+    }
+    family_ids = {
+        weather_family_id(city=city, target_date=target_date, metric=metric): family
+        for family in families
+        for city, target_date, metric in (family,)
+    }
+    eligible_id, ineligible_id = tuple(family_ids)
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1, ?, ?)",
+        (
+            "global_single_order_auction_delta",
+            json.dumps(
+                {
+                    "summary": {
+                        "schema_version": 22,
+                        "scope_family_coverage_complete": True,
+                        "full_scope_family_count": 2,
+                        "probability_ineligible_by_family": {
+                            ineligible_id: "CURRENT_Q_UNAVAILABLE"
+                        },
+                        "proof_counterfactual": {
+                            "probability_manifest": [[eligible_id, "witness"]]
+                        },
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(queue_mod, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    paths = (
+        tmp_path / "Istanbul.2026-08-29.high.current.json",
+        tmp_path / "Tel_Aviv.2026-08-30.low.current.json",
+        tmp_path / "Moscow.2026-08-30.high.background.json",
+    )
+
+    assert queue_mod._current_global_auction_scope_families(
+        paths, trade_db=trade_db
+    ) == frozenset(families)
+
+
+def test_global_scope_queue_identity_enters_priority_below_held(monkeypatch, tmp_path):
+    """The latest global cut cannot wait in background behind unrelated recovery."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_family = ("Istanbul", "2026-08-29", "high")
+    global_family = ("Tel Aviv", "2026-08-30", "low")
+    held = tmp_path / "Istanbul.2026-08-29.high.current.json"
+    global_path = tmp_path / "Tel_Aviv.2026-08-30.low.current.json"
+    background = tmp_path / "Moscow.2026-08-30.high.background.json"
+    common = {
+        "source_cycle_time": "2026-08-28T12:00:00+00:00",
+        "computed_at": "2026-08-28T20:00:00+00:00",
+    }
+    payloads = {
+        held: {
+            **common,
+            "city": held_family[0],
+            "target_date": held_family[1],
+            "temperature_metric": held_family[2],
+        },
+        global_path: {
+            **common,
+            "city": global_family[0],
+            "target_date": global_family[1],
+            "temperature_metric": global_family[2],
+        },
+        background: {
+            **common,
+            "city": "Moscow",
+            "target_date": "2026-08-30",
+            "temperature_metric": "high",
+        },
+    }
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: frozenset(),
+    )
+    priority_names: set[str] = set()
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        tuple(payloads),
+        payloads,
+        current_money_risk=frozenset({held_family}),
+        current_global_scope=frozenset({global_family}),
+        priority_names=priority_names,
+    )
+
+    assert priority_names == {held.name, global_path.name}
+    assert priority[held.name][0] < priority[global_path.name][0]
+    assert background.name not in priority_names
+
+
+@pytest.mark.parametrize("unheld_owner", ("global", "never_priced"))
+def test_priority_seed_tranche_preserves_held_and_unheld_truth(
+    tmp_path, monkeypatch, unheld_owner
+):
+    """Two-slot priority work cannot orphan global or first-price q truth."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held_family = ("Istanbul", "2026-08-29", "high")
+    held_second_family = ("Moscow", "2026-08-29", "high")
+    global_family = ("Jinan", "2026-08-29", "low")
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+
+    def write_seed(path: Path, family: tuple[str, str, str]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    **_minimal_seed(upgrade=False),
+                    "city": family[0],
+                    "target_date": family[1],
+                    "temperature_metric": family[2],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    held_first = seed_dir / "Istanbul.2026-08-29.high.current.json"
+    held_second = seed_dir / "Moscow.2026-08-29.high.current.json"
+    global_path = seed_dir / "Jinan.2026-08-29.low.current.json"
+    write_seed(held_first, held_family)
+    write_seed(held_second, held_second_family)
+    write_seed(global_path, global_family)
+    held = frozenset({held_family, held_second_family})
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: held)
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_global_auction_scope_families",
+        lambda _paths: (
+            held | frozenset({global_family})
+            if unheld_owner == "global"
+            else held
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_never_priced_enqueued_seed_families",
+        lambda _db: (
+            frozenset({global_family})
+            if unheld_owner == "never_priced"
+            else frozenset()
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod, "_current_probability_debt_families", lambda **_kwargs: frozenset()
+    )
+    monkeypatch.setattr(queue_mod, "_seed_source_cycle_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: queue_mod._Day0EnqueueOwnershipCheck(
+            queue_mod._Day0EnqueueOwnership.CURRENT,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda seed, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, "current-inputs", False),
+    )
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=2,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+    assert not failed
+    assert len(processed) == 2
+    assert {path.name for path in request_dir.glob("*.json")} == {
+        held_first.name,
+        global_path.name,
+    }
+    assert held_second.exists()
+
+
 def test_priority_selected_identity_ignores_unrelated_active_metadata_owner(tmp_path, monkeypatch):
     """A limit-one held A claim is not vetoed by active B, even when B's body is bad."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -3197,7 +4415,7 @@ def test_priority_same_identity_uses_metadata_when_active_body_is_malformed(tmp_
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda _argv: pytest.fail("same leased identity must not spawn"),
     )
@@ -3276,6 +4494,103 @@ def test_background_uses_metadata_owner_for_corrupt_active_request_and_stale_rec
     assert not second_keys and not second_unknown
     assert second_recovered == 0
     assert (request_dir / "damaged.json").is_file()
+
+
+def test_stale_claim_recovery_moves_stage_receipt_with_request(tmp_path, monkeypatch):
+    """Recovery leaves no orphan progress file that keeps an empty batch alive."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    inflight_dir = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME
+    batch = inflight_dir / "stale-owner"
+    request_dir.mkdir()
+    batch.mkdir(parents=True)
+    claimed = batch / "Istanbul.json"
+    claimed.write_text(
+        json.dumps(
+            {
+                "city": "Istanbul",
+                "target_date": "2026-08-24",
+                "temperature_metric": "high",
+                "source_cycle_time": "2026-08-24T06:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    queue_mod._write_stage_receipt_payload(
+        claimed,
+        {"stage": "wake", "deadline_at": "2026-08-24T06:05:00+00:00"},
+    )
+    (batch / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": "2000-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod, "_materialization_subprocess_timeout_seconds", lambda: 1.0
+    )
+
+    _keys, recovered, _unknown = queue_mod._recover_stale_claims(
+        request_path=request_dir,
+        inflight_path=inflight_dir,
+    )
+
+    restored = request_dir / "Istanbul.json"
+    assert recovered == 1
+    assert restored.is_file()
+    assert queue_mod._stage_receipt_path(restored).is_file()
+    assert not batch.exists()
+
+
+def test_empty_claim_batch_removes_orphan_stage_receipt(tmp_path):
+    """A non-authority stage file cannot make an empty batch immortal."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    batch = tmp_path / "inflight" / "orphan"
+    batch.mkdir(parents=True)
+    orphan = batch / "Moscow.json.stage"
+    orphan.write_text('{"stage":"wake"}', encoding="utf-8")
+
+    queue_mod._remove_empty_claim_batch(batch)
+
+    assert not batch.exists()
+
+
+def test_request_stage_cleanup_removes_only_orphan_telemetry(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    live = requests / "Moscow.2026-08-30.high.json"
+    live.write_text('{"city":"Moscow"}', encoding="utf-8")
+    live_stage = requests / f"{live.name}.stage"
+    live_stage.write_text('{"stage":"write_verify"}', encoding="utf-8")
+    orphan = requests / "Taipei.2026-08-30.high.json.stage"
+    orphan.write_text('{"stage":"open_read_snapshot"}', encoding="utf-8")
+
+    removed = queue_mod._remove_orphan_request_stage_receipts(requests)
+
+    assert removed == 1
+    assert live.exists()
+    assert live_stage.exists()
+    assert not orphan.exists()
+
+
+def test_request_stage_cleanup_is_bounded(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    for index in range(3):
+        (requests / f"orphan-{index}.json.stage").write_text(
+            '{"stage":"open_read_snapshot"}',
+            encoding="utf-8",
+        )
+
+    removed = queue_mod._remove_orphan_request_stage_receipts(
+        requests,
+        inspection_limit=2,
+    )
+
+    assert removed == 2
+    assert len(tuple(requests.glob("*.json.stage"))) == 1
 
 
 def test_fresh_malformed_request_never_claims_or_blocks_unrelated_held_priority(
@@ -3413,6 +4728,7 @@ def test_claim_read_deadline_releases_lock_for_priority_held_day0(tmp_path, monk
         queue_mod, "_current_money_risk_families",
         lambda **_kwargs: frozenset({("Istanbul", "2026-08-24", "high")}),
     )
+    monkeypatch.setattr(queue_mod, "_MATERIALIZATION_CLAIM_DEADLINE_SECONDS", 10.0)
     monkeypatch.setattr(
         queue_mod,
         "_claim_replacement_forecast_live_materialization_queue_locked",
@@ -3422,7 +4738,7 @@ def test_claim_read_deadline_releases_lock_for_priority_held_day0(tmp_path, monk
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=forecast_db,
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0,
         discover=False, limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\\n", stderr=""),
     )
@@ -3466,7 +4782,7 @@ def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monke
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
@@ -3533,7 +4849,7 @@ def test_priority_unrelated_stale_batch_does_not_block_held_request(tmp_path, mo
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr=""),
     )
@@ -3590,7 +4906,7 @@ def test_priority_legacy_unknown_inflight_scope_defers_without_consuming_held(
         request_dir=request_dir, processed_dir=tmp_path / "processed",
         failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
         seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+        seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
@@ -3646,7 +4962,7 @@ def test_priority_wal_commit_between_plan_and_apply_defers_without_claim(tmp_pat
             request_dir=request_dir, processed_dir=tmp_path / "processed",
             failed_dir=tmp_path / "failed", forecast_db=forecast_db,
             seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
-            seed_failed_dir=tmp_path / "seed_failed", seed_limit=1, discover=False,
+            seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
             limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
         )
     finally:
@@ -4265,6 +5581,74 @@ def test_queue_requeues_typed_child_deadline_before_outer_timeout(tmp_path) -> N
     assert len(tuple(request_dir.glob("Madrid.timeout-retry-*.json"))) == 1
 
 
+def test_blocked_fingerprint_resets_when_eligible_ensemble_mark_advances(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    forecast_db = tmp_path / "forecasts.db"
+    sqlite3.connect(forecast_db).close()
+    request_path = tmp_path / "Moscow.json"
+    request_path.write_text("{}", encoding="utf-8")
+    base = {
+        "city": "Moscow",
+        "target_date": "2026-08-31",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-30T18:00:00+00:00",
+        "bins": [{"bin_id": "22C"}],
+    }
+    monkeypatch.setattr(
+        queue_mod,
+        "_source_clock_missing_configured_sources",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "read_current_instrument_frontier_identity",
+        lambda *_args, **_kwargs: {"revision": "same-provider-frontier"},
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "current_value_serving_schema",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(weights, "scheme_for_city", lambda *_args, **_kwargs: None)
+
+    def _ensemble_mark(_conn, *, decision_time, **_kwargs):
+        if decision_time < datetime(2026, 8, 31, 1, 27, tzinfo=timezone.utc):
+            return (1294588, datetime(2026, 8, 30, 12, tzinfo=timezone.utc))
+        return (1295198, datetime(2026, 8, 30, 18, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(
+        input_hwm,
+        "_latest_eligible_ensemble_input_mark",
+        _ensemble_mark,
+    )
+
+    before_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:11:01+00:00"},
+    )
+    after_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:55:59+00:00"},
+    )
+    unchanged_after_ens = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path,
+        forecast_db=forecast_db,
+        payload={**base, "computed_at": "2026-08-31T01:56:59+00:00"},
+    )
+
+    assert before_ens is not None
+    assert after_ens is not None
+    assert before_ens != after_ens
+    assert after_ens == unchanged_after_ens
+
+
 @pytest.mark.parametrize(
     "blocked_reason",
     [
@@ -4600,6 +5984,35 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes
 
 
+def test_ens_waiting_seed_backoff_yields_and_expires_exactly(
+    tmp_path, monkeypatch
+) -> None:
+    """A missing-ENS cache entry cannot hide actionable current-q work."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    waiting = tmp_path / "Waiting.2026-09-01.high.json"
+    actionable = tmp_path / "Actionable.2026-09-01.high.json"
+    waiting.write_text("{}", encoding="utf-8")
+    actionable.write_text("{}", encoding="utf-8")
+    now = [100.0]
+    monkeypatch.setattr(queue_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(queue_mod, "_AWAITING_ENSEMBLE_RECHECK_AT", {})
+
+    queue_mod._defer_awaiting_ensemble_seed(waiting)
+    reordered = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
+        (waiting, actionable)
+    )
+    assert reordered == (actionable, waiting)
+    assert waiting.exists()
+
+    now[0] += queue_mod._AWAITING_ENSEMBLE_RECHECK_SECONDS
+    reset = queue_mod._deprioritize_recently_waiting_ensemble_seeds(
+        (waiting, actionable)
+    )
+    assert reset == (waiting, actionable)
+
+
 def test_current_capital_seed_precedes_backlog_before_bounded_inspection(
     tmp_path, monkeypatch
 ) -> None:
@@ -4693,7 +6106,7 @@ def test_current_capital_seed_precedes_backlog_before_bounded_inspection(
     assert not held.exists()
     assert all(path.exists() for path in backlog)
     assert (request_dir / held.name).exists()
-    assert len(loaded) <= queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS
+    assert len(loaded) <= queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS + 1
 
 
 def test_processed_seed_publishes_one_zero_copy_family_cache(tmp_path) -> None:

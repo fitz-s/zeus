@@ -322,15 +322,6 @@ def _edli_held_snapshot_refresh_report(
                     """,
                     (condition_id, token_id),
                 ).fetchone()
-                if row is not None:
-                    invalidation_rows = trade_conn.execute(
-                        """
-                        SELECT invalidated_at
-                          FROM executable_market_snapshot_invalidations
-                         WHERE condition_id = ? OR token_id IN (?, ?, ?)
-                        """,
-                        (condition_id, token_id, row[6], row[7]),
-                    ).fetchall()
             except Exception:  # noqa: BLE001 - exact projection read remains debt
                 row = None
                 invalidation_rows = None
@@ -372,6 +363,29 @@ def _edli_held_snapshot_refresh_report(
             elif deadline <= checked_at:
                 reason = "snapshot_expired"
             else:
+                try:
+                    # Keep the pair-index predicates and push the already-known
+                    # snapshot window into SQLite. An old invalidation history
+                    # must not be materialised and filtered in Python on every
+                    # held monitor pass.
+                    invalidation_rows = trade_conn.execute(
+                        """
+                        SELECT invalidated_at
+                          FROM executable_market_snapshot_invalidations
+                         WHERE (condition_id = ? OR token_id IN (?, ?, ?))
+                           AND invalidated_at BETWEEN ? AND ?
+                        """,
+                        (
+                            condition_id,
+                            token_id,
+                            row[6],
+                            row[7],
+                            captured_at.isoformat(),
+                            checked_at.isoformat(),
+                        ),
+                    ).fetchall()
+                except Exception:  # noqa: BLE001 - exact projection read remains debt
+                    invalidation_rows = None
                 if invalidation_rows is None:
                     reason = "snapshot_invalidation_projection_unavailable"
                 else:
@@ -388,10 +402,9 @@ def _edli_held_snapshot_refresh_report(
                             reason = "snapshot_invalidation_timestamp_invalid"
                             invalidated = True
                             break
-                        if captured_at <= invalidated_at <= checked_at:
-                            reason = "snapshot_invalidated"
-                            invalidated = True
-                            break
+                        reason = "snapshot_invalidated"
+                        invalidated = True
+                        break
                     if not invalidated:
                         current_fresh = True
                         proactive_due = deadline <= freshness_cut
@@ -506,16 +519,23 @@ def _edli_exact_snapshot_refresh_completed(
         invalidations = trade_conn.execute(
             """
             SELECT invalidated_at FROM executable_market_snapshot_invalidations
-             WHERE condition_id = ? OR token_id IN (?, ?, ?)
+             WHERE (condition_id = ? OR token_id IN (?, ?, ?))
+               AND invalidated_at BETWEEN ? AND ?
             """,
-            (condition_id, token_id, row[6], row[7]),
+            (
+                condition_id,
+                token_id,
+                row[6],
+                row[7],
+                captured_at.isoformat(),
+                checked_at.isoformat(),
+            ),
         ).fetchall()
         for invalidation in invalidations:
             invalidated_at = datetime.fromisoformat(str(invalidation[0]).replace("Z", "+00:00"))
             if invalidated_at.tzinfo is None:
                 return False
-            if captured_at <= invalidated_at.astimezone(timezone.utc) <= checked_at:
-                return False
+            return False
         return True
     except Exception:  # noqa: BLE001 - projection/read failure is retryable
         return False
@@ -1361,7 +1381,11 @@ class _PriceChannelWriteGate:
             self._stack = None
 
 
-def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGate:
+def _edli_price_channel_world_write_gate(
+    *,
+    owner: str,
+    deadline_monotonic: float | None = None,
+) -> _PriceChannelWriteGate:
     deadline_ms = (
         PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS
         if owner in {
@@ -1375,7 +1399,77 @@ def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGat
         owner=owner,
         scope="world",
         deadline_ms=deadline_ms,
+        max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        deadline_monotonic=deadline_monotonic,
     )
+
+
+def _fill_bridge_write_deadline() -> float:
+    """One absolute bound for bootstrap and the following write tranche."""
+
+    return time.monotonic() + (
+        PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS / 1000.0
+    )
+
+
+def _bound_fill_bridge_sqlite_wait_remaining(
+    conn,
+    *,
+    deadline_monotonic: float,
+) -> None:
+    """Apply the still-available absolute tranche budget before a SQLite unit."""
+
+    remaining_ms = int(
+        max(0.0, deadline_monotonic - time.monotonic()) * 1000.0
+    )
+    if remaining_ms <= 0:
+        raise TimeoutError("fill bridge write deadline elapsed")
+    _bound_price_channel_sqlite_wait(conn, timeout_ms=remaining_ms)
+
+
+def _prepare_fill_bridge_write_connection(
+    opener,
+    *,
+    deadline_monotonic: float,
+):
+    """Open one attached INV-37 connection before taking a unified writer lease."""
+
+    remaining_ms = int(
+        max(0.0, deadline_monotonic - time.monotonic()) * 1000.0
+    )
+    if remaining_ms <= 0:
+        raise TimeoutError("fill bridge connection deadline elapsed before open")
+    conn = opener(
+        write_class="live",
+        busy_timeout_ms=remaining_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
+    try:
+        _bound_fill_bridge_sqlite_wait_remaining(
+            conn,
+            deadline_monotonic=deadline_monotonic,
+        )
+        set_progress_handler = getattr(conn, "set_progress_handler", None)
+        if callable(set_progress_handler):
+            set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic),
+                1_000,
+            )
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _close_fill_bridge_write_connection(conn) -> None:
+    """Release bootstrap guards and the attached connection after one write tranche."""
+
+    try:
+        set_progress_handler = getattr(conn, "set_progress_handler", None)
+        if callable(set_progress_handler):
+            set_progress_handler(None, 0)
+    finally:
+        conn.close()
 
 
 def _edli_price_channel_trade_write_gate(
@@ -2266,10 +2360,10 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     from src.events.edli_position_bridge import (
         DISPOSITION_SETTLED_MARKET,
         DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+        _dispositions_table,
         _edli_events_table,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
-        get_fill_bridge_disposition,
     )
 
     table = _edli_events_table(conn)
@@ -2279,17 +2373,41 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     if bounded_limit == 0:
         return ()
 
-    # The aggregate index streams one group at a time.  Do not materialize all
-    # confirmed fills, all positions, or the global command join merely to
-    # answer a limit=1 boot probe on append-only canonical databases.
+    # The former aggregate-index query walked the append-only WORLD stream before
+    # Python could apply ``limit``. Filter by event type and resolve deterministic
+    # position identities in SQL so LIMIT bounds the returned orphan tranche.
+    conn.create_function(
+        "edli_bridge_position_id_v1",
+        1,
+        edli_bridge_position_id,
+        deterministic=True,
+    )
+    conn.create_function(
+        "edli_bridge_position_id_legacy_v1",
+        1,
+        edli_bridge_position_id_legacy,
+        deterministic=True,
+    )
+    dispositions_table = _dispositions_table(conn)
     aggregate_rows = conn.execute(
         f"""
         SELECT observed.aggregate_id
           FROM {table} AS observed
-               INDEXED BY idx_edli_live_order_events_aggregate
+               INDEXED BY idx_edli_live_order_events_type
+          LEFT JOIN position_current AS canonical_position
+            ON canonical_position.position_id =
+               edli_bridge_position_id_v1(observed.aggregate_id)
+          LEFT JOIN position_current AS legacy_position
+            ON legacy_position.position_id =
+               edli_bridge_position_id_legacy_v1(observed.aggregate_id)
+          LEFT JOIN {dispositions_table} AS disposition
+            ON disposition.aggregate_id = observed.aggregate_id
          WHERE observed.event_type = 'UserTradeObserved'
            AND json_extract(observed.payload_json, '$.fill_authority_state')
                = 'FILL_CONFIRMED'
+           AND canonical_position.position_id IS NULL
+           AND legacy_position.position_id IS NULL
+           AND COALESCE(disposition.disposition, '') NOT IN (?, ?)
            AND NOT EXISTS (
                SELECT 1
                  FROM {table} AS command_event
@@ -2312,36 +2430,19 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
            )
          GROUP BY observed.aggregate_id
          ORDER BY observed.aggregate_id ASC
-        """
-    )
-    orphan_ids: list[str] = []
-    for row in aggregate_rows:
-        aggregate_id = str(_row_get(row, "aggregate_id") or "")
-        if not aggregate_id:
-            continue
-        if get_fill_bridge_disposition(conn, aggregate_id) in {
+         LIMIT ?
+        """,
+        (
             DISPOSITION_SETTLED_MARKET,
             DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
-        }:
-            continue
-        canonical_position = conn.execute(
-            """
-            SELECT 1
-              FROM position_current
-             WHERE position_id IN (?, ?)
-             LIMIT 1
-            """,
-            (
-                edli_bridge_position_id(aggregate_id),
-                edli_bridge_position_id_legacy(aggregate_id),
-            ),
-        ).fetchone()
-        if canonical_position is not None:
-            continue
-        orphan_ids.append(aggregate_id)
-        if len(orphan_ids) >= bounded_limit:
-            break
-    return tuple(orphan_ids)
+            bounded_limit,
+        ),
+    ).fetchall()
+    return tuple(
+        aggregate_id
+        for row in aggregate_rows
+        if (aggregate_id := str(_row_get(row, "aggregate_id") or ""))
+    )
 
 
 def _edli_durable_fill_bridge_work_exists(conn) -> bool:
@@ -2383,6 +2484,7 @@ def _edli_trade_fact_bridge_candidates_read_only():
         discover_absorbed_confirmed_fill_aggregate_ids,
         discover_confirmed_trade_fact_candidates,
         discover_rest_filled_orphan_trade_fact_candidates,
+        prepare_trade_fact_bridge_evidence,
     )
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
@@ -2416,6 +2518,34 @@ def _edli_trade_fact_bridge_candidates_read_only():
             event_schema="world",
             projection_schema="world",
             cap_schema="world",
+        )
+        confirmed_candidates = tuple(
+            prepared
+            for candidate in confirmed_candidates
+            if (
+                prepared := prepare_trade_fact_bridge_evidence(
+                    conn,
+                    candidate,
+                    kind="confirmed",
+                    trade_schema="main",
+                    event_schema="world",
+                )
+            )
+            is not None
+        )
+        rest_orphan_candidates = tuple(
+            prepared
+            for candidate in rest_orphan_candidates
+            if (
+                prepared := prepare_trade_fact_bridge_evidence(
+                    conn,
+                    candidate,
+                    kind="rest_orphan",
+                    trade_schema="main",
+                    event_schema="world",
+                )
+            )
+            is not None
         )
     finally:
         conn.close()
@@ -2885,7 +3015,13 @@ def _m5_authority_deadline_check(deadline_monotonic: float) -> None:
         raise TimeoutError("m5_authority_proof_deadline_exhausted")
 
 
-def _edli_market_channel_universe_m5_failure_reason() -> str | None:
+def _edli_market_channel_universe_scoped_debt_reason() -> str | None:
+    """Return held-identity debt without changing the M5 authority verdict.
+
+    Canonical held identity belongs to the exact held snapshot/identity gates.
+    It is not user-channel or reconciliation evidence, so it must remain
+    observable without turning a completed M5 proof into a global WS failure.
+    """
     with _market_channel_bootstrap_lock:
         universe_debt = _market_channel_universe_refresh_debt
     reason = str((universe_debt or {}).get("reason", ""))
@@ -3161,13 +3297,13 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
         "user_channel_messages": message_count,
         "venue_reconciliations": reconcile_count,
     }
-    # A registered sink is not canonical-ready if the current held identity
-    # could not be materialized.  Keep the daemon's canonical heartbeat in
-    # STARTING until the next M5 runs after that exact debt is drained.
-    universe_failure_reason = _edli_market_channel_universe_m5_failure_reason()
-    if universe_failure_reason:
-        result["scheduler_failed"] = True
-        result["scheduler_failure_reason"] = universe_failure_reason
+    # Canonical held-identity debt is scoped to the affected held
+    # snapshot/identity gates.  It remains visible for their fail-closed
+    # recovery path, but cannot relabel a successful user-channel/M5 proof as
+    # a global WS failure and block unrelated exit submissions.
+    universe_debt_reason = _edli_market_channel_universe_scoped_debt_reason()
+    if universe_debt_reason:
+        result["canonical_held_identity_debt"] = universe_debt_reason
     return result
 
 
@@ -3222,47 +3358,91 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
             or absorbed_fill_aggregate_ids
         ):
             from src.state.db import get_world_connection_with_trades_required
-
-            conn = None
-            try:
-                with _edli_price_channel_world_write_gate(
-                    owner="price_channel_fill_bridge_reconcile"
-                ):
-                    conn = get_world_connection_with_trades_required(write_class="live")
-                    _bound_price_channel_sqlite_wait(
+            from src.events.edli_trade_fact_bridge import (
+                append_confirmed_trade_facts_to_edli,
+                append_prepared_trade_fact_bridge_evidence,
+            )
+            prepared_work = [
+                *confirmed_candidates,
+                *rest_orphan_candidates,
+            ][:FILL_BRIDGE_WRITE_TRANCHES_PER_TICK]
+            for evidence in prepared_work:
+                conn = None
+                deadline_monotonic = _fill_bridge_write_deadline()
+                try:
+                    conn = _prepare_fill_bridge_write_connection(
+                        get_world_connection_with_trades_required,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    _bound_fill_bridge_sqlite_wait_remaining(
                         conn,
-                        timeout_ms=PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                    from src.events.edli_trade_fact_bridge import (
-                        append_confirmed_trade_facts_to_edli,
-                        append_rest_filled_orphan_trade_facts_to_edli,
+                    with _edli_price_channel_world_write_gate(
+                        owner="price_channel_fill_bridge_reconcile",
+                        deadline_monotonic=deadline_monotonic,
+                    ):
+                        # One immutable, prevalidated candidate per lease.
+                        conn.execute("BEGIN")
+                        reconciled_trade_facts += append_prepared_trade_fact_bridge_evidence(
+                            conn, evidence, now=now
+                        )
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
+                    if conn is not None:
+                        conn.rollback()
+                    canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
+                    logger.error(
+                        "EDLI trade-fact bridge append failed aggregate=%s (non-fatal): %s",
+                        evidence.candidate.aggregate_id,
+                        exc,
+                        exc_info=True,
                     )
-
-                    reconciled_trade_facts += append_confirmed_trade_facts_to_edli(
+                finally:
+                    if conn is not None:
+                        _close_fill_bridge_write_connection(conn)
+            # An already-canonical fill has no append evidence, but its exact
+            # aggregate remains a separately bounded cap-consume tranche.
+            remaining_tranches = max(
+                0, FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - len(prepared_work)
+            )
+            for aggregate_id in absorbed_fill_aggregate_ids[:remaining_tranches]:
+                conn = None
+                deadline_monotonic = _fill_bridge_write_deadline()
+                try:
+                    conn = _prepare_fill_bridge_write_connection(
+                        get_world_connection_with_trades_required,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    _bound_fill_bridge_sqlite_wait_remaining(
                         conn,
-                        now=now,
-                        candidates=confirmed_candidates,
-                        absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                    reconciled_trade_facts += append_rest_filled_orphan_trade_facts_to_edli(
-                        conn,
-                        now=now,
-                        candidates=rest_orphan_candidates,
-                        absorbed_fill_aggregate_ids=(),
+                    with _edli_price_channel_world_write_gate(
+                        owner="price_channel_fill_bridge_reconcile",
+                        deadline_monotonic=deadline_monotonic,
+                    ):
+                        conn.execute("BEGIN")
+                        reconciled_trade_facts += append_confirmed_trade_facts_to_edli(
+                            conn,
+                            now=now,
+                            candidates=(),
+                            absorbed_fill_aggregate_ids=(aggregate_id,),
+                        )
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001 - exact aggregate retries next tick
+                    if conn is not None:
+                        conn.rollback()
+                    canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
+                    logger.error(
+                        "EDLI absorbed fill bridge append failed aggregate=%s (non-fatal): %s",
+                        aggregate_id,
+                        exc,
+                        exc_info=True,
                     )
-                    conn.commit()
-            except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
-                if conn is not None:
-                    conn.rollback()
-                canonical_failure_reasons.append(FILL_BRIDGE_TRADE_FACT_PERSIST_FAILED)
-                logger.error(
-                    "EDLI trade-fact bridge append failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-            finally:
-                if conn is not None:
-                    conn.close()
+                finally:
+                    if conn is not None:
+                        _close_fill_bridge_write_connection(conn)
 
     bridged_positions = 0
     try:
@@ -3287,22 +3467,28 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
 
         for aggregate_id in durable_bridge_candidate_ids:
             bridge_conn = None
+            deadline_monotonic = _fill_bridge_write_deadline()
             try:
+                # One attached connection preserves INV-37. Its potentially
+                # blocking bootstrap is bounded before the writer lease starts.
+                bridge_conn = _prepare_fill_bridge_write_connection(
+                    get_trade_connection_with_world_required,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _bound_fill_bridge_sqlite_wait_remaining(
+                    bridge_conn,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 with _PriceChannelWriteGate(
                     owner="price_channel_fill_bridge",
                     scope="world_trade",
                     deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
                     max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                    deadline_monotonic=deadline_monotonic,
                 ):
                     # One exact aggregate per transaction guarantees a lease
                     # release point before any later repair tranche.
-                    bridge_conn = get_trade_connection_with_world_required(
-                        write_class="live"
-                    )
-                    _bound_price_channel_sqlite_wait(
-                        bridge_conn,
-                        timeout_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
-                    )
+                    bridge_conn.execute("BEGIN")
                     bridged_positions += _edli_durable_fill_bridge_scan(
                         bridge_conn,
                         now=now,
@@ -3327,7 +3513,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
             finally:
                 if bridge_conn is not None:
                     try:
-                        bridge_conn.close()
+                        _close_fill_bridge_write_connection(bridge_conn)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -4417,7 +4603,7 @@ def _edli_refresh_held_position_quote_evidence(
         MarketChannelOnlineService,
         active_weather_token_metadata_for_tokens,
     )
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
 
     edli_cfg = _settings_section("edli_v1", {})
     budget = max(
@@ -4437,12 +4623,9 @@ def _edli_refresh_held_position_quote_evidence(
     deadline = started_monotonic + budget
     canonical_rest_refreshed_token_ids: set[str] = set()
 
-    # This is a capital-protection lane.  Binding the *connection bootstrap*
-    # to the same absolute deadline matters: get_trade_connection() establishes
-    # WAL mode and can otherwise spend its default SQLite wait before the first
-    # held-side quote request is even admitted.
-    trade_read = get_trade_connection(
-        write_class=None,
+    # This is a capital-protection read lane.  It must not run RW journal-mode
+    # bootstrap before the first held-side quote request is admitted.
+    trade_read = get_trade_connection_read_only(
         deadline_monotonic=deadline,
     )
     try:
@@ -4761,7 +4944,10 @@ def _edli_refresh_held_position_quote_evidence(
                     append_evidence_token_ids=_edli_current_loss_audit_token_ids,
                 ),
                 fetch_orderbook=fetch_orderbook,
-                fetch_orderbooks=fetch_orderbooks,
+                # Held exposure is an exact per-token recovery scope.  A shared
+                # /books admission failure must not turn every native held token
+                # into zero-event freshness debt.
+                fetch_orderbooks=None,
             )
             # A canonical held-side quote cannot share its first REST/commit
             # tranche with audit or residual tokens.  A slow or denied sibling
@@ -5896,12 +6082,27 @@ def _edli_market_channel_ingestor_cycle(
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.state.db import get_trade_connection
 
-                with _edli_background_snapshot_trade_write_context_factory(
-                    owner="price_channel_snapshot_invalidate"
-                )() as write_lease:
-                    trade_conn = get_trade_connection(write_class="live")
-                    before_changes = int(trade_conn.total_changes)
-                    try:
+                # Connection bootstrap executes PRAGMA journal_mode=WAL and may
+                # wait on an incumbent SQLite writer.  It is prerequisite work,
+                # not part of the invalidation write unit, so it must complete
+                # before this replayable background lane acquires the canonical
+                # TRADE lease.  Once admitted, bind SQLite's own busy handler to
+                # the same short hold budget; max_hold_ms is telemetry, not a
+                # preemptive timer.
+                trade_conn = get_trade_connection(
+                    write_class="live",
+                    deadline_monotonic=(
+                        time.monotonic()
+                        + PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS / 1000.0
+                    ),
+                )
+                _bound_background_price_channel_sqlite_wait(trade_conn)
+                _disable_background_quote_autocheckpoint(trade_conn)
+                try:
+                    with _edli_background_snapshot_trade_write_context_factory(
+                        owner="price_channel_snapshot_invalidate"
+                    )() as write_lease:
+                        before_changes = int(trade_conn.total_changes)
                         invalidated = invalidate_executable_snapshots_for_market_channel_action(
                             trade_conn,
                             action,
@@ -5917,8 +6118,10 @@ def _edli_market_channel_ingestor_cycle(
                                     int(trade_conn.total_changes) - before_changes,
                                 ),
                             )
-                    finally:
-                        trade_conn.close()
+                finally:
+                    if trade_conn.in_transaction:
+                        trade_conn.rollback()
+                    trade_conn.close()
 
             def _refresh_snapshot_action(
                 action: "MarketChannelAction",
@@ -6014,6 +6217,15 @@ def _edli_market_channel_ingestor_cycle(
                     turnstile_ctx.__exit__(None, None, None)
                     turnstile_entered = False
                     trade_conn = get_trade_connection(write_class="live")
+                    # The foreground snapshot write lease is capped at one
+                    # second.  SQLite must share that bound; otherwise its
+                    # process-wide 300 s busy_timeout can retain the coordinator
+                    # lease while held-position monitoring starves behind it.
+                    _bound_price_channel_sqlite_wait(
+                        trade_conn,
+                        timeout_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                    )
+                    _disable_background_quote_autocheckpoint(trade_conn)
                     with PolymarketClient(
                         public_request_priority=RequestPriority.SUBMIT_JIT
                     ) as exact_clob:

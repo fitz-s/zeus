@@ -55,6 +55,7 @@ _RESERVATION_PREFIX = "__fusion_upgrade_reservation__:"
 _PUBLISH_PENDING_PREFIX = "__fusion_upgrade_publish_pending__:"
 _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
+_DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
 
 
 @dataclass(frozen=True)
@@ -329,8 +330,9 @@ def _latest_posterior_inputs(
     frozenset[str],
     str | None,
     tuple[str, ...],
+    bool,
 ]:
-    """Return cycle, provider inputs, and the consumed Day0 vector revision."""
+    """Return cycle, provider inputs, and committed Day0 successor state."""
     try:
         row = conn.execute(
             """
@@ -343,14 +345,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), None, ()
+        return None, frozenset(), {}, frozenset(), None, (), False
     if row is None:
-        return None, frozenset(), {}, frozenset(), None, ()
+        return None, frozenset(), {}, frozenset(), None, (), False
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), None, ()
+        return source_cycle_iso, frozenset(), {}, frozenset(), None, (), False
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -376,6 +378,22 @@ def _latest_posterior_inputs(
     day0_revision, day0_expected_models = _canonical_day0_vector_revision(
         prov.get("day0_remaining_vector_witness")
     )
+    day0_bundle_valid = False
+    bundle = prov.get("day0_causal_evidence_bundle")
+    if isinstance(bundle, Mapping):
+        try:
+            from src.data.day0_hourly_vectors import (
+                validate_day0_causal_evidence_bundle,
+            )
+
+            day0_bundle_valid = bool(
+                validate_day0_causal_evidence_bundle(
+                    expected=bundle,
+                    actual=bundle,
+                ).ok
+            )
+        except (KeyError, TypeError, ValueError):
+            day0_bundle_valid = False
     return (
         source_cycle_iso,
         decorrelated_provider_families_of(set(str(m) for m in used)),
@@ -383,6 +401,7 @@ def _latest_posterior_inputs(
         frozenset(str(source) for source in configured if str(source).strip()),
         day0_revision,
         day0_expected_models,
+        day0_bundle_valid,
     )
 
 
@@ -450,6 +469,7 @@ def scope_capture_offers_larger_provider_set(
         configured_sources,
         consumed_day0_vector_revision,
         day0_expected_models,
+        day0_causal_bundle_valid,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
@@ -532,6 +552,17 @@ def scope_capture_offers_larger_provider_set(
             changed_inputs.append(_DAY0_HOURLY_VECTOR_SOURCE)
             changed_inputs.sort()
             changed_revisions[_DAY0_HOURLY_VECTOR_SOURCE] = (
+                current_day0_vector_revision
+            )
+        if current_day0_vector_revision is not None and not day0_causal_bundle_valid:
+            # SCOPE: this exact city/date/metric posterior. DRAIN: the existing
+            # single-flight fusion seed materializes the unchanged vector rows
+            # with a causal bundle. RESET: the newest self-validating posterior
+            # makes this predicate false. Missing bundle is therefore a real
+            # input revision even when the vector IDs themselves did not move.
+            changed_inputs.append(_DAY0_CAUSAL_BUNDLE_SOURCE)
+            changed_inputs.sort()
+            changed_revisions[_DAY0_CAUSAL_BUNDLE_SOURCE] = (
                 current_day0_vector_revision
             )
     input_revision_changed = bool(changed_inputs)
@@ -905,7 +936,13 @@ def _reserve_enqueues(
             (_PUBLISH_PENDING_PREFIX, _RESERVATION_PREFIX)
         ):
             continue
-        queue_state = _finalized_seed_has_active_queue_work(marker_value)
+        queue_state = _finalized_seed_has_active_queue_work(
+            marker_value,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            source_cycle_iso=source_cycle_iso,
+        )
         if queue_state is False:
             reclaimable_markers[transition_key] = marker_value
     try:
@@ -1047,7 +1084,14 @@ def _reserve_enqueues(
     return reservation, tuple(reserved)
 
 
-def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
+def _finalized_seed_has_active_queue_work(
+    seed_file: str,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_iso: str,
+) -> bool | None:
     """Return True/False for exact queue work; None when fencing is uncertain."""
     marker = str(seed_file or "").strip()
     if not marker:
@@ -1055,6 +1099,31 @@ def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
     path = Path(marker)
     if path.parent.name != "seeds":
         return None
+
+    def matches_transition(candidate: Path) -> bool | None:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            cycle = datetime.fromisoformat(
+                str(payload.get("source_cycle_time") or "").replace(
+                    "Z", "+00:00"
+                )
+            )
+            expected_cycle = datetime.fromisoformat(
+                str(source_cycle_iso).replace("Z", "+00:00")
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if cycle.tzinfo is None:
+            cycle = cycle.replace(tzinfo=UTC)
+        if expected_cycle.tzinfo is None:
+            expected_cycle = expected_cycle.replace(tzinfo=UTC)
+        return (
+            str(payload.get("city") or "").strip() == city
+            and str(payload.get("target_date") or "").strip() == target_date
+            and str(payload.get("temperature_metric") or "").strip() == metric
+            and cycle.astimezone(UTC) == expected_cycle.astimezone(UTC)
+        )
+
     queue_root = path.parent.parent
     try:
         from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
@@ -1065,16 +1134,20 @@ def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
         with _queue_lock(queue_root / ".materialization_queue.lock") as acquired:
             if not acquired:
                 return None
-            if path.is_file() or (queue_root / "requests" / path.name).is_file():
-                return True
+            if path.is_file():
+                return matches_transition(path)
+            request = queue_root / "requests" / path.name
+            if request.is_file():
+                return matches_transition(request)
             inflight = queue_root / "inflight"
             try:
                 batches = tuple(inflight.iterdir())
             except FileNotFoundError:
                 batches = ()
             for batch in batches:
-                if batch.is_dir() and (batch / path.name).is_file():
-                    return True
+                candidate = batch / path.name
+                if batch.is_dir() and candidate.is_file():
+                    return matches_transition(candidate)
             indexed_receipt = _seed_terminal_receipt_index_path(path)
             if indexed_receipt is not None and indexed_receipt.is_file():
                 try:
@@ -1506,6 +1579,7 @@ def enqueue_fusion_upgrade_reseeds(
                     seed_path=seed_path,
                     seed_file=publication.staging_file,
                     computed_at=now,
+                    source_cycle_time=source_cycle_iso,
                     build_seed=build_replacement_forecast_materialization_seed,
                     latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
                     market_bins=market_bins_for_replacement_seed,
@@ -1687,6 +1761,7 @@ def _build_and_write_upgrade_seed(
     seed_path: Path,
     seed_file: Path,
     computed_at: datetime,
+    source_cycle_time: datetime | str,
     build_seed,
     latest_baseline_coverage,
     market_bins,
@@ -1707,6 +1782,18 @@ def _build_and_write_upgrade_seed(
 
     city_cfg = cities_by_name.get(city)
     city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+
+    def cycle_utc(value: datetime | str) -> datetime:
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    expected_cycle = cycle_utc(source_cycle_time)
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -1714,6 +1801,10 @@ def _build_and_write_upgrade_seed(
         city=city,
         target_date=target_date,
         city_timezone=city_timezone,
+        cycle_admissible=lambda manifest: cycle_utc(
+            manifest.source_cycle_time
+        )
+        == expected_cycle,
     )
     if openmeteo is None:
         return None

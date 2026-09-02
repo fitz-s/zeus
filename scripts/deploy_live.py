@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-31
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -139,6 +139,17 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+RESTART_WORLD_MIGRATION_TARGETS = (
+    ("world", "202607_drop_world_collateral_unsettled_ghost"),
+    ("world_active_redecision_projection", "202608_edli_active_redecision_projection"),
+    (
+        "world_active_redecision_backfill_notnull",
+        "202608_edli_active_redecision_projection_receipt_notnull",
+    ),
+)
+RESTART_TRADE_MIGRATION_TARGETS = (
+    ("trade", "202607_cas_reservation_ledger"),
+)
 LIVE_RESTART_LOCK_FILENAME = "deploy-live-restart.lock"
 LIVE_TRADING_PREREQUISITE_LABELS = tuple(
     DAEMONS[key]
@@ -162,6 +173,9 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS", "90")
 )
+LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS", "90")
+)
 LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS", "90")
 )
@@ -171,6 +185,19 @@ LIVE_PRESTOP_HANDOFF_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_MONITOR_FULL_COVERAGE_CYCLES = 3
 LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = (
     LIVE_MONITOR_FULL_COVERAGE_CYCLES * 2 * 60
+)
+# This is deliberately longer than the held-quote sidecar freshness below: it
+# identifies a monitor that is truly stalled, rather than a normal in-flight
+# monitor pass.  Only that total-stall shape may recover by stopping it.
+LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS = LIVE_MONITOR_CADENCE_CONTRACT_SECONDS
+LIVE_HELD_QUOTE_SIDECAR_MAX_AGE_SECONDS = 180.0
+FRESH_FAILED_MONITOR_NO_ACTION_ISSUES = frozenset(
+    {
+        # A current MONITOR_REFRESHED attempt explicitly found neither
+        # probability nor held-side CLOB authority. It is not actionable, and
+        # cannot stand in for a current price/probability handoff.
+        "monitor_probability_and_clob_stale",
+    }
 )
 LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS = 2 * 60
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
@@ -461,6 +488,48 @@ def _wait_for_prerequisite_code_identity(
         if time.monotonic() >= deadline:
             return False, "sidecar code identity did not verify after restart: " + "; ".join(last_pending)
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
+def _current_prerequisite_code_identity_labels(
+    labels: list[str],
+    *,
+    expected_sha: str,
+    now: datetime | None = None,
+) -> set[str]:
+    """Return loaded sidecars that already prove the requested code identity.
+
+    SCOPE is one heartbeat-governed prerequisite label. DRAIN retains that
+    healthy process instead of flushing its quote/forecast cache during a
+    retry. RESET is any unload, SHA mismatch, invalid/future timestamp, or age
+    beyond ``LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS``; that label then follows
+    the ordinary bootout/bootstrap path.
+    """
+
+    observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    state_dir = Path(_require_live_repo()) / "state"
+    expected = str(expected_sha or "").strip()
+    reusable: set[str] = set()
+    for label in labels:
+        heartbeat = PREREQUISITE_CODE_HEARTBEATS.get(label)
+        if heartbeat is None or not _launchctl_service_loaded(label):
+            continue
+        filename, time_keys = heartbeat
+        payload = _load_json(state_dir / filename)
+        observed = str(payload.get("git_head") or "").strip()
+        observed_at = next(
+            (
+                parsed
+                for key in time_keys
+                if (parsed := _parse_iso_utc(payload.get(key))) is not None
+            ),
+            None,
+        )
+        if not _git_head_matches(expected, observed) or observed_at is None:
+            continue
+        age_seconds = (observed_now - observed_at).total_seconds()
+        if 0.0 <= age_seconds <= LIVE_PREREQUISITE_REUSE_MAX_AGE_SECONDS:
+            reusable.add(label)
+    return reusable
 
 
 def _wait_for_live_runtime_fresh(
@@ -1035,6 +1104,9 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
         return {
             "open_position_count": len(position_ids),
             "open_position_ids": position_ids[:10],
+            # The display sample remains bounded, but the exceptional recovery
+            # admission must prove classification against every open position.
+            "all_open_position_ids": position_ids,
             "nonterminal_command_count": len(command_ids),
             "nonterminal_command_ids": command_ids[:10],
         }
@@ -1105,8 +1177,185 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     )
     reauction_handoff_count = len(reauction_handoff_ids)
     restart_blocking_count -= reauction_handoff_count
-    quote_only_count = int(groups.get("quote_only_stale_position_count") or 0)
+    quote_only_count_raw = groups.get("quote_only_stale_position_count")
+    quote_only_shape_error: str | None = None
+    if isinstance(quote_only_count_raw, bool) or not isinstance(
+        quote_only_count_raw, int
+    ) or quote_only_count_raw < 0:
+        quote_only_count = 0
+        quote_only_shape_error = "count_invalid"
+    else:
+        quote_only_count = quote_only_count_raw
     fresh_count = int(cadence.get("fresh_position_count") or 0)
+    probability_positions = list(
+        groups.get("probability_only_stale_positions") or []
+    )
+    quote_only_raw = groups.get("quote_only_stale_positions")
+    if quote_only_raw is None:
+        quote_only_positions: list[object] = []
+    elif isinstance(quote_only_raw, list):
+        quote_only_positions = quote_only_raw
+    else:
+        quote_only_positions = []
+        quote_only_shape_error = quote_only_shape_error or "records_not_list"
+    quote_only_ids_list: list[str] = []
+    if quote_only_shape_error is None and len(quote_only_positions) != quote_only_count:
+        quote_only_shape_error = "count_mismatch"
+    if quote_only_shape_error is None:
+        for item in quote_only_positions:
+            if not isinstance(item, dict):
+                quote_only_shape_error = "record_not_mapping"
+                break
+            position_id = str(item.get("position_id") or "").strip()
+            if not position_id:
+                quote_only_shape_error = "position_id_missing"
+                break
+            if item.get("issue") != "monitor_clob_stale":
+                quote_only_shape_error = "issue_invalid"
+                break
+            if position_id in quote_only_ids_list:
+                quote_only_shape_error = "position_id_duplicate"
+                break
+            quote_only_ids_list.append(position_id)
+    restart_blocking_positions = [
+        item
+        for item in list(groups.get("restart_blocking_stale_positions") or [])
+        if isinstance(item, dict)
+        and str(item.get("position_id") or "").strip()
+        not in set(reauction_handoff_ids)
+    ]
+    fresh_failed_restart_positions = [
+        item
+        for item in restart_blocking_positions
+        if str(item.get("issue") or "") in FRESH_FAILED_MONITOR_NO_ACTION_ISSUES
+    ]
+    # ``collect_monitor_cadence_evidence`` gives this category only to the
+    # canonical closed-market hold shape or an exact backoff-exhausted dust
+    # receipt. It remains restart-only evidence; settlement/exit authority is
+    # unchanged.
+    fresh_failed_settlement_positions = [
+        item
+        for item in list(cadence.get("settlement_recoverable_positions") or [])
+        if isinstance(item, dict)
+        and item.get("cadence_source")
+        in {
+            "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+            "EXIT_ORDER_REJECTED",
+        }
+    ]
+    fresh_failed_positions = [
+        *fresh_failed_restart_positions,
+        *fresh_failed_settlement_positions,
+    ]
+    settlement_recoverable_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in fresh_failed_settlement_positions
+        if str(item.get("position_id") or "").strip()
+    )
+    probability_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in probability_positions
+        if isinstance(item, dict) and str(item.get("position_id") or "").strip()
+    )
+    restart_blocking_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in restart_blocking_positions
+    )
+    quote_only_ids = tuple(quote_only_ids_list)
+    fresh_failed_ids = tuple(
+        str(item.get("position_id") or "").strip()
+        for item in fresh_failed_positions
+        if str(item.get("position_id") or "").strip()
+    )
+    fresh_failed_id_counts = {
+        position_id: fresh_failed_ids.count(position_id)
+        for position_id in set(fresh_failed_ids)
+    }
+    fresh_failed_duplicate_ids = tuple(
+        sorted(
+            position_id
+            for position_id, count in fresh_failed_id_counts.items()
+            if count > 1
+        )
+    )
+    fresh_failed_id_set = set(fresh_failed_ids)
+    fresh_failed_other_ids = tuple(
+        [
+            *probability_ids,
+            *quote_only_ids,
+            *(
+                position_id
+                for position_id in restart_blocking_ids
+                if position_id not in fresh_failed_id_set
+            ),
+            *reauction_handoff_ids,
+        ]
+    )
+    classified_positions = [
+        *probability_positions,
+        *restart_blocking_positions,
+        *quote_only_positions,
+    ]
+    stale_classified_ids: list[str] = []
+    missing_monitor_timestamp_ids: list[str] = []
+    invalid_monitor_timestamp_ids: list[str] = []
+    stale_fresh_failed_timestamp_ids: list[str] = []
+    for item in classified_positions:
+        if not isinstance(item, dict):
+            continue
+        position_id = str(item.get("position_id") or "").strip()
+        if not position_id:
+            continue
+        raw_occurred_at = item.get("last_monitor_refreshed_at")
+        timestamp_text = str(raw_occurred_at or "").strip()
+        if not timestamp_text:
+            missing_monitor_timestamp_ids.append(position_id)
+            continue
+        try:
+            parsed = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if parsed.tzinfo is None:
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        occurred_at = parsed.astimezone(timezone.utc)
+        if (
+            now - occurred_at
+        ).total_seconds() > LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS:
+            stale_classified_ids.append(position_id)
+            if position_id in fresh_failed_id_set:
+                stale_fresh_failed_timestamp_ids.append(position_id)
+    # Closed-market entries are deliberately not part of the ordinary stale
+    # partition. Validate their timestamp here too, so a historical closed
+    # hold cannot authorize a repair restart.
+    classified_id_set = {
+        str(item.get("position_id") or "").strip()
+        for item in classified_positions
+        if isinstance(item, dict)
+    }
+    for item in fresh_failed_positions:
+        position_id = str(item.get("position_id") or "").strip()
+        if not position_id or position_id in classified_id_set:
+            continue
+        timestamp_text = str(item.get("last_monitor_refreshed_at") or "").strip()
+        if not timestamp_text:
+            missing_monitor_timestamp_ids.append(position_id)
+            continue
+        try:
+            parsed = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if parsed.tzinfo is None:
+            invalid_monitor_timestamp_ids.append(position_id)
+            continue
+        if (now - parsed.astimezone(timezone.utc)).total_seconds() > (
+            LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS
+        ):
+            stale_classified_ids.append(position_id)
+            stale_fresh_failed_timestamp_ids.append(position_id)
     identity_complete = (
         len(monitored_ids) == open_count
         and all(monitored_ids)
@@ -1123,6 +1372,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             fresh_count
             + probability_degraded_count
             + reauction_handoff_count
+            + len(settlement_recoverable_ids)
             == open_count
         )
     )
@@ -1132,12 +1382,632 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
         "monitored_position_ids": monitored_ids,
         "fresh_position_count": fresh_count,
         "probability_degraded_position_count": probability_degraded_count,
+        "probability_degraded_position_ids": probability_ids,
+        "quote_only_stale_position_ids": quote_only_ids,
+        "quote_only_stale_shape_valid": quote_only_shape_error is None,
+        "quote_only_stale_shape_error": quote_only_shape_error,
         "reauction_handoff_position_count": reauction_handoff_count,
         "reauction_handoff_position_ids": reauction_handoff_ids,
         "restart_blocking_position_count": restart_blocking_count,
+        "restart_blocking_position_ids": restart_blocking_ids,
+        "settlement_recoverable_position_count": len(settlement_recoverable_ids),
+        "settlement_recoverable_position_ids": settlement_recoverable_ids,
+        "fresh_failed_monitor_no_action_position_count": len(fresh_failed_ids),
+        "fresh_failed_monitor_no_action_position_ids": fresh_failed_ids,
+        "fresh_failed_monitor_duplicate_position_ids": fresh_failed_duplicate_ids,
+        "fresh_failed_monitor_other_classified_position_ids": fresh_failed_other_ids,
+        "fresh_failed_monitor_timestamp_stale_position_ids": tuple(
+            stale_fresh_failed_timestamp_ids
+        ),
+        "stale_classified_position_ids": tuple(stale_classified_ids),
+        "missing_monitor_timestamp_position_ids": tuple(missing_monitor_timestamp_ids),
+        "invalid_monitor_timestamp_position_ids": tuple(invalid_monitor_timestamp_ids),
         "quote_only_stale_position_count": quote_only_count,
+        "future_monitor_event_count": int(
+            cadence.get("future_monitor_event_count") or 0
+        ),
+        "non_monitor_chain_risk_position_count": int(
+            cadence.get("non_monitor_chain_risk_position_count") or 0
+        ),
         "sample": groups.get("restart_blocking_stale_positions", []),
     }
+
+
+def _held_quote_sidecar_current_evidence() -> dict[str, object]:
+    """Return the non-authorizing current-state proof for held quote refresh.
+
+    ``price-channel-ingest`` writes ``alive_at`` only after a successful M5
+    proof.  This admission therefore cannot treat a merely launched sidecar or
+    a future-dated heartbeat as current held-quote coverage.
+    """
+
+    path = (
+        Path(_require_live_repo())
+        / "state"
+        / "daemon-heartbeat-price-channel-ingest.json"
+    )
+    payload = _load_json(path)
+    observed_at = _parse_iso_utc(payload.get("alive_at"))
+    if not payload:
+        return {"current": False, "reason": "held_quote_sidecar_unreadable"}
+    if payload.get("daemon") != "price-channel-ingest":
+        return {"current": False, "reason": "held_quote_sidecar_identity_invalid"}
+    if payload.get("status") != "READY" or payload.get("liveness") != "ALIVE":
+        return {"current": False, "reason": "held_quote_sidecar_not_ready"}
+    if observed_at is None:
+        return {"current": False, "reason": "held_quote_sidecar_timestamp_invalid"}
+    age_seconds = (datetime.now(timezone.utc) - observed_at).total_seconds()
+    if age_seconds < 0.0:
+        return {
+            "current": False,
+            "reason": "held_quote_sidecar_timestamp_future",
+            "age_seconds": age_seconds,
+        }
+    if age_seconds > LIVE_HELD_QUOTE_SIDECAR_MAX_AGE_SECONDS:
+        return {
+            "current": False,
+            "reason": "held_quote_sidecar_stale",
+            "age_seconds": age_seconds,
+        }
+    return {"current": True, "age_seconds": age_seconds}
+
+
+def _stuck_monitor_recovery_admission(
+    *,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit only a fully classified, quote-supported total monitor stall.
+
+    This is a narrow stop-to-absent recovery, not alternate handoff authority.
+    Fresh or partial handoffs retain the ordinary ``green`` gate above.
+    """
+
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    required_handoff_fields = {
+        "open_position_count",
+        "fresh_position_count",
+        "future_monitor_event_count",
+        "non_monitor_chain_risk_position_count",
+        "quote_only_stale_position_count",
+        "quote_only_stale_position_ids",
+        "quote_only_stale_shape_valid",
+        "quote_only_stale_shape_error",
+        "reauction_handoff_position_count",
+        "probability_degraded_position_count",
+        "probability_degraded_position_ids",
+        "restart_blocking_position_count",
+        "restart_blocking_position_ids",
+        "settlement_recoverable_position_count",
+        "settlement_recoverable_position_ids",
+        "stale_classified_position_ids",
+        "missing_monitor_timestamp_position_ids",
+        "invalid_monitor_timestamp_position_ids",
+    }
+    if pause_state.get("entries_paused") is not True:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:nonterminal_commands"
+    if open_count <= 0 or len(expected_ids) != open_count or len(expected_set) != open_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:canonical_open_identity_incomplete"
+    if not required_handoff_fields.issubset(handoff):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:handoff_evidence_incomplete"
+    if int(handoff.get("open_position_count") or 0) != open_count:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:handoff_open_count_mismatch"
+    if int(handoff.get("fresh_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:partial_or_fresh_handoff"
+    if int(handoff.get("future_monitor_event_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:future_monitor_evidence"
+    if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:non_monitor_chain_risk"
+    if handoff.get("quote_only_stale_shape_valid") is not True:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:quote_only_shape_invalid"
+    if int(handoff.get("reauction_handoff_position_count") or 0) != 0:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:reauction_handoff_present"
+    if handoff.get("missing_monitor_timestamp_position_ids"):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_timestamp_missing"
+    if handoff.get("invalid_monitor_timestamp_position_ids"):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_timestamp_invalid"
+
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    restart_ids = tuple(handoff.get("restart_blocking_position_ids") or ())
+    quote_only_ids = tuple(handoff.get("quote_only_stale_position_ids") or ())
+    settlement_ids = tuple(
+        handoff.get("settlement_recoverable_position_ids") or ()
+    )
+    classified_ids = (
+        *probability_ids,
+        *restart_ids,
+        *quote_only_ids,
+        *settlement_ids,
+    )
+    classified_set = {str(position_id).strip() for position_id in classified_ids}
+    if (
+        len(probability_ids)
+        != int(handoff.get("probability_degraded_position_count") or 0)
+        or len(restart_ids)
+        != int(handoff.get("restart_blocking_position_count") or 0)
+        or len(quote_only_ids)
+        != int(handoff.get("quote_only_stale_position_count") or 0)
+        or len(settlement_ids)
+        != int(handoff.get("settlement_recoverable_position_count") or 0)
+        or not all(str(position_id).strip() for position_id in classified_ids)
+        or set(str(position_id).strip() for position_id in probability_ids)
+        & set(str(position_id).strip() for position_id in restart_ids)
+        or set(str(position_id).strip() for position_id in probability_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
+        or set(str(position_id).strip() for position_id in restart_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
+        & set(str(position_id).strip() for position_id in probability_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
+        & set(str(position_id).strip() for position_id in restart_ids)
+        or set(str(position_id).strip() for position_id in settlement_ids)
+        & set(str(position_id).strip() for position_id in quote_only_ids)
+        or len(classified_ids) != open_count
+        or len(classified_set) != open_count
+        or classified_set != expected_set
+    ):
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:open_classification_incomplete"
+    stale_ids = tuple(handoff.get("stale_classified_position_ids") or ())
+    if set(str(position_id).strip() for position_id in stale_ids) != expected_set:
+        return False, "STUCK_MONITOR_RECOVERY_REFUSED:monitor_evidence_not_stale"
+
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "STUCK_MONITOR_RECOVERY_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "STUCK_MONITOR_RECOVERY_ADMITTED: "
+        f"open_positions={open_count} fresh_positions=0 "
+        f"quote_only_stale_positions={len(quote_only_ids)} "
+        f"settlement_recoverable_positions={len(settlement_ids)} "
+        f"monitor_stale_bound_seconds={LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS} "
+        "held_quote_sidecar_current=true",
+    )
+
+
+def _loaded_live_runtime_repair_pending() -> dict[str, object]:
+    """Prove the loaded process predates the currently checked-out repair."""
+
+    payload = _load_json(Path(_require_live_repo()) / "state" / "loaded_sha.json")
+    loaded_sha = str(
+        payload.get("loaded_sha") or payload.get("boot_sha") or ""
+    ).strip()
+    expected_sha = head_sha(short=False)
+    if not loaded_sha or not expected_sha or expected_sha == "?":
+        return {"pending": False, "reason": "loaded_or_current_sha_unreadable"}
+    if _git_head_matches(expected_sha, loaded_sha):
+        return {"pending": False, "reason": "loaded_sha_matches_current_head"}
+    return {
+        "pending": True,
+        "loaded_sha": loaded_sha,
+        "current_head": expected_sha,
+    }
+
+
+def _fresh_failed_monitor_handoff_shape_valid(
+    *,
+    obligations: object,
+    pause_state: object,
+    handoff: object,
+    repair_pending: object,
+) -> bool:
+    """Reject malformed in-memory evidence before restart admission reads it."""
+
+    if not all(
+        isinstance(value, dict)
+        for value in (obligations, pause_state, handoff, repair_pending)
+    ):
+        return False
+
+    def _nonnegative_int(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    def _position_ids(value: object) -> bool:
+        return isinstance(value, (list, tuple)) and all(
+            type(position_id) is str and bool(position_id.strip())
+            for position_id in value
+        )
+
+    obligation_counts = (
+        obligations.get("open_position_count"),
+        obligations.get("nonterminal_command_count"),
+    )
+    handoff_counts = tuple(
+        handoff.get(field)
+        for field in (
+            "open_position_count",
+            "fresh_position_count",
+            "probability_degraded_position_count",
+            "future_monitor_event_count",
+            "non_monitor_chain_risk_position_count",
+            "quote_only_stale_position_count",
+            "reauction_handoff_position_count",
+            "fresh_failed_monitor_no_action_position_count",
+        )
+    )
+    handoff_id_fields = tuple(
+        handoff.get(field)
+        for field in (
+            "probability_degraded_position_ids",
+            "fresh_failed_monitor_no_action_position_ids",
+            "fresh_failed_monitor_duplicate_position_ids",
+            "fresh_failed_monitor_other_classified_position_ids",
+            "fresh_failed_monitor_timestamp_stale_position_ids",
+            "missing_monitor_timestamp_position_ids",
+            "invalid_monitor_timestamp_position_ids",
+        )
+    )
+    return bool(
+        all(_nonnegative_int(value) for value in (*obligation_counts, *handoff_counts))
+        and _position_ids(obligations.get("all_open_position_ids"))
+        and all(_position_ids(value) for value in handoff_id_fields)
+        and type(pause_state.get("entries_paused")) is bool
+        and type(handoff.get("quote_only_stale_shape_valid")) is bool
+        and type(repair_pending.get("pending")) is bool
+    )
+
+
+def _fresh_failed_monitor_repair_handoff_admission(
+    *,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+    repair_pending: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit a fully classified fresh no-action monitor failure for restart only.
+
+    SCOPE: stopping an already-loaded live-trading daemon while every canonical
+    open position has a current typed no-action monitor result. DRAIN: the
+    replacement daemon loads the pending repair and resumes normal monitor
+    coverage; this function never grants submit or exit authority. RESET: any
+    actionable/future/stale/missing classification, sidecar regression, command,
+    pause release, or loaded SHA catching up refuses on the next invocation.
+    """
+
+    if not _fresh_failed_monitor_handoff_shape_valid(
+        obligations=obligations,
+        pause_state=pause_state,
+        handoff=handoff,
+        repair_pending=repair_pending,
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_invalid"
+
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    required_handoff_fields = {
+        "open_position_count",
+        "fresh_position_count",
+        "probability_degraded_position_count",
+        "probability_degraded_position_ids",
+        "future_monitor_event_count",
+        "non_monitor_chain_risk_position_count",
+        "quote_only_stale_position_count",
+        "quote_only_stale_shape_valid",
+        "reauction_handoff_position_count",
+        "fresh_failed_monitor_no_action_position_count",
+        "fresh_failed_monitor_no_action_position_ids",
+        "fresh_failed_monitor_duplicate_position_ids",
+        "fresh_failed_monitor_other_classified_position_ids",
+        "fresh_failed_monitor_timestamp_stale_position_ids",
+        "missing_monitor_timestamp_position_ids",
+        "invalid_monitor_timestamp_position_ids",
+    }
+    if pause_state.get("entries_paused") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:nonterminal_commands"
+    if open_count <= 0 or len(expected_ids) != open_count or len(expected_set) != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:canonical_open_identity_incomplete"
+    if not required_handoff_fields.issubset(handoff):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_incomplete"
+    if repair_pending.get("pending") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:repair_code_not_pending"
+    if int(handoff.get("open_position_count") or 0) != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_open_count_mismatch"
+    fresh_count = int(handoff.get("fresh_position_count") or 0)
+    probability_count = int(
+        handoff.get("probability_degraded_position_count") or 0
+    )
+    no_action_count = int(
+        handoff.get("fresh_failed_monitor_no_action_position_count") or 0
+    )
+    if handoff.get("fresh_failed_monitor_duplicate_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
+    if fresh_count + probability_count + no_action_count != open_count:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
+    if int(handoff.get("future_monitor_event_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:future_monitor_evidence"
+    if int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:non_monitor_chain_risk"
+    if int(handoff.get("quote_only_stale_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:held_quote_stale"
+    if handoff.get("quote_only_stale_shape_valid") is not True:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:quote_only_shape_invalid"
+    if int(handoff.get("reauction_handoff_position_count") or 0) != 0:
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:reauction_handoff_present"
+    if handoff.get("missing_monitor_timestamp_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_missing"
+    if handoff.get("invalid_monitor_timestamp_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_invalid"
+    if handoff.get("fresh_failed_monitor_timestamp_stale_position_ids"):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:monitor_timestamp_stale"
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    probability_set = {str(position_id).strip() for position_id in probability_ids}
+    no_action_ids = tuple(handoff.get("fresh_failed_monitor_no_action_position_ids") or ())
+    no_action_set = {str(position_id).strip() for position_id in no_action_ids}
+    if (
+        len(probability_ids) != probability_count
+        or len(probability_set) != probability_count
+        or not probability_set.issubset(expected_set)
+        or len(no_action_ids) != no_action_count
+        or len(no_action_set) != no_action_count
+        or not no_action_set.issubset(expected_set)
+        or probability_set & no_action_set
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:open_no_action_partition_incomplete"
+    other_ids = tuple(
+        handoff.get("fresh_failed_monitor_other_classified_position_ids") or ()
+    )
+    if (
+        len(other_ids) != probability_count
+        or {str(position_id).strip() for position_id in other_ids}
+        != probability_set
+    ):
+        return False, "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_not_disjoint"
+
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED: "
+        f"open_positions={open_count} fresh_actionable_positions={fresh_count} "
+        f"probability_degraded_positions={probability_count} "
+        "typed_no_action_partition=complete held_quote_sidecar_current=true "
+        "restart_permission_only=true",
+    )
+
+
+def _current_quote_only_repair_snapshot_ids(
+    trade_db: Path,
+    *,
+    position_ids: tuple[str, ...],
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Return quote-gap positions with exact current local held-book proof."""
+
+    wanted = tuple(dict.fromkeys(str(value).strip() for value in position_ids))
+    if not wanted or any(not position_id for position_id in wanted):
+        return ()
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    placeholders = ", ".join("?" for _ in wanted)
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        position_columns = _sqlite_table_columns(conn, "position_current")
+        snapshot_columns = _sqlite_table_columns(
+            conn, "executable_market_snapshot_latest"
+        )
+        if not {
+            "position_id",
+            "condition_id",
+            "direction",
+            "token_id",
+            "no_token_id",
+        }.issubset(position_columns) or not {
+            "condition_id",
+            "selected_outcome_token_id",
+            "active",
+            "closed",
+            "accepting_orders",
+            "orderbook_top_bid",
+            "captured_at",
+            "freshness_deadline",
+        }.issubset(snapshot_columns):
+            return ()
+        rows = conn.execute(
+            f"""
+            SELECT pc.position_id,
+                   CASE pc.direction
+                       WHEN 'buy_yes' THEN pc.token_id
+                       WHEN 'buy_no' THEN pc.no_token_id
+                   END AS held_token_id,
+                   snapshot.selected_outcome_token_id,
+                   snapshot.active,
+                   snapshot.closed,
+                   snapshot.accepting_orders,
+                   snapshot.orderbook_top_bid,
+                   snapshot.captured_at,
+                   snapshot.freshness_deadline
+              FROM position_current AS pc
+              LEFT JOIN executable_market_snapshot_latest AS snapshot
+                ON snapshot.condition_id = pc.condition_id
+               AND snapshot.selected_outcome_token_id = CASE pc.direction
+                       WHEN 'buy_yes' THEN pc.token_id
+                       WHEN 'buy_no' THEN pc.no_token_id
+                   END
+             WHERE pc.position_id IN ({placeholders})
+            """,
+            wanted,
+        ).fetchall()
+    except (RuntimeError, sqlite3.Error):
+        return ()
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+    proven: set[str] = set()
+    for row in rows:
+        position_id = str(row["position_id"] or "").strip()
+        held_token_id = str(row["held_token_id"] or "").strip()
+        selected_token_id = str(row["selected_outcome_token_id"] or "").strip()
+        captured_at = _parse_iso_utc(row["captured_at"])
+        freshness_deadline = _parse_iso_utc(row["freshness_deadline"])
+        try:
+            held_bid = float(row["orderbook_top_bid"])
+        except (TypeError, ValueError):
+            continue
+        if (
+            position_id not in wanted
+            or position_id in proven
+            or not held_token_id
+            or selected_token_id != held_token_id
+            or row["active"] != 1
+            or row["closed"] != 0
+            or row["accepting_orders"] != 1
+            or captured_at is None
+            or freshness_deadline is None
+            or captured_at > now_utc
+            or freshness_deadline < now_utc
+            or not math.isfinite(held_bid)
+            or not 0.05 <= held_bid <= 0.95
+        ):
+            continue
+        proven.add(position_id)
+    return tuple(position_id for position_id in wanted if position_id in proven)
+
+
+def _quote_only_monitor_repair_handoff_admission(
+    *,
+    trade_db: Path,
+    obligations: dict[str, object],
+    pause_state: dict[str, object],
+    handoff: dict[str, object],
+    repair_pending: dict[str, object],
+) -> tuple[bool, str]:
+    """Admit an exact current-book repair over a loaded quote-age defect only.
+
+    SCOPE: restart permission while the loaded daemon misclassifies a freshly
+    fetched low-activity CLOB book by its last-mutation timestamp. DRAIN: the
+    replacement runtime uses fetch receipt time and must pass post-boot held
+    monitoring. RESET: any command, pause release, identity gap, expired exact
+    held-token snapshot, or loaded SHA convergence refuses immediately.
+    """
+
+    if not all(
+        isinstance(value, dict)
+        for value in (obligations, pause_state, handoff, repair_pending)
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:evidence_invalid"
+    open_count = int(obligations.get("open_position_count") or 0)
+    command_count = int(obligations.get("nonterminal_command_count") or 0)
+    expected_ids = tuple(obligations.get("all_open_position_ids") or ())
+    expected_set = {str(position_id).strip() for position_id in expected_ids}
+    monitored_ids = tuple(handoff.get("monitored_position_ids") or ())
+    monitored_set = {str(position_id).strip() for position_id in monitored_ids}
+    if pause_state.get("entries_paused") is not True:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:durable_entries_pause_false"
+    if command_count:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:nonterminal_commands"
+    if repair_pending.get("pending") is not True:
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:repair_code_not_pending"
+    if (
+        open_count <= 0
+        or len(expected_ids) != open_count
+        or len(expected_set) != open_count
+        or len(monitored_ids) != open_count
+        or len(monitored_set) != open_count
+        or monitored_set != expected_set
+        or int(handoff.get("open_position_count") or 0) != open_count
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:canonical_open_identity_incomplete"
+    if (
+        int(handoff.get("future_monitor_event_count") or 0) != 0
+        or int(handoff.get("non_monitor_chain_risk_position_count") or 0) != 0
+        or int(handoff.get("reauction_handoff_position_count") or 0) != 0
+        or handoff.get("quote_only_stale_shape_valid") is not True
+        or handoff.get("fresh_failed_monitor_duplicate_position_ids")
+        or handoff.get("fresh_failed_monitor_timestamp_stale_position_ids")
+        or handoff.get("stale_classified_position_ids")
+        or handoff.get("missing_monitor_timestamp_position_ids")
+        or handoff.get("invalid_monitor_timestamp_position_ids")
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:current_partition_invalid"
+
+    probability_ids = tuple(handoff.get("probability_degraded_position_ids") or ())
+    quote_ids = tuple(handoff.get("quote_only_stale_position_ids") or ())
+    no_action_ids = tuple(
+        handoff.get("fresh_failed_monitor_no_action_position_ids") or ()
+    )
+    other_ids = tuple(
+        handoff.get("fresh_failed_monitor_other_classified_position_ids") or ()
+    )
+    probability_set = {str(position_id).strip() for position_id in probability_ids}
+    quote_set = {str(position_id).strip() for position_id in quote_ids}
+    no_action_set = {str(position_id).strip() for position_id in no_action_ids}
+    other_set = {str(position_id).strip() for position_id in other_ids}
+    fresh_count = int(handoff.get("fresh_position_count") or 0)
+    if (
+        not quote_ids
+        or len(probability_ids)
+        != int(handoff.get("probability_degraded_position_count") or 0)
+        or len(quote_ids) != int(handoff.get("quote_only_stale_position_count") or 0)
+        or len(no_action_ids)
+        != int(handoff.get("fresh_failed_monitor_no_action_position_count") or 0)
+        or len(probability_set) != len(probability_ids)
+        or len(quote_set) != len(quote_ids)
+        or len(no_action_set) != len(no_action_ids)
+        or probability_set & quote_set
+        or probability_set & no_action_set
+        or quote_set & no_action_set
+        or other_set != probability_set | quote_set
+        or not (probability_set | quote_set | no_action_set).issubset(expected_set)
+        or fresh_count + len(probability_set | quote_set | no_action_set)
+        != open_count
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:open_partition_incomplete"
+    restart_ids = {
+        str(position_id).strip()
+        for position_id in tuple(handoff.get("restart_blocking_position_ids") or ())
+    }
+    settlement_ids = {
+        str(position_id).strip()
+        for position_id in tuple(handoff.get("settlement_recoverable_position_ids") or ())
+    }
+    if not restart_ids.issubset(no_action_set) or not settlement_ids.issubset(
+        no_action_set
+    ):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_invalid"
+
+    snapshot_ids = _current_quote_only_repair_snapshot_ids(
+        trade_db,
+        position_ids=quote_ids,
+    )
+    if set(snapshot_ids) != quote_set or len(snapshot_ids) != len(quote_ids):
+        return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:exact_held_book_not_current"
+    quote_sidecar = _held_quote_sidecar_current_evidence()
+    if quote_sidecar.get("current") is not True:
+        return (
+            False,
+            "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:"
+            f"{quote_sidecar.get('reason') or 'held_quote_sidecar_not_current'}",
+        )
+    return (
+        True,
+        "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_ADMITTED: "
+        f"open_positions={open_count} fresh_positions={fresh_count} "
+        f"quote_only_positions={len(quote_ids)} exact_held_books=current "
+        "durable_entries_pause=true nonterminal_commands=0 "
+        "restart_permission_only=true",
+    )
 
 
 def _exact_v4_reauction_restart_handoff_ids(
@@ -1495,10 +2365,41 @@ def _loaded_live_restart_obligation_gate(
             handoff.get("green") is not True
             or int(handoff.get("open_position_count") or 0) != open_count
         ):
+            stuck_ok, stuck_detail = _stuck_monitor_recovery_admission(
+                obligations=obligations,
+                pause_state=pause_state,
+                handoff=handoff,
+            )
+            if stuck_ok:
+                return True, f"loaded live-trading {stuck_detail}"
+            fresh_failed_ok, fresh_failed_detail = (
+                _fresh_failed_monitor_repair_handoff_admission(
+                    obligations=obligations,
+                    pause_state=pause_state,
+                    handoff=handoff,
+                    repair_pending=_loaded_live_runtime_repair_pending(),
+                )
+            )
+            if fresh_failed_ok:
+                return True, f"loaded live-trading {fresh_failed_detail}"
+            quote_only_ok, quote_only_detail = (
+                _quote_only_monitor_repair_handoff_admission(
+                    trade_db=trade_db,
+                    obligations=obligations,
+                    pause_state=pause_state,
+                    handoff=handoff,
+                    repair_pending=_loaded_live_runtime_repair_pending(),
+                )
+            )
+            if quote_only_ok:
+                return True, f"loaded live-trading {quote_only_detail}"
             return (
                 False,
                 "loaded live-trading repair handoff is not current: "
-                f"open_positions={open_count} evidence={handoff}",
+                f"open_positions={open_count} evidence={handoff} "
+                f"stuck_monitor_recovery={stuck_detail} "
+                f"fresh_failed_monitor_repair_handoff={fresh_failed_detail} "
+                f"quote_only_monitor_repair_handoff={quote_only_detail}",
             )
         return (
             True,
@@ -1943,7 +2844,13 @@ def _gate(allow_dirty: bool, allow_unpushed: bool = False) -> tuple[bool, list[s
     return True, blockers
 
 
-def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
+def _run_restart_preflight_if_needed(
+    labels: list[str],
+    *,
+    expected_live_process_state: str = "absent",
+    process_state_only: bool = False,
+    defer_running_monitor_cadence: bool = False,
+) -> tuple[bool, str]:
     """Run the live-money preflight before booting the trading daemon.
 
     ``--allow-dirty`` is only a git-surface override. It must not bypass current
@@ -1956,7 +2863,15 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    cmd = [py, "scripts/check_live_restart_preflight.py", "--json"]
+    cmd = [
+        py,
+        "scripts/check_live_restart_preflight.py",
+        "--json",
+        "--expected-live-process-state",
+        expected_live_process_state,
+    ]
+    if process_state_only:
+        cmd.append("--process-state-only")
     env = _live_trading_subprocess_env()
     env["ZEUS_LIVE_RESTART_IN_PROGRESS"] = "1"
     try:
@@ -1971,35 +2886,136 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"live restart preflight could not run: {exc}"
     output = (res.stdout or res.stderr or "").strip()
-    if res.returncode == 0:
-        try:
-            payload = json.loads(output)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if res.returncode == 0:
             return False, f"live restart preflight returned invalid JSON: {exc}"
-        if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
-            return False, "live restart preflight returned invalid attestation shape"
-        price_band = next(
-            (
-                check
-                for check in payload["checks"]
-                if isinstance(check, dict)
-                if check.get("name") == "absolute_live_unit_price_band"
-            ),
-            None,
+        tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+        return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
+        if res.returncode != 0:
+            tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+            return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+        return False, "live restart preflight returned invalid attestation shape"
+    reported_process_state = payload.get("expected_live_process_state")
+    if reported_process_state is None and expected_live_process_state == "absent":
+        reported_process_state = "absent"
+    if reported_process_state != expected_live_process_state:
+        return False, "live restart preflight process-state attestation mismatch"
+    if process_state_only:
+        if res.returncode == 0 and payload.get("ok") is True:
+            return True, f"live process-state witness passed: {expected_live_process_state}"
+        tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+        return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+    price_band = next(
+        (
+            check
+            for check in payload["checks"]
+            if isinstance(check, dict)
+            if check.get("name") == "absolute_live_unit_price_band"
+        ),
+        None,
+    )
+    if not isinstance(price_band, dict):
+        return False, (
+            "live restart preflight omitted required "
+            "absolute_live_unit_price_band attestation"
         )
-        if not isinstance(price_band, dict):
-            return False, (
-                "live restart preflight omitted required "
-                "absolute_live_unit_price_band attestation"
-            )
-        if price_band.get("ok") is not True or price_band.get("restart_blocking") is not True:
-            return False, (
-                "live restart preflight absolute_live_unit_price_band attestation "
-                f"is not restart-blocking PASS: {price_band}"
-            )
+    if price_band.get("ok") is not True or price_band.get("restart_blocking") is not True:
+        return False, (
+            "live restart preflight absolute_live_unit_price_band attestation "
+            f"is not restart-blocking PASS: {price_band}"
+        )
+    if res.returncode == 0 and payload.get("ok") is True:
         return True, "live restart preflight passed"
+    blockers = payload.get("blockers")
+    monitor_only = (
+        defer_running_monitor_cadence
+        and expected_live_process_state == "running"
+        and res.returncode != 0
+        and payload.get("ok") is False
+        and isinstance(blockers, list)
+        and bool(blockers)
+        and all(
+            isinstance(blocker, dict)
+            and blocker.get("name") == "monitor_cadence_restart_evidence"
+            and blocker.get("restart_blocking") is True
+            for blocker in blockers
+        )
+    )
+    if monitor_only:
+        return (
+            True,
+            "warm preflight passed except monitor cadence; exact current-capital "
+            "handoff remains mandatory immediately before stop",
+        )
     tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+
+
+def _restart_runtime_db_paths() -> tuple[Path, Path]:
+    """Resolve the exact world/trade DBs used by the loaded LaunchAgent."""
+
+    env = _live_trading_subprocess_env()
+    live_repo = Path(_require_live_repo()).expanduser().resolve()
+
+    def resolve_from_live(value: str | os.PathLike[str]) -> Path:
+        path = Path(value).expanduser()
+        return (path if path.is_absolute() else live_repo / path).resolve()
+
+    state_override = env.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR") or env.get(
+        "ZEUS_STATE_DIR"
+    )
+    if state_override:
+        state_dir = resolve_from_live(state_override)
+    elif env.get("ZEUS_PRIMARY_ROOT"):
+        state_dir = resolve_from_live(env["ZEUS_PRIMARY_ROOT"]) / "state"
+    else:
+        state_dir = live_repo / "state"
+    world_override = env.get("ZEUS_WORLD_DB")
+    trade_override = env.get("ZEUS_TRADE_DB")
+    world_db = (
+        resolve_from_live(world_override)
+        if world_override
+        else (state_dir / "zeus-world.db").resolve()
+    )
+    trade_db = (
+        resolve_from_live(trade_override)
+        if trade_override
+        else (state_dir / "zeus_trades.db").resolve()
+    )
+    return world_db, trade_db
+
+
+def _restart_migration_targets_current() -> tuple[bool, str]:
+    """Prove process-absent migrations are already recorded in live DBs."""
+
+    try:
+        world_db, trade_db = _restart_runtime_db_paths()
+        evidence = []
+        for db_path, targets in (
+            (world_db, RESTART_WORLD_MIGRATION_TARGETS),
+            (trade_db, RESTART_TRADE_MIGRATION_TARGETS),
+        ):
+            if not db_path.is_file():
+                return False, f"restart migration DB missing: {db_path}"
+            uri = f"file:{db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                applied = {
+                    str(row[0])
+                    for row in conn.execute("SELECT name FROM _migrations_applied")
+                }
+            finally:
+                conn.close()
+            missing = [target for _key, target in targets if target not in applied]
+            if missing:
+                return False, f"restart migrations pending in {db_path}: {missing}"
+            evidence.append(f"{db_path}:{len(targets)}")
+        return True, "restart migration ledgers current: " + ", ".join(evidence)
+    except Exception as exc:  # noqa: BLE001 -- fast path must fail closed.
+        return False, f"restart migration ledger proof failed: {type(exc).__name__}: {exc}"
 
 
 def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
@@ -2100,6 +3116,8 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         import time
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
+            RESTART_TRADE_MIGRATION_TARGETS,
+            RESTART_WORLD_MIGRATION_TARGETS,
             _assert_restart_trade_schema_ready,
             _ensure_restart_world_schemas,
         )
@@ -2117,21 +3135,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         world_conn = get_world_connection(write_class='live')
         try:
             _ensure_restart_world_schemas(world_conn)
-            applied['world'] = apply_migrations(
-                world_conn,
-                target='202607_drop_world_collateral_unsettled_ghost',
-                db_identity='world',
-            )
-            applied['world_active_redecision_projection'] = apply_migrations(
-                world_conn,
-                target='202608_edli_active_redecision_projection',
-                db_identity='world',
-            )
-            applied['world_active_redecision_backfill_notnull'] = apply_migrations(
-                world_conn,
-                target='202608_edli_active_redecision_projection_receipt_notnull',
-                db_identity='world',
-            )
+            for result_key, target in RESTART_WORLD_MIGRATION_TARGETS:
+                applied[result_key] = apply_migrations(
+                    world_conn,
+                    target=target,
+                    db_identity='world',
+                )
             world_conn.commit()
         finally:
             world_conn.close()
@@ -2173,11 +3182,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
 
         trade_conn = get_trade_connection(write_class='live')
         try:
-            applied['trade'] = apply_migrations(
-                trade_conn,
-                target='202607_cas_reservation_ledger',
-                db_identity='trade',
-            )
+            for result_key, target in RESTART_TRADE_MIGRATION_TARGETS:
+                applied[result_key] = apply_migrations(
+                    trade_conn,
+                    target=target,
+                    db_identity='trade',
+                )
             _assert_restart_trade_schema_ready(trade_conn)
         finally:
             trade_conn.close()
@@ -2185,7 +3195,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         from src.execution.command_recovery import reconcile_unresolved_commands
         from src.events.edli_trade_fact_bridge import (
             append_confirmed_trade_facts_to_edli,
-            append_rest_filled_orphan_trade_facts_to_edli,
+            append_prepared_trade_fact_bridge_evidence,
         )
         from src.ingest.price_channel_ingest import (
             _edli_trade_fact_bridge_candidates_read_only,
@@ -2210,17 +3220,24 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 1000,
             )
             try:
-                summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
-                    bridge_conn,
-                    candidates=confirmed_candidates,
-                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
-                )
-                summary['rest_fill_orphan_bridge_appended'] = (
-                    append_rest_filled_orphan_trade_facts_to_edli(
-                        bridge_conn,
-                        candidates=rest_orphan_candidates,
-                        absorbed_fill_aggregate_ids=(),
+                summary['confirmed_fill_bridge_appended'] = 0
+                summary['rest_fill_orphan_bridge_appended'] = 0
+                for evidence in confirmed_candidates:
+                    summary['confirmed_fill_bridge_appended'] += (
+                        append_prepared_trade_fact_bridge_evidence(
+                            bridge_conn, evidence
+                        )
                     )
+                for evidence in rest_orphan_candidates:
+                    summary['rest_fill_orphan_bridge_appended'] += (
+                        append_prepared_trade_fact_bridge_evidence(
+                            bridge_conn, evidence
+                        )
+                    )
+                summary['confirmed_fill_bridge_appended'] += append_confirmed_trade_facts_to_edli(
+                    bridge_conn,
+                    candidates=(),
+                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
                 )
                 bridge_conn.commit()
             except sqlite3.OperationalError as exc:
@@ -2255,8 +3272,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         return False, f"live restart recovery could not run: {exc}"
     stdout = (res.stdout or "").strip()
     stderr = (res.stderr or "").strip()
-    diagnostic = "\n".join(part for part in (stderr, stdout) if part)
-    tail = "\n".join(diagnostic.splitlines()[-80:]) if diagnostic else "<no output>"
+    recovery_output = "\n".join(part for part in (stderr, stdout) if part)
+    tail = (
+        "\n".join(recovery_output.splitlines()[-80:])
+        if recovery_output
+        else "<no output>"
+    )
     if res.returncode != 0:
         return False, f"live restart recovery failed rc={res.returncode}:\n{tail}"
     try:
@@ -2593,6 +3614,23 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
+
+    # Arm the durable entry guard while the loaded main still monitors held
+    # capital.  The obligation gate below requires this witness, so checking it
+    # first creates a circular refusal.  Do not use the writer-stuck recovery
+    # helper here: its stop fallback is only safe after a fresh capital handoff
+    # has already been proven.
+    pause_ok, pause_detail = _pause_entries_for_live_restart_if_needed(
+        labels,
+        expected_sha=expected_live_sha,
+    )
+    if not pause_ok:
+        print("REFUSING to restart — live entry pause guard is not armed:")
+        print(pause_detail)
+        return 1
+    print(pause_detail)
+
     obligation_ok, obligation_detail = _loaded_live_restart_obligation_gate(
         labels,
         live_was_loaded=live_was_loaded_before,
@@ -2602,18 +3640,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         print(obligation_detail)
         return 1
     print(obligation_detail)
-    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
-
-    pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
-        labels,
-        live_was_loaded=live_was_loaded_before,
-        expected_sha=expected_live_sha,
-    )
-    if not pause_ok:
-        print("REFUSING to restart — live entry pause guard is not armed:")
-        print(pause_detail)
-        return 1
-    print(pause_detail)
 
     launched_after: datetime | None = None
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
@@ -2628,8 +3654,16 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     preflight_prerequisite_labels = [
         label for label in non_live_labels if label not in post_live_labels
     ]
+    reusable_prerequisite_labels = _current_prerequisite_code_identity_labels(
+        preflight_prerequisite_labels,
+        expected_sha=expected_live_sha,
+    )
     prerequisite_launch_started_at = datetime.now(timezone.utc)
+    continuous_monitor_cutover = False
     for label in preflight_prerequisite_labels:
+        if label in reusable_prerequisite_labels:
+            print(f"retained current prerequisite {label}: loaded SHA and heartbeat verified")
+            continue
         ok, detail = _launch_or_restart_label(label)
         if ok:
             print(detail)
@@ -2660,6 +3694,24 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             return 1
         print(prerequisite_detail)
 
+        if live_was_loaded_before:
+            migrations_current, migration_detail = _restart_migration_targets_current()
+            print(migration_detail)
+            if migrations_current:
+                warm_ok, warm_detail = _run_restart_preflight_if_needed(
+                    labels,
+                    expected_live_process_state="running",
+                    defer_running_monitor_cadence=True,
+                )
+                if not warm_ok:
+                    print(
+                        "REFUSING to stop live-trading — warm restart preflight is not green:"
+                    )
+                    print(warm_detail)
+                    return 1
+                print(warm_detail)
+                continuous_monitor_cutover = True
+
         # Keep the currently loaded order daemon monitoring held capital while
         # new-code prerequisites become ready.  Stopping it before sidecar
         # reload/identity waits created multi-minute MONITOR_REFRESHED blackouts
@@ -2677,6 +3729,20 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 print(handoff_detail)
                 return 1
             print(f"pre-stop {handoff_detail}")
+            if continuous_monitor_cutover:
+                running_ok, running_detail = _run_restart_preflight_if_needed(
+                    labels,
+                    expected_live_process_state="running",
+                    process_state_only=True,
+                )
+                print(running_detail)
+                if not running_ok:
+                    print(
+                        "REFUSING to stop live-trading — exact one-main witness "
+                        "failed after the fresh capital handoff",
+                        file=sys.stderr,
+                    )
+                    return 1
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
@@ -2690,8 +3756,27 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             else:
                 print(detail, file=sys.stderr)
                 return 1
+        if continuous_monitor_cutover:
+            absent_ok, absent_detail = _run_restart_preflight_if_needed(
+                labels,
+                expected_live_process_state="absent",
+                process_state_only=True,
+            )
+            print(absent_detail)
+            if not absent_ok:
+                print(
+                    "REFUSING to bootstrap live-trading — exact zero-main witness failed; "
+                    "entry pause remains armed and no second main will be launched",
+                    file=sys.stderr,
+                )
+                return 1
 
-    if includes_live_trading:
+    if continuous_monitor_cutover:
+        recovery_ok, recovery_detail = (
+            True,
+            "live restart recovery skipped: migration ledgers and warm preflight current",
+        )
+    elif includes_live_trading:
         recovery_ok, recovery_detail = (
             _run_restart_recovery_with_quiesced_prerequisites(
                 labels,
@@ -2718,7 +3803,13 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         return 1
     print(recovery_detail)
 
-    preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
+    if continuous_monitor_cutover:
+        preflight_ok, preflight_detail = (
+            True,
+            "live restart preflight satisfied by warm full attestation and zero-main witness",
+        )
+    else:
+        preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)

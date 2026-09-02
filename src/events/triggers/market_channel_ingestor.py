@@ -1,5 +1,5 @@
 # Created: prior to 2026-05-24
-# Last reused or audited: 2026-07-30
+# Last reused or audited: 2026-08-30
 # Authority basis: EDLI v1 §10 online MarketChannelIngestor contract.
 #   2026-06-04: 5th-instance WAL-bloat fix — pre-capture pattern for on_connect
 #   REST orderbook fetch; seed_from_rest gains pre_cached kwarg; on_connect gains
@@ -243,6 +243,8 @@ class MarketChannelIngestor:
         self._seen_quote_event_limit = 20_000
         self._pending_quote_event_ids: dict[str, str] = {}
         self._pending_quote_seen_at: dict[str, str] = {}
+        self._committed_loss_audit_token_ids: set[str] = set()
+        self._pending_loss_audit_event_tokens: dict[str, str] = {}
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -440,6 +442,7 @@ class MarketChannelIngestor:
         if self._coalescer is None:
             return
         for event in prepared.events:
+            self._pending_loss_audit_event_tokens.pop(event.event_id, None)
             if self._pending_quote_is_current(event):
                 self._coalescer.enqueue(event)
 
@@ -763,6 +766,35 @@ class MarketChannelIngestor:
             payload.get("best_ask"), previous.best_ask
         )
 
+    def _market_sell_bid_ladder_unchanged(self, event: OpportunityEvent) -> bool:
+        """Return whether a full-depth update leaves executable SELL proceeds unchanged."""
+
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        token_id = str(payload.get("token_id") or "")
+        previous = self.quote_cache.get(token_id)
+        if previous is None:
+            return False
+
+        def _bids(depth_json: object) -> list[object] | None:
+            if not isinstance(depth_json, str) or not depth_json:
+                return None
+            try:
+                depth = json.loads(depth_json)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(depth, dict) or not isinstance(depth.get("bids"), list):
+                return None
+            return depth["bids"]
+
+        current_bids = _bids(payload.get("depth_json"))
+        previous_bids = _bids(previous.depth_json)
+        return current_bids is not None and current_bids == previous_bids
+
     def _market_quote_is_older(self, event: OpportunityEvent) -> bool:
         if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
             return False
@@ -856,12 +888,25 @@ class MarketChannelIngestor:
                 _logger.exception(
                     "selective market-channel evidence append set unavailable"
                 )
-        audit_rows = [
-            row
-            for row in rows
-            if str(row.get("token_id") or "") in append_tokens
-            and str(row.get("direction") or "").startswith("buy_")
-        ]
+        self._committed_loss_audit_token_ids.intersection_update(append_tokens)
+        append_event_tokens: dict[str, str] = {}
+        audit_rows: list[dict[str, Any]] = []
+        for quote in current:
+            token_id = str(quote.payload.get("token_id") or "")
+            if token_id not in append_tokens:
+                continue
+            if (
+                self._coalescer is not None
+                and token_id in self._committed_loss_audit_token_ids
+                and self._market_sell_bid_ladder_unchanged(quote.event)
+            ):
+                continue
+            append_event_tokens[quote.event.event_id] = token_id
+            audit_rows.extend(
+                row
+                for row in quote.evidence_rows
+                if str(row.get("direction") or "").startswith("buy_")
+            )
         if audit_rows:
             insert_execution_feasibility_evidence_batch(
                 self._feasibility_conn,
@@ -870,6 +915,8 @@ class MarketChannelIngestor:
                 append_evidence=True,
                 prepared_rows=True,
             )
+            if self._coalescer is not None:
+                self._pending_loss_audit_event_tokens.update(append_event_tokens)
         return current
 
     def finalize_prepared_quote_events(
@@ -880,6 +927,12 @@ class MarketChannelIngestor:
 
         quotes = tuple(prepared)
         for quote in quotes:
+            token_id = self._pending_loss_audit_event_tokens.pop(
+                quote.event.event_id,
+                None,
+            )
+            if token_id is not None:
+                self._committed_loss_audit_token_ids.add(token_id)
             self._cache_quote_payload(quote.event, quote.payload)
             self._remember_quote_event(quote.event.event_id)
             self._clear_pending_quote_event(quote.event)

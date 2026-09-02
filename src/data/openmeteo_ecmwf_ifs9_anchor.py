@@ -368,6 +368,7 @@ def fetch_openmeteo_ifs9_model_meta(
         max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_model_meta",
         fast_fail_429=fast_fail_429,
+        count_toward_quota=False,
         **fetch_kwargs,
     )
     if not isinstance(meta, Mapping):

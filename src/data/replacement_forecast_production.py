@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-08-31
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -649,23 +649,14 @@ def _probe_resolved_available_cycle() -> datetime | None:
 
 
 def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
-    """Newest cycle fetchable by the BPF extras transport itself.
+    """Newest provider-confirmed cycle for a BPF download attempt.
 
-    The anchor lane can use a ladder (single-runs, model meta, bucket). BPF
-    extras are persisted from the Open-Meteo single-runs API, so an anchor-only
-    bucket/meta cycle is not enough proof that extras can fetch the same run.
+    Availability preflight and data capture must not both spend single-runs
+    quota. Free provider metadata/S3 selects the exact cycle; the BPF downloader
+    itself proves single-runs transport availability and durably records 400,
+    cooldown, coverage, and written rows. No failed download becomes data.
     """
-    from src.data.replacement_cycle_availability import (  # noqa: PLC0415
-        newest_complete_cycle,
-        probe_openmeteo_single_run_available,
-        resolve_anchor_cycle_availability,
-    )
-
-    availability = resolve_anchor_cycle_availability(
-        datetime.now(timezone.utc),
-        probe_anchor=probe_openmeteo_single_run_available,
-    )
-    return newest_complete_cycle(availability)
+    return _probe_resolved_available_cycle()
 
 
 def _critical_scopes_missing_current_anchor(
@@ -673,7 +664,7 @@ def _critical_scopes_missing_current_anchor(
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
 ) -> tuple[tuple[str, str, str], ...] | None:
-    """Return exact critical scopes without materializable canonical raw at ``cycle``."""
+    """Return exact scoped targets without materializable canonical raw at ``cycle``."""
 
     from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
         expected_replacement_dependency_identity_by_role,
@@ -785,6 +776,10 @@ def _download_replacement_forecast_current_targets_if_needed(
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
     plan = None
+    structurally_unservable_critical_scopes: tuple[
+        tuple[str, str, str], ...
+    ] = ()
+    critical_scope_exclusions: list[dict[str, object]] = []
     if required_scopes is None:
         plan = build_replacement_forecast_current_target_plan(
             Path(str(forecast_db)),
@@ -802,36 +797,107 @@ def _download_replacement_forecast_current_targets_if_needed(
                 held_position_family_priorities,
             )
 
-            critical_families = held_position_family_priorities()
+            held_families = held_position_family_priorities()
             unauthorized = tuple(
-                scope for scope in required_scopes if critical_families.get(scope) != 0
+                scope for scope in required_scopes if scope not in held_families
             )
             if unauthorized:
                 raise ValueError(
                     "critical current-target quota requires exact canonical "
-                    "day0_window/pending_exit scopes: "
+                    "open-held scopes: "
                     + ",".join("/".join(scope) for scope in unauthorized)
                 )
-            missing_critical_scopes = _critical_scopes_missing_current_anchor(
-                Path(str(forecast_db)),
-                required_scopes,
-                available_cycle,
+            from src.config import cities_by_name  # noqa: PLC0415
+
+            # A current source cycle cannot repair a past local target day.  Such
+            # exposure remains an observation/settlement/exit obligation, but it
+            # must not become infinite forecast-anchor quota debt.
+            for scope in required_scopes:
+                city_cfg = cities_by_name.get(scope[0])
+                reason = (
+                    "CITY_CONFIG_UNAVAILABLE"
+                    if city_cfg is None
+                    else "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW"
+                    if not _source_cycle_can_cover_local_decision_window(
+                        cycle=available_cycle,
+                        target_date=scope[1],
+                        timezone_name=str(city_cfg.timezone),
+                    )
+                    else None
+                )
+                if reason is not None:
+                    critical_scope_exclusions.append(
+                        {"scope": list(scope), "reason": reason}
+                    )
+            structurally_unservable_critical_scopes = tuple(
+                tuple(str(value) for value in row["scope"])
+                for row in critical_scope_exclusions
             )
-            if missing_critical_scopes is None:
-                raise RuntimeError("critical current-target anchor coverage unreadable")
-            if not missing_critical_scopes:
+            unservable = set(structurally_unservable_critical_scopes)
+            required_scopes = tuple(
+                scope for scope in required_scopes if scope not in unservable
+            )
+            if not required_scopes:
                 return {
-                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
                     "available_cycle": available_cycle.isoformat(),
                     "downloaded_cycle": (
                         None
                         if downloaded_cycle is None
                         else downloaded_cycle.isoformat()
                     ),
-                    "target_count": len(required_scopes),
+                    "target_count": len(structurally_unservable_critical_scopes),
+                    "structurally_unservable_scope_count": len(
+                        structurally_unservable_critical_scopes
+                    ),
+                    "structurally_unservable_scopes": [
+                        list(scope)
+                        for scope in structurally_unservable_critical_scopes
+                    ],
+                    "scope_exclusions": critical_scope_exclusions,
                     "written_manifest_count": 0,
                 }
-            required_scopes = missing_critical_scopes
+        # Explicit ordinary held scopes need the same exact-cycle reuse proof as
+        # critical held scopes.  Previously only quota_critical entered this
+        # check, so already-materializable active positions re-downloaded the
+        # same provider cycle every minute until the local quota failed. SCOPE:
+        # only this explicit scoped slice. DRAIN: missing scopes continue into
+        # the existing bounded transport below. RESET: a newer provider cycle or
+        # a missing/invalid canonical artifact makes the scope missing again.
+        missing_scopes = _critical_scopes_missing_current_anchor(
+            Path(str(forecast_db)),
+            required_scopes,
+            available_cycle,
+        )
+        if missing_scopes is None:
+            raise RuntimeError("scoped current-target anchor coverage unreadable")
+        if not missing_scopes:
+            covered_report: dict[str, object] = {
+                "status": (
+                    "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+                    if quota_critical
+                    else "CURRENT_TARGETS_ALREADY_COVERED"
+                ),
+                "available_cycle": available_cycle.isoformat(),
+                "downloaded_cycle": (
+                    None
+                    if downloaded_cycle is None
+                    else downloaded_cycle.isoformat()
+                ),
+                "target_count": len(required_scopes),
+                "written_manifest_count": 0,
+            }
+            if structurally_unservable_critical_scopes:
+                covered_report["structurally_unservable_scope_count"] = len(
+                    structurally_unservable_critical_scopes
+                )
+                covered_report["structurally_unservable_scopes"] = [
+                    list(scope)
+                    for scope in structurally_unservable_critical_scopes
+                ]
+                covered_report["scope_exclusions"] = critical_scope_exclusions
+            return covered_report
+        required_scopes = missing_scopes
     if quota_critical and required_scopes is None:
         raise ValueError("critical current-target quota requires explicit scopes")
     cycle_targets_have_current_manifests = (
@@ -948,6 +1014,14 @@ def _download_replacement_forecast_current_targets_if_needed(
         "downloaded_cycle",
         None if downloaded_cycle is None else downloaded_cycle.isoformat(),
     )
+    if structurally_unservable_critical_scopes:
+        result["structurally_unservable_scope_count"] = len(
+            structurally_unservable_critical_scopes
+        )
+        result["structurally_unservable_scopes"] = [
+            list(scope) for scope in structurally_unservable_critical_scopes
+        ]
+        result["scope_exclusions"] = critical_scope_exclusions
     return result
 
 
@@ -981,10 +1055,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
                 "cooldown_seconds": cooldown_seconds,
             }
-        # RUN-SELECTION AUTHORITY (2026-06-19): the capture cycle is the newest cycle
-        # provably fetchable by the BPF extras transport itself. The anchor lane can
-        # advance through meta/bucket before the single-runs API serves the same run;
-        # extras must not follow that anchor-only cycle and then fail every target.
+        # RUN-SELECTION AUTHORITY: free provider metadata/S3 chooses the exact
+        # cycle. The real extras download, not a duplicate paid preflight,
+        # proves whether single-runs can serve it and records any refusal.
         cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
         if cycle is None:
             # The single-runs probe can be unavailable while the anchor lane has
@@ -2430,7 +2503,10 @@ def _record_bayes_precision_fusion_capture_health(
             },
         )
         return
-    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+    if (
+        status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+        and not report.get("global_models_unavailable")
+    ):
         cycle_raw = report.get("cycle")
         try:
             cycle = datetime.fromisoformat(str(cycle_raw).replace("Z", "+00:00"))
@@ -2442,6 +2518,7 @@ def _record_bayes_precision_fusion_capture_health(
                 cycle,
                 written=int(report.get("written_row_count", 0) or 0),
             )
+    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
         unavailable = report.get("global_models_unavailable")
         if unavailable:
             _write_scheduler_health(
@@ -2497,11 +2574,10 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
          servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
       B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
          ``_probe_resolved_bayes_precision_fusion_extras_cycle()`` — the newest cycle the
-         BPF extras single-runs transport itself can serve on the fixed 00/06/12/18Z grid
-         (replacement_cycle_availability.py:47), monotone in publish order. Within ~6h the
-         next single-runs cycle publishes, the probe advances to C', the latch (keyed on C's
-         ISO) goes stale, and C' is healed from scratch. A permanently-unservable scope thus
-         halts looping for C but never poisons C+1.
+         provider metadata/S3 frontier declares on the fixed 00/06/12/18Z grid. The real
+         download is the single-runs availability proof. When the provider frontier advances
+         to C', the latch (keyed on C's ISO) goes stale and C' is healed from scratch. A
+         permanently-unservable scope thus halts looping for C but never poisons C+1.
          => INVARIANT: for any cycle C the fan-out runs on finitely many ticks — bounded by
             min(ticks-until-covered-count-stops-rising, C's ~6h active-probe window) — and the
             unservable residual is surfaced (logged), never silently looped on.
@@ -2598,6 +2674,320 @@ def _current_target_anchor_gap_count(
         return None
 
 
+def _held_common_cycle_recovery_targets(
+    forecast_db: Path,
+    *,
+    decision_time: datetime,
+) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
+    """Return held scopes whose posterior trails their newest common input cycle.
+
+    The provider anchor can advance beyond ENS after a held scope missed one
+    bounded download slice. Fetching only the newest anchor then cannot heal the
+    posterior: same-cycle probability law rejects ``new anchor + older ENS``.
+    Recovery includes both missing anchors and already-committed anchors whose
+    reseed was lost across a crash/restart boundary. ``None`` means the evidence
+    was unreadable and must be retried.
+    """
+
+    from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        held_position_family_priorities,
+    )
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        SOURCE_ID,
+    )
+    from src.data.replacement_forecast_materialization_seed_builder import (  # noqa: PLC0415
+        latest_baseline_coverage_for_replacement_seed,
+    )
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    held_scopes = tuple(sorted(held_position_family_priorities()))
+    if not held_scopes:
+        return ()
+    conn = None
+    try:
+        conn = _connect_read_only(forecast_db)
+        conn.execute("PRAGMA query_only=ON")
+        scopes_by_cycle: dict[datetime, list[tuple[str, str, str]]] = {}
+        for city, target_date, metric in held_scopes:
+            ensemble_hwm = latest_eligible_ensemble_input_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+            )
+            if ensemble_hwm is None:
+                continue
+            ensemble_hwm = ensemble_hwm.astimezone(timezone.utc)
+            baseline = latest_baseline_coverage_for_replacement_seed(
+                conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+                not_after_source_cycle_time=ensemble_hwm,
+                as_of_time=decision_time,
+            )
+            if baseline is None:
+                continue
+            baseline_cycle = datetime.fromisoformat(
+                str(baseline["source_cycle_time"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            # Both high-water marks are authority-filtered as of the same
+            # decision clock. Their minimum is the newest cycle neither leg
+            # outruns; the materializer still performs exact same-cycle
+            # identity validation before publishing q.
+            common_cycle = min(baseline_cycle, ensemble_hwm)
+            row = conn.execute(
+                """
+                SELECT source_cycle_time
+                FROM forecast_posteriors
+                WHERE source_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                  AND runtime_layer = 'live'
+                ORDER BY computed_at DESC, posterior_id DESC
+                LIMIT 1
+                """,
+                (SOURCE_ID, city, target_date, metric),
+            ).fetchone()
+            posterior_cycle = None
+            if row is not None and row[0]:
+                posterior_cycle = datetime.fromisoformat(
+                    str(row[0]).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            if posterior_cycle is not None and posterior_cycle >= common_cycle:
+                continue
+            scopes_by_cycle.setdefault(common_cycle, []).append(
+                (city, target_date, metric)
+            )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return tuple(
+        (cycle, tuple(scopes))
+        for cycle, scopes in sorted(scopes_by_cycle.items())
+    )
+
+
+def _held_common_cycle_anchor_gaps(
+    forecast_db: Path,
+    *,
+    decision_time: datetime,
+) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
+    """Return only missing-anchor subsets of held common-cycle q debt."""
+
+    targets = _held_common_cycle_recovery_targets(
+        forecast_db,
+        decision_time=decision_time,
+    )
+    if targets is None:
+        return None
+    batches: list[tuple[datetime, tuple[tuple[str, str, str], ...]]] = []
+    for cycle, scopes in targets:
+        missing = _critical_scopes_missing_current_anchor(
+            forecast_db,
+            scopes,
+            cycle,
+        )
+        if missing is None:
+            return None
+        if missing:
+            batches.append((cycle, missing))
+    return tuple(batches)
+
+
+def _recover_held_common_cycle_anchors_if_needed(
+    cfg: Mapping[str, object],
+    *,
+    decision_time: datetime | None = None,
+) -> dict[str, object] | None:
+    """Capture exact missing anchor legs for held scopes' common input cycle."""
+
+    forecast_db = cfg.get("forecast_db")
+    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
+    if forecast_db is None or output_dir is None:
+        return None
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        download_current_target_openmeteo_inputs,
+    )
+
+    now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    forecast_db_path = Path(str(forecast_db))
+    batches = _held_common_cycle_recovery_targets(
+        forecast_db_path,
+        decision_time=now,
+    )
+    if batches is None:
+        return {
+            "status": "HELD_COMMON_CYCLE_EVIDENCE_UNREADABLE_RETRY",
+            "decision_time": now.isoformat(),
+            "recoveries": [],
+            "committed_families": (),
+        }
+    report: dict[str, object] = {
+        "status": (
+            "HELD_COMMON_CYCLE_GAPS_FOUND"
+            if batches
+            else "HELD_COMMON_CYCLE_CURRENT"
+        ),
+        "decision_time": now.isoformat(),
+        "recoveries": [],
+        "committed_families": (),
+    }
+    anchor_hwm = _per_leg_downloaded_cycle(
+        forecast_db_path,
+        "openmeteo_ecmwf_ifs_9km",
+    )
+    rolled_past = 0
+    committed_families: list[tuple[str, str, str]] = []
+    for cycle, scopes in batches:
+        missing_before = _critical_scopes_missing_current_anchor(
+            forecast_db_path,
+            scopes,
+            cycle,
+        )
+        if missing_before is None:
+            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "ANCHOR_EVIDENCE_UNREADABLE_RETRY",
+                    "committed_families": [],
+                }
+            )
+            continue
+        missing_set = set(missing_before)
+        ready_before = tuple(scope for scope in scopes if scope not in missing_set)
+        committed_families.extend(ready_before)
+        if missing_before and anchor_hwm is not None and cycle < anchor_hwm:
+            rolled_past += 1
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "PROVIDER_CYCLE_ROLLED_PAST",
+                    "anchor_hwm": anchor_hwm.isoformat(),
+                    "committed_families": [
+                        list(scope) for scope in ready_before
+                    ],
+                }
+            )
+            continue
+        try:
+            recovered: tuple[tuple[str, str, str], ...] = ready_before
+            if missing_before:
+                result = download_current_target_openmeteo_inputs(
+                    forecast_db=forecast_db_path,
+                    output_dir=Path(str(output_dir)),
+                    cycle=cycle,
+                    limit=None,
+                    write_db=True,
+                    release_lag_hours=float(
+                        cfg.get("download_release_lag_hours") or 14.0
+                    ),
+                    anchor_sigma_c=float(
+                        cfg.get("download_anchor_sigma_c") or 3.0
+                    ),
+                    required_scopes=missing_before,
+                    fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                    # This recovery is exclusively for canonical open-held
+                    # families.  Local quota counters are telemetry here: they
+                    # must not manufacture authority loss for capital already
+                    # at risk.  The downloader's critical lane still obeys the
+                    # provider cooldown, terminal HTTP outcome, single-flight,
+                    # and bounded-request contracts.
+                    quota_critical=True,
+                )
+                # SCOPE: only exact held families requested in this recovery batch.
+                # DRAIN: re-read canonical exact-cycle coverage after the downloader
+                # commits; a count or sibling manifest is never family evidence.
+                # RESET: only families absent from the post-commit missing set may
+                # publish a reseed; unreadable evidence remains retryable.
+                missing_after = _critical_scopes_missing_current_anchor(
+                    forecast_db_path,
+                    missing_before,
+                    cycle,
+                )
+                if missing_after is None:
+                    report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+                else:
+                    missing_after_set = set(missing_after)
+                    newly_recovered = tuple(
+                        scope
+                        for scope in missing_before
+                        if scope not in missing_after_set
+                    )
+                    committed_families.extend(newly_recovered)
+                    recovered = (*ready_before, *newly_recovered)
+            else:
+                result = {
+                    "status": "ANCHOR_ALREADY_CURRENT_RESEED_REQUIRED",
+                    "written_manifest_count": 0,
+                    "written_manifests": [],
+                }
+            recovery: dict[str, object] = {
+                "cycle": cycle.isoformat(),
+                "scopes": [list(scope) for scope in scopes],
+                "status": result.get("status"),
+                "written_manifest_count": result.get("written_manifest_count"),
+                "written_manifests": list(result.get("written_manifests") or ()),
+                "committed_families": [list(scope) for scope in recovered],
+            }
+            if recovered:
+                manifest_paths = tuple(
+                    str(path)
+                    for path in (result.get("written_manifests") or ())
+                    if str(path).strip()
+                )
+                reseed_kwargs: dict[str, object] = {"scopes": recovered}
+                if manifest_paths:
+                    reseed_kwargs["manifest_snapshot"] = {
+                        "manifest_paths": manifest_paths
+                    }
+                reseed = _enqueue_cycle_advance_reseeds_if_needed(
+                    dict(cfg),
+                    **reseed_kwargs,
+                )
+                if reseed is not None:
+                    recovery["reseed_status"] = reseed.get("status")
+                    recovery["seeds_enqueued"] = reseed.get("seeds_enqueued")
+                    reseed_status = str(reseed.get("status") or "")
+                    reseed_error = (
+                        None
+                        if reseed_status == "CYCLE_ADVANCE_TRIGGER"
+                        else f"cycle_advance:{reseed_status or 'RESEED_STATUS_MISSING'}"
+                    )
+                    if reseed_error is not None:
+                        report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+                        recovery["reseed_error"] = reseed_error
+            report["recoveries"].append(recovery)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 - next poll retries exact gaps.
+            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
+            report["recoveries"].append(  # type: ignore[union-attr]
+                {
+                    "cycle": cycle.isoformat(),
+                    "scopes": [list(scope) for scope in scopes],
+                    "status": "FETCH_FAILED_RETRY",
+                    "error": str(exc)[:200],
+                    "committed_families": [
+                        list(scope) for scope in ready_before
+                    ],
+                }
+            )
+    if rolled_past == len(batches) and batches:
+        report["status"] = "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST"
+    report["committed_families"] = tuple(dict.fromkeys(committed_families))
+    return report
+
+
 def _replacement_cycle_availability_poll_if_needed(
     cfg: dict[str, object],
     *,
@@ -2679,7 +3069,20 @@ def _replacement_cycle_availability_poll_if_needed(
     except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
         report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
         report["source_clock_error"] = str(exc)[:200]
-    if fetch_anchor_cycle is None:
+    recovery_report = _recover_held_common_cycle_anchors_if_needed(
+        cfg,
+        decision_time=now,
+    )
+    if recovery_report is not None:
+        report["held_common_cycle_recovery_status"] = recovery_report.get(
+            "status"
+        )
+        report["held_common_cycle_recovery"] = recovery_report.get("recoveries")
+    recovery_active = bool(
+        recovery_report
+        and recovery_report.get("status") != "HELD_COMMON_CYCLE_CURRENT"
+    )
+    if fetch_anchor_cycle is None and not recovery_active:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
         # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).
@@ -2751,7 +3154,14 @@ def _replacement_cycle_availability_poll_if_needed(
             # and is a TRANSIENT error, NOT proof the residual is unservable — latching on it
             # would wrongly suppress the self-healing re-run. (Distinguishes "unservable ->
             # complete-with-gap" from "transient fan-out error -> keep re-running".)
-            if _extras_cycle is not None and _bpf_status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+            if (
+                _extras_cycle is not None
+                and _bpf_status
+                == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+                and not bayes_precision_fusion_report.get(
+                    "global_models_unavailable"
+                )
+            ):
                 _record_extras_fixpoint(
                     cfg,
                     _extras_cycle,

@@ -26,16 +26,14 @@ LEGACY_SETTLEMENT_CONTRACT_VERSION = "decision_log.settlement.v1"
 #
 # Piggybacked in the SAME transaction as every decision_log INSERT (both
 # store_artifact and store_settlement_records below): after inserting a row
-# of a given mode, opportunistically deletes up to _INLINE_EXPIRE_LIMIT rows
-# of that SAME mode older than that mode's retention window. No commit here
-# -- matches the existing "caller owns the commit" contract, so this is part
-# of whatever transaction the caller is already managing. Bounded by
-# construction: fires once per insert, so as long as writes continue the
-# backlog cannot grow unbounded; if writes ever stopped, no expiry would be
-# needed either. scripts/migrations/202608_decision_log_retention.py (PR
-# #510) remains available as the one-time backlog-drain tool for rows
-# written before this inline mechanism existed; its companion launchd plist
-# is optional in steady state.
+# of a given mode, scans at most _INLINE_EXPIRE_SCAN_LIMIT expired candidates
+# and deletes up to _INLINE_EXPIRE_LIMIT rows of that SAME mode. The canonical
+# DB cursor is stored in zeus_meta in that same transaction, so later writes
+# continue the bounded backward walk. No commit here -- matches the existing
+# "caller owns the commit" contract. scripts/migrations/
+# 202608_decision_log_retention.py (PR #510) remains available as the one-time
+# backlog-drain tool for rows written before this inline mechanism existed;
+# its companion launchd plist is optional in steady state.
 #
 # Per-mode windows carried forward from the PR #510 consumer-window audit:
 # 7 days is safe for every consumer except the tier0 preregistered-study
@@ -52,6 +50,8 @@ _MODE_RETENTION_DAYS: dict[str, int] = {
 }
 _DEFAULT_MODE_RETENTION_DAYS = 30
 _INLINE_EXPIRE_LIMIT = 50
+_INLINE_EXPIRE_SCAN_LIMIT = 500
+_INLINE_EXPIRE_CURSOR_PREFIX = "decision_log.inline_expire_cursor.v1:"
 
 # Tier0 preregistered selection-lift study anchor (PR #510): a
 # global_single_order_auction row whose artifact_json.summary.
@@ -73,20 +73,62 @@ TIER0_EXCEPT_CLAUSE = """
 
 
 def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = None) -> None:
-    """Opportunistically delete up to _INLINE_EXPIRE_LIMIT expired decision_log
-    rows of the given mode. ``exclude_id`` is the row just inserted by the
-    caller in this same call -- excluded so a legitimately old-timestamped
-    write (a backfill/catch-up insert, or a row whose own timestamp happens
-    to already be outside the window) is never deleted by the very insert
-    that created it. Never raises -- a bug here must not block a legitimate
-    decision_log write; failures are logged and swallowed so the caller's
-    insert/commit proceeds unaffected.
+    """Scan a fixed expired page and delete matching rows of ``mode``.
+
+    The canonical trade DB's ``zeus_meta`` cursor makes sparse modes progress
+    across calls without an unbounded index walk. ``exclude_id`` protects the
+    row just inserted by this caller. Never raises: retention failure must not
+    block a legitimate decision artifact write.
     """
     try:
         keep_days = _MODE_RETENTION_DAYS.get(mode, _DEFAULT_MODE_RETENTION_DAYS)
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=keep_days)
-        ).strftime("%Y-%m-%dT%H:%M:%S")
+        # A day-stable cutoff prevents the cursor from resetting on every call.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).strftime(
+            "%Y-%m-%dT00:00:00"
+        )
+        has_meta = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zeus_meta'"
+        ).fetchone() is not None
+        cursor_key = f"{_INLINE_EXPIRE_CURSOR_PREFIX}{mode}"
+        scan_cursor: tuple[str, int] | None = None
+        if has_meta:
+            cursor_row = conn.execute(
+                "SELECT value FROM zeus_meta WHERE key = ?", (cursor_key,)
+            ).fetchone()
+            if cursor_row is not None:
+                try:
+                    cursor_value = json.loads(str(cursor_row[0]))
+                    cursor_timestamp = cursor_value.get("timestamp")
+                    cursor_id = cursor_value.get("id")
+                    if (
+                        cursor_value.get("cutoff") == cutoff
+                        and isinstance(cursor_timestamp, str)
+                        and isinstance(cursor_id, int)
+                    ):
+                        scan_cursor = (cursor_timestamp, cursor_id)
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    scan_cursor = None
+
+        cursor_clause = ""
+        scan_params: list[object] = [cutoff]
+        if scan_cursor is not None:
+            cursor_clause = (
+                "AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+            )
+            scan_params.extend((scan_cursor[0], scan_cursor[0], scan_cursor[1]))
+        scan_params.append(_INLINE_EXPIRE_SCAN_LIMIT)
+        candidates = conn.execute(
+            f"""
+            SELECT id, timestamp, mode
+            FROM decision_log INDEXED BY idx_decision_log_ts
+            WHERE timestamp < ?
+            {cursor_clause}
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(scan_params),
+        ).fetchall()
+
         except_clause = ""
         if mode == "global_single_order_auction":
             has_tier0 = conn.execute(
@@ -95,29 +137,44 @@ def _inline_expire_decision_log(conn, mode: str, *, exclude_id: "int | None" = N
             ).fetchone() is not None
             if has_tier0:
                 except_clause = TIER0_EXCEPT_CLAUSE
-        exclude_clause = "AND id != ?" if exclude_id is not None else ""
-        params: tuple = (cutoff, mode)
-        if exclude_id is not None:
-            params += (exclude_id,)
-        params += (_INLINE_EXPIRE_LIMIT,)
-        # The canonical table is hundreds of GB. Walk the timestamp index
-        # backward from the cutoff: walking forward from its oldest entry can
-        # traverse years of other-mode rows before finding this mode, while the
-        # caller already owns the write transaction and exit/cancel journals
-        # wait behind it. The reverse order is still a bounded, exact expiry;
-        # it only changes which 50 already-expired rows drain first.
-        conn.execute(
-            f"""
-            DELETE FROM decision_log WHERE id IN (
-                SELECT id FROM decision_log INDEXED BY idx_decision_log_ts
-                WHERE timestamp < ? AND mode = ?
-                {exclude_clause}
+        candidate_ids = [
+            int(row[0])
+            for row in candidates
+            if row[2] == mode and (exclude_id is None or int(row[0]) != exclude_id)
+        ][:_INLINE_EXPIRE_LIMIT]
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            conn.execute(
+                f"""
+                DELETE FROM decision_log
+                WHERE id IN ({placeholders}) AND mode = ?
                 {except_clause}
-                ORDER BY timestamp DESC, id DESC LIMIT ?
+                """,
+                (*candidate_ids, mode),
             )
-            """,
-            params,
-        )
+
+        if has_meta:
+            if len(candidates) == _INLINE_EXPIRE_SCAN_LIMIT:
+                last = candidates[-1]
+                cursor_value = {
+                    "cutoff": cutoff,
+                    "timestamp": str(last[1]),
+                    "id": int(last[0]),
+                }
+            else:
+                # End reached. Wrap so matches skipped by the 50-row delete
+                # cap are reconsidered on the next artifact write.
+                cursor_value = {"cutoff": cutoff}
+            conn.execute(
+                """
+                INSERT INTO zeus_meta(key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (cursor_key, json.dumps(cursor_value, separators=(",", ":"))),
+            )
     except Exception:  # noqa: BLE001 - inline expiry must never block a real write
         logger.exception("_inline_expire_decision_log failed for mode=%s (write unaffected)", mode)
 

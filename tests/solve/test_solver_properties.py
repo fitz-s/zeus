@@ -2491,7 +2491,7 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
 
 
 @pytest.mark.parametrize("bid_price", ("0.01", "0.04"))
-def test_global_taker_buy_can_commit_to_settlement_without_exit_depth(bid_price):
+def test_statistical_taker_buy_requires_in_band_liquidation_capacity(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
         family="taker-born-unexitable-family",
@@ -2509,15 +2509,38 @@ def test_global_taker_buy_can_commit_to_settlement_without_exit_depth(bid_price)
 
     decision = _global_select((candidate,), cap="5")
 
-    assert decision.candidate is candidate
-    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
-    assert decision.expected_growth is not None
-    assert decision.expected_growth.expected_ev_usd > 0.0
-    assert decision.capital_lock_hours is not None
-    assert decision.capital_lock_hours > 0.0
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+    )
 
 
-def test_global_taker_buy_size_uses_buy_depth_not_current_exit_depth():
+def test_jinan_statistical_buy_with_floor_bid_has_no_executable_unwind():
+    candidate = _global_candidate(
+        candidate_id="jinan-2026-08-27-floor-bid",
+        family="Jinan|2026-08-27|high",
+        side="YES",
+        q=0.1242,
+        levels=(("0.076", "26"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+    )
+
+
+def test_global_taker_buy_size_is_capped_by_current_liquidation_capacity():
     candidate = _global_candidate(
         candidate_id="taker-repairable-prefix",
         family="taker-repairable-prefix-family",
@@ -2537,7 +2560,31 @@ def test_global_taker_buy_size_uses_buy_depth_not_current_exit_depth():
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is candidate
-    assert decision.shares > Decimal("55")
+    assert decision.shares == Decimal("55")
+
+
+def test_statistical_taker_buy_retains_liquidation_capped_legal_size():
+    candidate = _global_candidate(
+        candidate_id="liquidation-capped-buy",
+        family="liquidation-capped-buy-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.50"), size=Decimal("6")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="20")
+
+    assert decision.candidate is candidate
+    assert decision.shares == Decimal("6")
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_ev_usd > 0.0
 
 
 def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():

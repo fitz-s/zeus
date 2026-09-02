@@ -1,4 +1,5 @@
 # Created: 2026-07-20
+# Last reused/audited: 2026-08-29
 # Authority basis: docs/operations/current review-blocker sweep (three
 #   independent GPT-5.6 Pro merge-safety reviews) item C6 — ingest fan-out
 #   fail-OPEN on Day0 family-admission failure.
@@ -44,6 +45,7 @@ from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 from src.ingest_main import (
     _day0_family_admission_for_scopes,
     _day0_source_family_admission,
+    _obs_tick_day0_family_admission,
 )
 from src.state.db import init_schema, init_schema_forecasts, init_schema_trade_only
 
@@ -568,6 +570,52 @@ def test_obs_tick_source_tiers_forward_day0_admission_to_canonical_write(
     assert result.rows_written == 1
     assert result.day0_event_ids == ("event-1",)
     assert result.day0_event_families == ((city_name, "2026-07-29", "high"),)
+
+
+def test_obs_tick_admits_wu_and_noaa_but_not_other_source_lanes(monkeypatch):
+    """WU canonical rows must reach Day0 events just like NOAA rows."""
+
+    import src.config as config
+    import src.ingest_main as ingest_main
+
+    cities = {
+        "Jinan": SimpleNamespace(
+            name="Jinan",
+            timezone="Asia/Shanghai",
+            settlement_source_type="wu_icao",
+        ),
+        "Tel Aviv": SimpleNamespace(
+            name="Tel Aviv",
+            timezone="Asia/Jerusalem",
+            settlement_source_type="noaa",
+        ),
+        "Hong Kong": SimpleNamespace(
+            name="Hong Kong",
+            timezone="Asia/Hong_Kong",
+            settlement_source_type="hko",
+        ),
+    }
+    monkeypatch.setattr(config, "runtime_cities_by_name", lambda: cities)
+    captured: dict[str, tuple[tuple[str, str], ...]] = {}
+
+    def capture(scopes):
+        captured["scopes"] = scopes
+        return lambda _observation: True
+
+    monkeypatch.setattr(ingest_main, "_day0_family_admission_for_scopes", capture)
+
+    admission = _obs_tick_day0_family_admission(
+        tuple(cities),
+        decision_time=datetime(2026, 8, 30, 1, tzinfo=UTC),
+    )
+
+    assert admission({}) is True
+    assert captured["scopes"] == (
+        ("Jinan", "2026-08-29"),
+        ("Jinan", "2026-08-30"),
+        ("Tel Aviv", "2026-08-29"),
+        ("Tel Aviv", "2026-08-30"),
+    )
 
 
 @pytest.mark.parametrize("job_name", ("_k2_obs_tick", "_k2_obs_fast_tick"))

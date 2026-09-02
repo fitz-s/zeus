@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
@@ -974,6 +977,7 @@ def test_global_exact_submit_uses_fee_aware_max_spend_not_raw_limit_or_base_cost
             "edge_lcb": 0.20,
             "global_actuation_identity": "global-actuation-1",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
             "global_target_shares": "10",
             "global_limit_price": "0.44",
             "global_expected_fill_price_before_fee": "0.41",
@@ -1249,6 +1253,7 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "global_auction_receipt": auction_receipt,
             "global_economic_identity": "global-economic-current-1",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
             "global_execution_mode": "TAKER_LIMIT",
             "global_candidate_id": "candidate-current-1",
             "global_bin_id": "bin-1",
@@ -2461,6 +2466,7 @@ def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers()
         "global_proposal_expected_capital_efficiency": expected_du / expected_cost,
         "global_proposal_fill_semantics": "IMMEDIATE_FILL",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
         "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
         "global_candidate_id": "global-candidate-mean",
         "global_bin_id": "bin-mean",

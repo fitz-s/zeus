@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-28
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -2539,6 +2539,69 @@ def test_venue_background_m5_reconcile_cold_boot_failure_keeps_latch(monkeypatch
     assert result == {"status": "failed_closed", "error": "fresh M5 unavailable"}
     assert len(calls) == 1
     assert guard.summary()["m5_reconcile_required"] is True
+
+
+def test_venue_background_m5_default_route_separates_db_and_network(monkeypatch):
+    """The live route must capture venue truth between two closed DB phases."""
+    from src import main
+    from src.execution import exchange_reconcile, venue_sync_contract
+
+    class Guard:
+        def summary(self, *, now=None):
+            return {
+                "m5_reconcile_required": True,
+                "stale_after_seconds": 60,
+            }
+
+    phase = {"db_open": False}
+    calls = []
+
+    def snapshot(_conn):
+        assert phase["db_open"] is True
+        calls.append("snapshot")
+        return ("ord-m5",)
+
+    def network(_adapter, *, observed_at, trade_order_ids):
+        assert phase["db_open"] is False
+        assert trade_order_ids == {"ord-m5"}
+        calls.append("network")
+        return object()
+
+    def apply(_snapshot, _conn, **_kwargs):
+        assert phase["db_open"] is True
+        calls.append("apply")
+        return {"status": "blocked", "reason": "test"}
+
+    def run_three_phase(snapshot_fn, network_fn, apply_fn, **kwargs):
+        phase["db_open"] = True
+        scoped = snapshot_fn(object())
+        phase["db_open"] = False
+        venue = network_fn(scoped)
+        phase["db_open"] = True
+        try:
+            result = apply_fn(object(), venue)
+        finally:
+            phase["db_open"] = False
+        assert kwargs["label"] == "venue_background.ws_gap_m5"
+        return result
+
+    monkeypatch.setattr(exchange_reconcile, "ws_gap_local_order_ids", snapshot)
+    monkeypatch.setattr(exchange_reconcile, "fresh_reconcile_snapshot", network)
+    monkeypatch.setattr(
+        exchange_reconcile,
+        "apply_ws_gap_reconcile_snapshot_and_clear",
+        apply,
+    )
+    monkeypatch.setattr(venue_sync_contract, "run_three_phase", run_three_phase)
+
+    result = main._run_ws_gap_reconcile_if_required(
+        object(),
+        ws_guard=Guard(),
+        now=datetime(2026, 8, 28, 16, 30, tzinfo=timezone.utc),
+    )
+
+    assert result == {"status": "blocked", "reason": "test"}
+    assert calls == ["snapshot", "network", "apply"]
 
 
 def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(monkeypatch):

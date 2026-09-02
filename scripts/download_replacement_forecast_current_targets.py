@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-31
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -230,17 +230,21 @@ def _rotate_current_target_rows(
     *,
     cycle: datetime,
     state_path: Path | None = None,
+    pinned_prefix_count: int = 0,
 ) -> tuple[list[object], int, int, int, _RotationStateToken]:
     ordered = list(rows)
+    pinned_count = min(max(0, int(pinned_prefix_count)), len(ordered))
+    pinned = ordered[:pinned_count]
+    rotating = ordered[pinned_count:]
     cycle_key = cycle.astimezone(UTC).isoformat()
-    if not ordered:
+    if not rotating:
         if state_path is None:
-            return ordered, 0, 0, 0, (None, None)
+            return pinned, 0, 0, 0, (None, None)
         _, generation, state_token = _read_rotation_state(
             state_path,
             cycle_key=cycle_key,
         )
-        return ordered, 0, 0, generation, state_token
+        return pinned, 0, 0, generation, state_token
     with _CURRENT_TARGET_ROTATION_LOCK:
         persisted_start = 0
         generation = 0
@@ -257,13 +261,13 @@ def _rotate_current_target_rows(
             persisted_start
             if state_path is not None
             else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
-        ) % len(ordered)
+        ) % len(rotating)
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
     return (
-        ordered[start:] + ordered[:start],
+        pinned + rotating[start:] + rotating[:start],
         start,
-        len(ordered),
+        len(rotating),
         generation,
         state_token,
     )
@@ -479,6 +483,33 @@ def _json_file_valid(path: Path) -> bool:
         return False
 
 
+def _current_target_scoped_payload(
+    payload: object,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> dict:
+    """Bind canonical payload bytes to the target certificate identity.
+
+    One provider city/run payload spans several dates, so its unscoped bytes
+    share one SHA. ``raw_forecast_artifacts`` is content-addressed by that SHA,
+    while the anchor manifest and precision metadata are target-specific. The
+    namespaced scope keeps provider samples unchanged but prevents two valid
+    target certificates from collapsing onto one DB row.
+    """
+
+    if not isinstance(payload, dict):
+        raise TypeError("current-target Open-Meteo payload must be an object")
+    scoped = dict(payload)
+    scoped["_zeus_current_target_scope"] = {
+        "city": str(city),
+        "target_date": str(target_date),
+        "metric": str(metric),
+    }
+    return scoped
+
+
 def _current_target_payload_materializable(
     payload: object,
     *,
@@ -662,6 +693,128 @@ def _canonical_current_target_reuse(
             ):
                 continue
             reused[key] = int(row["artifact_id"])
+        except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            continue
+    return reused
+
+
+def _canonical_sibling_payload_reuse(
+    forecast_db: Path,
+    *,
+    cycle: datetime,
+    targets: Sequence[object],
+) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
+    """Reuse one verified hourly payload for the missing HIGH/LOW twin.
+
+    Open-Meteo serves one run-pinned hourly ``temperature_2m`` payload per
+    city/run. HIGH and LOW are distinct downstream data versions, but the same
+    payload can cover several target dates and both metrics; a provider quota
+    must not strand another materializable date/metric after capture. SCOPE is
+    one city/cycle payload plus an explicitly verified target date. DRAIN is
+    the normal manifest loop below. RESET is an exact date/metric artifact,
+    which then moves the family into ``_canonical_current_target_reuse``.
+    """
+
+    if not forecast_db.exists() or not targets:
+        return {}
+    wanted_by_city: dict[str, list[tuple[str, str]]] = {}
+    for target in targets:
+        wanted_by_city.setdefault(str(target.city), []).append(
+            (str(target.target_date), str(target.temperature_metric))
+        )
+    cycle_iso = cycle.astimezone(UTC).isoformat()
+    try:
+        conn = _connect(forecast_db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT artifact_id, data_version, artifact_path, sha256, byte_size,
+                   captured_at, artifact_metadata_json
+            FROM raw_forecast_artifacts
+            WHERE source_id = ?
+              AND product_id = ?
+              AND source_cycle_time = ?
+              AND data_version IN (?, ?)
+            ORDER BY artifact_id DESC
+            """,
+            (
+                OPENMETEO_SOURCE_ID,
+                OPENMETEO_PRODUCT_ID,
+                cycle_iso,
+                OPENMETEO_HIGH_DATA_VERSION,
+                OPENMETEO_LOW_DATA_VERSION,
+            ),
+        ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    reused: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
+    excluded_metadata = {
+        "artifact_class",
+        "cities",
+        "city",
+        "target_date",
+        "target_dates",
+        "metric",
+        "source_run_id",
+        "openmeteo_payload_json",
+        "precision_metadata_json",
+    }
+    for row in rows:
+        try:
+            metadata = json.loads(str(row["artifact_metadata_json"] or "{}"))
+            city = str(metadata.get("city") or "")
+            sibling_metric = str(metadata.get("metric") or "")
+            row_metric = (
+                "high"
+                if str(row["data_version"]) == OPENMETEO_HIGH_DATA_VERSION
+                else "low"
+                if str(row["data_version"]) == OPENMETEO_LOW_DATA_VERSION
+                else ""
+            )
+            city_targets = wanted_by_city.get(city, ())
+            if not city_targets or sibling_metric != row_metric:
+                continue
+            artifact_path = Path(str(row["artifact_path"]))
+            raw = artifact_path.read_bytes()
+            if (
+                len(raw) != int(row["byte_size"])
+                or hashlib.sha256(raw).hexdigest() != str(row["sha256"])
+            ):
+                continue
+            payload = json.loads(raw)
+            city_config = cities_by_name.get(city)
+            if city_config is None:
+                continue
+            captured_at = datetime.fromisoformat(
+                str(row["captured_at"]).replace("Z", "+00:00")
+            ).astimezone(UTC)
+            provenance = {
+                name: value
+                for name, value in metadata.items()
+                if name not in excluded_metadata
+            }
+            provenance["raw_metric_sibling_reuse"] = sibling_metric
+            provenance["raw_target_date_sibling_reuse"] = str(
+                metadata.get("target_date") or ""
+            )
+            for target_date, wanted_metric in city_targets:
+                key = (city, target_date)
+                if (
+                    key in reused
+                    or {wanted_metric, sibling_metric} != {"high", "low"}
+                    or not _current_target_payload_materializable(
+                        payload,
+                        city_timezone=city_config.timezone,
+                        target_date=target_date,
+                        cycle=cycle,
+                    )
+                ):
+                    continue
+                reused[key] = (payload, dict(provenance), captured_at)
         except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             continue
     return reused
@@ -1144,6 +1297,119 @@ def _fetch_run_pinned_anchor_wave(
     return resolved
 
 
+def _dedupe_pending_anchor_requests(
+    requests: dict[tuple[str, str], object],
+) -> tuple[
+    dict[tuple[str, str], object],
+    dict[tuple[str, str], tuple[tuple[str, str], ...]],
+]:
+    """Fetch each identical city/run request once, then fan it out by target date."""
+
+    representative_by_request: dict[object, tuple[str, str]] = {}
+    representatives: dict[tuple[str, str], object] = {}
+    fanout: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for target_key, request in requests.items():
+        representative = representative_by_request.get(request)
+        if representative is None:
+            representative = target_key
+            representative_by_request[request] = representative
+            representatives[representative] = request
+            fanout[representative] = []
+        fanout[representative].append(target_key)
+    return representatives, {
+        representative: tuple(target_keys)
+        for representative, target_keys in fanout.items()
+    }
+
+
+def _fan_out_anchor_payloads(
+    resolved: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
+    *,
+    requests: dict[tuple[str, str], object],
+    fanout: dict[tuple[str, str], tuple[tuple[str, str], ...]],
+) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
+    expanded: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
+    for representative, target_keys in fanout.items():
+        fetched = resolved.get(representative)
+        if fetched is None:
+            continue
+        payload, provenance, captured_at = fetched
+        request = requests[representative]
+        for target_key in target_keys:
+            if not _current_target_payload_materializable(
+                payload,
+                city_timezone=request.timezone_name,
+                target_date=target_key[1],
+                cycle=request.run,
+            ):
+                continue
+            expanded[target_key] = (
+                payload,
+                {
+                    **provenance,
+                    "request_payload_fanout_count": len(target_keys),
+                },
+                captured_at,
+            )
+    return expanded
+
+
+def _expand_required_metric_siblings(
+    forecast_db: Path,
+    scopes: Sequence[tuple[str, str, str]],
+) -> tuple[tuple[str, str, str], ...]:
+    """Close active HIGH/LOW twins before spending a city/run request.
+
+    One run-pinned hourly payload is the raw input for both extrema.  A scoped
+    recovery that requests only one active metric must persist its active twin
+    in the same pass; otherwise the local target rotation can strand usable
+    bytes until a later cycle.  Missing ``market_events`` keeps the caller's
+    exact scope unchanged for isolated fixtures and non-market repair use.
+    """
+
+    normalized = tuple(
+        dict.fromkeys(
+            (
+                str(city).strip(),
+                str(target_date).strip(),
+                str(metric).strip(),
+            )
+            for city, target_date, metric in scopes
+            if str(city).strip()
+            and str(target_date).strip()
+            and str(metric).strip() in {"high", "low"}
+        )
+    )
+    if not normalized or not forecast_db.exists():
+        return normalized
+    try:
+        conn = _connect(forecast_db)
+        active_scopes = {
+            (str(city), str(target_date), str(metric))
+            for city, target_date, metric in conn.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE temperature_metric IN ('high', 'low')
+                """
+            ).fetchall()
+        }
+    except (OSError, sqlite3.Error):
+        return normalized
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    expanded = list(normalized)
+    seen = set(normalized)
+    for city, target_date, metric in normalized:
+        sibling = (city, target_date, "low" if metric == "high" else "high")
+        if sibling in active_scopes and sibling not in seen:
+            expanded.append(sibling)
+            seen.add(sibling)
+    return tuple(expanded)
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -1182,6 +1448,10 @@ def download_current_target_raw_inputs(
         raise ValueError("limit must be a positive integer or None")
     plan: ReplacementForecastCurrentTargetPlan | None = None
     if required_scopes is not None:
+        required_scopes = _expand_required_metric_siblings(
+            forecast_db,
+            required_scopes,
+        )
         _rows = [
             ReplacementForecastTargetKey(city, target_date, metric)
             for city, target_date, metric in dict.fromkeys(
@@ -1217,6 +1487,18 @@ def download_current_target_raw_inputs(
         _rows,
         held_family_priority,
     )
+    held_priority_row_count = sum(
+        _current_target_family_key(row) in held_family_priority
+        for row in _rows
+    )
+    # Pin existing exposure only when the configured slice can still carry at
+    # least one ordinary family.  A smaller slice keeps the old full-universe
+    # rotation so priority cannot turn into permanent background starvation.
+    priority_row_count = (
+        held_priority_row_count
+        if limit is None or held_priority_row_count < int(limit)
+        else 0
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     rotation_state_path = _current_target_rotation_state_path(
         output_dir,
@@ -1233,6 +1515,7 @@ def download_current_target_raw_inputs(
         _rows,
         cycle=cycle,
         state_path=rotation_state_path,
+        pinned_prefix_count=priority_row_count,
     )
     targets = rotated_rows[:limit] if limit is not None else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
@@ -1259,6 +1542,7 @@ def download_current_target_raw_inputs(
         "openmeteo_transport_fetch_count": 0,
         "openmeteo_model_meta_fetch_count": 0,
         "openmeteo_wave_payload_count": 0,
+        "openmeteo_intra_wave_fanout_count": 0,
         "openmeteo_single_runs_location_batch_count": 0,
     }
     deadline_monotonic = (
@@ -1268,7 +1552,16 @@ def download_current_target_raw_inputs(
     )
     resolved_payloads: dict[
         tuple[str, str], tuple[dict, dict[str, object], datetime]
-    ] = {}
+    ] = _canonical_sibling_payload_reuse(
+        forecast_db,
+        cycle=cycle,
+        targets=tuple(
+            target
+            for target in targets
+            if _current_target_family_key(target) not in canonical_reuse
+        ),
+    )
+    sibling_payload_reuse_count = len(resolved_payloads)
     meta_wave_failures: dict[tuple[str, str], Exception] = {}
     unavailable_targets: set[tuple[str, str]] = set()
     processed_target_count = 0
@@ -1297,6 +1590,8 @@ def download_current_target_raw_inputs(
         if _current_target_family_key(target) in canonical_reuse:
             continue
         target_key = (target.city, target.target_date)
+        if target_key in resolved_payloads:
+            continue
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
         if payload_path.exists() and _current_target_payload_file_materializable(
             payload_path,
@@ -1316,6 +1611,9 @@ def download_current_target_raw_inputs(
                 past_hours=CURRENT_RUN_CONTEXT_HOURS,
             ),
         )
+    representative_requests, request_fanout = _dedupe_pending_anchor_requests(
+        pending_requests
+    )
 
     openmeteo_client = httpx.Client()
     first_request = next(iter(pending_requests.values()), None)
@@ -1351,8 +1649,8 @@ def download_current_target_raw_inputs(
         and len(pending_requests) > 1
     ):
         try:
-            wave_resolved = _fetch_run_pinned_anchor_wave(
-                pending_requests,
+            fetched_wave = _fetch_run_pinned_anchor_wave(
+                representative_requests,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
@@ -1368,9 +1666,17 @@ def download_current_target_raw_inputs(
                 raise
             single_runs_wave_failure = exc
         else:
+            wave_resolved = _fan_out_anchor_payloads(
+                fetched_wave,
+                requests=pending_requests,
+                fanout=request_fanout,
+            )
             resolved_payloads.update(wave_resolved)
-            downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
-            downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+            downloaded["openmeteo_transport_fetch_count"] = len(fetched_wave)
+            downloaded["openmeteo_wave_payload_count"] = len(fetched_wave)
+            downloaded["openmeteo_intra_wave_fanout_count"] = max(
+                0, len(wave_resolved) - len(fetched_wave)
+            )
         downloaded["openmeteo_single_runs_location_batch_count"] = 1
 
     if (
@@ -1379,8 +1685,8 @@ def download_current_target_raw_inputs(
         and (not single_runs_public or single_runs_wave_failure is not None)
     ):
         try:
-            wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
-                pending_requests,
+            fetched_wave, representative_failures = _fetch_meta_stamped_anchor_wave(
+                representative_requests,
                 max_workers=fetch_workers,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
@@ -1391,7 +1697,19 @@ def download_current_target_raw_inputs(
         except Exception as exc:
             meta_wave_failures = {key: exc for key in pending_requests}
             wave_resolved = {}
+            fetched_wave = {}
             downloaded["openmeteo_model_meta_fetch_count"] = 1
+        else:
+            wave_resolved = _fan_out_anchor_payloads(
+                fetched_wave,
+                requests=pending_requests,
+                fanout=request_fanout,
+            )
+            meta_wave_failures = {
+                target_key: error
+                for representative, error in representative_failures.items()
+                for target_key in request_fanout.get(representative, (representative,))
+            }
         if single_runs_wave_failure is not None:
             reason = (
                 f"{type(single_runs_wave_failure).__name__}: "
@@ -1406,8 +1724,11 @@ def download_current_target_raw_inputs(
                 for key, (payload, provenance, captured_at) in wave_resolved.items()
             }
         resolved_payloads.update(wave_resolved)
-        downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
-        downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+        downloaded["openmeteo_transport_fetch_count"] = len(fetched_wave)
+        downloaded["openmeteo_wave_payload_count"] = len(fetched_wave)
+        downloaded["openmeteo_intra_wave_fanout_count"] = max(
+            0, len(wave_resolved) - len(fetched_wave)
+        )
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketPointReaderPool
 
@@ -1455,6 +1776,8 @@ def download_current_target_raw_inputs(
                     cycle=cycle,
                 )
             )
+            if payload_is_materializable:
+                payload = json.loads(payload_path.read_text(encoding="utf-8"))
             if not payload_is_materializable:
                 try:
                     if target_key in unavailable_targets:
@@ -1524,7 +1847,15 @@ def download_current_target_raw_inputs(
                     )
                     processed_target_count += 1
                     continue
-                _write_json(payload_path, payload)
+            _write_json(
+                payload_path,
+                _current_target_scoped_payload(
+                    payload,
+                    city=target.city,
+                    target_date=target.target_date,
+                    metric=target.temperature_metric,
+                ),
+            )
             _write_json(
                 precision_path,
                 _precision_metadata(
@@ -1617,7 +1948,8 @@ def download_current_target_raw_inputs(
         if conn is not None:
             conn.close()
 
-    unscheduled_target_count = max(0, rotation_row_count - len(targets))
+    total_row_count = priority_row_count + rotation_row_count
+    unscheduled_target_count = max(0, total_row_count - len(targets))
     incomplete_target_set = (
         timeboxed_incomplete
         or len(manifests) + len(canonical_reuse) < len(targets)
@@ -1626,7 +1958,10 @@ def download_current_target_raw_inputs(
     rotation_next_start, rotation_cas_applied = _advance_current_target_rotation(
         cycle=cycle,
         row_count=rotation_row_count,
-        attempted_count=processed_target_count,
+        attempted_count=max(
+            0,
+            processed_target_count - min(priority_row_count, len(targets)),
+        ),
         incomplete=incomplete_target_set,
         state_path=rotation_state_path,
         expected_generation=rotation_generation,
@@ -1637,6 +1972,8 @@ def download_current_target_raw_inputs(
         "status": (
             "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
             if timeboxed_incomplete
+            else "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE"
+            if targets and not manifests and not canonical_reuse
             else "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
         ),
         "cycle": cycle.isoformat(),
@@ -1650,6 +1987,7 @@ def download_current_target_raw_inputs(
         "db_artifact_ids": db_artifact_ids,
         "reused_canonical_artifact_count": len(canonical_reuse),
         "reused_canonical_artifact_ids": list(canonical_reuse.values()),
+        "sibling_payload_reuse_count": sibling_payload_reuse_count,
         "downloaded": downloaded,
         "skipped_city_count": len(skipped_cities),
         "skipped_cities": skipped_cities,

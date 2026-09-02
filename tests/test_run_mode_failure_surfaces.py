@@ -8209,7 +8209,11 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 13)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 13)
     monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8251,7 +8255,11 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
     monkeypatch.setattr(main_module, "_held_position_monitor_canonical_debt", monitor_debt)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8268,8 +8276,8 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     assert calls == []
 
 
-def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
-    """An isolated market may not starve global held-capital truth."""
+def test_scoped_capital_recovery_runs_during_held_monitor(monkeypatch) -> None:
+    """An isolated unknown side effect must not starve behind monitor debt."""
     import threading
 
     import src.execution.command_recovery as command_recovery
@@ -8294,7 +8302,11 @@ def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
     )
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8319,7 +8331,7 @@ def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
 
     main_module._edli_command_recovery_cycle.__wrapped__()
 
-    assert calls == []
+    assert calls == ["live_tick"]
 
 
 def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
@@ -8348,7 +8360,11 @@ def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatc
     )
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8687,6 +8703,40 @@ def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch)
     main_module._edli_continuous_redecision_screen_cycle()
 
     assert calls == ["screen"]
+
+
+def test_redecision_screen_yields_to_monitor_handoff_not_canonical_debt(
+    monkeypatch,
+) -> None:
+    """Existing venue rests keep management time while BUY cadence is scoped."""
+
+    import src.events.reactor as reactor_module
+    import src.main as main_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _name: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_continuous_redecision_screen_cycle",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    main_module._held_position_monitor_canonical_debt.set()
+    main_module._held_position_monitor_handoff_pending.clear()
+    try:
+        main_module._edli_continuous_redecision_screen_cycle()
+        preempt = captured["monitor_preempt_requested"]
+        assert callable(preempt)
+        assert preempt() is False
+        main_module._held_position_monitor_handoff_pending.set()
+        assert preempt() is True
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
 
 
 @pytest.mark.parametrize(
@@ -10768,6 +10818,180 @@ def test_recovery_full_book_handoff_returns_before_next_recovery_tick(
         main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
+def test_recovery_full_book_owns_urgent_pressure_until_canonical_coverage(
+    monkeypatch,
+) -> None:
+    """Durable full-book recovery cannot yield to a narrower urgent wake."""
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    entered: list[bool] = []
+    releases: list[bool] = []
+
+    class Claim:
+        def release(self) -> None:
+            releases.append(True)
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            assert timeout > 0.0
+            return True
+
+        def release(self) -> None:
+            return None
+
+    def run_recovery(**kwargs) -> bool:
+        entered.append(True)
+        assert kwargs["target_families"] is None
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", Claim())
+    monkeypatch.setattr(
+        main_module,
+        "_acquire_held_monitor_claim",
+        lambda **_kwargs: (True, 0),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_preemption_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_owner_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_monitor_preempt_generation_now",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_exit_monitor_should_yield",
+        lambda _pending: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_reserve_periodic_held_monitor_successor",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_consume_periodic_held_monitor_successor",
+        lambda _generation: None,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run_recovery)
+
+    assert main_module._exit_monitor_cycle(recovery_full_book=True) is True
+    assert entered == [True]
+    assert releases == [True]
+
+
+def test_targeted_recovery_owns_exact_overdue_scope_under_urgent_pressure(
+    monkeypatch,
+) -> None:
+    """Recovery drains the shrinking overdue set before a narrower urgent wake."""
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    target = frozenset({("Hong Kong", "2026-08-29", "high")})
+    releases: list[bool] = []
+    bounded_claims: list[bool] = []
+
+    class Claim:
+        def release(self) -> None:
+            releases.append(True)
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+            return True
+
+        def release(self) -> None:
+            return None
+
+    def run_recovery(**kwargs) -> bool:
+        assert kwargs["target_families"] == target
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", Claim())
+    monkeypatch.setattr(
+        main_module,
+        "_acquire_held_monitor_claim",
+        lambda **_kwargs: (True, 0),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_claim_budget_seconds",
+        lambda *, periodic_full_book: bounded_claims.append(periodic_full_book)
+        or 29.0,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: target,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_preemption_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_urgent_held_monitor_owner_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_exit_monitor_should_yield",
+        lambda _pending: pytest.fail("recovery must own its exact overdue set"),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run_recovery)
+
+    try:
+        assert (
+            main_module._exit_monitor_cycle(
+                target_families=target,
+                recovery_full_book=True,
+            )
+            is True
+        )
+        assert releases == [True]
+        assert bounded_claims == [True]
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
 def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
     monkeypatch,
 ) -> None:
@@ -11094,6 +11318,12 @@ def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
     stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
     fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
     evidence = iter((stale, stale, fresh, fresh))
+    overdue_scopes = iter(
+        (
+            frozenset({("Hong Kong", "2026-08-29", "high")}),
+            frozenset({("Moscow", "2026-08-29", "high")}),
+        )
+    )
     monitor_calls: list[dict] = []
     monkeypatch.setattr(
         main_module,
@@ -11105,6 +11335,11 @@ def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
         "_exit_monitor_cycle",
         lambda **kwargs: monitor_calls.append(kwargs) or False,
     )
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: next(overdue_scopes),
+    )
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
     main_module._held_position_monitor_recovery_requested.clear()
     main_module._held_position_monitor_canonical_debt.set()
@@ -11112,8 +11347,18 @@ def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
     try:
         main_module._held_position_monitor_recovery_worker_main()
         assert monitor_calls == [
-            {"recovery_full_book": True},
-            {"recovery_full_book": True},
+            {
+                "target_families": frozenset(
+                    {("Hong Kong", "2026-08-29", "high")}
+                ),
+                "recovery_full_book": True,
+            },
+            {
+                "target_families": frozenset(
+                    {("Moscow", "2026-08-29", "high")}
+                ),
+                "recovery_full_book": True,
+            },
         ]
         assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
         assert not main_module._held_position_monitor_canonical_debt.is_set()
@@ -11148,6 +11393,11 @@ def test_durable_monitor_recovery_worker_survives_monitor_exception(
         lambda: next(evidence),
     )
     monkeypatch.setattr(main_module, "_exit_monitor_cycle", monitor)
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
     main_module._held_position_monitor_recovery_requested.clear()
     main_module._held_position_monitor_canonical_debt.set()
@@ -11212,6 +11462,11 @@ def test_durable_monitor_recovery_worker_redrives_real_busy_handoff(
         main_module,
         "_current_periodic_monitor_obligation_count",
         lambda: 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
     monkeypatch.setattr(
@@ -11404,7 +11659,7 @@ def test_full_book_monitor_success_requires_complete_canonical_coverage() -> Non
         },
         open_position_count=4,
     )
-    assert not _full_book_monitor_completed_canonical_coverage(
+    assert _full_book_monitor_completed_canonical_coverage(
         {
             "monitors": 4,
             "held_monitor_candidates": 4,
@@ -12029,7 +12284,7 @@ def test_reactor_poll_defers_ordinary_work_after_exact_debt_read(monkeypatch) ->
     assert reads == []
 
 
-def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(
+def test_reactor_wrapper_preexisting_canonical_debt_scopes_buy_without_preemption(
     monkeypatch,
 ) -> None:
     import src.events.reactor as reactor_module
@@ -12087,11 +12342,14 @@ def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(
     monkeypatch.setattr(
         main_module,
         "_held_position_monitor_debt_pending",
-        lambda: pytest.fail("debt present at cut start must use family scope"),
+        canonical_debt.is_set,
     )
 
     def run_cycle(**kwargs) -> bool:
         observed.update(kwargs)
+        # Canonical debt is already an exact family BUY block.  With no actual
+        # handoff or fairness turn, it must not preempt unrelated fresh-family
+        # comparison or held SELL/HOLD/CASH.
         assert kwargs["held_position_monitor_pending"]() is False
         assert kwargs["held_position_monitor_debt_pending"]() is False
         return True

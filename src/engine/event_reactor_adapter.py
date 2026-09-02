@@ -590,11 +590,11 @@ class _GlobalJitHandoff:
             raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
         return book
 
-def _persist_global_jit_authority_snapshot(
+def _ensure_global_jit_authority_snapshot(
     trade_conn: sqlite3.Connection,
     authority: _CurrentGlobalMarketAuthority,
 ) -> object:
-    """Append the exact Gamma+CLOB+raw-book snapshot before submit."""
+    """Insert or validate one exact JIT snapshot without owning commit policy."""
 
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
@@ -612,8 +612,96 @@ def _persist_global_jit_authority_snapshot(
         or existing.captured_at != snapshot.captured_at
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+    return snapshot
+
+
+def _persist_global_jit_authority_snapshot(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+) -> object:
+    """Append the exact Gamma+CLOB+raw-book snapshot on a caller-owned connection."""
+
+    snapshot = _ensure_global_jit_authority_snapshot(trade_conn, authority)
     trade_conn.commit()
     return snapshot
+
+
+def _persist_global_jit_authority_snapshot_isolated(
+    authority: _CurrentGlobalMarketAuthority,
+    *,
+    coordinator: object | None = None,
+    priority: str = "standard",
+) -> object:
+    """Persist and read back JIT authority in one isolated TRADE write unit.
+
+    SCOPE is this exact global winner's preflight provenance. DRAIN is the
+    bounded coordinator transaction; contention returns to the existing fresh
+    global redecision path. RESET is the next cut's new q/book/wealth witness.
+    """
+
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLeaseTimeout,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+    from src.state.db import _connect_existing_db_without_journal_bootstrap
+
+    writer = coordinator or default_runtime_write_coordinator()
+    write_priority = WritePriority(priority)
+    try:
+        with writer.transaction(
+            (DBIdentity.TRADE,),
+            owner="global_jit_authority_snapshot",
+            priority=write_priority,
+            deadline_ms=1_500,
+            max_hold_ms=500,
+            connection_factory=_connect_existing_db_without_journal_bootstrap,
+        ) as transaction:
+            snapshot = _ensure_global_jit_authority_snapshot(
+                transaction.connection,
+                authority,
+            )
+            from src.state.snapshot_repo import get_snapshot
+
+            persisted = get_snapshot(transaction.connection, snapshot.snapshot_id)
+            if persisted is None:
+                raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+            return persisted
+    except WriteLeaseTimeout as exc:
+        raise sqlite3.OperationalError(
+            "database is busy: global JIT snapshot write deferred"
+        ) from exc
+
+
+def _persist_global_jit_authority_snapshot_for_preflight(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+    *,
+    priority: str = "standard",
+) -> object:
+    """Use an isolated writer for canonical live preflight provenance."""
+
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    main_path = next(
+        (
+            str(row[2] or "").strip()
+            for row in trade_conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main"
+        ),
+        "",
+    )
+    if main_path and Path(main_path).resolve(strict=False) == _zeus_trade_db_path().resolve(
+        strict=False
+    ):
+        return _persist_global_jit_authority_snapshot_isolated(
+            authority,
+            priority=priority,
+        )
+    return _persist_global_jit_authority_snapshot(trade_conn, authority)
 
 
 def _canonical_global_jit_raw_book(raw_book: Mapping[str, object]) -> str:
@@ -636,6 +724,7 @@ def _is_global_jit_authority_failure(reason: object) -> bool:
         "GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE",
         "GLOBAL_JIT_MARKET_",
         "GLOBAL_JIT_CLOB_MARKET_",
+        "GLOBAL_JIT_DURABLE_",
         "GLOBAL_BUY_JIT_CLOCK_INVALID",
         "GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING",
         "GLOBAL_BUY_JIT_TOKEN_MISMATCH",
@@ -3826,6 +3915,7 @@ class _CandidateProof:
     settlement_coverage_status: str | None = None
     replacement_calibration_credential: dict[str, Any] | None = None
     replacement_no_bound_certificate: dict[str, Any] | None = None
+    replacement_no_bound_expected: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
     # probability_authority from the evidence dict
     # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
@@ -7492,6 +7582,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_completion_reserved: bool = False,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_sell_reauction_requests: tuple[object, ...] = (),
+    required_held_family_keys: frozenset[str] = frozenset(),
     held_family_provider: Callable[[], object] | None = None,
     construction_work_context: "WorkContext | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
@@ -7570,6 +7661,14 @@ def event_bound_live_adapter_from_trade_conn(
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_INVALID")
     if exact_completion_sell_keys and not selection_completion_reserved:
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED")
+    required_held_family_keys = frozenset(
+        str(family_key or "").strip()
+        for family_key in required_held_family_keys
+    )
+    if "" in required_held_family_keys:
+        raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_INVALID")
+    if required_held_family_keys and exact_completion_sell_keys:
+        raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT")
     exact_completion_family_keys: frozenset[str] | None = None
     if (
         selection_completion_reserved
@@ -7767,6 +7866,11 @@ def event_bound_live_adapter_from_trade_conn(
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
                 allow_partial_deterministic=True,
+                # Provisional source truth remains statistical: its empirical
+                # revision likelihood is carried inside q and cannot emit an
+                # exact payoff.  It may still compete as an ENTRY witness when
+                # current ENTRY and immediate HELD content reproduce at submit.
+                allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             failure_type = type(exc).__name__
@@ -8702,11 +8806,11 @@ def event_bound_live_adapter_from_trade_conn(
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if _stable_preflight_monitor_handoff[0]:
-                # A stable submit-time SELL proof owns the short final-actuation
+                # A stable submit-time proof owns the short final-actuation
                 # window. Periodic monitor pressure already has durable completion
-                # debt and cannot improve this exact globally ranked SELL. Keep
-                # probing above for a newer committed Day0 fact, which does revoke
-                # the capability before venue I/O.
+                # debt and the global solve already compared current held actions
+                # with this exact winner. Keep probing above for a newer committed
+                # Day0 fact, which does revoke the capability before venue I/O.
                 return False
             if selection_cancelled is not None:
                 try:
@@ -9067,12 +9171,11 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt.decision_proof_bundle is not None
                 or reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             ):
-                if reason == "GLOBAL_SELL_PREFLIGHT_STABLE":
-                    # The runtime probes cancellation immediately after this
-                    # submit-time proof. A routine held-position monitor must
-                    # not preempt the global SELL lane it cannot execute. A
-                    # newer committed Day0 fact still wins in the probe above.
-                    _stable_preflight_monitor_handoff[0] = True
+                # The runtime probes cancellation immediately after this exact
+                # submit-time proof. Routine held-monitor fairness must not
+                # starve either side of the globally ranked action; fresh wealth
+                # and hard Day0 authority are still checked before venue I/O.
+                _stable_preflight_monitor_handoff[0] = True
                 issued_at, expires_at = _global_preflight_token_window(
                     authority.actuation_deadline
                 )
@@ -11265,6 +11368,7 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
                 held_sell_reauction_requests=held_sell_reauction_requests,
+                required_held_family_keys=required_held_family_keys,
                 # Ordinary proof-only entry evaluation remains global. An exact
                 # held-SELL completion instead owns only the requested actions:
                 # portfolio wealth still carries every holding, while unrelated
@@ -13488,6 +13592,8 @@ def _durable_global_sell_market_authority(
     token_id: str,
     side: str,
     submit_at: datetime,
+    current_raw_book: Mapping[str, object] | None = None,
+    current_book_captured_at: datetime | None = None,
     max_quote_age: timedelta = timedelta(seconds=1),
 ) -> tuple[dict[str, object], _CurrentGlobalMarketAuthority]:
     """Hydrate one final SELL book from current durable market-channel truth.
@@ -13509,27 +13615,51 @@ def _durable_global_sell_market_authority(
     expected_direction = {"YES": "buy_yes", "NO": "buy_no"}.get(selected_side)
     if not expected_direction or not condition_id or not token_id:
         raise ValueError("GLOBAL_JIT_DURABLE_BOOK_IDENTITY_INVALID")
-    row = trade_conn.execute(
-        """
-        SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
-               book_hash_before, depth_before_json
-          FROM execution_feasibility_latest
-         WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
-           AND direction = ?
-        """,
-        (token_id, condition_id, selected_side, expected_direction),
-    ).fetchone()
-    if row is None:
-        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
-    try:
-        evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
-        quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
-        if quote_at.tzinfo is None:
-            raise ValueError("naive quote")
-        quote_at = quote_at.astimezone(UTC)
-        depth = json.loads(str(raw_depth or ""))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
+    has_current_book = current_raw_book is not None or current_book_captured_at is not None
+    if has_current_book:
+        if (
+            not isinstance(current_raw_book, Mapping)
+            or not isinstance(current_book_captured_at, datetime)
+            or current_book_captured_at.tzinfo is None
+        ):
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID")
+        depth = dict(current_raw_book)
+        quote_at = current_book_captured_at.astimezone(UTC)
+        row_condition = condition_id
+        row_token = str(depth.get("asset_id") or depth.get("token_id") or "")
+        row_side = selected_side
+        evidence_id = _hash_jsonish(
+            (
+                "GLOBAL_JIT_CURRENT_RAW_BOOK",
+                condition_id,
+                token_id,
+                selected_side,
+                quote_at.isoformat(),
+                depth,
+            )
+        )
+    else:
+        row = trade_conn.execute(
+            """
+            SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
+                   book_hash_before, depth_before_json
+              FROM execution_feasibility_latest
+             WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
+               AND direction = ?
+            """,
+            (token_id, condition_id, selected_side, expected_direction),
+        ).fetchone()
+        if row is None:
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
+        try:
+            evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
+            quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
+            if quote_at.tzinfo is None:
+                raise ValueError("naive quote")
+            quote_at = quote_at.astimezone(UTC)
+            depth = json.loads(str(raw_depth or ""))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
     if (
         str(row_condition) != condition_id
         or str(row_token) != token_id
@@ -13771,11 +13901,13 @@ def _submit_current_global_sell(
                 book_captured_at_utc = market_authority.snapshot.captured_at
             else:
                 raw_book: dict[str, object] = {}
+                current_book_captured_at: datetime | None = None
                 candidate_token_id = str(
                     getattr(candidate, "token_id", "") or ""
                 )
 
                 def _capture_final_sell_book():
+                    nonlocal current_book_captured_at
                     try:
                         books = clob.get_orderbook_snapshots(
                             [candidate_token_id],
@@ -13788,7 +13920,8 @@ def _submit_current_global_sell(
                         raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
                     raw_book.clear()
                     raw_book.update(dict(current_book))
-                    return raw_book, datetime.now(UTC)
+                    current_book_captured_at = datetime.now(UTC)
+                    return raw_book, current_book_captured_at
 
                 try:
                     try:
@@ -13821,12 +13954,33 @@ def _submit_current_global_sell(
                 except ValueError as rest_exc:
                     if not _is_global_jit_authority_failure(str(rest_exc)):
                         raise
+                    if (
+                        current_book_captured_at is None
+                        and not str(rest_exc).startswith(
+                            "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
+                        )
+                    ):
+                        try:
+                            _capture_final_sell_book()
+                        except ValueError:
+                            raw_book.clear()
+                            current_book_captured_at = None
+                    logging.getLogger(__name__).info(
+                        "global SELL JIT durable-metadata fallback: "
+                        "primary_reason=%s current_raw_book=%s",
+                        rest_exc,
+                        current_book_captured_at is not None,
+                    )
                     raw_book, market_authority = _durable_global_sell_market_authority(
                         trade_conn,
                         condition_id=str(getattr(candidate, "condition_id", "") or ""),
                         token_id=str(getattr(candidate, "token_id", "") or ""),
                         side=str(getattr(candidate, "side", "") or ""),
                         submit_at=datetime.now(UTC),
+                        current_raw_book=(
+                            raw_book if current_book_captured_at is not None else None
+                        ),
+                        current_book_captured_at=current_book_captured_at,
                     )
                 book_captured_at_utc = market_authority.snapshot.captured_at
                 try:
@@ -13854,7 +14008,11 @@ def _submit_current_global_sell(
                         proof_accepted=False,
                         jit_handoff=jit_handoff,
                     )
-            _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+            _persist_global_jit_authority_snapshot_for_preflight(
+                trade_conn,
+                market_authority,
+                priority="monitor",
+            )
             jit_handoff = jit_handoff or _GlobalJitHandoff(
                 candidate=current_candidate,
                 authority=market_authority,
@@ -14347,6 +14505,16 @@ def _global_curve_supersession_from_receipt(
 
     reason = str(receipt.reason or "")
     market_prefix = "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+    if reason.startswith(
+        market_prefix + "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+    ):
+        # The JIT book proves this exact BUY is not executable under the
+        # pre-cliff capital-release law.  It does not invalidate another
+        # token's frozen q/book/wealth comparison.  SCOPE: the selected BUY
+        # candidate only.  DRAIN: exclude it and preflight the next-best
+        # action in this cut.  RESET: the next cut rebuilds this token from a
+        # fresh native book and may admit it when exit capacity returns.
+        return "CANDIDATE_BLOCKED", None, reason
     if reason.startswith(market_prefix):
         return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
@@ -14747,14 +14915,20 @@ def _rebind_global_jit_receipt_snapshot(
     handoff: _GlobalJitHandoff,
     *,
     trade_conn: sqlite3.Connection,
+    persisted_snapshot: object | None = None,
 ) -> EventSubmissionReceipt:
     """Rebind every executor-facing BUY reference to one exact JIT row."""
 
     from src.state.snapshot_repo import get_snapshot
 
-    snapshot = get_snapshot(trade_conn, handoff.authority.snapshot.snapshot_id)
+    snapshot = persisted_snapshot or get_snapshot(
+        trade_conn,
+        handoff.authority.snapshot.snapshot_id,
+    )
     if snapshot is None:
         raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+    if snapshot != handoff.authority.snapshot:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_READBACK_MISMATCH")
     bundle = receipt.decision_proof_bundle
     if bundle is None:
         return receipt
@@ -15270,18 +15444,6 @@ def _global_preflight_entry_jit_receipt(
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
         )
-        # Tier-0 research entries are hold-to-settle by design (reversal plan
-        # item 6 flat venue-min stake; item 8 even BLOCKS auction SELL for
-        # cheap positions): their loss bound is the full ~$1-5 entry cost, no
-        # exit leg exists in the plan, so demanding same-instant bid-side
-        # depth for the whole stake bans exactly the thin weather books the
-        # research mode must trade in (live 2026-08-26: every survivor of the
-        # 10-layer funnel died here on precliff_bid_shares=0). The check
-        # stays binding for every non-tier0 BUY, where liquidation capacity
-        # genuinely bounds the loss.
-        tier0_hold_to_settle_entry = (
-            execution_mode == "TAKER_LIMIT" and tier0_research_mode_enabled()
-        )
         if (
             not (
                 execution_mode == "TAKER_LIMIT"
@@ -15289,7 +15451,6 @@ def _global_preflight_entry_jit_receipt(
                 and typed_exact_payoff_binding
                 and exact_payoff_decision
             )
-            and not tier0_hold_to_settle_entry
             and liquidation_capacity + Decimal("1e-9") < shares
         ):
             raise ValueError(
@@ -15314,8 +15475,12 @@ def _global_preflight_entry_jit_receipt(
                 )
         if handoff is None:
             raise ValueError("GLOBAL_JIT_HANDOFF_MISSING")
+        persisted_snapshot = None
         if trade_conn is not None:
-            _persist_global_jit_authority_snapshot(trade_conn, handoff.authority)
+            persisted_snapshot = _persist_global_jit_authority_snapshot_for_preflight(
+                trade_conn,
+                handoff.authority,
+            )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         reason = str(exc)
         if _is_global_jit_authority_failure(reason):
@@ -15337,6 +15502,7 @@ def _global_preflight_entry_jit_receipt(
                 receipt,
                 handoff,
                 trade_conn=trade_conn,
+                persisted_snapshot=persisted_snapshot,
             )
         except Exception as exc:  # noqa: BLE001 - final JIT binding is fail closed
             reason = str(exc)
@@ -17432,6 +17598,7 @@ def _rehydrate_held_pinned_bundle_for_actuation(
     from src.data.replacement_forecast_bundle_reader import (
         read_prior_complete_replacement_forecast_bundle,
     )
+    from src.solve.solver import DeterministicBinPayoffWitness
 
     result = read_prior_complete_replacement_forecast_bundle(
         forecast_conn,
@@ -17456,6 +17623,12 @@ def _rehydrate_held_pinned_bundle_for_actuation(
     bundle = result.bundle
     if not selected_identity or bundle is None:
         raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISSING")
+    if isinstance(selected, DeterministicBinPayoffWitness):
+        # The deterministic witness is a derived child: its posterior identity
+        # is intentionally different from the pinned source-clock carrier.
+        # Rehydrate the exact parent and let the current prepare seam rebuild
+        # and compare the child against current observation truth.
+        return bundle
     if selected_identity != str(bundle.posterior_identity_hash or "").strip():
         raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISMATCH")
     return bundle
@@ -17562,7 +17735,11 @@ def _current_global_actuation_prepared_family(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         allow_provisional_day0_replacement=(
-            probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+            probability_use
+            in {
+                _CurrentProbabilityUse.ENTRY,
+                _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+            }
         ),
         probability_use=probability_use,
         pinned_complete_bundle=pinned_complete_bundle,
@@ -20119,6 +20296,9 @@ def _build_event_bound_no_submit_receipt_core(
             "replacement_no_bound_certificate": _json_finite(
                 proof.replacement_no_bound_certificate
             ),
+            "replacement_no_bound_expected": _json_finite(
+                proof.replacement_no_bound_expected
+            ),
             "probability_semantics_revision": (
                 proof.probability_semantics_revision
             ),
@@ -20703,6 +20883,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         replacement_no_bound_certificate=(
             raw_receipt.get("replacement_no_bound_certificate")
             if isinstance(raw_receipt.get("replacement_no_bound_certificate"), dict)
+            else None
+        ),
+        replacement_no_bound_expected=(
+            raw_receipt.get("replacement_no_bound_expected")
+            if isinstance(raw_receipt.get("replacement_no_bound_expected"), dict)
             else None
         ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
@@ -31232,6 +31417,7 @@ def _generate_candidate_proofs(
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
                     replacement_no_bound_certificate=replacement_no_bound_certificate,
+                    replacement_no_bound_expected=replacement_no_bound_expected,
                     # H2_E2E: carry posterior_id + probability_authority from the
                     # probability evidence dict. Present only on the replacement_0_1
                     # path; None (absent key) on canonical. posterior_id is emitted
@@ -33444,6 +33630,104 @@ def _candidate_min_tick_size(proof: _CandidateProof) -> float | None:
     return None
 
 
+def _direct_day0_entry_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    family: object,
+    forecast_conn: sqlite3.Connection,
+    observation_conn: sqlite3.Connection,
+    native_costs: dict[
+        tuple[str, str],
+        tuple[
+            dict[str, Any] | None,
+            ExecutionPrice | None,
+            float,
+            float | None,
+            str | None,
+        ],
+    ],
+    decision_time: datetime,
+    provenance_capture: dict[str, Any] | None = None,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+] | None:
+    """Reproduce the direct hourly-ENS witness for the legacy proof seam."""
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.solve.solver import _lower_cvar
+
+    day0_payload: dict[str, object] = {}
+    prepared = _prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast_conn,
+        topology_conn=forecast_conn,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        max_age=FRESHNESS_WINDOW_DEFAULT,
+        day0_payload_out=day0_payload,
+        allow_partial_deterministic=True,
+        allow_provisional_day0_replacement=True,
+        probability_use=_CurrentProbabilityUse.ENTRY,
+    )
+    if day0_payload.get("_edli_day0_direct_current_entry_authority") is not True:
+        return None
+    payload.update(day0_payload)
+    witness = prepared.probability_witness
+    samples = np.asarray(
+        getattr(witness, "yes_q_samples", ()), dtype=np.float64
+    )
+    point_q = np.asarray(
+        getattr(witness, "yes_point_q", ()), dtype=np.float64
+    )
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    if (
+        samples.ndim != 2
+        or samples.shape[1] != len(bindings)
+        or point_q.shape != (len(bindings),)
+        or not np.isfinite(samples).all()
+        or not np.isfinite(point_q).all()
+    ):
+        raise ValueError("DAY0_DIRECT_ENTRY_PROOF_WITNESS_INVALID")
+    weights = np.ones(samples.shape[0], dtype=np.float64)
+    q_by_condition: dict[str, float] = {}
+    lcb_by_condition: dict[tuple[str, str], float] = {}
+    evidence: dict[str, str] = {}
+    for index, binding in enumerate(bindings):
+        condition_id = str(getattr(binding, "condition_id", "") or "").strip()
+        if not condition_id or condition_id in q_by_condition:
+            raise ValueError("DAY0_DIRECT_ENTRY_PROOF_BINDING_INVALID")
+        q_by_condition[condition_id] = float(point_q[index])
+        lcb_by_condition[(condition_id, "buy_yes")] = _lower_cvar(
+            samples[:, index], weights, float(witness.band_alpha)
+        )
+        lcb_by_condition[(condition_id, "buy_no")] = _lower_cvar(
+            1.0 - samples[:, index], weights, float(witness.band_alpha)
+        )
+        evidence[condition_id] = "DAY0_DIRECT_CURRENT_HOURLY_ENS"
+    masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
+        payload=payload,
+        family=family,
+        q_by_condition=q_by_condition,
+        lcb_by_condition=lcb_by_condition,
+        decision_time=decision_time,
+    )
+    p_values, prefilter = _day0_hard_fact_fdr_maps(
+        family=family,
+        native_costs=native_costs,
+        masked_lcb_by_condition=masked_lcb,
+    )
+    if provenance_capture is not None:
+        probability_block = _global_day0_probability_authority_payload(payload)
+        payload["day0_probability_authority"] = probability_block
+        provenance_capture["day0_probability_authority"] = probability_block
+    return masked_q, masked_lcb, p_values, prefilter, evidence
+
+
 def _live_yes_probabilities(
     *,
     event: OpportunityEvent,
@@ -33526,15 +33810,32 @@ def _live_yes_probabilities(
                 )
                 payload.update(current_observation)
             capture = provenance_capture if provenance_capture is not None else {}
-            replacement = _replacement_authority_probability_and_fdr_proof(
-                event=event,
-                payload=payload,
-                family=family,
-                conn=conn,
-                native_costs=native_costs,
-                decision_time=decision_time,
-                provenance_capture=capture,
-            )
+            try:
+                replacement = _replacement_authority_probability_and_fdr_proof(
+                    event=event,
+                    payload=payload,
+                    family=family,
+                    conn=conn,
+                    native_costs=native_costs,
+                    decision_time=decision_time,
+                    provenance_capture=capture,
+                )
+            except ValueError as exc:
+                if str(exc) != "REPLACEMENT_0_1_LIVE_READINESS_MISSING":
+                    raise
+                direct = _direct_day0_entry_probability_and_fdr_proof(
+                    event=event,
+                    payload=payload,
+                    family=family,
+                    forecast_conn=conn,
+                    observation_conn=calibration_conn,
+                    native_costs=native_costs,
+                    decision_time=decision_time,
+                    provenance_capture=capture,
+                )
+                if direct is None:
+                    raise
+                return direct
             if replacement is None:
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
@@ -33933,6 +34234,7 @@ def _conditioning_names_physical_frontier(
     if conditioned == physical:
         return conditioned in {
             "aviationweather_metar",
+            "hko_rhrread_spot",
             "same_station_fast_tail",
             "wu_api",
         }
@@ -33996,12 +34298,26 @@ def _assert_provisional_day0_replacement_bundle(
 
     identity_payload = payload
     identity_value_is_celsius = False
+    identity_requires_celsius_unit = False
+    equivalent_conditioning_time: str | None = None
     binding = payload.get("_edli_global_day0_binding")
     if isinstance(binding, Mapping):
+        probability_conditioning = binding.get(
+            "probability_conditioning_identity"
+        )
         statistical_conditioning = binding.get(
             "statistical_probability_conditioning"
         )
-        if isinstance(statistical_conditioning, Mapping):
+        if isinstance(probability_conditioning, Mapping):
+            # Settlement/payoff truth and probability conditioning may be
+            # carried by different authorized channels. Validate the posterior
+            # against the identity it actually consumed, after the producer has
+            # independently reconciled that identity with current physical
+            # truth.
+            identity_payload = probability_conditioning
+            identity_value_is_celsius = True
+            identity_requires_celsius_unit = True
+        elif isinstance(statistical_conditioning, Mapping):
             # The top-level Day0 payload deliberately remains settlement-channel
             # truth.  A fast-residual posterior is instead identified by its
             # separately validated statistical conditioning.  Comparing that
@@ -34009,13 +34325,64 @@ def _assert_provisional_day0_replacement_bundle(
             # witness contradict itself during local-proof reconstruction.
             identity_payload = statistical_conditioning
             identity_value_is_celsius = True
+        elif any(
+            key in binding
+            for key in (
+                "probability_conditioning_observation_time",
+                "current_observation_time",
+                "conditioning_clock_lag_seconds",
+                "conditioning_clock_role",
+            )
+        ):
+            conditioning_time = str(
+                binding.get("probability_conditioning_observation_time") or ""
+            ).strip()
+            current_time = str(
+                binding.get("current_observation_time") or ""
+            ).strip()
+            role = str(binding.get("conditioning_clock_role") or "").strip()
+            conditioning_at = _parse_utc(conditioning_time)
+            current_at = _parse_utc(current_time)
+            payload_at = _parse_utc(identity_payload.get("observation_time"))
+            try:
+                lag_seconds = float(binding["conditioning_clock_lag_seconds"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH"
+                ) from None
+            direction = {
+                "same_extreme_newer_observation_clock": 1.0,
+                "same_extreme_conditioning_ahead_of_reader_clock": -1.0,
+            }.get(role)
+            if (
+                conditioning_at is None
+                or current_at is None
+                or payload_at is None
+                or current_at != payload_at
+                or direction is None
+                or not math.isfinite(lag_seconds)
+                or lag_seconds <= 0.0
+                or not math.isclose(
+                    (current_at - conditioning_at).total_seconds(),
+                    direction * lag_seconds,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH"
+                )
+            equivalent_conditioning_time = conditioning_time
     expected_source = str(
         identity_payload.get("settlement_source")
         or identity_payload.get("observation_source")
         or identity_payload.get("source")
         or ""
     ).strip()
-    expected_time = str(identity_payload.get("observation_time") or "").strip()
+    expected_time = (
+        equivalent_conditioning_time
+        or str(identity_payload.get("observation_time") or "").strip()
+    )
     metric = str(
         identity_payload.get("metric")
         or identity_payload.get("temperature_metric")
@@ -34049,6 +34416,10 @@ def _assert_provisional_day0_replacement_bundle(
     if (
         provisional.get("active") is not True
         or bool(provisional.get("support_truncation"))
+        or (
+            identity_requires_celsius_unit
+            and str(identity_payload.get("unit") or "").strip().upper() != "C"
+        )
         or not expected_source
         or not expected_time
         or str(provisional.get("source") or "").strip() != expected_source
@@ -34209,8 +34580,9 @@ def _assert_day0_post_local_vector_witness(
     try:
         from src.data.day0_hourly_vectors import DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
 
+        freshness_as_of = min(decision_utc, target_end_utc)
         if (
-            decision_utc - source_available
+            freshness_as_of - source_available
         ).total_seconds() > float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS) * 3600.0:
             raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE")
     except ImportError:
@@ -34251,6 +34623,7 @@ def _assert_day0_post_local_vector_witness(
             or fetch_started > fetch_finished
             or fetch_finished > causal_as_of
             or fetch_finished > decision_utc
+            or fetch_finished > target_end_utc
             or provider_cycle > provider_available
             or provider_available > fetch_finished
             or provider_modified > fetch_finished
@@ -34323,6 +34696,39 @@ def _assert_day0_post_local_vector_witness(
         "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
     ):
         raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+
+
+def _day0_probability_conditioning_source(
+    payload: Mapping[str, object],
+) -> str:
+    """Return the source role that actually conditioned the action q.
+
+    A provisional receipt can carry settlement-channel truth at the top level
+    while a faster same-station channel supplies the statistical probability
+    update.  Revision-model and carrier validation must follow the latter; the
+    former remains settlement authority and is never overwritten.
+    """
+
+    binding = payload.get("_edli_global_day0_binding")
+    candidates = (
+        payload.get("statistical_probability_conditioning"),
+        (
+            binding.get("statistical_probability_conditioning")
+            if isinstance(binding, Mapping)
+            else None
+        ),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        source = str(candidate.get("source") or "").strip()
+        if source:
+            return source
+    return str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or ""
+    ).strip()
 
 
 def _provisional_day0_revision_likelihood(
@@ -34494,6 +34900,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_carrier_probability_cutoff_utc",
                 "day0_remaining_vector_witness",
+                "day0_causal_evidence_bundle",
             )
             if key in provenance
         },
@@ -35265,44 +35672,13 @@ def _global_probability_action_content_mismatches(
     current: object,
     monitored: object,
 ) -> tuple[str, ...]:
-    """Compare the q facts that can change one fixed action's economics.
+    """Use the global auction's one action-content comparison law."""
 
-    ENTRY and HELD_MONITOR may serialize different causal provenance while
-    producing the exact same current probability distribution. That provenance
-    distinction remains in each immutable witness, but it cannot by itself make
-    an immediately monitored BUY economically divergent. A type, semantics,
-    topology, band, sample, binding, or point-q change still fails closed.
-    """
-
-    mismatches: tuple[str, ...] = ()
-    if type(current) is not type(monitored):
-        mismatches += ("witness_type",)
-    mismatches += tuple(
-        field
-        for field in _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS
-        if getattr(current, field, None) != getattr(monitored, field, None)
+    from src.engine.global_batch_runtime import (
+        _probability_action_content_mismatches,
     )
-    if not str(getattr(current, "sample_matrix_identity", "") or "").strip():
-        if "sample_matrix_identity" not in mismatches:
-            mismatches += ("sample_matrix_identity",)
-    if tuple(getattr(current, "bindings", ()) or ()) != tuple(
-        getattr(monitored, "bindings", ()) or ()
-    ):
-        mismatches += ("bindings",)
-    current_q_version = str(getattr(current, "q_version", "") or "")
-    monitored_q_version = str(getattr(monitored, "q_version", "") or "")
-    if current_q_version != monitored_q_version:
-        from src.events.day0_authority import day0_probability_semantics_revision
 
-        current_revision = day0_probability_semantics_revision(current_q_version)
-        monitored_revision = day0_probability_semantics_revision(
-            monitored_q_version
-        )
-        if current_revision is None or current_revision != monitored_revision:
-            mismatches += ("q_version",)
-    if not _global_probability_point_q_matches(current, monitored):
-        mismatches += ("yes_point_q",)
-    return mismatches
+    return _probability_action_content_mismatches(current, monitored)
 
 
 def _global_probability_point_q_matches(left: object, right: object) -> bool:
@@ -35611,6 +35987,16 @@ def _global_day0_execution_payload(
         binding["statistical_probability_conditioning"] = dict(
             fast_residual_conditioning
         )
+    elif conditioning is not None:
+        binding["probability_conditioning_identity"] = {
+            "source": str(conditioning.get("source") or "").strip(),
+            "observation_time": str(
+                conditioning.get("observation_time") or ""
+            ).strip(),
+            "observed_extreme_c": float(conditioning["observed_extreme_c"]),
+            "unit": "C",
+            "metric": str(conditioning.get("metric") or metric).strip().lower(),
+        }
     remaining_witness = (
         conditioning.get("day0_remaining_vector_witness")
         if isinstance(conditioning, Mapping)
@@ -35618,6 +36004,13 @@ def _global_day0_execution_payload(
     )
     if isinstance(remaining_witness, Mapping):
         binding["day0_remaining_vector_witness"] = dict(remaining_witness)
+    causal_bundle = (
+        conditioning.get("day0_causal_evidence_bundle")
+        if isinstance(conditioning, Mapping)
+        else None
+    )
+    if isinstance(causal_bundle, Mapping):
+        binding["day0_causal_evidence_bundle"] = dict(causal_bundle)
     physical_clock: dict[str, object] | None = None
     physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
@@ -35742,6 +36135,8 @@ def _global_day0_execution_payload(
         payload["_edli_day0_remaining_model_names"] = list(
             remaining_witness.get("actual_models") or ()
         )
+    if isinstance(causal_bundle, Mapping):
+        payload["_edli_day0_causal_evidence_bundle"] = dict(causal_bundle)
     if isinstance(conditioning, Mapping):
         carrier_fields = {
             "day0_remaining_carrier_content_identity": "_edli_day0_remaining_content_identity",
@@ -36083,6 +36478,19 @@ def _bind_current_deterministic_day0_witness(
         getattr(witness, "sample_matrix_identity", "") or ""
     )
     payload["_edli_day0_deterministic_witness_identity"] = witness_identity
+
+
+def _deterministic_payoffs_cover_required_bin(
+    exact_yes_payoffs: tuple[tuple[str, int], ...],
+    required_bin_id: str | None,
+) -> bool:
+    """Use a partial exact witness only when it answers the requested bin."""
+
+    if not exact_yes_payoffs:
+        return False
+    return required_bin_id is None or required_bin_id in {
+        str(bin_id) for bin_id, _payoff in exact_yes_payoffs
+    }
 
 
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
@@ -36558,12 +36966,85 @@ def _held_pinned_day0_probability_components(
     mask = _day0_absorbing_mask(payload=payload, family=family)
     masked_samples = np.asarray(samples, dtype=np.float64) * mask.reshape(1, -1)
     row_totals = masked_samples.sum(axis=1)
-    if np.any(row_totals <= 0.0) or not np.isfinite(row_totals).all():
+    valid_rows = np.isfinite(row_totals) & (row_totals > 0.0)
+    if not valid_rows.all():
+        exact_yes_payoffs = _day0_deterministic_bin_payoffs(
+            omega=SimpleNamespace(bins=bindings),
+            family=family,
+            payload=payload,
+        )
+        if exact_yes_payoffs:
+            payload["_edli_day0_held_pinned_mask"] = [
+                float(value) for value in mask
+            ]
+            payload["_edli_day0_held_pinned_overlay"] = (
+                "authorized_monotone_day0_observation_v1"
+            )
+            payload["_edli_day0_held_pinned_zero_support_payoffs"] = (
+                exact_yes_payoffs
+            )
+            payload["_edli_day0_held_pinned_zero_support_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT"
+            )
+            payload["_edli_day0_deterministic_scope_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT"
+            )
+            if int(valid_rows.sum()) >= 2:
+                # Rejection-condition the pinned joint draws on the current
+                # monotone observation. Rows with no surviving bin contradict
+                # the new bound; surviving rows retain coherent statistical q.
+                conditioned = masked_samples[valid_rows]
+                conditioned /= row_totals[valid_rows].reshape(-1, 1)
+                payload[
+                    "_edli_day0_held_pinned_rejected_sample_count"
+                ] = int((~valid_rows).sum())
+                payload["_edli_day0_held_pinned_overlay"] = (
+                    "authorized_monotone_day0_rejection_conditioning_v1"
+                )
+                return (
+                    np.ascontiguousarray(conditioned, dtype=np.float64),
+                    np.ascontiguousarray(
+                        conditioned.mean(axis=0),
+                        dtype=np.float64,
+                    ),
+                    _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+                )
+            return (
+                np.ascontiguousarray(masked_samples, dtype=np.float64),
+                np.ascontiguousarray(np.zeros_like(point_q), dtype=np.float64),
+                _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+            )
         raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT")
     masked_samples = masked_samples / row_totals.reshape(-1, 1)
     masked_point = np.asarray(point_q, dtype=np.float64) * mask
     point_total = float(masked_point.sum())
     if point_total <= 0.0 or not math.isfinite(point_total):
+        exact_yes_payoffs = _day0_deterministic_bin_payoffs(
+            omega=SimpleNamespace(bins=bindings),
+            family=family,
+            payload=payload,
+        )
+        if exact_yes_payoffs:
+            payload["_edli_day0_held_pinned_mask"] = [
+                float(value) for value in mask
+            ]
+            payload["_edli_day0_held_pinned_overlay"] = (
+                "authorized_monotone_day0_observation_v1"
+            )
+            payload["_edli_day0_held_pinned_zero_support_payoffs"] = (
+                exact_yes_payoffs
+            )
+            payload["_edli_day0_held_pinned_zero_support_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT"
+            )
+            payload["_edli_day0_deterministic_scope_reason"] = (
+                "GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT"
+            )
+            return (
+                np.ascontiguousarray(masked_samples, dtype=np.float64),
+                np.ascontiguousarray(np.zeros_like(point_q), dtype=np.float64),
+                _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+            )
         raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT")
     masked_point = masked_point / point_total
     payload["_edli_day0_held_pinned_mask"] = [float(value) for value in mask]
@@ -36575,6 +37056,148 @@ def _held_pinned_day0_probability_components(
         np.ascontiguousarray(masked_point, dtype=np.float64),
         _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
+
+
+def _build_day0_deterministic_witness(
+    *,
+    event: OpportunityEvent,
+    family: object,
+    omega: object,
+    bindings: tuple[object, ...],
+    exact_yes_payoffs: tuple[tuple[str, int], ...],
+    payload: dict[str, object],
+    current_day0_payload: Mapping[str, object],
+    day0_base_identity: str,
+    source_cycle: datetime,
+    source_available_at: str,
+    resolution_identity: str,
+    max_age: timedelta,
+    decision_time: datetime,
+    day0_payload_out: dict[str, object] | None,
+) -> tuple[object, dict[str, object]]:
+    """Materialize exact Day0 payoff authority for a held pinned recovery."""
+
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    probability_authority = "day0_deterministic_bin_payoff_v1"
+    source_truth_identity = stable_hash(
+        {
+            "probability_base_identity": day0_base_identity,
+            "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
+            "source_available_at": source_available_at,
+            "day0_binding": current_day0_payload.get(
+                "_edli_global_day0_binding"
+            ),
+            "exact_yes_payoffs": exact_yes_payoffs,
+        }
+    )
+    posterior_identity_hash = stable_hash(
+        {
+            "probability_authority": probability_authority,
+            "source_truth_identity": source_truth_identity,
+            "exact_yes_payoffs": exact_yes_payoffs,
+        }
+    )
+    q_version = bind_day0_probability_semantics(
+        stable_hash(
+            {
+                "authority": probability_authority,
+                "posterior_identity_hash": posterior_identity_hash,
+                "topology_identity": omega.topology_hash,
+                "exact_yes_payoffs": exact_yes_payoffs,
+            }
+        )
+    )
+    authority_certificate_hash = stable_hash(
+        {
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "family_binding_hash": family.binding_hash,
+            "q_version": q_version,
+            "source_truth_identity": source_truth_identity,
+            "captured_at_utc": decision_time.isoformat(),
+        }
+    )
+    alpha = _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA
+    witness_identity = deterministic_bin_payoff_witness_identity(
+        family_key=family.family_id,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+        captured_at_utc=decision_time,
+    )
+    witness = DeterministicBinPayoffWitness(
+        family_key=family.family_id,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+        captured_at_utc=decision_time,
+        max_age=max_age,
+        witness_identity=witness_identity,
+    )
+    deterministic_payload: dict[str, object] = {
+        "probability_authority": probability_authority,
+        "q_source": "day0_deterministic_bin_payoff",
+        "_edli_q_source": "day0_deterministic_bin_payoff",
+        "_edli_day0_q_mode": "deterministic_bin_payoff",
+        "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+        "_edli_day0_condition_by_bin": {
+            binding.bin_id: binding.condition_id for binding in bindings
+        },
+        "_edli_day0_deterministic_witness_identity": witness_identity,
+        "_edli_day0_deterministic_q_version": q_version,
+        "_edli_day0_deterministic_sample_identity": witness.sample_matrix_identity,
+        "_edli_day0_deterministic_source_truth_identity": source_truth_identity,
+        "_edli_day0_deterministic_authority_certificate_hash": authority_certificate_hash,
+        "_edli_day0_deterministic_family_key": witness.family_key,
+        "_edli_day0_deterministic_bindings": [
+            {
+                "bin_id": binding.bin_id,
+                "condition_id": binding.condition_id,
+                "yes_token_id": binding.yes_token_id,
+                "no_token_id": binding.no_token_id,
+            }
+            for binding in witness.bindings
+        ],
+        "_edli_day0_deterministic_resolution_identity": witness.resolution_identity,
+        "_edli_day0_deterministic_topology_identity": witness.topology_identity,
+        "_edli_day0_deterministic_posterior_identity_hash": witness.posterior_identity_hash,
+        "_edli_day0_deterministic_band_alpha": witness.band_alpha,
+        "_edli_day0_deterministic_band_basis": witness.band_basis,
+        "_edli_day0_deterministic_captured_at_utc": witness.captured_at_utc.isoformat(),
+    }
+    for key in (
+        "_edli_day0_deterministic_scope_reason",
+        "_edli_day0_held_pinned_zero_support_reason",
+    ):
+        if key in payload:
+            deterministic_payload[key] = payload[key]
+    if "_edli_day0_held_pinned_zero_support_reason" in payload:
+        deterministic_payload["_edli_day0_deterministic_reason"] = (
+            "held_pinned_day0_observation_zero_support"
+        )
+    payload.update(deterministic_payload)
+    if day0_payload_out is not None:
+        day0_payload_out.update(deterministic_payload)
+    return witness, deterministic_payload
 
 
 def _day0_remaining_global_probability_components(
@@ -36905,6 +37528,72 @@ def _post_local_incomplete_day0_redecision_authority(
     )
 
 
+def _bind_day0_causal_evidence_bundle(
+    payload: dict[str, object],
+    replacement_bundle: object | None,
+) -> None:
+    """Bind only the selected posterior's causal Day0 certificate.
+
+    Event payloads are durable carriers and may predate the posterior selected
+    for this decision.  Clear any inherited certificate first so a bundle that
+    lacks the current revision cannot accidentally validate against stale
+    evidence.
+    """
+
+    key = "_edli_day0_causal_evidence_bundle"
+    payload.pop(key, None)
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    causal_bundle = (
+        provenance.get("day0_causal_evidence_bundle")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if isinstance(causal_bundle, Mapping):
+        payload[key] = dict(causal_bundle)
+
+
+def _direct_day0_source_clock_bound_identity(
+    *,
+    payload: Mapping[str, object],
+    carrier: Mapping[str, object],
+    samples: np.ndarray,
+    candidate_payoff_q_lcb_caps: tuple[
+        tuple[str, str, str, str, float], ...
+    ],
+) -> tuple[str, str]:
+    """Bind the direct current-evidence carrier to the action-q sample cut."""
+
+    from src.solve.solver import probability_sample_matrix_identity
+
+    carrier_identity = str(carrier.get("carrier_identity") or "").strip()
+    causal_bundle = payload.get("_edli_day0_causal_evidence_bundle")
+    causal_bundle_identity = (
+        str(causal_bundle.get("bundle_identity") or "").strip()
+        if isinstance(causal_bundle, Mapping)
+        else ""
+    )
+    sigma_basis = str(
+        payload.get("_edli_day0_source_clock_predictive_sigma_basis") or ""
+    ).strip()
+    if (
+        payload.get("_edli_day0_direct_current_entry_authority") is not True
+        or not all((carrier_identity, causal_bundle_identity, sigma_basis))
+    ):
+        raise ValueError(
+            "GLOBAL_DAY0_DIRECT_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE"
+        )
+    bound_identity = stable_hash(
+        {
+            "carrier_identity": carrier_identity,
+            "causal_evidence_bundle_identity": causal_bundle_identity,
+            "predictive_sigma_basis": sigma_basis,
+            "sample_matrix_identity": probability_sample_matrix_identity(samples),
+            "candidate_payoff_q_lcb_caps": candidate_payoff_q_lcb_caps,
+        }
+    )
+    return carrier_identity, bound_identity
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -36940,6 +37629,7 @@ def _prepare_current_global_probability_family(
     from src.data.replacement_forecast_bundle_reader import (
         ReplacementForecastAuthorityPurpose,
         market_bin_topology_hash_from_rows,
+        read_pinned_replacement_forecast_bundle,
         read_replacement_forecast_bundle,
     )
     from src.engine.qkernel_spine_bridge import (
@@ -37062,6 +37752,8 @@ def _prepare_current_global_probability_family(
     final_daily_observation = None
     source_available_at = ""
     bundle = pinned_complete_bundle
+    if is_day0:
+        _bind_day0_causal_evidence_bundle(payload, bundle)
     posterior_identity_hash = ""
     dependency_hash = ""
     posterior_config_hash = ""
@@ -37081,6 +37773,7 @@ def _prepare_current_global_probability_family(
             raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_INCOMPLETE")
     day0_source_clock_bound_identity = ""
     current_day0_redecision_only = False
+    direct_day0_entry_carrier: Mapping[str, object] | None = None
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -37261,6 +37954,7 @@ def _prepare_current_global_probability_family(
                 and probability_use
                 in {
                     _CurrentProbabilityUse.HELD_MONITOR,
+                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
                 }
             )
             current_day0_redecision_only = bool(
@@ -37288,11 +37982,11 @@ def _prepare_current_global_probability_family(
                 raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
-            # post-local incomplete monitor observability. REDUCE_ONLY_EXIT
-            # must retain the comparable source-clock bundle used by ENTRY;
-            # this lower-variance fallback cannot authorize a statistical sale.
-            # Definitive current-day evidence uses the replacement bundle for
-            # the same probability authority as ENTRY.
+            # post-local incomplete observability.  It may refresh monitoring
+            # or JIT reduce-only q, but it can never add exposure.  Prefer a
+            # current replacement certificate when one exists; otherwise the
+            # direct current-evidence certificate below binds the observation
+            # and hourly vectors that actually produce this invocation's q.
             # DRAIN: the strict remaining-window builder below consumes a fresh,
             # complete expected-provider vector bundle on every redecision.
             # RESET: missing/stale vectors or the next local day fail closed;
@@ -37325,6 +38019,65 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
+            causal_readiness = latest_replacement_readiness(
+                forecast_conn,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+            )
+            dependencies = (
+                getattr(causal_readiness, "dependency_json", {}).get(
+                    "dependencies", ()
+                )
+                if causal_readiness is not None
+                else ()
+            )
+            causal_posterior_id = next(
+                (
+                    dependency.get("posterior_id")
+                    for dependency in dependencies
+                    if isinstance(dependency, Mapping)
+                    and dependency.get("role") == "soft_anchor_posterior"
+                ),
+                None,
+            )
+            if causal_posterior_id not in (None, ""):
+                causal_result = read_pinned_replacement_forecast_bundle(
+                    forecast_conn,
+                    posterior_id=int(causal_posterior_id),
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    current_bin_topology_hash=current_topology_hash,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=bundle_authority_purpose,
+                )
+                if causal_result.ok and causal_result.bundle is not None:
+                    # Post-local held q comes from the remaining-vector tail.
+                    # A valid readiness-pinned posterior contributes only its
+                    # immutable certificate; persisted q is never substituted.
+                    _bind_day0_causal_evidence_bundle(
+                        payload,
+                        causal_result.bundle,
+                    )
+            if not isinstance(
+                payload.get("_edli_day0_causal_evidence_bundle"), Mapping
+            ):
+                # A Day0 LOW source-clock ENS slice can be permanently
+                # unidentifiable when its final 3h extrema bucket straddles
+                # local midnight.  The held action q below does not consume
+                # that posterior's persisted q: it is rebuilt from the exact
+                # current observation and persisted hourly-vector revision.
+                # Name that narrower authority explicitly so monitor and JIT
+                # reduce-only redecision do not wait forever for an impossible
+                # source-clock successor.  ENTRY never reaches this scope.
+                payload[
+                    "_edli_day0_direct_current_redecision_authority"
+                ] = True
         elif final_daily_observation is None and pinned_complete_bundle is None:
             # Current-day held q first reuses the same source-clock bundle as
             # ENTRY so an admitted BUY is immediately monitorable on identical
@@ -37342,49 +38095,92 @@ def _prepare_current_global_probability_family(
             if readiness is None:
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
-                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
-            result = read_replacement_forecast_bundle(
-                forecast_conn,
-                baseline_bundle=None,
-                readiness=readiness,
-                city=family.city,
-                target_date=family.target_date,
-                temperature_metric=family.metric,
-                decision_time=decision_time,
-                require_baseline_bundle=False,
-                current_bin_topology_hash=current_topology_hash,
-                enforce_raw_input_hwm=True,
-                raw_input_hwm_conn=raw_input_hwm_conn,
-                raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
-                raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
-                authority_purpose=bundle_authority_purpose,
-            )
-            if not result.ok or result.bundle is None:
+                if (
+                    entry_authority
+                    and provisional_day0_fact is not None
+                    and provisional_day0_observation
+                    and local_target == local_now.date()
+                ):
+                    direct_day0_entry_carrier = (
+                        _day0_direct_entry_source_clock_carrier(
+                            forecast_conn=forecast_conn,
+                            world_conn=day0_observation_conn,
+                            family=family,
+                            decision_time=decision_time,
+                        )
+                    )
+                if direct_day0_entry_carrier is None:
+                    raise ValueError(
+                        "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"
+                    )
+                payload.update(
+                    {
+                        "_edli_day0_direct_current_entry_authority": True,
+                        "_edli_day0_direct_entry_source_clock_carrier": dict(
+                            direct_day0_entry_carrier
+                        ),
+                    }
+                )
+                source_cycle_raw = str(
+                    direct_day0_entry_carrier[
+                        "provider_source_cycle_time_utc"
+                    ]
+                )
+                source_available_at = str(
+                    direct_day0_entry_carrier["fetch_finished_at_utc"]
+                )
+                day0_base_identity = str(
+                    direct_day0_entry_carrier["carrier_identity"]
+                )
+                # Continue into the same current-observation and remaining-path
+                # builder. No full-day replacement q or rejected extrema row is
+                # consumed on this route.
+                result = None
+            else:
+                result = read_replacement_forecast_bundle(
+                    forecast_conn,
+                    baseline_bundle=None,
+                    readiness=readiness,
+                    city=family.city,
+                    target_date=family.target_date,
+                    temperature_metric=family.metric,
+                    decision_time=decision_time,
+                    require_baseline_bundle=False,
+                    current_bin_topology_hash=current_topology_hash,
+                    enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=bundle_authority_purpose,
+                )
+            if result is not None and (not result.ok or result.bundle is None):
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
                 raise ValueError(
                     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
                     f"{result.reason_code}"
                 )
-            bundle = result.bundle
-            posterior_identity_hash = str(
-                bundle.posterior_identity_hash or ""
-            ).strip()
-            dependency_hash = str(bundle.dependency_hash or "").strip()
-            posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
-            if not all(
-                (posterior_identity_hash, dependency_hash, posterior_config_hash)
-            ):
-                raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
-            source_cycle_raw = bundle.source_cycle_time
-            source_available_at = str(bundle.source_available_at or "").strip()
-            day0_base_identity = posterior_identity_hash
-            probability_conditioning_is_provisional = (
-                _replacement_uses_provisional_day0_conditioning(bundle)
-            )
-            fast_residual_conditioning = _fast_residual_day0_conditioning(
-                bundle
-            )
+            if result is not None:
+                bundle = result.bundle
+                _bind_day0_causal_evidence_bundle(payload, bundle)
+                posterior_identity_hash = str(
+                    bundle.posterior_identity_hash or ""
+                ).strip()
+                dependency_hash = str(bundle.dependency_hash or "").strip()
+                posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
+                if not all(
+                    (posterior_identity_hash, dependency_hash, posterior_config_hash)
+                ):
+                    raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+                source_cycle_raw = bundle.source_cycle_time
+                source_available_at = str(bundle.source_available_at or "").strip()
+                day0_base_identity = posterior_identity_hash
+                probability_conditioning_is_provisional = (
+                    _replacement_uses_provisional_day0_conditioning(bundle)
+                )
+                fast_residual_conditioning = _fast_residual_day0_conditioning(
+                    bundle
+                )
             if fast_residual_conditioning is not None:
                 if (
                     str(fast_residual_conditioning.get("metric") or "")
@@ -37416,11 +38212,17 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
-            if probability_conditioning_is_provisional:
+            if probability_conditioning_is_provisional and entry_authority:
                 # The provisional replacement posterior is conditioned on the
                 # physical Day0 source clock.  Keep the settlement-channel
                 # fact above for final/settlement authority; only the fast
                 # residual route is identified by its statistical fact.
+                # Held/reduce-only redecision validates after
+                # ``_global_day0_execution_payload`` has bound a same-extreme
+                # clock advance.  Rejecting it here would require exact clock
+                # equality before that typed binding exists and would strand a
+                # position whenever the observation clock advances without a
+                # new extreme.
                 provisional_identity_fact = (
                     provisional_day0_fact
                     if fast_residual_conditioning is not None
@@ -37632,9 +38434,21 @@ def _prepare_current_global_probability_family(
                     "_edli_day0_redecision_authority_scope"
                 ] = redecision_scope
             if provisional_day0_observation and bundle is None:
-                if not current_day0_redecision_only:
+                if (
+                    not current_day0_redecision_only
+                    and direct_day0_entry_carrier is None
+                ):
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                    )
+                if direct_day0_entry_carrier is not None:
+                    current_day0_payload.update(
+                        {
+                            "_edli_day0_direct_current_entry_authority": True,
+                            "_edli_day0_direct_entry_source_clock_carrier": dict(
+                                direct_day0_entry_carrier
+                            ),
+                        }
                     )
             elif probability_conditioning_is_provisional:
                 if fast_residual_conditioning is not None:
@@ -37722,9 +38536,9 @@ def _prepare_current_global_probability_family(
             day0_payload_out.update(current_day0_payload)
         if provisional_day0_observation:
             try:
-                provisional_source = str(
-                    current_day0_payload.get("settlement_source") or ""
-                ).strip().lower()
+                provisional_source = _day0_probability_conditioning_source(
+                    current_day0_payload
+                ).lower()
                 revision_likelihood = _provisional_day0_revision_likelihood(
                     day0_observation_conn,
                     source=provisional_source,
@@ -37834,6 +38648,63 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
+        zero_support_payoffs = payload.get(
+            "_edli_day0_held_pinned_zero_support_payoffs"
+        )
+        if zero_support_payoffs:
+            exact_yes_payoffs = tuple(
+                (str(bin_id), int(payoff))
+                for bin_id, payoff in zero_support_payoffs
+            )
+            if _deterministic_payoffs_cover_required_bin(
+                exact_yes_payoffs,
+                required_bin_id,
+            ):
+                witness, _deterministic_payload = _build_day0_deterministic_witness(
+                    event=event,
+                    family=family,
+                    omega=omega,
+                    bindings=bindings,
+                    exact_yes_payoffs=exact_yes_payoffs,
+                    payload=payload,
+                    current_day0_payload=current_day0_payload or {},
+                    day0_base_identity=day0_base_identity,
+                    source_cycle=source_cycle,
+                    source_available_at=source_available_at,
+                    resolution_identity=resolution_identity,
+                    max_age=max_age,
+                    decision_time=decision_time,
+                    day0_payload_out=day0_payload_out,
+                )
+                reason = str(
+                    payload.get("_edli_day0_deterministic_reason")
+                    or "held_pinned_day0_observation_zero_support"
+                )
+                return PreparedGlobalFamily(
+                    decision_id=stable_hash(
+                        {
+                            "authority_certificate_hash": witness.authority_certificate_hash,
+                            "witness_identity": witness.witness_identity,
+                        }
+                    ),
+                    probability_witness=witness,
+                    candidate_seeds=(),
+                    posterior_id=int(pinned_complete_bundle.posterior_id),
+                    probability_authority="day0_deterministic_bin_payoff_v1",
+                    day0_exit_authority_status="mature",
+                    day0_exit_authority_reason=reason,
+                    sell_action_authority_identity=sell_action_authority_identity(
+                        family_key=family.family_id,
+                        probability_witness_identity=witness.witness_identity,
+                        status="mature",
+                        reason=reason,
+                    ),
+                    day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+                        event_type=event.event_type,
+                        payload=payload,
+                        family=family,
+                    ),
+                )
     elif final_daily_observation is not None:
         components = _final_daily_exact_probability_components(
             omega=omega,
@@ -38294,7 +39165,30 @@ def _prepare_current_global_probability_family(
             and not current_day0_redecision_only
         ):
             bound_bundle = bundle
-            if bound_bundle is None:
+            if bound_bundle is None and direct_day0_entry_carrier is not None:
+                (
+                    direct_carrier_identity,
+                    day0_source_clock_bound_identity,
+                ) = _direct_day0_source_clock_bound_identity(
+                    payload=payload,
+                    carrier=direct_day0_entry_carrier,
+                    samples=samples,
+                    candidate_payoff_q_lcb_caps=day0_caps,
+                )
+                payload.update(
+                    {
+                        "_edli_day0_source_clock_bound_carrier_identity": (
+                            direct_carrier_identity
+                        ),
+                        "_edli_day0_source_clock_bound_identity": (
+                            day0_source_clock_bound_identity
+                        ),
+                        "_edli_day0_source_clock_bound_basis": (
+                            "direct_current_remaining_hourly_ens_current_evidence_v1"
+                        ),
+                    }
+                )
+            elif bound_bundle is None:
                 readiness = latest_replacement_readiness(
                     forecast_conn,
                     city=family.city,
@@ -38328,70 +39222,73 @@ def _prepare_current_global_probability_family(
                         f"{bound_result.reason_code}"
                     )
                 bound_bundle = bound_result.bundle
-            bound_components = _replacement_global_probability_components(
-                bound_bundle,
-                candidates=family.candidates,
-                bindings=bindings,
-            )
-            if bound_components is None:
-                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_INVALID")
-            bound_samples, bound_point_q, _bound_basis = bound_components
-            source_clock_caps = _day0_global_candidate_payoff_q_lcb_caps(
-                payload=dict(payload),
-                family=family,
-                bindings=bindings,
-                samples=bound_samples,
-                point_q=bound_point_q,
-                band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
-                decision_time=decision_time,
-            )
-            current_caps = (
-                _intersect_candidate_payoff_q_lcb_caps(
-                    day0_caps,
-                    source_clock_caps,
+            if bound_bundle is not None:
+                bound_components = _replacement_global_probability_components(
+                    bound_bundle,
+                    candidates=family.candidates,
+                    bindings=bindings,
                 )
-            )
-            bound_posterior_identity = str(
-                bound_bundle.posterior_identity_hash or ""
-            ).strip()
-            bound_dependency_hash = str(
-                bound_bundle.dependency_hash or ""
-            ).strip()
-            bound_config_hash = str(
-                bound_bundle.posterior_config_hash or ""
-            ).strip()
-            if not all(
-                (
-                    bound_posterior_identity,
-                    bound_dependency_hash,
-                    bound_config_hash,
+                if bound_components is None:
+                    raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_INVALID")
+                bound_samples, bound_point_q, _bound_basis = bound_components
+                source_clock_caps = _day0_global_candidate_payoff_q_lcb_caps(
+                    payload=dict(payload),
+                    family=family,
+                    bindings=bindings,
+                    samples=bound_samples,
+                    point_q=bound_point_q,
+                    band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
+                    decision_time=decision_time,
                 )
-            ):
-                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE")
-            day0_source_clock_bound_identity = stable_hash(
-                {
-                    "posterior_identity_hash": bound_posterior_identity,
-                    "dependency_hash": bound_dependency_hash,
-                    "posterior_config_hash": bound_config_hash,
-                    "sample_matrix_identity": probability_sample_matrix_identity(
-                        bound_samples
-                    ),
-                    "candidate_payoff_q_lcb_caps": current_caps,
-                }
-            )
-            payload.update(
-                {
-                    "_edli_day0_source_clock_bound_posterior_identity": (
-                        bound_posterior_identity
-                    ),
-                    "_edli_day0_source_clock_bound_identity": (
-                        day0_source_clock_bound_identity
-                    ),
-                    "_edli_day0_source_clock_bound_basis": (
-                        "intersection_with_replacement_current_evidence_v1"
-                    ),
-                }
-            )
+                current_caps = (
+                    _intersect_candidate_payoff_q_lcb_caps(
+                        day0_caps,
+                        source_clock_caps,
+                    )
+                )
+                bound_posterior_identity = str(
+                    bound_bundle.posterior_identity_hash or ""
+                ).strip()
+                bound_dependency_hash = str(
+                    bound_bundle.dependency_hash or ""
+                ).strip()
+                bound_config_hash = str(
+                    bound_bundle.posterior_config_hash or ""
+                ).strip()
+                if not all(
+                    (
+                        bound_posterior_identity,
+                        bound_dependency_hash,
+                        bound_config_hash,
+                    )
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE"
+                    )
+                day0_source_clock_bound_identity = stable_hash(
+                    {
+                        "posterior_identity_hash": bound_posterior_identity,
+                        "dependency_hash": bound_dependency_hash,
+                        "posterior_config_hash": bound_config_hash,
+                        "sample_matrix_identity": probability_sample_matrix_identity(
+                            bound_samples
+                        ),
+                        "candidate_payoff_q_lcb_caps": current_caps,
+                    }
+                )
+                payload.update(
+                    {
+                        "_edli_day0_source_clock_bound_posterior_identity": (
+                            bound_posterior_identity
+                        ),
+                        "_edli_day0_source_clock_bound_identity": (
+                            day0_source_clock_bound_identity
+                        ),
+                        "_edli_day0_source_clock_bound_basis": (
+                            "intersection_with_replacement_current_evidence_v1"
+                        ),
+                    }
+                )
         if not provisional_day0_observation and not current_day0_redecision_only:
             candidate_payoff_q_lcb_caps = current_caps
     if (
@@ -38410,6 +39307,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
+            "_edli_day0_remaining_vector_freshness_as_of_utc",
             "_edli_day0_remaining_content_identity",
             "_edli_day0_probability_operator",
             "_edli_day0_remaining_carrier_q",
@@ -38419,7 +39317,14 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_carrier_path_error_sigma_c",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "_edli_day0_remaining_vector_witness",
-            "_edli_day0_current_vector_witness_rebound",
+            "_edli_day0_causal_evidence_bundle",
+            "_edli_day0_causal_evidence_bundle_validation",
+            "_edli_day0_causal_evidence_bundle_successor_materialized",
+            "_edli_day0_causal_evidence_bundle_authority",
+            "_edli_day0_direct_current_redecision_authority",
+            "_edli_day0_direct_current_entry_authority",
+            "_edli_day0_direct_entry_source_clock_carrier",
+            "_edli_day0_direct_entry_source_clock_sigma_components_c",
             "_edli_day0_source_clock_carrier_provenance",
             "_edli_day0_decision_carrier_rebuild_basis",
             "_edli_day0_held_carrier_rebuild_basis",
@@ -38439,6 +39344,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_bound_classification",
             "_edli_day0_lcb_transform",
             "_edli_day0_source_clock_bound_posterior_identity",
+            "_edli_day0_source_clock_bound_carrier_identity",
             "_edli_day0_source_clock_bound_identity",
             "_edli_day0_source_clock_bound_basis",
             "_edli_day0_redecision_authority_scope",
@@ -38479,11 +39385,20 @@ def _prepare_current_global_probability_family(
             "remaining_capture_times": payload.get(
                 "_edli_day0_remaining_capture_times_utc"
             ),
+            "remaining_vector_freshness_as_of_utc": payload.get(
+                "_edli_day0_remaining_vector_freshness_as_of_utc"
+            ),
             "remaining_content_identity": payload.get(
                 "_edli_day0_remaining_content_identity"
             ),
             "remaining_vector_witness": payload.get(
                 "_edli_day0_remaining_vector_witness"
+            ),
+            "causal_evidence_bundle_identity": (
+                payload.get("_edli_day0_causal_evidence_bundle") or {}
+            ).get("bundle_identity"),
+            "causal_evidence_bundle_authority": payload.get(
+                "_edli_day0_causal_evidence_bundle_authority"
             ),
             "decision_carrier_rebuild_basis": payload.get(
                 "_edli_day0_decision_carrier_rebuild_basis"
@@ -38523,6 +39438,12 @@ def _prepare_current_global_probability_family(
             ),
             "source_clock_predictive_sigma_basis": payload.get(
                 "_edli_day0_source_clock_predictive_sigma_basis"
+            ),
+            "direct_entry_source_clock_carrier": payload.get(
+                "_edli_day0_direct_entry_source_clock_carrier"
+            ),
+            "direct_entry_source_clock_sigma_components_c": payload.get(
+                "_edli_day0_direct_entry_source_clock_sigma_components_c"
             ),
             "provisional_revision_likelihood": payload.get(
                 "_edli_day0_provisional_revision_likelihood"
@@ -42134,11 +43055,7 @@ def _day0_remaining_p_raw_vector(
     if decision_time is None:
         from src.events.day0_authority import day0_is_noaa_preliminary_source
 
-        source_hint = str(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
-        )
+        source_hint = _day0_probability_conditioning_source(payload)
         if day0_is_noaa_preliminary_source(source_hint):
             raise ValueError(
                 "DAY0_NOAA_PRELIMINARY_CARRIER_DECISION_TIME_MISSING"
@@ -42202,9 +43119,7 @@ def _day0_remaining_p_raw_vector(
     noaa_preliminary = (
         finality in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
         and day0_is_noaa_preliminary_source(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
+            _day0_probability_conditioning_source(payload)
         )
     )
     if noaa_preliminary:
@@ -42797,11 +43712,7 @@ def _day0_probability_boundary_scenarios_native(
         likelihood = payload.get("_edli_day0_provisional_revision_likelihood")
         if not isinstance(likelihood, Mapping) and isinstance(binding, Mapping):
             likelihood = binding.get("provisional_revision_likelihood")
-        source = str(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
-        ).strip().lower()
+        source = _day0_probability_conditioning_source(payload).lower()
         from src.events.day0_authority import (
             DAY0_MONOTONE_SETTLEMENT_BOUND,
             day0_evidence_finality,
@@ -43262,8 +44173,17 @@ def _latest_day0_current_temperature_native(
     the current level needed to condition the remaining forecast path.
     """
 
+    attached = {
+        str(row[1])
+        for row in world_conn.execute("PRAGMA database_list").fetchall()
+    }
+    observation_prints_ref = "observation_prints"
+    table_schema = "main"
+    if "world" in attached:
+        observation_prints_ref = "world.observation_prints"
+        table_schema = "world"
     table = world_conn.execute(
-        "SELECT 1 FROM sqlite_master "
+        f"SELECT 1 FROM {table_schema}.sqlite_master "
         "WHERE type = 'table' AND name = 'observation_prints'"
     ).fetchone()
     if table is None:
@@ -43305,7 +44225,7 @@ def _latest_day0_current_temperature_native(
         f"""
         SELECT publish_ts_utc, value_native, unit, station_id, source_channel,
                raw_report, fetched_at_utc
-          FROM observation_prints
+          FROM {observation_prints_ref}
          WHERE city = ?
            AND source_channel IN ({placeholders})
            AND publish_ts_utc >= ?
@@ -43560,9 +44480,7 @@ def _rebuild_decision_time_day0_carrier(
     )
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
-    source = str(
-        payload.get("settlement_source") or payload.get("observation_source") or ""
-    ).strip().lower()
+    source = _day0_probability_conditioning_source(payload).lower()
     finality = day0_evidence_finality(payload)
     if not day0_is_noaa_preliminary_source(source) or finality not in {
         "PROVISIONAL_CURRENT_SNAPSHOT",
@@ -43703,6 +44621,152 @@ def _rebuild_held_day0_shared_carrier(
     )
 
 
+def _pinned_station_extreme_providers_c(
+    *,
+    conn: sqlite3.Connection | None,
+    payload: Mapping[str, object],
+    family: object,
+    decision_time: datetime,
+    represented_models: Iterable[str],
+) -> tuple[dict[str, object], ...]:
+    """Read station-native final-extreme providers bound by the base posterior.
+
+    Station forecasts such as HKO FND predict the final daily extreme directly,
+    so they have no hourly vector.  Day0 must not silently discard a provider
+    already admitted by the immutable source-clock posterior; equally, it must
+    not splice a newer station issue onto that posterior.  The exact
+    ``raw_model_forecast_id`` in ``current_value_serving`` is the causal join.
+    """
+
+    execute = getattr(conn, "execute", None)
+    if not callable(execute):
+        return ()
+    binding = payload.get("_edli_global_day0_binding")
+    posterior_id = payload.get("posterior_id")
+    if posterior_id in (None, "") and isinstance(binding, Mapping):
+        posterior_id = binding.get("posterior_id")
+    if posterior_id in (None, ""):
+        return ()
+    try:
+        posterior_id = int(posterior_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_ID_INVALID") from exc
+    row = execute(
+        """
+        SELECT city, target_date, temperature_metric, provenance_json
+          FROM forecast_posteriors
+         WHERE posterior_id = ?
+         LIMIT 1
+        """,
+        (posterior_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_MISSING")
+    city = str(getattr(family, "city", "") or "")
+    target_date = str(getattr(family, "target_date", "") or "")
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    if (
+        str(row[0] or "") != city
+        or str(row[1] or "") != target_date
+        or str(row[2] or "").strip().lower() != metric
+    ):
+        raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_SCOPE_MISMATCH")
+    try:
+        provenance = json.loads(str(row[3] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("DAY0_STATION_EXTREME_PROVENANCE_INVALID") from exc
+    fusion = (
+        provenance.get("bayes_precision_fusion")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if not isinstance(fusion, Mapping):
+        return ()
+    serving = fusion.get("current_value_serving")
+    used_models = fusion.get("used_models")
+    if not isinstance(serving, Mapping) or not isinstance(used_models, list):
+        return ()
+    from src.data.station_forecast_adapter import load_station_forecast_config
+
+    station_models = {
+        str(model).strip() for model in load_station_forecast_config()
+    }
+    represented = {str(model).strip() for model in represented_models}
+    requested = tuple(
+        model
+        for model in (str(value).strip() for value in used_models)
+        if model in station_models and model not in represented
+    )
+    evidence: list[dict[str, object]] = []
+    for model in requested:
+        serving_row = serving.get(model)
+        if not isinstance(serving_row, Mapping):
+            raise ValueError("DAY0_STATION_EXTREME_SERVING_IDENTITY_MISSING")
+        try:
+            raw_id = int(serving_row["raw_model_forecast_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_EXTREME_SERVING_IDENTITY_INVALID") from exc
+        raw = execute(
+            """
+            SELECT raw_model_forecast_id, model, city, target_date, metric,
+                   source_cycle_time, source_available_at, captured_at,
+                   forecast_value_c, source_id, coverage_status
+              FROM raw_model_forecasts
+             WHERE raw_model_forecast_id = ?
+             LIMIT 1
+            """,
+            (raw_id,),
+        ).fetchone()
+        if raw is None:
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_MISSING")
+        try:
+            source_cycle_time = datetime.fromisoformat(
+                str(raw[5]).replace("Z", "+00:00")
+            )
+            source_available_at = datetime.fromisoformat(
+                str(raw[6]).replace("Z", "+00:00")
+            )
+            captured_at = datetime.fromisoformat(
+                str(raw[7]).replace("Z", "+00:00")
+            )
+            value_c = float(raw[8])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_INVALID") from exc
+        decision_utc = decision_time.astimezone(UTC)
+        if (
+            int(raw[0]) != raw_id
+            or str(raw[1] or "") != model
+            or str(raw[2] or "") != city
+            or str(raw[3] or "") != target_date
+            or str(raw[4] or "").strip().lower() != metric
+            or str(raw[9] or "") != f"{model}_single_runs"
+            or str(raw[10] or "").strip().upper() != "COVERED"
+            or source_cycle_time.tzinfo is None
+            or source_available_at.tzinfo is None
+            or captured_at.tzinfo is None
+            or source_cycle_time.astimezone(UTC)
+            > source_available_at.astimezone(UTC)
+            or source_available_at.astimezone(UTC)
+            > captured_at.astimezone(UTC)
+            or source_available_at.astimezone(UTC) > decision_utc
+            or captured_at.astimezone(UTC) > decision_utc
+            or not math.isfinite(value_c)
+        ):
+            raise ValueError("DAY0_STATION_EXTREME_RAW_ROW_SCOPE_INVALID")
+        evidence.append(
+            {
+                "model": model,
+                "raw_model_forecast_id": raw_id,
+                "forecast_value_c": value_c,
+                "source_cycle_time": source_cycle_time.astimezone(UTC).isoformat(),
+                "source_available_at": source_available_at.astimezone(UTC).isoformat(),
+                "captured_at": captured_at.astimezone(UTC).isoformat(),
+                "posterior_id": posterior_id,
+            }
+        )
+    return tuple(evidence)
+
+
 def _day0_current_vector_witness(
     *,
     conn: sqlite3.Connection | None,
@@ -43725,9 +44789,14 @@ def _day0_current_vector_witness(
         request_hash_by_model: dict[str, str] = {}
         source_run_by_model: dict[str, str] = {}
         provider_run_by_model: dict[str, str] = {}
+        model_api_by_model: dict[str, str] = {}
         provider_cycle_by_model: dict[str, str] = {}
         provider_available_by_model: dict[str, str] = {}
         provider_modified_by_model: dict[str, str] = {}
+        fetch_started_by_model: dict[str, str] = {}
+        fetch_finished_by_model: dict[str, str] = {}
+        source_run_authority_by_model: dict[str, str] = {}
+        endpoint_mode_by_model: dict[str, str] = {}
         for vector in vectors:
             model = str(getattr(vector, "model", "") or "").strip()
             captured = str(getattr(vector, "captured_at", "") or "").strip()
@@ -43756,6 +44825,7 @@ def _day0_current_vector_witness(
             request_hash_by_model[model] = str(row[3] or "").strip()
             source_run_by_model[model] = str(meta.get("source_run_id") or "").strip()
             provider_run_by_model[model] = str(meta.get("provider_run_id") or "").strip()
+            model_api_by_model[model] = str(meta.get("model_api_id") or "").strip()
             provider_cycle_by_model[model] = str(
                 meta.get("provider_source_cycle_time_utc") or ""
             ).strip()
@@ -43765,6 +44835,18 @@ def _day0_current_vector_witness(
             provider_modified_by_model[model] = str(
                 meta.get("provider_source_modified_at_utc") or ""
             ).strip()
+            fetch_started_by_model[model] = str(
+                meta.get("fetch_started_at") or ""
+            ).strip()
+            fetch_finished_by_model[model] = str(
+                meta.get("fetch_finished_at") or ""
+            ).strip()
+            source_run_authority_by_model[model] = str(
+                meta.get("source_run_authority") or ""
+            ).strip()
+            endpoint_mode_by_model[model] = str(
+                meta.get("endpoint_mode") or ""
+            ).strip()
         if set(vector_ids) != set(models) or any(
             not value
             for mapping in (
@@ -43773,12 +44855,27 @@ def _day0_current_vector_witness(
                 request_hash_by_model,
                 source_run_by_model,
                 provider_run_by_model,
+                model_api_by_model,
                 provider_cycle_by_model,
                 provider_available_by_model,
+                provider_modified_by_model,
+                fetch_started_by_model,
+                fetch_finished_by_model,
+                source_run_authority_by_model,
+                endpoint_mode_by_model,
             )
             for value in mapping.values()
         ):
             return None
+        city_obj = runtime_cities_by_name().get(str(family.city))
+        if city_obj is None:
+            return None
+        local_target = date.fromisoformat(str(family.target_date)[:10])
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city_obj.timezone)),
+        ).astimezone(UTC)
         return {
             "vector_id": vector_ids[models[0]],
             "vector_ids_by_model": vector_ids,
@@ -43791,9 +44888,20 @@ def _day0_current_vector_witness(
             "request_hash_by_model": request_hash_by_model,
             "source_run_id_by_model": source_run_by_model,
             "provider_run_id_by_model": provider_run_by_model,
+            "model_api_id_by_model": model_api_by_model,
             "provider_source_cycle_time_by_model_utc": provider_cycle_by_model,
             "provider_source_available_at_by_model_utc": provider_available_by_model,
             "provider_source_modified_at_by_model_utc": provider_modified_by_model,
+            "fetch_started_times_by_model_utc": fetch_started_by_model,
+            "fetch_finished_times_by_model_utc": fetch_finished_by_model,
+            "source_run_authority_by_model": source_run_authority_by_model,
+            "endpoint_mode_by_model": endpoint_mode_by_model,
+            "provider_source_cycle_time_utc": provider_cycle_by_model.get(
+                "ecmwf_ifs", provider_cycle_by_model[models[0]]
+            ),
+            "local_capture_clock_utc": max(capture_by_model.values()),
+            "source_available_at_utc": max(fetch_finished_by_model.values()),
+            "target_end_utc": target_end.isoformat(),
             "city": str(family.city),
             "target_date": str(family.target_date),
             "metric": str(family.metric),
@@ -43801,6 +44909,527 @@ def _day0_current_vector_witness(
         }
     except (sqlite3.Error, TypeError, ValueError, KeyError, json.JSONDecodeError):
         return None
+
+
+def _validate_day0_causal_bundle_successor(
+    *,
+    conn: sqlite3.Connection | None,
+    payload: dict[str, object],
+    family: object,
+    decision_time: datetime,
+    vector_witness: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Require the current vectors and posterior to name one committed bundle.
+
+    A newer vector row is not a license to rebind an older posterior.  The
+    materializer writes a successor posterior carrying the same bundle
+    identity; until that row exists both event-bound inference and held
+    monitoring remain fail-closed.  The validation receipt is deliberately
+    kept on the threaded payload before raising so rejection evidence survives
+    the caller's no-trade path.
+    """
+
+    receipt_key = "_edli_day0_causal_evidence_bundle_validation"
+    successor_key = "_edli_day0_causal_evidence_bundle_successor_materialized"
+    expected = payload.get("_edli_day0_causal_evidence_bundle")
+    if not isinstance(expected, Mapping):
+        receipt = {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID",
+            "expected_bundle_identity": "",
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": "",
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": "",
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        payload[successor_key] = False
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+
+    try:
+        from src.data.day0_hourly_vectors import (
+            build_day0_causal_evidence_bundle,
+            validate_day0_causal_evidence_bundle,
+        )
+
+        expected_witness = expected["carrier_vector_witness"]
+        expected_context = expected["observation_context"]
+        expected_cutoff = expected["cutoff_utc"]
+        if not isinstance(expected_witness, Mapping):
+            raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        # Older readers expose the stable vector-id/provenance subset while
+        # the materializer persists additional possession clocks.  Retain
+        # those immutable fields from the expected certificate and overlay the
+        # freshly selected vector witness; vector-id/hash changes still remain
+        # visible to the validator.
+        actual_witness = dict(expected_witness)
+        actual_witness.update(dict(vector_witness))
+        # The producer's causal-as-of clock is the materialization clock, not
+        # the later decision clock.  Preserve that immutable field while the
+        # complete current vector witness supplies the identity-bearing rows.
+        if expected_witness.get("causal_as_of_utc") not in (None, ""):
+            actual_witness["causal_as_of_utc"] = expected_witness[
+                "causal_as_of_utc"
+            ]
+        if expected_witness.get("vector_id") not in (None, ""):
+            actual_witness["vector_id"] = expected_witness["vector_id"]
+        actual = build_day0_causal_evidence_bundle(
+            city=str(expected["city"]),
+            target_date=str(expected["target_date"]),
+            metric=str(expected["metric"]),
+            observation_context=expected_context,
+            cutoff_utc=str(expected_cutoff),
+            vector_witness=actual_witness,
+        )
+        validation = validate_day0_causal_evidence_bundle(
+            expected=expected,
+            actual=actual,
+        )
+        receipt = validation.receipt()
+    except ValueError as exc:
+        reason = str(exc) or "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID"
+        receipt = {
+            "reason": reason,
+            "expected_bundle_identity": str(
+                expected.get("bundle_identity") or ""
+            ),
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": str(
+                expected.get("carrier_vector_identity") or ""
+            ),
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": str(
+                expected.get("carrier_vector_hash") or ""
+            ),
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        payload[successor_key] = False
+        error = ValueError(reason)
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error from None
+    except (KeyError, TypeError) as exc:
+        receipt = {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID",
+            "expected_bundle_identity": str(
+                expected.get("bundle_identity") or ""
+            ),
+            "actual_bundle_identity": "",
+            "expected_carrier_vector_identity": str(
+                expected.get("carrier_vector_identity") or ""
+            ),
+            "actual_carrier_vector_identity": "",
+            "expected_carrier_vector_hash": str(
+                expected.get("carrier_vector_hash") or ""
+            ),
+            "actual_carrier_vector_hash": "",
+        }
+        payload[receipt_key] = receipt
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error from exc
+
+    payload[receipt_key] = receipt
+    if not validation.ok:
+        # Probe only the current successor identity.  A positive probe cannot
+        # legalize this invocation's old q: the caller must re-read the
+        # successor bundle on the next bounded cycle.
+        successor = False
+        try:
+            from src.data.replacement_forecast_bundle_reader import (
+                day0_causal_bundle_successor_materialized,
+            )
+
+            successor = bool(
+                conn is not None
+                and day0_causal_bundle_successor_materialized(
+                    conn,
+                    city=str(family.city),
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    bundle_identity=str(actual["bundle_identity"]),
+                    decision_time=decision_time,
+                )
+            )
+        except (TypeError, ValueError, sqlite3.Error):
+            successor = False
+        payload[successor_key] = successor
+        error = ValueError(str(validation.reason))
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+
+    # A matching identity is still not consumable until the materializer's
+    # self-validating successor row is visible on the canonical DB.
+    successor = False
+    try:
+        from src.data.replacement_forecast_bundle_reader import (
+            day0_causal_bundle_successor_materialized,
+        )
+
+        successor = bool(
+            conn is not None
+            and day0_causal_bundle_successor_materialized(
+                conn,
+                city=str(family.city),
+                target_date=str(family.target_date),
+                temperature_metric=str(family.metric),
+                bundle_identity=str(actual["bundle_identity"]),
+                decision_time=decision_time,
+            )
+        )
+    except (TypeError, ValueError, sqlite3.Error):
+        successor = False
+    payload[successor_key] = successor
+    if not successor:
+        error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH")
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        raise error
+    payload["_edli_day0_causal_evidence_bundle"] = dict(actual)
+    return actual
+
+
+def _day0_direct_entry_source_clock_carrier(
+    *,
+    forecast_conn: sqlite3.Connection,
+    world_conn: sqlite3.Connection | None = None,
+    family: object,
+    decision_time: datetime,
+) -> Mapping[str, object] | None:
+    """Build an exact current hourly-ENS carrier for an ambiguous Day0 LOW.
+
+    This does not legalize the rejected full-day extrema product.  It binds the
+    unresolved-hour 51-member IFS025 paths, their provider-run metadata, the
+    latest causal current-temperature state, and the complete persisted vector
+    rows that will be reproduced at submit.
+    """
+
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        OPENMETEO_ENSEMBLE_URL,
+        day0_source_clock_ensemble_member_models,
+        read_freshest_day0_hourly_vectors,
+    )
+
+    if decision_time.tzinfo is None or str(getattr(family, "metric", "")) != "low":
+        return None
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if city is None:
+        return None
+    current_state = _latest_day0_current_temperature_native(
+        world_conn=world_conn or forecast_conn,
+        family=family,
+        decision_time=decision_time,
+    )
+    if current_state is None:
+        return None
+    current_native, current_observed_at, current_source = current_state
+    expected_models = day0_source_clock_ensemble_member_models()
+    vectors = read_freshest_day0_hourly_vectors(
+        city=str(family.city),
+        target_date=str(family.target_date),
+        now=decision_time,
+        expected_models=expected_models,
+        require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=current_observed_at,
+        require_complete_remaining_window=True,
+        conn=forecast_conn,
+    )
+    if len(vectors) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+        return None
+    witness = _day0_current_vector_witness(
+        conn=forecast_conn,
+        vectors=vectors,
+        family=family,
+        expected_models=expected_models,
+        decision_time=decision_time,
+    )
+    if not isinstance(witness, Mapping):
+        return None
+
+    def _one_map_value(key: str) -> str | None:
+        values = witness.get(key)
+        if not isinstance(values, Mapping) or set(values) != set(expected_models):
+            return None
+        unique = {str(value or "").strip() for value in values.values()}
+        return next(iter(unique)) if len(unique) == 1 and "" not in unique else None
+
+    request_hash = _one_map_value("request_hash_by_model")
+    provider_cycle_text = _one_map_value(
+        "provider_source_cycle_time_by_model_utc"
+    )
+    provider_available_text = _one_map_value(
+        "provider_source_available_at_by_model_utc"
+    )
+    provider_modified_text = _one_map_value(
+        "provider_source_modified_at_by_model_utc"
+    )
+    fetch_finished_text = _one_map_value("fetch_finished_times_by_model_utc")
+    capture_text = _one_map_value("capture_times_by_model_utc")
+    if not all(
+        (
+            request_hash,
+            provider_cycle_text,
+            provider_available_text,
+            provider_modified_text,
+            fetch_finished_text,
+            capture_text,
+        )
+    ):
+        return None
+    exact_fields = {
+        "provider_by_model": "openmeteo",
+        "endpoint_by_model": OPENMETEO_ENSEMBLE_URL,
+        "model_api_id_by_model": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        "source_run_authority_by_model": "provider_meta_declared",
+        "endpoint_mode_by_model": "ensemble_meta_stamped",
+    }
+    if any(_one_map_value(key) != value for key, value in exact_fields.items()):
+        return None
+    try:
+        provider_cycle = datetime.fromisoformat(
+            provider_cycle_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        provider_available = datetime.fromisoformat(
+            provider_available_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        provider_modified = datetime.fromisoformat(
+            provider_modified_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        fetch_finished = datetime.fromisoformat(
+            fetch_finished_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        captured_at = datetime.fromisoformat(
+            capture_text.replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+    decision_utc = decision_time.astimezone(UTC)
+    if (
+        provider_cycle > provider_available
+        or provider_available > fetch_finished
+        or provider_modified > fetch_finished
+        or fetch_finished > decision_utc
+        or captured_at > decision_utc
+        or decision_utc - fetch_finished
+        > timedelta(hours=float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS))
+    ):
+        return None
+    current_c = (
+        float(current_native)
+        if str(getattr(city, "settlement_unit", "") or "").upper() == "C"
+        else (float(current_native) - 32.0) * 5.0 / 9.0
+    )
+    future_extremes_c, _innovations = (
+        _remaining_day_extremes_c_with_current_state_evidence(
+            vectors,
+            target_date=str(family.target_date),
+            decision_time=decision_time,
+            observation_time=current_observed_at,
+            current_temp_c=current_c,
+            metric="low",
+        )
+    )
+    values = np.asarray(future_extremes_c, dtype=np.float64)
+    if (
+        values.shape != (DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,)
+        or not np.isfinite(values).all()
+    ):
+        return None
+    carrier_content = {
+        "schema": "day0_direct_entry_hourly_ens_carrier_v1",
+        "model": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        "member_count": DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+        "city": str(family.city),
+        "target_date": str(family.target_date),
+        "metric": "low",
+        "provider_source_cycle_time_utc": provider_cycle.isoformat(),
+        "provider_source_available_at_utc": provider_available.isoformat(),
+        "provider_source_modified_at_utc": provider_modified.isoformat(),
+        "fetch_finished_at_utc": fetch_finished.isoformat(),
+        "captured_at_utc": captured_at.isoformat(),
+        "request_hash": request_hash,
+        "current_temperature_native": float(current_native),
+        "current_temperature_observed_at_utc": current_observed_at.isoformat(),
+        "current_temperature_source": str(current_source),
+        "future_extremes_c": [float(value) for value in values.tolist()],
+        "vector_witness": dict(witness),
+    }
+    return {
+        **carrier_content,
+        "carrier_identity": stable_hash(carrier_content),
+    }
+
+
+def _build_direct_current_day0_causal_bundle(
+    *,
+    payload: dict[str, object],
+    family: object,
+    unit: str,
+    decision_time: datetime,
+    vector_witness: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Bind direct current evidence without inventing a full-day extrema q.
+
+    The remaining-window probability is recomputed in this invocation from
+    exact persisted vector rows and current observation state. Existing capital
+    may use the held-only direct carrier. New capital additionally requires a
+    complete 51-member hourly ENS carrier whose same provider cycle matches the
+    ECMWF deterministic path. Neither route relabels a rejected full-day ENS
+    snapshot as eligible.
+    """
+
+    held_direct = bool(
+        payload.get("_edli_day0_redecision_authority_scope")
+        == "held_exposure_current_day0_only_v1"
+        and payload.get("_edli_day0_direct_current_redecision_authority")
+        is True
+    )
+    entry_carrier = payload.get(
+        "_edli_day0_direct_entry_source_clock_carrier"
+    )
+    entry_direct = bool(
+        payload.get("_edli_day0_redecision_authority_scope") is None
+        and payload.get("_edli_day0_direct_current_entry_authority") is True
+        and isinstance(entry_carrier, Mapping)
+    )
+    if not held_direct and not entry_direct:
+        raise ValueError("DAY0_DIRECT_CURRENT_REDECISION_AUTHORITY_REQUIRED")
+    direct_authority = (
+        "entry_current_remaining_hourly_ens_v1"
+        if entry_direct
+        else "held_current_redecision_direct_v1"
+    )
+    if entry_direct:
+        provider_cycles = vector_witness.get(
+            "provider_source_cycle_time_by_model_utc"
+        )
+        deterministic_ecmwf_cycle = (
+            str(provider_cycles.get("ecmwf_ifs") or "").strip()
+            if isinstance(provider_cycles, Mapping)
+            else ""
+        )
+        carrier_cycle = str(
+            entry_carrier.get("provider_source_cycle_time_utc") or ""
+        ).strip()
+        if (
+            not deterministic_ecmwf_cycle
+            or deterministic_ecmwf_cycle != carrier_cycle
+            or not str(entry_carrier.get("carrier_identity") or "").strip()
+        ):
+            raise ValueError("DAY0_DIRECT_ENTRY_SAME_CYCLE_CARRIER_MISMATCH")
+    metric = str(
+        payload.get("metric")
+        or payload.get("temperature_metric")
+        or getattr(family, "metric", "")
+        or ""
+    ).strip().lower()
+    city = str(getattr(family, "city", "") or "").strip()
+    target_date = str(getattr(family, "target_date", "") or "").strip()
+    source = _day0_probability_conditioning_source(payload)
+    observation_time_text = str(
+        payload.get("observation_time")
+        or payload.get("_edli_day0_probability_boundary_observation_time")
+        or ""
+    ).strip()
+    observed_extreme = _observed_day0_extreme_native(payload, metric)
+    probability_boundary = _day0_probability_boundary_native(payload, metric)
+    normalized_unit = str(
+        payload.get("settlement_unit") or unit or ""
+    ).strip().upper()
+    if decision_time.tzinfo is None or not all(
+        (city, target_date, source, observation_time_text)
+    ) or metric not in {"high", "low"} or normalized_unit not in {"C", "F"}:
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID")
+    try:
+        observed_at = datetime.fromisoformat(
+            observation_time_text.replace("Z", "+00:00")
+        )
+        observed_extreme_value = float(observed_extreme)
+        probability_boundary_value = float(probability_boundary)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID") from exc
+    if (
+        observed_at.tzinfo is None
+        or observed_at.astimezone(UTC) > decision_time.astimezone(UTC)
+    ):
+        raise ValueError("DAY0_DIRECT_CURRENT_OBSERVATION_CONTEXT_INVALID")
+
+    revision_likelihood = payload.get(
+        "_edli_day0_provisional_revision_likelihood"
+    )
+    revision_identity = (
+        str(revision_likelihood.get("identity_hash") or "").strip()
+        if isinstance(revision_likelihood, Mapping)
+        else ""
+    )
+    observation_context = {
+        "authority": direct_authority,
+        "source": source,
+        "station_id": str(payload.get("station_id") or "").strip() or None,
+        "observation_time": observed_at.astimezone(UTC).isoformat(),
+        "observation_available_at": str(
+            payload.get("observation_available_at") or ""
+        ).strip()
+        or None,
+        "observed_extreme_native": observed_extreme_value,
+        "probability_boundary_native": probability_boundary_value,
+        "probability_boundary_observation_time": str(
+            payload.get("_edli_day0_probability_boundary_observation_time")
+            or observation_time_text
+        ),
+        "sample_count": payload.get("sample_count")
+        or payload.get("observation_count"),
+        "unit": normalized_unit,
+        "evidence_finality": payload.get("evidence_finality"),
+        "revision_likelihood_identity": revision_identity or None,
+        "raw_payload_sha256": payload.get("raw_payload_sha256"),
+        "source_clock_entry_carrier_identity": (
+            entry_carrier.get("carrier_identity") if entry_direct else None
+        ),
+        "source_clock_predictive_sigma_native": (
+            payload.get("_edli_day0_source_clock_predictive_sigma_native")
+            if entry_direct
+            else None
+        ),
+    }
+    from src.data.day0_hourly_vectors import (
+        build_day0_causal_evidence_bundle,
+        validate_day0_causal_evidence_bundle,
+    )
+
+    bundle = build_day0_causal_evidence_bundle(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        observation_context=observation_context,
+        cutoff_utc=decision_time.astimezone(UTC).isoformat(),
+        vector_witness=vector_witness,
+    )
+    validation = validate_day0_causal_evidence_bundle(
+        expected=bundle,
+        actual=bundle,
+    )
+    if not validation.ok:
+        raise ValueError("DAY0_DIRECT_CURRENT_CAUSAL_BUNDLE_INVALID")
+    payload.update(
+        {
+            "_edli_day0_causal_evidence_bundle": dict(bundle),
+            "_edli_day0_causal_evidence_bundle_validation": (
+                validation.receipt()
+            ),
+            "_edli_day0_causal_evidence_bundle_successor_materialized": False,
+            "_edli_day0_causal_evidence_bundle_authority": (
+                direct_authority
+            ),
+        }
+    )
+    return bundle
 
 
 def _day0_remaining_day_members(
@@ -43882,11 +45511,27 @@ def _day0_remaining_day_members(
         payload["_edli_day0_remaining_window_start_utc"] = (
             window_start.astimezone(timezone.utc).isoformat()
         )
+        vector_freshness_time = decision_time
+        local_target = date.fromisoformat(str(family.target_date)[:10])
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city_obj.timezone)),
+        ).astimezone(UTC)
+        if decision_time.astimezone(UTC) > target_end:
+            # The target-day tail is physically closed.  Its last causal
+            # pre-close vector cannot become stale merely because final daily
+            # settlement evidence publishes later; captures after target_end
+            # are rejected by the post-local witness gate above this seam.
+            vector_freshness_time = target_end
+            payload["_edli_day0_remaining_vector_freshness_as_of_utc"] = (
+                target_end.isoformat()
+            )
         expected_models = day0_hourly_models_for_city(city_obj)
         vectors = read_freshest_day0_hourly_vectors(
             city=str(family.city),
             target_date=str(family.target_date),
-            now=decision_time,
+            now=vector_freshness_time,
             expected_models=expected_models,
             require_expected=bool(expected_models),
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
@@ -43911,41 +45556,39 @@ def _day0_remaining_day_members(
                 "current_vector_witness_unavailable"
             )
             return None
-        persisted_vector_witness = payload.get(
-            "_edli_day0_remaining_vector_witness"
+        direct_entry_authority = bool(
+            entry_authority
+            and payload.get("_edli_day0_direct_current_entry_authority") is True
         )
-        if isinstance(persisted_vector_witness, Mapping):
-            compare_fields = (
-                "vector_id",
-                "vector_ids_by_model",
-                "capture_times_utc",
-                "capture_times_by_model_utc",
-                "provider_by_model",
-                "endpoint_by_model",
-                "request_hash_by_model",
-                "source_run_id_by_model",
-                "provider_run_id_by_model",
-                "provider_source_cycle_time_by_model_utc",
-                "provider_source_available_at_by_model_utc",
+        validated_bundle = None
+        if direct_entry_authority:
+            # The entry certificate additionally binds the predictive sigma
+            # computed below from this deterministic path set and the exact
+            # hourly ENS carrier. Build it only after that decomposition exists.
+            pass
+        elif payload.get("_edli_day0_direct_current_redecision_authority") is True:
+            validated_bundle = _build_direct_current_day0_causal_bundle(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
             )
-            witness_changed = any(
-                persisted_vector_witness.get(field) != current_vector_witness.get(field)
-                for field in compare_fields
-            )
-            if witness_changed:
-                held_scope = payload.get("_edli_day0_redecision_authority_scope")
-                if held_scope not in {
-                    "held_exposure_current_day0_only_v1",
-                    "held_exposure_current_bundle_day0_only_v1",
-                }:
-                    raise ValueError("DAY0_CURRENT_VECTOR_WITNESS_MISMATCH")
-                _snapshot_day0_source_clock_carrier_provenance(payload)
-                payload["_edli_day0_remaining_vector_witness"] = (
-                    current_vector_witness
-                )
-                payload["_edli_day0_current_vector_witness_rebound"] = True
         else:
-            payload["_edli_day0_remaining_vector_witness"] = current_vector_witness
+            # Source-clock actions retain the immutable posterior successor
+            # contract.  A newly captured member set cannot be rebound to an
+            # older posterior in place.
+            validated_bundle = _validate_day0_causal_bundle_successor(
+                conn=forecast_conn,
+                payload=payload,
+                family=family,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
+            )
+        if validated_bundle is not None:
+            payload["_edli_day0_remaining_vector_witness"] = dict(
+                validated_bundle["carrier_vector_witness"]
+            )
         from src.strategy.live_inference.source_clock_vnext import (
             provider_family_for_source,
         )
@@ -43963,9 +45606,10 @@ def _day0_remaining_day_members(
             represented_families.add(provider_family)
             provider_representatives.append(vector)
         vectors = provider_representatives
-        payload["_edli_day0_provider_representative_models"] = [
-            str(vector.model) for vector in vectors
-        ]
+        provider_models = [str(vector.model) for vector in vectors]
+        payload["_edli_day0_provider_representative_models"] = list(
+            provider_models
+        )
         if current_state is None:
             # Telemetry/test callers without the canonical world connection
             # retain the pure forecast seam. Live callers always pass it.
@@ -44010,6 +45654,132 @@ def _day0_remaining_day_members(
                 "current_state_aligned_trajectory_unavailable"
             )
             return None
+        station_extremes = _pinned_station_extreme_providers_c(
+            conn=forecast_conn,
+            payload=payload,
+            family=family,
+            decision_time=decision_time,
+            represented_models=provider_models,
+        )
+        if station_extremes:
+            boundary_native = _day0_probability_boundary_native(payload, metric)
+            boundary_c = (
+                boundary_native
+                if boundary_native is None or str(unit).upper() == "C"
+                else (boundary_native - 32.0) * 5.0 / 9.0
+            )
+            for evidence in station_extremes:
+                station_value = float(evidence["forecast_value_c"])
+                if boundary_c is not None:
+                    station_value = (
+                        max(station_value, boundary_c)
+                        if metric == "high"
+                        else min(station_value, boundary_c)
+                    )
+                extremes_c.append(station_value)
+                provider_models.append(str(evidence["model"]))
+            payload["_edli_day0_station_extreme_providers"] = [
+                dict(evidence) for evidence in station_extremes
+            ]
+            payload["_edli_day0_provider_representative_models"] = list(
+                provider_models
+            )
+        if direct_entry_authority:
+            entry_carrier = payload.get(
+                "_edli_day0_direct_entry_source_clock_carrier"
+            )
+            if not isinstance(entry_carrier, Mapping):
+                raise ValueError("DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISSING")
+            try:
+                ensemble_extremes_c = np.asarray(
+                    entry_carrier["future_extremes_c"], dtype=np.float64
+                )
+                provider_extremes_c = np.asarray(extremes_c, dtype=np.float64)
+                carrier_current_native = float(
+                    entry_carrier["current_temperature_native"]
+                )
+                carrier_current_time = str(
+                    entry_carrier["current_temperature_observed_at_utc"]
+                )
+                carrier_current_source = str(
+                    entry_carrier["current_temperature_source"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_INVALID"
+                ) from exc
+            if (
+                ensemble_extremes_c.shape != (51,)
+                or provider_extremes_c.size < 2
+                or not np.isfinite(ensemble_extremes_c).all()
+                or not np.isfinite(provider_extremes_c).all()
+                or not math.isclose(
+                    carrier_current_native,
+                    float(payload.get("_edli_day0_current_temperature_native")),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                or carrier_current_time
+                != str(
+                    payload.get(
+                        "_edli_day0_current_temperature_observed_at_utc"
+                    )
+                )
+                or carrier_current_source
+                != str(payload.get("_edli_day0_current_temperature_source"))
+            ):
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISMATCH"
+                )
+            within_c = float(np.std(ensemble_extremes_c, ddof=0))
+            center_delta_c = abs(
+                float(np.mean(ensemble_extremes_c))
+                - float(np.mean(provider_extremes_c))
+            )
+            between_c = float(np.std(provider_extremes_c, ddof=0))
+            predictive_sigma_c = float(
+                np.sqrt(
+                    within_c**2 + center_delta_c**2 + between_c**2
+                )
+            )
+            predictive_sigma_native = (
+                predictive_sigma_c * 9.0 / 5.0
+                if str(unit).upper() == "F"
+                else predictive_sigma_c
+            )
+            if not (
+                predictive_sigma_native > 0.0
+                and math.isfinite(predictive_sigma_native)
+            ):
+                raise ValueError(
+                    "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                )
+            payload.update(
+                {
+                    "_edli_day0_source_clock_predictive_sigma_native": (
+                        predictive_sigma_native
+                    ),
+                    "_edli_day0_source_clock_predictive_sigma_basis": (
+                        "hourly_ifs025_within_plus_center_delta_plus_provider_between_v1"
+                    ),
+                    "_edli_day0_direct_entry_source_clock_sigma_components_c": {
+                        "within_ens_spread": within_c,
+                        "ens_center_delta": center_delta_c,
+                        "between_provider_spread": between_c,
+                        "predictive_sigma": predictive_sigma_c,
+                    },
+                }
+            )
+            validated_bundle = _build_direct_current_day0_causal_bundle(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                vector_witness=current_vector_witness,
+            )
+            payload["_edli_day0_remaining_vector_witness"] = dict(
+                validated_bundle["carrier_vector_witness"]
+            )
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
             values = values * 9.0 / 5.0 + 32.0
@@ -44019,9 +45789,7 @@ def _day0_remaining_day_members(
         from src.events.day0_authority import day0_is_noaa_preliminary_source
 
         is_noaa_preliminary = day0_is_noaa_preliminary_source(
-            payload.get("settlement_source")
-            or payload.get("observation_source")
-            or ""
+            _day0_probability_conditioning_source(payload)
         )
         has_likelihood = isinstance(
             payload.get("_edli_day0_provisional_revision_likelihood"), Mapping
@@ -44099,9 +45867,7 @@ def _day0_remaining_day_members(
                 else np.minimum(values, float(probability_boundary))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
-        payload["_edli_day0_remaining_model_names"] = [
-            str(vector.model) for vector in vectors
-        ]
+        payload["_edli_day0_remaining_model_names"] = list(provider_models)
         captured_times: list[str] = []
         for vector in vectors:
             try:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -14,6 +14,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
+from src.data.forecast_target_contract import compute_target_local_day_window_utc
 
 
 UTC = timezone.utc
@@ -323,8 +324,30 @@ def build_materialize_request_dataclass(
     )
     precision_metadata_path = _existing_path(request_json, "precision_metadata_json", base_dir=base_path)
     precision_payload = _json_file(Path(precision_metadata_path))
+    precision_metadata = OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
+    city = _required_text(request_json, "city")
+    city_timezone = _required_text(request_json, "city_timezone")
+    if str(precision_metadata.city).strip() != city:
+        raise ValueError("precision metadata city does not match materialization target")
+    if str(precision_metadata.timezone_name).strip() != city_timezone:
+        raise ValueError(
+            "precision metadata timezone does not match materialization target"
+        )
+    target_window = compute_target_local_day_window_utc(
+        city_timezone=city_timezone,
+        target_local_date=target_date,
+    )
+    # One run-pinned Open-Meteo payload spans several target days. Its spatial
+    # precision metadata is reusable, but the local-day fields are not: they
+    # describe the materialization target, not the shared fetch artifact.
+    precision_metadata = replace(
+        precision_metadata,
+        target_local_date=target_date,
+        local_day_start_utc=target_window.start_utc,
+        local_day_end_utc=target_window.end_utc,
+    )
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
+        precision_metadata
     )
 
     def _opt_float(key: str) -> float | None:
@@ -341,9 +364,9 @@ def build_materialize_request_dataclass(
 
     anchor_artifact_id = _opt_int("openmeteo_anchor_artifact_id")
     return ReplacementForecastMaterializeRequest(
-        city=_required_text(request_json, "city"),
+        city=city,
         city_id=str(request_json.get("city_id") or request_json["city"]),
-        city_timezone=_required_text(request_json, "city_timezone"),
+        city_timezone=city_timezone,
         target_date=target_date,
         temperature_metric=metric,
         baseline_source_run_id=_required_text(request_json, "baseline_source_run_id"),

@@ -139,8 +139,18 @@ def _assert_risk_allocator_allows_submit(intent: ExecutionIntent):
     return assert_global_allocation_allows(intent)
 
 
-def _assert_risk_allocator_allows_exit_submit():
+def _assert_risk_allocator_allows_exit_submit(
+    *,
+    red_force_exit_authorized: bool = False,
+):
     """Fail before exit command persistence/SDK contact when A2 kill switch is armed."""
+
+    if red_force_exit_authorized:
+        from src.risk_allocator.governor import (
+            assert_global_red_force_exit_submit_allows,
+        )
+
+        return assert_global_red_force_exit_submit_allows()
     from src.risk_allocator import assert_global_submit_allows
 
     return assert_global_submit_allows(reduce_only=True)
@@ -515,9 +525,17 @@ def _entry_terminal_no_fill_redecision_proof(
         return None
     if not isinstance(payload, dict):
         return None
-    if (
-        payload.get("reason") == "V2_PRE_SUBMIT_EXCEPTION"
+    rejection_reason = str(payload.get("reason") or "")
+    pre_submit_redecision_proof = (
+        "pre_submit_transport"
+        if rejection_reason == "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+        else "pre_submit_db_lock"
+        if rejection_reason == "V2_PRE_SUBMIT_EXCEPTION"
         and "database is locked" in str(payload.get("detail") or "").lower()
+        else None
+    )
+    if (
+        pre_submit_redecision_proof is not None
         and not str(venue_order_id or "").strip()
         and _table_exists(conn, "venue_order_facts")
         and not _entry_has_positive_trade_fact(conn, command_id=command_id)
@@ -526,10 +544,10 @@ def _entry_terminal_no_fill_redecision_proof(
             (command_id,),
         ).fetchone()
     ):
-        # The adapter emits V2_PRE_SUBMIT_EXCEPTION only while post_started is
-        # false. With no bound/order/trade identity, the lock created no venue
-        # exposure and a fresh decision may retry the same executable price.
-        return "pre_submit_db_lock"
+        # These typed reasons are emitted only while post_started is false.
+        # With no bound/order/trade identity, local lock/transport loss created
+        # no venue exposure and a fresh decision may retry the same price.
+        return pre_submit_redecision_proof
     proof_class = str(payload.get("proof_class") or "")
     if proof_class == "deterministic_venue_fak_no_match_400":
         payload_order_id = str(payload.get("venue_order_id") or "").strip()
@@ -2350,7 +2368,10 @@ def _entry_same_token_cooldown_component(
         if terminal_no_fill
         else None
     )
-    if no_fill_redecision_proof == "pre_submit_db_lock":
+    if no_fill_redecision_proof in {
+        "pre_submit_db_lock",
+        "pre_submit_transport",
+    }:
         # The exact proof says the adapter never crossed POST and canonical
         # order/trade facts are absent. Re-decision must therefore recapture a
         # fresh quote immediately; applying the generic terminal-no-fill
@@ -2358,7 +2379,9 @@ def _entry_same_token_cooldown_component(
         return {
             "component": "entry_same_token_cooldown",
             "allowed": True,
-            "reason": "allowed_terminal_pre_submit_db_lock_no_fill_redecision",
+            "reason": (
+                f"allowed_terminal_{no_fill_redecision_proof}_no_fill_redecision"
+            ),
             "terminal_no_fill_redecision_proof": no_fill_redecision_proof,
             "cooldown_seconds": 0,
             "age_seconds": int(age_seconds),
@@ -2745,7 +2768,7 @@ def _entry_duplicate_same_token_component(
                              WHERE command_id = ?
                                AND position_id = ?
                                AND lower(COALESCE(order_role, '')) = 'entry'
-                               AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+                               AND lower(COALESCE(terminal_exec_status, '')) IN ('filled', 'partial')
                                AND filled_at IS NOT NULL
                                AND fill_price > 0
                                AND shares > 0
@@ -6676,8 +6699,6 @@ def execute_exit_order(
         )
 
     cutover_component = _assert_cutover_allows_submit(IntentKind.EXIT)
-    risk_allocator_decision = _assert_risk_allocator_allows_exit_submit()
-
     # -----------------------------------------------------------------------
     # build phase — pure, no I/O (INV-30)
     # -----------------------------------------------------------------------
@@ -6747,7 +6768,14 @@ def execute_exit_order(
             )
         # The submitted floor and the executable counterparty bid are both
         # action authority.  Neither may leave the absolute live band.
-        selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        selected_order_type = (
+            "FAK"
+            if intent.protective_sell_execution_authority is not None
+            else _select_risk_allocator_order_type(
+                conn,
+                intent.executable_snapshot_id,
+            )
+        )
         try:
             if intent.protective_sell_execution_authority is not None:
                 if str(intent.submit_order_type or "").upper() != "FAK":
@@ -6839,6 +6867,15 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        protective_authority = intent.protective_sell_execution_authority
+        red_force_exit_authorized = bool(
+            marketable_certificate_error is None
+            and getattr(protective_authority, "kind", "") == "RED_FORCE_EXIT"
+            and intent.red_handoff is not None
+        )
+        risk_allocator_decision = _assert_risk_allocator_allows_exit_submit(
+            red_force_exit_authorized=red_force_exit_authorized,
+        )
         if order_type not in {"GTC", "GTD", "FAK"}:
             return OrderResult(
                 trade_id=intent.trade_id,
@@ -9969,7 +10006,7 @@ def _live_order(
         # a race may lose here without rolling back the already-durable venue fact.
         from src.execution.command_recovery import ensure_live_entry_projection_for_command
 
-        try:
+        def _persist_entry_projection() -> None:
             ensure_live_entry_projection_for_command(
                 conn,
                 command_id=command_id,
@@ -9988,6 +10025,13 @@ def _live_order(
                 # Command terminalization remains the sole collateral owner.
                 _release_entry_risk_reservation(conn, command_id=command_id)
             conn.commit()
+
+        try:
+            _retry_persist_on_db_lock(
+                conn,
+                _persist_entry_projection,
+                what="entry_position_projection",
+            )
         except Exception as projection_exc:
             try:
                 conn.rollback()

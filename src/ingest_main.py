@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-04-30; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -79,6 +79,7 @@ _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
 _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
+_REPLACEMENT_HELD_PARTITION_FIRST = "critical"
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -521,7 +522,7 @@ def _obs_tick_day0_family_admission(
     *,
     decision_time: datetime,
 ):
-    """Resolve only the NOAA/Ogimet local-day scopes this source tick can publish."""
+    """Resolve WU/NOAA local-day scopes this observation tick can publish."""
 
     from src.config import runtime_cities_by_name
 
@@ -529,7 +530,9 @@ def _obs_tick_day0_family_admission(
     scopes: list[tuple[str, str]] = []
     for city_name in city_names:
         city = cities.get(str(city_name))
-        if city is None or str(getattr(city, "settlement_source_type", "")) != "noaa":
+        if city is None or str(
+            getattr(city, "settlement_source_type", "")
+        ) not in {"wu_icao", "noaa"}:
             continue
         try:
             local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
@@ -927,6 +930,25 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
 _REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS = 8.0
 
 
+def _next_replacement_held_partition_order(
+    critical_scopes: tuple[tuple[str, str, str], ...],
+    ordinary_scopes: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]:
+    """Alternate the first held lane so one slow provider wave cannot starve its twin."""
+    global _REPLACEMENT_HELD_PARTITION_FIRST
+    partitions = (
+        ("critical", critical_scopes),
+        ("ordinary", ordinary_scopes),
+    )
+    if not critical_scopes or not ordinary_scopes:
+        return tuple((lane, scopes) for lane, scopes in partitions if scopes)
+    first = _REPLACEMENT_HELD_PARTITION_FIRST
+    _REPLACEMENT_HELD_PARTITION_FIRST = (
+        "ordinary" if first == "critical" else "critical"
+    )
+    return partitions if first == "critical" else tuple(reversed(partitions))
+
+
 def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
     global _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC
     now = time.monotonic() if now_monotonic is None else float(now_monotonic)
@@ -982,10 +1004,10 @@ def _record_replacement_bpf_maintenance_progress(
 
     status = str(report.get("status") or "") if isinstance(report, dict) else ""
     written = int(report.get("written_row_count") or 0) if isinstance(report, dict) else 0
-    if (
-        status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        and written == 0
-    ):
+    if status in {
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    } and written == 0:
         _REPLACEMENT_BPF_NO_PROGRESS_FAILURES += 1
         delay = min(
             REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS,
@@ -2517,6 +2539,7 @@ def _harvester_truth_writer_tick():
 _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
     {
         "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+        "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
         "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
         "CURRENT_TARGETS_ALREADY_COVERED",
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
@@ -2653,18 +2676,21 @@ def _replacement_maintenance_tick():
             held_budget_s / max(1, partition_count),
         )
         partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
-        for lane, scopes, quota_critical in (
-            ("critical", critical_scopes, True),
-            ("ordinary", ordinary_scopes, False),
+        for lane, scopes in _next_replacement_held_partition_order(
+            critical_scopes,
+            ordinary_scopes,
         ):
-            if not scopes:
-                continue
             kwargs: dict[str, object] = {
                 "max_wall_clock_seconds": held_lane_budget,
                 "required_scopes": scopes,
             }
-            if quota_critical:
-                kwargs["quota_critical"] = True
+            # Every canonical open position is capital-critical. The phase
+            # partition keeps independent time budgets, but must not demote an
+            # ordinary active holding behind our local quota ceilings. SCOPE:
+            # exact held families only. DRAIN: bounded provider-authoritative
+            # fetch or canonical reuse. RESET: position closure removes scope;
+            # provider cooldown/terminal response and single-flight still bind.
+            kwargs["quota_critical"] = True
             try:
                 partition_report = (
                     _download_replacement_forecast_current_targets_if_needed(
@@ -2703,7 +2729,16 @@ def _replacement_maintenance_tick():
                 isinstance(partition_report, dict)
                 and int(partition_report.get("written_manifest_count") or 0) > 0
             ):
-                held_reseed_scope_set.update(scopes)
+                structurally_unservable = {
+                    tuple(str(value) for value in scope)
+                    for scope in (
+                        partition_report.get("structurally_unservable_scopes") or ()
+                    )
+                    if isinstance(scope, (list, tuple)) and len(scope) == 3
+                } if isinstance(partition_report, dict) else set()
+                held_reseed_scope_set.update(
+                    scope for scope in scopes if scope not in structurally_unservable
+                )
         for lane, _scopes, partition_report in partition_reports:
             if lane == "critical":
                 held_report = partition_report
@@ -2978,6 +3013,7 @@ def _replacement_availability_poll_tick():
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _ingest_station_forecasts_if_due,
+        _recover_held_common_cycle_anchors_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
@@ -2987,6 +3023,143 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    def _attach_reseed_reports(
+        report: dict[str, object],
+        *,
+        scopes: tuple[tuple[str, str, str], ...] | None = None,
+        changed_sources: tuple[str, ...] | None = None,
+        include_cycle_advance: bool = True,
+        prepared_manifest_snapshot: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        manifest_snapshot = prepared_manifest_snapshot
+        reseed_errors = list(report.get("reseed_errors") or ())
+        try:
+            if scopes is None:
+                upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                    cfg,
+                    changed_sources=changed_sources,
+                )
+            else:
+                upgrade_kwargs: dict[str, object] = {
+                    "scopes": scopes,
+                    "changed_sources": changed_sources,
+                }
+                if manifest_snapshot is not None:
+                    upgrade_kwargs["manifest_snapshot"] = manifest_snapshot
+                upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                    cfg,
+                    **upgrade_kwargs,
+                )
+        except Exception as exc:  # noqa: BLE001 - cycle drain remains independent.
+            report["fusion_upgrade_status"] = "FUSION_UPGRADE_RESEED_FAILSOFT"
+            reseed_errors.append(
+                f"fusion_upgrade:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+        else:
+            if upgrade_report is not None:
+                report["fusion_upgrade_status"] = upgrade_report.get("status")
+                report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get(
+                    "seeds_enqueued"
+                )
+            upgrade_error = _replacement_reseed_error(
+                "fusion_upgrade",
+                upgrade_report,
+            )
+            if upgrade_error is not None:
+                reseed_errors.append(upgrade_error)
+        if not include_cycle_advance:
+            if reseed_errors:
+                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+                report["retryable"] = True
+            return report
+        try:
+            if scopes is None:
+                cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+            else:
+                cycle_kwargs: dict[str, object] = {"scopes": scopes}
+                if manifest_snapshot is not None:
+                    cycle_kwargs["manifest_snapshot"] = manifest_snapshot
+                cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(
+                    cfg,
+                    **cycle_kwargs,
+                )
+        except Exception as exc:  # noqa: BLE001 - one reseed organ cannot block the other.
+            report["cycle_advance_status"] = "CYCLE_ADVANCE_RESEED_FAILSOFT"
+            reseed_errors.append(
+                f"cycle_advance:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+        else:
+            if cycle_advance_report is not None:
+                report["cycle_advance_status"] = cycle_advance_report.get("status")
+                report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get(
+                    "seeds_enqueued"
+                )
+                if cycle_advance_report.get("advances_detected"):
+                    report["cycle_advance_detail"] = {
+                        k: cycle_advance_report.get(k)
+                        for k in (
+                            "freshest_materializable_cycle",
+                            "scopes_checked",
+                            "advances_detected",
+                            "held_advances_detected",
+                            "seeds_enqueued",
+                            "held_seeds_enqueued",
+                            "already_enqueued",
+                            "manifest_missing",
+                            "leg_artifact_missing",
+                            "family_cycle_missing",
+                            "family_cycle_not_newer",
+                            "day0_skipped",
+                            "comparison_failed",
+                            "family_scope_check_failed",
+                            "seed_build_failed",
+                            "enqueued",
+                        )
+                    }
+            cycle_error = _replacement_reseed_error(
+                "cycle_advance",
+                cycle_advance_report,
+            )
+            if cycle_error is not None:
+                reseed_errors.append(cycle_error)
+        if reseed_errors:
+            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+            report["retryable"] = True
+        return report
+
+    try:
+        common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(cfg)
+        if common_cycle_recovery:
+            committed_families = tuple(
+                dict.fromkeys(
+                    (str(city), str(target_date), str(metric))
+                    for city, target_date, metric in (
+                        common_cycle_recovery.get("committed_families") or ()
+                    )
+                )
+            )
+            if committed_families:
+                # SCOPE: exact held families whose anchor commit was re-proven
+                # above. DRAIN: both scoped reseed organs run in this poll tick.
+                # RESET: their durable markers/current posterior HWM become
+                # current; either organ's failure remains local and retryable.
+                _attach_reseed_reports(
+                    common_cycle_recovery,
+                    scopes=committed_families,
+                    changed_sources=("ecmwf_ifs",),
+                )
+            if (
+                common_cycle_recovery.get("status")
+                != "HELD_COMMON_CYCLE_CURRENT"
+                or committed_families
+            ):
+                logger.info(
+                    "held common-cycle anchor recovery report: %s",
+                    common_cycle_recovery,
+                )
+    except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
+        logger.warning("held common-cycle anchor recovery failed: %s", exc)
+
     # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
@@ -2998,90 +3171,6 @@ def _replacement_availability_poll_tick():
             logger.info("station-forecast live ingest wrote rows: %s", _station_report)
     except Exception as exc:  # noqa: BLE001 - station ingest must never break the poll
         logger.warning("station-forecast live ingest skipped (fail-soft): %s", exc)
-
-    def _attach_reseed_reports(
-        report: dict[str, object],
-        *,
-        scopes: tuple[tuple[str, str, str], ...] | None = None,
-        changed_sources: tuple[str, ...] | None = None,
-        include_cycle_advance: bool = True,
-        prepared_manifest_snapshot: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        manifest_snapshot = None
-        if scopes is not None:
-            manifest_snapshot = prepared_manifest_snapshot or {}
-        reseed_errors = list(report.get("reseed_errors") or ())
-        upgrade_report = (
-            _enqueue_fusion_upgrade_reseeds_if_needed(
-                cfg,
-                changed_sources=changed_sources,
-            )
-            if scopes is None
-            else _enqueue_fusion_upgrade_reseeds_if_needed(
-                cfg,
-                scopes=scopes,
-                changed_sources=changed_sources,
-                manifest_snapshot=manifest_snapshot,
-            )
-        )
-        if upgrade_report is not None:
-            report["fusion_upgrade_status"] = upgrade_report.get("status")
-            report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
-        upgrade_error = _replacement_reseed_error(
-            "fusion_upgrade",
-            upgrade_report,
-        )
-        if upgrade_error is not None:
-            reseed_errors.append(upgrade_error)
-        if not include_cycle_advance:
-            if reseed_errors:
-                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
-                report["retryable"] = True
-            return report
-        cycle_advance_report = (
-            _enqueue_cycle_advance_reseeds_if_needed(cfg)
-            if scopes is None
-            else _enqueue_cycle_advance_reseeds_if_needed(
-                cfg,
-                scopes=scopes,
-                manifest_snapshot=manifest_snapshot,
-            )
-        )
-        if cycle_advance_report is not None:
-            report["cycle_advance_status"] = cycle_advance_report.get("status")
-            report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
-            if cycle_advance_report.get("advances_detected"):
-                report["cycle_advance_detail"] = {
-                    k: cycle_advance_report.get(k)
-                    for k in (
-                        "freshest_materializable_cycle",
-                        "scopes_checked",
-                        "advances_detected",
-                        "held_advances_detected",
-                        "seeds_enqueued",
-                        "held_seeds_enqueued",
-                        "already_enqueued",
-                        "manifest_missing",
-                        "leg_artifact_missing",
-                        "family_cycle_missing",
-                        "family_cycle_not_newer",
-                        "day0_skipped",
-                        "comparison_failed",
-                        "family_scope_check_failed",
-                        "seed_build_failed",
-                        "enqueued",
-                    )
-                }
-        cycle_error = _replacement_reseed_error(
-            "cycle_advance",
-            cycle_advance_report,
-        )
-        if cycle_error is not None:
-            reseed_errors.append(cycle_error)
-        if reseed_errors:
-            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
-            report["retryable"] = True
-        return report
 
     _station_reseed_report: dict[str, object] | None = None
     _station_rows_written = sum(
@@ -3260,9 +3349,7 @@ def _replacement_availability_poll_tick():
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
         # slower Single Runs archive used by the multimodel BPF inputs.
-        held_anchor_scopes = _held_day0_current_target_scopes(
-            _all_held_current_target_scopes()
-        )
+        held_anchor_scopes = _all_held_current_target_scopes()
         if held_anchor_scopes:
             source_clock_held_anchor_report = _download_current_targets(
                 max_wall_clock_seconds=min(
@@ -3404,7 +3491,10 @@ def _replacement_availability_poll_tick():
         if scopes:
             manifest_snapshot = None
             if anchor_scopes:
-                critical_anchor_scopes = _held_day0_current_target_scopes(anchor_scopes)
+                held_scope_set = set(_all_held_current_target_scopes())
+                critical_anchor_scopes = tuple(
+                    scope for scope in anchor_scopes if scope in held_scope_set
+                )
                 critical_set = set(critical_anchor_scopes)
                 ordinary_anchor_scopes = tuple(
                     scope for scope in anchor_scopes if scope not in critical_set
@@ -3417,7 +3507,7 @@ def _replacement_availability_poll_tick():
                 )
                 anchor_reports: list[dict[str, object]] = []
                 written_manifests: list[str] = []
-                for partition, quota_critical in (
+                for partition, held_capital_scope in (
                     (critical_anchor_scopes, True),
                     (ordinary_anchor_scopes, False),
                 ):
@@ -3430,7 +3520,7 @@ def _replacement_availability_poll_tick():
                         "max_wall_clock_seconds": remaining,
                         "required_scopes": partition,
                     }
-                    if quota_critical:
+                    if held_capital_scope:
                         anchor_kwargs["quota_critical"] = True
                     else:
                         anchor_kwargs["quota_priority"] = True

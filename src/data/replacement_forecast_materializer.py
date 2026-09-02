@@ -1410,6 +1410,110 @@ def _day0_noaa_future_vector_members(
     return future, float(np.std(np.asarray(future), ddof=0)), cutoff.isoformat()
 
 
+def _day0_noaa_carrier_future_members(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    fusion: _BayesPrecisionFusionFusionOverride,
+) -> tuple[tuple[float, ...], float, str, tuple[dict[str, object], ...]]:
+    """Add exact source-clock station extrema to the hourly Day0 carrier.
+
+    Hourly vectors describe the remaining trajectory. Official station
+    products such as CWA township forecasts describe the final daily extreme
+    directly and therefore have no hourly vector. When precision fusion used
+    one, the persisted Day0 carrier must retain the exact raw row named by
+    ``current_value_serving`` instead of silently shrinking to the gridded
+    subset.
+    """
+
+    future, _vector_sigma, cutoff = _day0_noaa_future_vector_members(
+        conn,
+        request,
+        metric=metric,
+    )
+    from src.data.station_forecast_adapter import load_station_forecast_config
+
+    station_models = {
+        str(model).strip() for model in load_station_forecast_config()
+    }
+    requested = tuple(
+        model
+        for model in fusion.used_models
+        if str(model).strip() in station_models
+    )
+    if not requested:
+        return future, float(np.std(np.asarray(future), ddof=0)), cutoff, ()
+    serving = fusion.current_value_serving
+    if not isinstance(serving, Mapping):
+        raise ValueError("DAY0_STATION_CARRIER_SERVING_IDENTITY_MISSING")
+    decision_time = _to_utc(request.computed_at, field_name="computed_at")
+    evidence: list[dict[str, object]] = []
+    station_values: list[float] = []
+    for raw_model in requested:
+        model = str(raw_model).strip()
+        serving_row = serving.get(model)
+        if not isinstance(serving_row, Mapping):
+            raise ValueError("DAY0_STATION_CARRIER_SERVING_IDENTITY_MISSING")
+        try:
+            raw_id = int(serving_row["raw_model_forecast_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_CARRIER_SERVING_IDENTITY_INVALID") from exc
+        raw = conn.execute(
+            """
+            SELECT raw_model_forecast_id, model, city, target_date, metric,
+                   source_cycle_time, source_available_at, captured_at,
+                   forecast_value_c, source_id, coverage_status
+              FROM raw_model_forecasts
+             WHERE raw_model_forecast_id = ?
+             LIMIT 1
+            """,
+            (raw_id,),
+        ).fetchone()
+        if raw is None:
+            raise ValueError("DAY0_STATION_CARRIER_RAW_ROW_MISSING")
+        try:
+            source_cycle = _to_utc(raw[5], field_name="source_cycle_time")
+            available_at = _to_utc(raw[6], field_name="source_available_at")
+            captured_at = _to_utc(raw[7], field_name="captured_at")
+            value_c = float(raw[8])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAY0_STATION_CARRIER_RAW_ROW_INVALID") from exc
+        if (
+            int(raw[0]) != raw_id
+            or str(raw[1] or "") != model
+            or str(raw[2] or "") != request.city
+            or str(raw[3] or "") != _date_text(request.target_date)
+            or str(raw[4] or "").strip().lower() != metric
+            or str(raw[9] or "") != f"{model}_single_runs"
+            or str(raw[10] or "").strip().upper() != "COVERED"
+            or source_cycle > available_at
+            or available_at > captured_at
+            or available_at > decision_time
+            or captured_at > decision_time
+            or not math.isfinite(value_c)
+        ):
+            raise ValueError("DAY0_STATION_CARRIER_RAW_ROW_SCOPE_INVALID")
+        station_values.append(value_c)
+        evidence.append(
+            {
+                "model": model,
+                "raw_model_forecast_id": raw_id,
+                "forecast_value_c": value_c,
+                "source_cycle_time": source_cycle.isoformat(),
+                "source_available_at": available_at.isoformat(),
+                "captured_at": captured_at.isoformat(),
+            }
+        )
+    combined = tuple((*future, *station_values))
+    return (
+        combined,
+        float(np.std(np.asarray(combined), ddof=0)),
+        cutoff,
+        tuple(evidence),
+    )
+
+
 def _day0_remaining_vector_witness(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -1748,6 +1852,39 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         openmeteo_source_cycle_time = _to_utc(request.openmeteo_anchor.source_cycle_time, field_name="openmeteo_source_cycle_time")
         if openmeteo_source_cycle_time != request_source_cycle_time:
             reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH")
+    target_window = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=request.target_date,
+    )
+    precision_metadata = getattr(
+        request.openmeteo_precision_guard,
+        "metadata",
+        None,
+    )
+    if (
+        request.openmeteo_anchor.target_local_date != request.target_date
+        or (
+            precision_metadata is not None
+            and (
+                str(precision_metadata.city).strip() != request.city
+                or str(precision_metadata.timezone_name).strip()
+                != request.city_timezone
+                or str(precision_metadata.target_local_date)
+                != request.target_date.isoformat()
+                or _to_utc(
+                    precision_metadata.local_day_start_utc,
+                    field_name="precision_local_day_start_utc",
+                )
+                != target_window.start_utc
+                or _to_utc(
+                    precision_metadata.local_day_end_utc,
+                    field_name="precision_local_day_end_utc",
+                )
+                != target_window.end_utc
+            )
+        )
+    ):
+        reasons.append("REPLACEMENT_MATERIALIZATION_OM9_TARGET_SCOPE_MISMATCH")
     expected_om9_count = _expected_om9_hourly_count(
         city_timezone=request.city_timezone,
         target_date=request.target_date,
@@ -5826,6 +5963,7 @@ def _compute_posterior_payload(
     _fast_residual_likelihood_payload: dict[str, object] | None = None
     _day0_shared_carrier: dict[str, object] | None = None
     _day0_shared_carrier_likelihood: dict[str, object] | None = None
+    _day0_shared_carrier_station_extremes: tuple[dict[str, object], ...] = ()
     _provisional_extreme_c: float | None = None
     if (
         bayes_precision_fusion_override is not None
@@ -5923,8 +6061,18 @@ def _compute_posterior_payload(
                 _provisional_extreme_c is not None
                 and _is_noaa_preliminary_source(request.day0_observed_extreme_source)
             ):
-                _carrier_future, _carrier_path_sigma, _carrier_cutoff = (
-                    _day0_noaa_future_vector_members(conn, request, metric=metric)
+                (
+                    _carrier_future,
+                    _carrier_path_sigma,
+                    _carrier_cutoff,
+                    _day0_shared_carrier_station_extremes,
+                ) = (
+                    _day0_noaa_carrier_future_members(
+                        conn,
+                        request,
+                        metric=metric,
+                        fusion=bayes_precision_fusion_override,
+                    )
                 )
                 _day0_shared_carrier, _day0_shared_carrier_likelihood = (
                     _day0_noaa_preliminary_carrier(
@@ -6677,6 +6825,10 @@ def _compute_posterior_payload(
                 "day0_remaining_carrier_future_extremes_c": [
                     float(value) for value in _carrier_future
                 ],
+                "day0_remaining_carrier_station_extreme_providers": [
+                    dict(value)
+                    for value in _day0_shared_carrier_station_extremes
+                ],
                 "day0_remaining_carrier_path_error_sigma_c": float(
                     _carrier_path_sigma
                 ),
@@ -6882,6 +7034,34 @@ def _compute_posterior_payload(
             provenance_payload["day0_remaining_vector_witness"] = (
                 _day0_remaining_witness
             )
+    if _day0_remaining_witness is not None:
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        provenance_payload["day0_causal_evidence_bundle"] = (
+            build_day0_causal_evidence_bundle(
+                city=request.city,
+                target_date=_date_text(request.target_date),
+                metric=metric,
+                observation_context={
+                    "source": request.day0_observed_extreme_source,
+                    "observation_time": (
+                        None
+                        if request.day0_observed_extreme_observation_time is None
+                        else _to_utc(
+                            request.day0_observed_extreme_observation_time,
+                            field_name="day0_observed_extreme_observation_time",
+                        ).isoformat()
+                    ),
+                    "observed_extreme_c": _day0_observed_extreme_c(request),
+                    "sample_count": request.day0_observed_extreme_sample_count,
+                    "unit": request.day0_observed_extreme_unit,
+                },
+                cutoff_utc=_to_utc(
+                    request.computed_at, field_name="computed_at"
+                ).isoformat(),
+                vector_witness=_day0_remaining_witness,
+            )
+        )
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.
@@ -7016,6 +7196,15 @@ def _write_posterior_row(
             "dependency_hash": dependency_hash,
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,
+            "day0_causal_evidence_bundle_identity": (
+                (provenance_payload.get("day0_causal_evidence_bundle") or {}).get(
+                    "bundle_identity"
+                )
+                if isinstance(
+                    provenance_payload.get("day0_causal_evidence_bundle"), Mapping
+                )
+                else None
+            ),
             "anchor_id": anchor_id,
             "anchor_artifact_id": request.anchor_artifact_id,
         }

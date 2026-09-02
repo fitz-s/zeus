@@ -29,6 +29,7 @@ from src.state.chain_mirror_reconciler import (
     MirrorFinding,
     SettlementFact,
     apply_size_correction_finding,
+    apply_size_correction_finding_coordinated,
     classify_chain_only_asset,
     classify_local_position,
     grade_bin,
@@ -1586,6 +1587,71 @@ def test_observation_writer_rechecks_current_phase_after_classification_race(
     assert event_count == 0
 
 
+def test_coordinated_fallback_keeps_the_supplied_trade_db_and_callers_transaction(
+    tmp_path, monkeypatch
+):
+    """Fallback must not redirect a caller-owned repair transaction to live DB."""
+    trade_path = tmp_path / "independent-trades.db"
+    supplied = sqlite3.connect(str(trade_path))
+    supplied.row_factory = sqlite3.Row
+    init_schema(supplied)
+    init_schema_trade_only(supplied)
+    _insert_position_current(
+        supplied,
+        position_id="caller-bound-fallback",
+        token_id="caller-bound-token",
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    finding = MirrorFinding(
+        classification=SIZE_CORRECTED,
+        position_id="caller-bound-fallback",
+        asset="caller-bound-token",
+        writes=True,
+        details={"chain_size": 3.0, "local_shares": 5.0, "delta": 2.0},
+    )
+    default_coordinator_calls = []
+    monkeypatch.setattr(
+        "src.state.write_coordinator.default_runtime_write_coordinator",
+        lambda: default_coordinator_calls.append(True),
+    )
+    supplied.execute("BEGIN")
+    try:
+        assert apply_size_correction_finding_coordinated(
+            finding,
+            now=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            conn=supplied,
+        ) is True
+        assert supplied.in_transaction
+        assert supplied.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            ("caller-bound-fallback",),
+        ).fetchone()[0] == 1
+        outside = sqlite3.connect(str(trade_path))
+        try:
+            assert outside.execute(
+                "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+                ("caller-bound-fallback",),
+            ).fetchone()[0] == 0
+        finally:
+            outside.close()
+        supplied.commit()
+        outside = sqlite3.connect(str(trade_path))
+        try:
+            assert outside.execute(
+                "SELECT event_type FROM position_events WHERE position_id = ?",
+                ("caller-bound-fallback",),
+            ).fetchone()[0] == "CHAIN_SIZE_CORRECTED"
+        finally:
+            outside.close()
+    finally:
+        if supplied.in_transaction:
+            supplied.rollback()
+        supplied.close()
+    assert default_coordinator_calls == []
+
+
 def test_pending_exit_small_chain_delta_refreshes_without_owned_reduction(
     trades_conn, forecasts_conn
 ):
@@ -2531,3 +2597,60 @@ def test_reconcile_isolates_a_raising_position_and_continues(
         "SELECT phase FROM position_current WHERE position_id='pos-ok'"
     ).fetchone()
     assert ok_row["phase"] == "settled"
+
+
+def test_position_scoped_reconcile_reraises_for_transaction_rollback_and_later_position_continues(
+    trades_conn, forecasts_conn, monkeypatch
+):
+    """A bounded coordinated write may roll back one position without dropping the next."""
+    _insert_position_current(
+        trades_conn, position_id="pos-rollback", phase="active",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_yes", token_id="tok-milan-yes-rollback",
+    )
+    _insert_position_current(
+        trades_conn, position_id="pos-later", phase="active",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_yes", token_id="tok-milan-yes-later",
+    )
+    _insert_settlement(forecasts_conn, city="milan", target_date="2026-06-23", winning_bin="40°C")
+    trades_conn.commit()
+    forecasts_conn.commit()
+
+    import src.state.chain_mirror_reconciler as chain_mirror_module
+
+    original = chain_mirror_module._apply_settlement_finding
+
+    def _raising_apply(conn, finding, *, now):
+        if finding.position_id == "pos-rollback":
+            raise RuntimeError("synthetic bounded-write failure")
+        return original(conn, finding, now=now)
+
+    monkeypatch.setattr(chain_mirror_module, "_apply_settlement_finding", _raising_apply)
+    with pytest.raises(RuntimeError, match="synthetic bounded-write failure"):
+        reconcile(
+            trades_conn,
+            forecasts_conn,
+            chain_by_asset={},
+            apply=True,
+            position_ids=("pos-rollback",),
+            raise_on_error=True,
+        )
+    trades_conn.rollback()
+
+    reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={},
+        apply=True,
+        position_ids=("pos-later",),
+        raise_on_error=True,
+    )
+    later_row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-later'"
+    ).fetchone()
+    rollback_row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-rollback'"
+    ).fetchone()
+    assert later_row["phase"] == "settled"
+    assert rollback_row["phase"] == "active"

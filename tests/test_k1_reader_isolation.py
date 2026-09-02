@@ -14,6 +14,8 @@ whose world-DB access was correct under the legacy single-DB schema and requires
 separate per-script migration work.
 """
 import re
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -191,6 +193,97 @@ def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
         "monitor_refresh.py: must contain 'FROM world.temp_persistence' "
         "in _check_persistence_anomaly (K-B fix F102)."
     )
+
+
+def test_forecasts_world_read_only_connection_preserves_world_authority(
+    tmp_path,
+    monkeypatch,
+):
+    """The held monitor's forecast-rooted reader keeps NOAA evidence attached."""
+    from src.state import db
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    world_path = tmp_path / "zeus-world.db"
+    with sqlite3.connect(forecasts_path) as setup:
+        setup.execute("CREATE TABLE raw_model_forecasts (id INTEGER PRIMARY KEY)")
+    with sqlite3.connect(world_path) as setup:
+        setup.execute(
+            """CREATE TABLE observation_prints (
+                id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+                source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+                unit TEXT, fetched_at_utc TEXT, raw_report TEXT)"""
+        )
+        setup.execute(
+            "INSERT INTO observation_prints VALUES "
+            "(1, 'Tel Aviv', 'LLBG', 'aviationweather_metar', "
+            "'2026-08-20T09:20:00+00:00', 33, 'C', "
+            "'2026-08-20T09:21:00+00:00', 'METAR LLBG 200920Z 00000KT 9999 SKC 33/20 Q1010')"
+        )
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    monkeypatch.setattr(db, "ZEUS_WORLD_DB_PATH", world_path)
+
+    from src.data.day0_observation_reader import (
+        same_station_preliminary_report_survival_likelihood,
+    )
+
+    with db.get_forecasts_connection_read_only() as bare_forecasts:
+        with pytest.raises(ValueError, match="NOAA_PRELIMINARY_SURVIVAL_EVIDENCE_UNAVAILABLE"):
+            same_station_preliminary_report_survival_likelihood(
+                bare_forecasts,
+                city="Tel Aviv",
+                station_id="LLBG",
+                timezone_name="Asia/Jerusalem",
+                target_date="2026-08-24",
+                temperature_metric="high",
+                decision_time=datetime(2026, 8, 24, 9, 30, tzinfo=timezone.utc),
+                allow_prior_only=True,
+            )
+
+    with db.get_forecasts_connection_with_world_read_only() as conn:
+        assert conn.execute("SELECT city FROM world.observation_prints").fetchone()[0] == "Tel Aviv"
+        likelihood = same_station_preliminary_report_survival_likelihood(
+            conn,
+            city="Tel Aviv",
+            station_id="LLBG",
+            timezone_name="Asia/Jerusalem",
+            target_date="2026-08-24",
+            temperature_metric="high",
+            decision_time=datetime(2026, 8, 24, 9, 30, tzinfo=timezone.utc),
+            allow_prior_only=True,
+        )
+        assert likelihood["identity_hash"]
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO raw_model_forecasts VALUES (1)")
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "INSERT INTO world.observation_prints VALUES "
+                "(2, 'Tel Aviv', 'LLBG', 'aviationweather_metar', "
+                "'2026-08-20T09:25:00+00:00', 34, 'C', "
+                "'2026-08-20T09:26:00+00:00', "
+                "'METAR LLBG 200925Z 00000KT 9999 SKC 34/20 Q1010')"
+            )
+        conn.rollback()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+def test_forecasts_world_read_only_connection_fails_closed_when_world_missing(
+    tmp_path,
+    monkeypatch,
+):
+    """A missing attached world authority cannot degrade to a bare forecast read."""
+    from src.state import db
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    with sqlite3.connect(forecasts_path) as setup:
+        setup.execute("CREATE TABLE raw_model_forecasts (id INTEGER PRIMARY KEY)")
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    monkeypatch.setattr(db, "ZEUS_WORLD_DB_PATH", tmp_path / "missing-world.db")
+
+    with pytest.raises(sqlite3.OperationalError):
+        with db.get_forecasts_connection_with_world_read_only():
+            pass
 
 
 # ---------------------------------------------------------------------------

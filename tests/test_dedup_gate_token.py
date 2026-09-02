@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-05-17; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused/audited: 2026-09-01
+# Lifecycle: created=2026-05-17; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -1051,6 +1051,50 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     assert orphan_fill["existing_command_id"] == "cmd-orphan-fill"
 
 
+def test_executor_certified_increment_accepts_materialized_partial_fill(mem_db):
+    """A terminal command's positive partial fill is current endowment."""
+
+    _insert_position(
+        mem_db,
+        "partial-position",
+        "active",
+        token_id=TOKEN_X,
+        direction="buy_yes",
+        shares=14.999588,
+        cost_basis_usd=4.04988876,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-partial-materialized', 'partial-position', ?, 'ENTRY', 'BUY',
+                   'order-partial-materialized', 'FILLED',
+                   '2026-08-29T22:20:43+00:00', '2026-08-29T22:30:27+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('partial-position:entry:cmd-partial-materialized',
+                   'partial-position', 'cmd-partial-materialized', 'entry',
+                   '2026-08-29T22:30:27+00:00', '2026-08-29T22:20:43+00:00',
+                   0.27, 14.999588, 'partial', 'PARTIAL')"""
+    )
+    mem_db.commit()
+
+    allowed = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert allowed["allowed"] is True
+    assert allowed["reason"] == "allowed_reconciled_position_increment"
+    assert allowed["increment_position_id"] == "partial-position"
+
+
 def test_certified_increment_uses_fills_when_projection_cost_differs(mem_db):
     fills = (
         ("cmd-1", 16.2, 0.75),
@@ -1628,6 +1672,57 @@ def test_pre_submit_db_lock_redecision_bypasses_terminal_no_fill_cooldown(mem_db
         "allowed_terminal_pre_submit_db_lock_no_fill_redecision"
     )
     assert ready["terminal_no_fill_redecision_proof"] == "pre_submit_db_lock"
+    assert ready["cooldown_seconds"] == 0
+    assert ready["existing_price"] == "0.1"
+    assert ready["candidate_price"] == "0.1"
+
+
+def test_pre_submit_transport_redecision_bypasses_terminal_no_fill_cooldown(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-pre-submit-transport', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   10, 0.10, NULL, 'REJECTED',
+                   '2026-09-01T03:57:44+00:00', '2026-09-01T03:58:06+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-pre-submit-transport', 'cmd-pre-submit-transport', 3,
+                   'SUBMIT_REJECTED', '2026-09-01T03:58:06+00:00', ?,
+                   'REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION",
+                    "detail": (
+                        "PolyApiException[status_code=None, "
+                        "error_message=Request exception!]"
+                    ),
+                    "final_submission_envelope_stage": "post_submit_result",
+                }
+            ),
+        ),
+    )
+    mem_db.commit()
+
+    ready = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.10,
+        shares=10,
+        now=datetime.fromisoformat("2026-09-01T03:58:07+00:00"),
+    )
+
+    assert ready["allowed"] is True
+    assert ready["reason"] == (
+        "allowed_terminal_pre_submit_transport_no_fill_redecision"
+    )
+    assert ready["terminal_no_fill_redecision_proof"] == "pre_submit_transport"
     assert ready["cooldown_seconds"] == 0
     assert ready["existing_price"] == "0.1"
     assert ready["candidate_price"] == "0.1"

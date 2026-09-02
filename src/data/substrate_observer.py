@@ -147,6 +147,19 @@ def _substrate_background_snapshot_trade_write_context_factory(owner: str):
     return _factory
 
 
+def _disable_substrate_wal_autocheckpoint(conn: sqlite3.Connection) -> None:
+    """Keep substrate commits out of SQLite's implicit checkpoint path.
+
+    SCOPE: only short-lived substrate snapshot writer connections. DRAIN: the
+    live daemon's dedicated PASSIVE trade-WAL checkpoint job copies reclaimable
+    frames without making a snapshot commit do that I/O. RESET: each substrate
+    cycle closes its connection and a later cycle configures a new one.
+    """
+
+    if isinstance(conn, sqlite3.Connection):
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+
+
 def _substrate_clob_timeout_seconds() -> float:
     """Short public-CLOB timeout for background substrate refresh.
 
@@ -2643,6 +2656,7 @@ def _refresh_pending_family_snapshots(
             snapshot_read_conn.close()
             snapshot_read_conn = None
         write_conn = get_trade_connection(write_class="live")
+        _disable_substrate_wal_autocheckpoint(write_conn)
         try:
             clob = _substrate_clob_client(request_priority)
             summary = refresh_executable_market_substrate_snapshots(
@@ -2922,6 +2936,7 @@ def _market_discovery_cycle() -> None:
                     snapshot_budget_s
                 )
                 conn = get_trade_connection(write_class="live")
+                _disable_substrate_wal_autocheckpoint(conn)
                 try:
                     snapshot_clob = _substrate_clob_client(RequestPriority.SCAN)
                     snapshot_summary = refresh_executable_market_substrate_snapshots(

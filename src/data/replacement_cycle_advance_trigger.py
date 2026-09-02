@@ -54,6 +54,9 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+from src.contracts.replacement_pipeline_files import (
+    DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+)
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
@@ -64,6 +67,7 @@ UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
+_HELD_DAY0_OWNER_LOCK_WAIT_SECONDS = 2.0
 _CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS = 120.0
 _DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
 _CYCLE_ADVANCE_STAGING_DIR = ".cycle-advance-staging"
@@ -248,6 +252,33 @@ def _day0_observation_reseed_cycle(
     return min(family_cycle, eligible_cycle)
 
 
+def _newer_eligible_ensemble_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    family_cycle: datetime,
+    decision_time: datetime,
+) -> datetime | None:
+    """Return the ENS HWM that makes an older family anchor unmaterializable."""
+
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    eligible_cycle = latest_eligible_ensemble_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if eligible_cycle is None or eligible_cycle <= family_cycle:
+        return None
+    return eligible_cycle
+
+
 def _manifests_through_cycle(
     manifests: tuple[RawForecastArtifactManifest, ...],
     *,
@@ -293,6 +324,25 @@ def _day0_conditioning_identity(
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _day0_revision_identity_is_complete(
+    payload: Mapping[str, object],
+    *,
+    conditioning_identity: str | None,
+) -> bool:
+    """Accept either an observed-extreme identity or typed empty Day0 truth."""
+
+    if not payload:
+        return True
+    observation_state = str(payload.get("day0_observation_state") or "").strip()
+    if observation_state:
+        return (
+            observation_state
+            == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+            and payload.get("day0_observed_extreme_c") is None
+        )
+    return conditioning_identity is not None
 
 
 def _active_day0_provisional_or_conditioning(
@@ -1002,6 +1052,10 @@ def _enqueue_decision(
     recorded_identity = (
         str(recorded_identity_raw) if recorded_identity_raw not in (None, "") else None
     )
+    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
+    owner_lock_wait_seconds = (
+        _HELD_DAY0_OWNER_LOCK_WAIT_SECONDS if held else 0.0
+    )
     incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
     recorded_version = normalize_observation_version(
         row["day0_observed_extreme_observation_time"] if hasattr(row, "keys") else row[3]
@@ -1055,6 +1109,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=recorded_identity,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.RETRY_PENDING
@@ -1103,6 +1158,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=incoming_identity,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
@@ -1144,6 +1200,7 @@ def _enqueue_decision(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
                 identity=None,
+                queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
                 return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
@@ -1185,7 +1242,6 @@ def _enqueue_decision(
     # Auto-enable the missing-seed re-enqueue for held rows, mirroring the day0 escape hatch.
     # Bounded by the upstream needs_advance/coverage gate, so a successfully materialized cycle
     # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
-    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
     if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
         # A moved seed file is normal after the queue processed it. Re-enqueueing immediately every
         # poll tick creates a live backlog of identical failed work. Only Day0 observation-version
@@ -1620,6 +1676,7 @@ def enqueue_cycle_advance_reseeds(
         "leg_artifact_missing": 0,
         "family_cycle_missing": 0,
         "family_cycle_not_newer": 0,
+        "family_cycle_behind_eligible_ensemble": 0,
         "day0_skipped": 0,
         "comparison_failed": 0,
         "family_scope_check_failed": 0,
@@ -1760,7 +1817,10 @@ def enqueue_cycle_advance_reseeds(
                 observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                 unit=day0_payload.get("day0_observed_extreme_unit"),
             )
-            if day0_payload and day0_identity is None:
+            if not _day0_revision_identity_is_complete(
+                day0_payload,
+                conditioning_identity=day0_identity,
+            ):
                 report["day0_identity_incomplete"] = int(
                     report["day0_identity_incomplete"]
                 ) + 1
@@ -1889,6 +1949,53 @@ def enqueue_cycle_advance_reseeds(
                     report["causal_baseline_scope_failed"] = int(
                         report["causal_baseline_scope_failed"]
                     ) + 1
+                continue
+            try:
+                newer_ensemble_cycle = _newer_eligible_ensemble_cycle(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    family_cycle=family_cycle,
+                    decision_time=now,
+                )
+            except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
+                report["family_scope_check_failed"] = int(
+                    report.get("family_scope_check_failed", 0)
+                ) + 1
+                if causal_baseline_source_run_id:
+                    report["causal_baseline_scope_failed"] = int(
+                        report["causal_baseline_scope_failed"]
+                    ) + 1
+                _LOG.warning(
+                    "cycle-advance eligible ENS check failed for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            if newer_ensemble_cycle is not None:
+                # SCOPE: this city/date/metric only. DRAIN: capture its matching
+                # deterministic family anchor. RESET: family_cycle >= ENS HWM on
+                # the next poll. An older seed is guaranteed to be rejected by
+                # the queue HWM and must not consume the sole materializer lane.
+                report["family_cycle_behind_eligible_ensemble"] = int(
+                    report.get("family_cycle_behind_eligible_ensemble", 0)
+                ) + 1
+                if causal_baseline_source_run_id:
+                    report["causal_baseline_scope_failed"] = int(
+                        report["causal_baseline_scope_failed"]
+                    ) + 1
+                _LOG.info(
+                    "cycle-advance waiting for family anchor %s/%s/%s: "
+                    "family_cycle=%s eligible_ensemble_cycle=%s",
+                    city,
+                    target_date,
+                    metric,
+                    family_cycle.isoformat(),
+                    newer_ensemble_cycle.isoformat(),
+                )
                 continue
             if (
                 not missing_posterior
@@ -2281,6 +2388,44 @@ def enqueue_single_family_cycle_advance_reseed(
             report["consumed_cycle"] = consumed_cycle_iso
             report["target_cycle"] = target_cycle_iso
             return report
+        if family_cycle is None:
+            report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+            report["consumed_cycle"] = consumed_cycle_iso
+            return report
+        try:
+            newer_ensemble_cycle = _newer_eligible_ensemble_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                family_cycle=family_cycle,
+                decision_time=now,
+            )
+        except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
+            report["status"] = "CYCLE_ADVANCE_ENSEMBLE_HWM_UNREADABLE"
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["family_cycle"] = family_cycle.isoformat()
+            report["reason"] = str(exc)
+            return report
+        if newer_ensemble_cycle is not None:
+            # SCOPE: this city/date/metric only. DRAIN: capture its matching
+            # deterministic family anchor. RESET: family_cycle >= ENS HWM on
+            # the next single-family decision. An older seed is guaranteed to
+            # be rejected by the queue HWM and must not consume the materializer.
+            report["status"] = "CYCLE_ADVANCE_FAMILY_ANCHOR_BEHIND_ENSEMBLE"
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["family_cycle"] = family_cycle.isoformat()
+            report["eligible_ensemble_cycle"] = newer_ensemble_cycle.isoformat()
+            _LOG.info(
+                "single-family cycle-advance waiting for family anchor %s/%s/%s: "
+                "family_cycle=%s eligible_ensemble_cycle=%s",
+                city,
+                target_date,
+                metric,
+                family_cycle.isoformat(),
+                newer_ensemble_cycle.isoformat(),
+            )
+            return report
         # Day0 observation time is an independent source clock. A newer global
         # forecast cycle carried by another family must not divert this family
         # around the monotone observation-time re-materialization path below.
@@ -2288,8 +2433,7 @@ def enqueue_single_family_cycle_advance_reseed(
             if verdict.get("consumed_cycle") is not None:
                 if has_day0_evidence:
                     if (
-                        family_cycle is None
-                        or family_cycle < consumed_cycle_dt(consumed_cycle_iso)
+                        family_cycle < consumed_cycle_dt(consumed_cycle_iso)
                     ):
                         report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
                         report["consumed_cycle"] = consumed_cycle_iso

@@ -1558,13 +1558,135 @@ def test_legacy_lot_read_is_bounded_by_active_state_and_latest_identity():
     assert "GROUP BY position_id" not in lot_query
     assert "NOT EXISTS" in lot_query
 
-    rows_with_long_history = _load_legacy_position_lot_rows(
-        conn,
-        covered_position_ids={f"terminal-{index}" for index in range(40_000)},
-    )
-    assert [row["runtime_position_id"] for row in rows_with_long_history] == [
+    assert [row["runtime_position_id"] for row in _load_legacy_position_lot_rows(conn)] == [
         "open-runtime"
     ]
+
+
+def test_legacy_lot_reader_anti_joins_projected_positions_without_terminal_history_scan():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT,
+          shares REAL,
+          chain_shares REAL
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER,
+          UNIQUE (position_id, local_sequence)
+        );
+        CREATE INDEX idx_position_lots_state
+          ON position_lots (state, position_id);
+        INSERT INTO venue_commands VALUES
+          ('open-cmd', 'open-projection', 'open-market', 'open-token', 'open-decision'),
+          ('closed-cmd', 'closed-projection', 'closed-market', 'closed-token', 'closed-decision'),
+          ('pending-cmd', 'pending-projection', 'pending-market', 'pending-token', 'pending-decision'),
+          ('absent-cmd', 'absent-projection', 'absent-market', 'absent-token', 'absent-decision');
+        INSERT INTO position_current VALUES
+          ('open-projection', 'active', 1, 1),
+          ('closed-projection', 'settled', 0, 0),
+          ('pending-projection', 'pending_entry', 0, 0);
+        INSERT INTO position_lots
+          (position_id, state, shares, entry_price_avg, source_command_id,
+           source, raw_payload_json, local_sequence)
+        VALUES
+          (1, 'CONFIRMED_EXPOSURE', 1, '0.5', 'open-cmd', 'CHAIN', '{}', 1),
+          (2, 'CONFIRMED_EXPOSURE', 1, '0.5', 'closed-cmd', 'CHAIN', '{}', 1),
+          (3, 'CONFIRMED_EXPOSURE', 1, '0.5', 'pending-cmd', 'CHAIN', '{}', 1),
+          (4, 'CONFIRMED_EXPOSURE', 1, '0.5', 'absent-cmd', 'CHAIN', '{}', 1);
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, 'settled', 0, 0)",
+        ((f"terminal-{index}",) for index in range(5_000)),
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    rows = _load_legacy_position_lot_rows(conn)
+
+    conn.set_trace_callback(None)
+    assert [row["runtime_position_id"] for row in rows] == [
+        "open-projection",
+        "pending-projection",
+        "absent-projection",
+    ]
+    lot_query = next(statement for statement in traced if "FROM position_lots lot" in statement)
+    assert "LEFT JOIN position_current pc ON pc.position_id = cmd.position_id" in lot_query
+    assert "pc.position_id IS NULL" in lot_query
+    assert "json_each" not in lot_query
+    assert not any(
+        "SELECT position_id" in statement and "phase IN" in statement
+        for statement in traced
+    )
+
+
+def test_partial_current_schema_cannot_hide_unmaterialized_legacy_exposure():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT,
+          shares REAL
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER,
+          UNIQUE (position_id, local_sequence)
+        );
+        CREATE INDEX idx_position_lots_state
+          ON position_lots (state, position_id);
+        INSERT INTO venue_commands VALUES
+          ('active-cmd', 'active-projection', 'market', 'token', 'decision');
+        INSERT INTO position_current VALUES
+          ('active-projection', 'active', 1);
+        INSERT INTO position_lots
+          (position_id, state, shares, entry_price_avg, source_command_id,
+           source, raw_payload_json, local_sequence)
+        VALUES
+          (1, 'CONFIRMED_EXPOSURE', 2, '0.5', 'active-cmd', 'CHAIN', '{}', 1);
+        """
+    )
+
+    lots = load_position_lots(conn)
+
+    assert len(lots) == 1
+    assert lots[0].market_id == "market"
+    assert lots[0].exposure_micro == 1_000_000
 
 
 def test_current_position_authority_costs_exclude_historical_positions():

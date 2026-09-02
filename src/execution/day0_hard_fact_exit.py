@@ -1091,10 +1091,10 @@ def _durable_fast_tail_hard_fact_evidence(
 
     if world_conn is None or metric not in {"high", "low"}:
         return None
-    if (
+    source_type = (
         str(getattr(city, "settlement_source_type", "") or "").strip().lower()
-        != "wu_icao"
-    ):
+    )
+    if source_type not in {"wu_icao", "noaa"}:
         return None
     city_name = str(getattr(city, "name", "") or "").strip()
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
@@ -1115,7 +1115,11 @@ def _durable_fast_tail_hard_fact_evidence(
         source = fast_obs_source_for_city(city)
         if source is None or source.source_id != FAST_OBS_SOURCE_ID:
             return None
-        margin = _metar_kill_margin_units(city_name, unit)
+        margin = (
+            float(source.margin_units)
+            if source_type == "noaa"
+            else _metar_kill_margin_units(city_name, unit)
+        )
         if margin is None or not math.isfinite(float(margin)) or margin < 0.0:
             return None
         target = date.fromisoformat(str(target_date)[:10])
@@ -1289,7 +1293,7 @@ def _durable_fast_tail_hard_fact_evidence(
         )
         if (
             payload.get("settlement_source") != source.source_id
-            or payload.get("settlement_source_type") != "wu_icao"
+            or payload.get("settlement_source_type") != source_type
             or str(payload.get("station_id") or "").strip().upper() != station
             or payload.get("source_authorized_status") != "AUTHORIZED"
             or payload.get("source_match_status") != "MATCH"
@@ -1571,6 +1575,7 @@ def evaluate_hard_fact_exit(
     now: Optional[datetime] = None,
     world_conn: Any = None,
     durable_only: bool = False,
+    evidence_cache: dict[tuple[object, ...], HardFactEvidence | None] | None = None,
 ) -> Optional[HardFactVerdict]:
     """The lane entry point for one held day0 position. None = no hard fact
     (the estimator-evidence lane proceeds unchanged). Fail-soft everywhere:
@@ -1581,6 +1586,10 @@ def evaluate_hard_fact_exit(
     recovery path so the cold-start restart does not open an independent world
     connection per city. When None, the METAR memo recovery is skipped for cold
     cells; warm memo cells are unaffected.
+
+    ``evidence_cache`` is optional and caller-owned. A monitor cut may share it
+    across sibling bins at one exact decision clock; callers must never persist
+    or reuse it across cuts.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -1593,12 +1602,14 @@ def evaluate_hard_fact_exit(
         # product. Neither the hourly WU API nor a same-station METAR print is
         # settlement finality for that product; both stay in the statistical
         # redecision lane.
-        if (
+        source_type = (
             str(getattr(city, "settlement_source_type", "") or "")
             .strip()
             .lower()
-            == "wu_icao"
-        ):
+        )
+        if source_type == "wu_icao":
+            return None
+        if source_type != "noaa":
             return None
 
         from src.data.day0_oracle_anomaly import is_day0_family_paused
@@ -1617,14 +1628,31 @@ def evaluate_hard_fact_exit(
         if bin_low is None and bin_high is None:
             return None
 
-        evidence = _wu_hard_fact_evidence(
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            now=moment,
-            world_conn=world_conn,
-            durable_only=durable_only,
+        evidence_key = (
+            city_name,
+            target_date,
+            metric,
+            str(getattr(city, "settlement_source_type", "") or "")
+            .strip()
+            .lower(),
+            str(getattr(city, "settlement_unit", "") or "").strip().upper(),
+            str(getattr(city, "timezone", "") or "").strip(),
+            str(getattr(city, "wu_station", "") or "").strip().upper(),
+            moment.isoformat(),
+            bool(durable_only),
         )
+        if evidence_cache is not None and evidence_key in evidence_cache:
+            evidence = evidence_cache[evidence_key]
+        else:
+            evidence = _durable_fast_tail_hard_fact_evidence(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                now=moment,
+                world_conn=world_conn,
+            )
+            if evidence_cache is not None:
+                evidence_cache[evidence_key] = evidence
         if evidence is None:
             return None
         from src.events.day0_authority import (

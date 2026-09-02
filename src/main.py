@@ -2614,48 +2614,100 @@ def _run_ws_gap_reconcile_if_required(
         summary = ws_guard.summary()
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required"}
-    owns_connection = conn_factory is None
-    conn = None
-    try:
-        from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
-        from src.state.db import get_trade_connection
+    def _release_retries(conn, result: dict) -> dict:
+        if result.get("status") != "cleared":
+            logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
+            return result
+        from src.execution.exit_lifecycle import (
+            _release_ws_gap_blocked_exit_retries_after_m5_clear,
+        )
 
-        conn = (conn_factory or (lambda: get_trade_connection(write_class="live")))()
-        result = run_ws_gap_reconcile_and_clear(
-            adapter,
+        released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
             conn,
-            ws_guard=ws_guard,
             observed_at=current,
         )
-        conn.commit()
-        if result.get("status") == "cleared":
-            from src.execution.exit_lifecycle import (
-                _release_ws_gap_blocked_exit_retries_after_m5_clear,
+        result["exit_retries_released"] = released.get("released", 0)
+        result["exit_retry_position_ids"] = released.get("position_ids", [])
+        logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
+        return result
+
+    if conn_factory is not None:
+        conn = None
+        try:
+            from src.execution.exchange_reconcile import (
+                run_ws_gap_reconcile_and_clear,
             )
 
-            released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
+            conn = conn_factory()
+            result = run_ws_gap_reconcile_and_clear(
+                adapter,
                 conn,
+                ws_guard=ws_guard,
                 observed_at=current,
             )
-            if released.get("released", 0):
-                conn.commit()
-            result["exit_retries_released"] = released.get("released", 0)
-            result["exit_retry_position_ids"] = released.get("position_ids", [])
-            logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
-        else:
-            logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
-        return result
+            result = _release_retries(conn, result)
+            conn.commit()
+            return result
+        except Exception as exc:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            logger.warning("M5 WS-gap reconcile failed closed: %s", exc)
+            return {"status": "failed_closed", "error": str(exc)}
+
+    # SCOPE: the exact M5 latch and local open-order ids captured in phase 1.
+    # DRAIN: phase 2 captures complete venue truth with no DB connection open;
+    # phase 3 applies findings and any exit-retry release in one short write.
+    # RESET: a complete no-finding snapshot clears the latch; incomplete truth
+    # stays fail-closed and the next maintenance cadence retries all phases.
+    try:
+        from src.execution.exchange_reconcile import (
+            apply_ws_gap_reconcile_snapshot_and_clear,
+            fresh_reconcile_snapshot,
+            ws_gap_local_order_ids,
+        )
+        from src.execution.venue_sync_contract import (
+            default_trade_conn_factory,
+            default_trade_read_conn_factory,
+            run_three_phase,
+        )
+
+        write_factory = getattr(
+            default_trade_conn_factory,
+            "trade_only_factory",
+            default_trade_conn_factory,
+        )
+
+        def _network(order_ids):
+            return fresh_reconcile_snapshot(
+                adapter,
+                observed_at=current,
+                trade_order_ids=set(order_ids),
+            )
+
+        def _apply(conn, snapshot):
+            result = apply_ws_gap_reconcile_snapshot_and_clear(
+                snapshot,
+                conn,
+                ws_guard=ws_guard,
+                observed_at=current,
+                guard_summary=summary,
+            )
+            return _release_retries(conn, result)
+
+        return run_three_phase(
+            ws_gap_local_order_ids,
+            _network,
+            _apply,
+            conn_factory=write_factory,
+            snapshot_conn_factory=default_trade_read_conn_factory,
+            label="venue_background.ws_gap_m5",
+        )
     except Exception as exc:
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
         logger.warning("M5 WS-gap reconcile failed closed: %s", exc)
         return {"status": "failed_closed", "error": str(exc)}
-    finally:
-        if owns_connection and conn is not None:
-            conn.close()
 
 
 # R4-b (2026-07-08): _release_ws_gap_blocked_exit_retries_after_m5_clear,
@@ -4832,7 +4884,6 @@ def _edli_event_reactor_cycle(
         _settings_section("edli", {})
     )
     canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
-    canonical_monitor_debt_at_start = canonical_monitor_entry_block is not None
     if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
         monitor_entry_block = None
@@ -4884,23 +4935,21 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_successor_pending.is_set()
-                or (
-                    not canonical_monitor_debt_at_start
-                    and monitor_entry_block is None
-                    and _held_position_monitor_debt_pending()
-                )
+                or _held_position_monitor_handoff_pending.is_set()
             )
         ),
         held_position_monitor_debt_pending=(
-            # Debt already present at admission is carried by the exact family
-            # BUY block. Debt that first appears after admission cancels this
-            # replayable cut so the next cut can rebuild that scope.
+            # SCOPE: only an actual monitor handoff or unpaid periodic fairness
+            # turn may stop an ordinary global cut. Canonical stale evidence is
+            # already projected into exact BUY-family blocks above; treating it
+            # as global cooperative preemption lets one unavailable Day0 family
+            # freeze SELL/HOLD/CASH and every unrelated fresh family forever.
+            # DRAIN: the claimed monitor enters its core run or pays the one
+            # fairness turn. RESET: those process-local events clear on handoff;
+            # canonical family debt remains fail-closed until fresh evidence.
             lambda: (
                 _periodic_held_position_monitor_fairness_debt.is_set()
-                or (
-                    not canonical_monitor_debt_at_start
-                    and _held_position_monitor_debt_pending()
-                )
+                or _held_position_monitor_handoff_pending.is_set()
             )
         ),
     )
@@ -7703,33 +7752,36 @@ def _edli_command_recovery_cycle() -> None:
                 "retaining global reactor handoff: %r",
                 exc,
             )
-    # SCOPE: only non-systemic recovery without an exact persisted screen-cancel
-    # obligation may yield to monitor bootstrap/handoff. A live resting order
-    # already marked CANCEL_PENDING is current capital at risk: the bounded
-    # screen dispatcher must run even when its blocker is scoped to one market.
-    # DRAIN: live_tick dispatches that exact obligation before general recovery.
-    # RESET: CANCEL_ACKED/terminal venue truth removes the obligation; other
-    # scoped recovery resumes yielding to current held-capital monitoring.
+    # SCOPE: only maintenance with no capital-blocking command and no exact
+    # persisted screen-cancel obligation may yield to monitor bootstrap/handoff.
+    # A scoped unknown side effect is current capital at risk just like a
+    # systemic one; live_tick uses short DB connections and can reconcile that
+    # exact command without taking the global reactor handoff. DRAIN: live_tick
+    # applies current venue truth before general recovery. RESET: terminal venue
+    # truth removes the blocker; blocker-free maintenance yields again.
     if (
         not global_capital_handoff
+        and capital_blockers == 0
         and not screen_cancel_due
         and _defer_for_held_position_monitor(
             "edli_command_recovery"
         )
     ):
         return
-    if not global_capital_handoff and not screen_cancel_due and (
+    if (
+        not global_capital_handoff
+        and capital_blockers == 0
+        and not screen_cancel_due
+        and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
+        )
     ):
-        # SCOPE: a recovery tick with no systemic or unscopeable capital
-        # ambiguity. Exact single-market debt is already isolated from every
-        # other family and may wait for current held-capital truth.
-        # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
-        # and writes current MONITOR_REFRESHED evidence. RESET: its completion
-        # clears the active claim and canonical fresh coverage clears the debt;
-        # the next 60-second recovery tick resumes. Systemic, unscopeable, or
-        # incomplete confirmed-fill projection debt retains recovery priority.
+        # SCOPE: blocker-free historical maintenance only. DRAIN: the active or
+        # overdue held monitor gets uncontended trade-DB I/O and writes current
+        # MONITOR_REFRESHED evidence. RESET: its completion clears the active
+        # claim and canonical fresh coverage clears the debt; the next cadence
+        # resumes maintenance.
         logger.info(
             "edli_command_recovery deferred: held-position monitor owns "
             "current-capital I/O priority"
@@ -8656,7 +8708,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
     from src.events.reactor import run_edli_continuous_redecision_screen_cycle
 
-    run_edli_continuous_redecision_screen_cycle(screen_lock=_edli_redecision_screen_lock)
+    run_edli_continuous_redecision_screen_cycle(
+        screen_lock=_edli_redecision_screen_lock,
+        # This callback executes from SQLite's progress handler.  It must stay
+        # O(1). Canonical cadence debt scopes BUY admission; only an active
+        # monitor handoff owns I/O strongly enough to preempt management of an
+        # already-live maker rest.
+        monitor_preempt_requested=_held_position_monitor_handoff_pending.is_set,
+    )
 
 
 
@@ -8674,6 +8733,21 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 # un-checkpointed remainder grows without bound; 512 MiB of un-drained WAL is the
 # early-warning line, comfortably above the healthy 95-373 MB partial-drain band.
 _WAL_STARVATION_BACKLOG_BYTES = 512 * 1024 * 1024  # 512 MiB of un-checkpointed WAL
+# PASSIVE copies safe frames but deliberately leaves the WAL allocation in
+# place.  Bound that otherwise monotonic volume claim without making TRUNCATE a
+# normal checkpoint mode: only an already-fully-drained WAL at or above this
+# size gets one fail-fast reset attempt.  At most three canonical WALs can hold
+# this maintenance band between the staggered 90-second jobs.
+_WAL_IDLE_TRUNCATE_BYTES = 64 * 1024 * 1024
+
+
+def _wal_allocated_bytes(db_path: Path) -> int:
+    """Return current WAL file allocation, or zero when it is absent."""
+    wal_path = Path(f"{db_path}-wal")
+    try:
+        return wal_path.stat().st_size
+    except FileNotFoundError:
+        return 0
 
 
 def _wal_checkpoint_is_starved(
@@ -8741,6 +8815,7 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
             "forecasts": lambda: _db.ZEUS_FORECASTS_DB_PATH,
         }[db_name]()
         busy, log_frames, ckpt_frames, page_size = _db.checkpoint_wal(db_path)
+        wal_bytes = _wal_allocated_bytes(db_path)
         if busy != 0:
             logger.info(
                 "%s WAL checkpoint(PASSIVE): CONTENDED busy=%d log_frames=%d "
@@ -8761,9 +8836,34 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
             )
         else:
             logger.info(
-                "%s WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d page_size=%d",
+                "%s WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d "
+                "page_size=%d allocated=%.0fMiB",
                 db_name, busy, log_frames, ckpt_frames, page_size,
+                wal_bytes / (1024 * 1024),
             )
+
+        if (
+            busy == 0
+            and log_frames >= 0
+            and log_frames == ckpt_frames
+            and wal_bytes >= _WAL_IDLE_TRUNCATE_BYTES
+        ):
+            truncate_busy, truncate_log, truncate_ckpt = (
+                _db.truncate_checkpointed_wal(db_path)
+            )
+            if truncate_busy == 0:
+                logger.info(
+                    "%s WAL checkpoint(TRUNCATE): RECLAIMED prior_allocated=%.0fMiB "
+                    "log_frames=%d checkpointed=%d",
+                    db_name, wal_bytes / (1024 * 1024), truncate_log, truncate_ckpt,
+                )
+            else:
+                logger.info(
+                    "%s WAL checkpoint(TRUNCATE): DEFERRED busy=%d "
+                    "prior_allocated=%.0fMiB log_frames=%d checkpointed=%d",
+                    db_name, truncate_busy, wal_bytes / (1024 * 1024),
+                    truncate_log, truncate_ckpt,
+                )
 
     _cycle.__name__ = f"_{db_name}_wal_checkpoint_cycle"
     _cycle.__qualname__ = _cycle.__name__
@@ -9759,6 +9859,7 @@ def _exit_monitor_cycle(
     from src.riskguard.riskguard import get_current_level
 
     urgent_fact = urgent_day0 or urgent_forecast
+    recovery_claim = bool(recovery_full_book)
     absorbed_overdue_families: frozenset[tuple[str, str, str]] = frozenset()
     debt_scope_is_full_book = False
     if (
@@ -9798,7 +9899,6 @@ def _exit_monitor_cycle(
         )
 
     periodic_full_book = target_families is None and not urgent_fact
-    recovery_full_book = bool(recovery_full_book and periodic_full_book)
     if urgent_forecast and (
         _day0_exit_monitor_priority_pending()
         or _day0_held_monitor_preempt_requested.is_set()
@@ -9826,7 +9926,7 @@ def _exit_monitor_cycle(
         # not proof that an urgent owner still exists.  A later periodic pass
         # must therefore yield only to a live attempt; otherwise it immediately
         # becomes the full-book successor instead of creating an ownerless gap.
-        if _periodic_exit_monitor_should_yield(
+        if not recovery_claim and _periodic_exit_monitor_should_yield(
             _urgent_held_monitor_owner_pending()
         ):
             logger.info("periodic exit_monitor yielded to urgent held-family monitor")
@@ -9857,7 +9957,7 @@ def _exit_monitor_cycle(
     # consume the same finite budget so a stalled handoff cannot shift the
     # probability/exit work beyond its advertised cadence.
     claim_budget_seconds = _held_position_monitor_claim_budget_seconds(
-        periodic_full_book=periodic_full_book,
+        periodic_full_book=periodic_full_book or recovery_claim,
     )
     monitor_deadline_monotonic = time.monotonic() + claim_budget_seconds
     def _periodic_preemption_requested_since_claim() -> bool:
@@ -9927,7 +10027,7 @@ def _exit_monitor_cycle(
         # its entire slot and make max_instances=1 skip the next repair tick.
         configured_handoff_timeout = (
             _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            if urgent_fact or recovery_full_book
+            if urgent_fact or recovery_claim
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
         risk_level_at_claim = get_current_level()
@@ -9990,8 +10090,12 @@ def _exit_monitor_cycle(
                 "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
             return False
-        if not urgent_fact and _periodic_exit_monitor_should_yield(
-            _periodic_preemption_requested_since_claim()
+        if (
+            not urgent_fact
+            and not recovery_claim
+            and _periodic_exit_monitor_should_yield(
+                _periodic_preemption_requested_since_claim()
+            )
         ):
             logger.info(
                 "periodic exit_monitor yielded after reactor handoff to urgent "
@@ -10020,6 +10124,17 @@ def _exit_monitor_cycle(
             # in-flight urgent batch on every newer observation creates a
             # livelock when observations arrive faster than the batch can scan:
             # the tail positions never receive a MONITOR_REFRESHED decision.
+            should_preempt_for_urgent_day0 = (
+                _unabsorbed_canonical_monitor_debt_pending
+            )
+        elif recovery_claim and target_families is None:
+            should_preempt_for_urgent_day0 = lambda: False
+        elif recovery_claim:
+            # Recovery owns the exact canonical overdue set admitted above.
+            # A targeted recovery tranche intentionally excludes already-fresh
+            # families so a bounded claim cannot restart from the same portfolio
+            # prefix forever.  Only debt that appeared outside the admitted set
+            # may preempt it; the next retry reconstructs that larger set.
             should_preempt_for_urgent_day0 = (
                 _unabsorbed_canonical_monitor_debt_pending
             )
@@ -10150,7 +10265,21 @@ def _held_position_monitor_recovery_worker_main() -> None:
                 or [],
             )
             try:
-                _exit_monitor_cycle(recovery_full_book=True)
+                # Rebuild the exact overdue family set before every attempt.
+                # A full-book retry reprocesses the same fast prefix when the
+                # 29s periodic quantum expires, starving tail positions even
+                # though their predecessors already committed fresh canonical
+                # MONITOR_REFRESHED events.  Targeting only the remaining debt
+                # makes each partial pass monotonically shrink the obligation.
+                # An unreadable/empty scope while debt is known remains a
+                # fail-closed full-book fallback.
+                overdue_families = _canonical_overdue_monitor_families(
+                    require_fresh_inputs=False,
+                )
+                _exit_monitor_cycle(
+                    target_families=overdue_families or None,
+                    recovery_full_book=True,
+                )
             except Exception as exc:  # noqa: BLE001 - durable debt must survive.
                 logger.error(
                     "held-position monitor recovery attempt failed; retrying: %s",
@@ -10799,19 +10928,14 @@ def main():
         coalesce=True,
         executor="observability",
     )
-    # WAL checkpoint-starvation backstop (2026-06-04, part 2; comment corrected
-    # 2026-07-21 per audit finding W5-3 — this previously said TRUNCATE, but the
-    # implementation has always run PASSIVE): periodic
-    # PRAGMA wal_checkpoint(PASSIVE) on zeus-world.db so frames behind the WAL
-    # floor get reclaimed as soon as a transient reader releases it (part-1
-    # per-cycle releases). PASSIVE is intentional, not a downgrade: unlike
-    # TRUNCATE/FULL/RESTART it never waits behind or blocks a live writer.
-    # Design tension (W5-3, unresolved): PASSIVE alone does not BOUND the file —
-    # it drains frames but never truncates — so the -wal can still float in a
-    # wide healthy range (observed 95-373 MB) instead of converging to ~0;
-    # truly bounding it would need a periodic TRUNCATE/FULL during a
-    # demonstrated low-traffic window. Flagged for operator/consult review
-    # rather than risking a blocking checkpoint on the live write path here.
+    # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic PASSIVE
+    # copies every currently safe frame as soon as transient readers release.
+    # PASSIVE remains the normal mode and never waits behind a live writer. Once
+    # it proves the WAL fully drained, an allocated file above the maintenance
+    # threshold gets one zero-busy-timeout TRUNCATE attempt; any intervening
+    # reader/writer makes that attempt defer to the next cycle. This closes the
+    # former W5-3 gap where a healthy, fully-drained WAL could retain hundreds of
+    # MiB and consume the same volume reserve that gates new entries.
     # Mode-independent (the WAL bloat afflicts every mode), so registered
     # unconditionally. ~90s cadence (> the 60s reactor interval so it does not
     # fight an in-flight reactor read every tick; coalesce/max=1 so a slow
@@ -10821,10 +10945,9 @@ def main():
         id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
         max_instances=1, coalesce=True,
     )
-    # zeus_trades.db WAL PASSIVE checkpoint backstop (2026-06-16, the 810MB -wal
-    # incident; comment corrected 2026-07-21 — previously said TRUNCATE, the
-    # impl has always run PASSIVE; see the world job's comment above for the
-    # unresolved W5-3 bounding tension). The trade DB had no checkpoint backstop
+    # zeus_trades.db WAL checkpoint backstop (2026-06-16, the 810MB -wal
+    # incident; see the world job's comment above for PASSIVE-first, fail-fast
+    # idle truncation). The trade DB had no checkpoint backstop
     # (only zeus-world.db did), so a reader pinning the floor let
     # zeus_trades.db-wal grow unbounded → snapshot-capture writes failed
     # `database is locked` → fresh_executable_city_count=0 → the spine starved

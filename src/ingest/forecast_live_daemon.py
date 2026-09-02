@@ -888,18 +888,36 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
             (str(row[0]), str(row[1]), str(row[2]))
             for row in conn.execute(
                 """
-                SELECT city, target_date, temperature_metric
-                  FROM ensemble_snapshots
-                 WHERE source_run_id = ?
-                   AND source_id = 'ecmwf_open_data'
-                   AND model_version = 'ecmwf_ens'
-                   AND authority = 'VERIFIED'
-                   AND causality_status = 'OK'
-                   AND boundary_ambiguous = 0
-                   AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-                   AND contributes_to_target_extrema = 1
-                 GROUP BY city, target_date, temperature_metric
-                 ORDER BY target_date, city, temperature_metric
+                SELECT ens.city, ens.target_date, ens.temperature_metric
+                  FROM ensemble_snapshots ens
+                  JOIN source_run_coverage coverage
+                    ON coverage.source_run_id = ens.source_run_id
+                   AND coverage.city = ens.city
+                   AND coverage.target_local_date = ens.target_date
+                   AND coverage.temperature_metric = ens.temperature_metric
+                 WHERE ens.source_run_id = ?
+                   AND ens.source_id = 'ecmwf_open_data'
+                   AND ens.model_version = 'ecmwf_ens'
+                   AND ens.authority = 'VERIFIED'
+                   AND ens.causality_status = 'OK'
+                   AND ens.boundary_ambiguous = 0
+                   AND ens.forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+                   AND ens.contributes_to_target_extrema = 1
+                   AND coverage.completeness_status = 'COMPLETE'
+                   AND coverage.readiness_status = 'LIVE_ELIGIBLE'
+                   AND coverage.expires_at IS NOT NULL
+                   AND julianday(coverage.expires_at) > julianday('now')
+                   AND EXISTS (
+                       SELECT 1
+                         FROM market_events market
+                        WHERE market.city = ens.city
+                          AND market.target_date = ens.target_date
+                          AND market.temperature_metric = ens.temperature_metric
+                          AND market.token_id IS NOT NULL
+                          AND market.range_label IS NOT NULL
+                   )
+                 GROUP BY ens.city, ens.target_date, ens.temperature_metric
+                 ORDER BY ens.target_date, ens.city, ens.temperature_metric
                 """,
                 (source_run_id,),
             )
@@ -1319,7 +1337,7 @@ def _replacement_forecast_materialize_job(
 
 @_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)
 def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
-    """Run one independent bounded Day0/held priority claim."""
+    """Bridge bounded current-money seeds and claim one priority request."""
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
@@ -1328,7 +1346,10 @@ def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
     return _replacement_forecast_materialize_lane(
         cfg,
         lane="priority",
-        seed_limit=1,
+        # Existing requests must not starve seeds that carry a newer current
+        # input revision. Seed preparation interleaves Day0 and future work in
+        # this bounded tranche; the lane still materializes one request.
+        seed_limit=2,
     )
 
 
@@ -1354,7 +1375,7 @@ def _replacement_forecast_materialize_lane(
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_discovery_limit=1,
         seed_limit=seed_limit,
-        limit=1,
+        limit=2 if lane == "priority" else 1,
         discover=False,
         lane=lane,
     )
@@ -1610,18 +1631,6 @@ def _replacement_forecast_materialize_interval_minutes() -> int:
     return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 1)
 
 
-def _replacement_forecast_materialize_poll_seconds() -> int:
-    return max(
-        1,
-        int(
-            _replacement_forecast_live_cfg().get(
-                "materialization_queue_poll_seconds"
-            )
-            or 1
-        ),
-    )
-
-
 def _register_replacement_forecast_production_jobs(
     scheduler: object, *, startup_run_date: datetime | None = None
 ) -> None:
@@ -1633,12 +1642,13 @@ def _register_replacement_forecast_production_jobs(
     lane. The download wrapper remains importable for explicit operator inspection.
     """
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
-    materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
-    # Light materialize: interval (consumes already-downloaded manifests; no download).
+    # Background cache/catch-up cannot share the one-second cadence with current
+    # money. It still drains on the configured materialization interval; the
+    # priority lane alone owns second-scale q production.
     scheduler.add_job(  # type: ignore[attr-defined]
         _replacement_forecast_materialize_job,
         "interval",
-        seconds=materialize_poll_seconds,
+        minutes=materialize_minutes,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
         max_instances=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES,
@@ -1685,8 +1695,8 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
-        "materialize background=%ds priority=1s discovery=%dmin; lanes=%s,%s)",
-        materialize_poll_seconds,
+        "materialize background=%dmin priority=1s discovery=%dmin; lanes=%s,%s)",
+        materialize_minutes,
         materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
         REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,

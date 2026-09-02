@@ -81,6 +81,7 @@ _TRUSTED_AUTHORITIES: frozenset[str] = frozenset({"VERIFIED", "ICAO_STATION_NATI
 
 _HKO_SOURCE = "hko_hourly_accumulator"
 _HKO_EXTREMA_BASIS = "hko_since_midnight_extrema_1min_mean"
+_WU_REVISION_LOOKBACK_DAYS = (7, 30, 90)
 
 # coverage_status constants
 COVERAGE_OK = "OK"
@@ -204,20 +205,48 @@ _OBSERVATION_FACT_TIME_SQL = """
 """
 
 
+def _hko_observation_table_ref(conn: sqlite3.Connection) -> str:
+    """Resolve HKO observations to canonical attached-world truth first."""
+
+    schemas = {str(row[1]) for row in conn.execute("PRAGMA database_list")}
+    for schema in ("world", "main", "forecasts"):
+        if schema not in schemas:
+            continue
+        present = conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master "
+            "WHERE type = 'table' AND name = 'observation_instants'"
+        ).fetchone()
+        if present is not None:
+            return (
+                "observation_instants"
+                if schema == "main"
+                else f"{schema}.observation_instants"
+            )
+    raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
+
+
 def _hko_official_snapshot_rows(
     conn: sqlite3.Connection,
     *,
     start_date: date,
     end_date: date,
     decision_time: datetime,
+    table_ref: str | None = None,
 ) -> tuple[tuple[date, datetime, float, float], ...]:
     """Read causal HKO since-midnight snapshot pairs for one bounded window."""
 
     if decision_time.tzinfo is None:
         raise ValueError("HKO_PROVISIONAL_REVISION_DECISION_TIME_NAIVE")
+    table_ref = table_ref or _hko_observation_table_ref(conn)
+    schema = table_ref.removesuffix(".observation_instants")
+    pragma = (
+        "PRAGMA table_info(observation_instants)"
+        if schema == table_ref
+        else f"PRAGMA {schema}.table_info(observation_instants)"
+    )
     columns = {
         str(row[1])
-        for row in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
+        for row in conn.execute(pragma).fetchall()
     }
     required = {
         "target_date",
@@ -240,7 +269,7 @@ def _hko_official_snapshot_rows(
                CAST(json_extract(
                     provenance_json, '$.official_running_low_c'
                ) AS REAL) AS running_low_c
-          FROM observation_instants
+          FROM {table_ref}
          WHERE city = 'Hong Kong'
            AND target_date BETWEEN ? AND ?
            AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
@@ -297,15 +326,17 @@ def _hko_rollover_reset_confirmation_present(
     *,
     target_date: date,
     decision_time: datetime,
+    table_ref: str | None = None,
 ) -> bool:
     """Return whether a causal canonical row proves a cold-start pair change."""
 
     decision_utc = decision_time.astimezone(timezone.utc).isoformat()
+    table_ref = table_ref or _hko_observation_table_ref(conn)
     return (
         conn.execute(
             f"""
             SELECT 1
-              FROM observation_instants
+              FROM {table_ref}
              WHERE city = 'Hong Kong'
                AND target_date = ?
                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
@@ -437,11 +468,13 @@ def hko_rollover_carryover_status(
     """Classify whether HKO has demonstrably reset into the target date."""
 
     target = date.fromisoformat(str(target_date))
+    table_ref = _hko_observation_table_ref(conn)
     rows = _hko_official_snapshot_rows(
         conn,
         start_date=target - timedelta(days=1),
         end_date=target,
         decision_time=decision_time,
+        table_ref=table_ref,
     )
     previous = tuple(row for row in rows if row[0] == target - timedelta(days=1))
     current_pairs = [row[2:] for row in rows if row[0] == target]
@@ -467,6 +500,7 @@ def hko_rollover_carryover_status(
         conn,
         target_date=target,
         decision_time=decision_time,
+        table_ref=table_ref,
     ):
         return "RESET_CONFIRMED"
     return (
@@ -616,7 +650,7 @@ def wu_provisional_revision_likelihood(
     if metric not in {"high", "low"}:
         raise ValueError("WU_PROVISIONAL_REVISION_METRIC_INVALID")
     target = date.fromisoformat(str(target_date))
-    lookback_start = target - timedelta(days=7)
+    max_lookback_start = target - timedelta(days=max(_WU_REVISION_LOOKBACK_DAYS))
     decision_utc = decision_time.astimezone(timezone.utc)
     rows = None
     for table_ref in (
@@ -639,7 +673,7 @@ def wu_provisional_revision_likelihood(
                 """,
                 (
                     str(city),
-                    lookback_start.isoformat(),
+                    max_lookback_start.isoformat(),
                     target.isoformat(),
                     decision_utc.isoformat(),
                 ),
@@ -651,43 +685,65 @@ def wu_provisional_revision_likelihood(
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
     if not isinstance(allow_prior_only, bool):
         raise ValueError("WU_PROVISIONAL_REVISION_PRIOR_POLICY_INVALID")
-    if not rows and not allow_prior_only:
-        raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
-
     applied_reasons = frozenset(
         {
             "payload_hash_mismatch_monotone_widening_applied",
             "payload_hash_mismatch_source_revision_applied",
         }
     )
+    lookback_start = max_lookback_start
     applied_row_count = 0
     excluded_transition_count = 0
     transition_count = 0
     retraction_count = 0
-    for row in rows:
-        reason = str(row[3] or "").strip()
-        if reason not in applied_reasons:
-            excluded_transition_count += 1
-            continue
-        applied_row_count += 1
-        try:
-            existing = json.loads(row[1])
-            incoming = json.loads(row[2])
-            existing_value = float(
-                existing["running_max" if metric == "high" else "running_min"]
-            )
-            incoming_value = float(
-                incoming["running_max" if metric == "high" else "running_min"]
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not math.isfinite(existing_value) or not math.isfinite(incoming_value):
-            continue
-        transition_count += 1
-        if (metric == "high" and incoming_value < existing_value - 1e-9) or (
-            metric == "low" and incoming_value > existing_value + 1e-9
-        ):
-            retraction_count += 1
+    lookback_days = max(_WU_REVISION_LOOKBACK_DAYS)
+    for candidate_days in _WU_REVISION_LOOKBACK_DAYS:
+        candidate_start = target - timedelta(days=candidate_days)
+        candidate_rows = tuple(
+            row for row in rows if str(row[0]) >= candidate_start.isoformat()
+        )
+        candidate_applied = 0
+        candidate_excluded = 0
+        candidate_transitions = 0
+        candidate_retractions = 0
+        for row in candidate_rows:
+            reason = str(row[3] or "").strip()
+            if reason not in applied_reasons:
+                candidate_excluded += 1
+                continue
+            candidate_applied += 1
+            try:
+                existing = json.loads(row[1])
+                incoming = json.loads(row[2])
+                existing_value = float(
+                    existing[
+                        "running_max" if metric == "high" else "running_min"
+                    ]
+                )
+                incoming_value = float(
+                    incoming[
+                        "running_max" if metric == "high" else "running_min"
+                    ]
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(existing_value) or not math.isfinite(
+                incoming_value
+            ):
+                continue
+            candidate_transitions += 1
+            if (
+                metric == "high" and incoming_value < existing_value - 1e-9
+            ) or (metric == "low" and incoming_value > existing_value + 1e-9):
+                candidate_retractions += 1
+        lookback_start = candidate_start
+        lookback_days = candidate_days
+        applied_row_count = candidate_applied
+        excluded_transition_count = candidate_excluded
+        transition_count = candidate_transitions
+        retraction_count = candidate_retractions
+        if transition_count > 0:
+            break
     if transition_count <= 0 and (applied_row_count or not allow_prior_only):
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
 
@@ -716,12 +772,13 @@ def wu_provisional_revision_likelihood(
         raise ValueError("WU_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
     return {
         "semantics": (
-            "wu_applied_changed_payload_retraction_beta_jeffreys_prior_only_v2"
+            "wu_applied_changed_payload_retraction_beta_jeffreys_adaptive_prior_only_v3"
             if transition_count == 0
-            else "wu_applied_changed_payload_retraction_beta_jeffreys_v2"
+            else "wu_applied_changed_payload_retraction_beta_jeffreys_adaptive_v3"
         ),
         "lookback_start": lookback_start.isoformat(),
         "lookback_end": target.isoformat(),
+        "lookback_days": lookback_days,
         "transition_count": transition_count,
         "retraction_count": retraction_count,
         "excluded_transition_count": excluded_transition_count,

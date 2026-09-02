@@ -393,6 +393,17 @@ CREATE TABLE IF NOT EXISTS controller_debt (
     retry_identity TEXT NOT NULL DEFAULT '',
     next_retry_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_evidence_recovery_hard
+    ON incidents(kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_recovery_debt
+    ON controller_debt(kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id);
+CREATE INDEX IF NOT EXISTS idx_settled_no_bid_backlog
+    ON incidents(detected_at,incident_id,position_id)
+    WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending');
+CREATE INDEX IF NOT EXISTS idx_hard_revalidation_queue
+    ON incidents(incident_id)
+    WHERE kind='hard' AND stage='blind'
+      AND status IN ('queued','retry_pending');
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
@@ -542,6 +553,50 @@ def _startup_index_contract(
     )
 
 
+def _startup_expression_index_contract(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    name: str,
+    expression: str,
+) -> bool:
+    """Verify a non-unique expression index by its exact SQL contract."""
+    _startup_guard()
+    catalog = conn.execute(
+        "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
+        (name,),
+    ).fetchone()
+    if catalog is None or str(catalog[0]) != table or not catalog[1]:
+        return False
+    normalize = lambda value: re.sub(r"\s*,\s*", ",", re.sub(r"\s+", " ", value.strip())).lower()
+    expected = f"CREATE INDEX {name} ON {table}({expression})"
+    return normalize(str(catalog[1])) == normalize(expected)
+
+
+def _startup_partial_index_contract(
+    conn: sqlite3.Connection,
+    *,
+    name: str = "idx_settled_no_bid_backlog",
+    expected: str = (
+        "CREATE INDEX idx_settled_no_bid_backlog "
+        "ON incidents(detected_at,incident_id,position_id) "
+        "WHERE crossing_kind='no_bid' AND status IN ('queued','retry_pending')"
+    ),
+) -> bool:
+    """Verify one exact partial index used by a bounded queue."""
+    _startup_guard()
+    catalog = conn.execute(
+        "SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?",
+        (name,),
+    ).fetchone()
+    if catalog is None or str(catalog[0]) != "incidents" or not catalog[1]:
+        return False
+    normalize = lambda value: re.sub(
+        r"\s*,\s*", ",", re.sub(r"\s+", " ", value.strip())
+    ).lower()
+    return normalize(str(catalog[1])) == normalize(expected)
+
+
 def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
     """Verify the existing schema with catalog-only reads before startup DDL."""
     _startup_guard()
@@ -594,6 +649,28 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             unique=False,
             columns=("kind", "status", "priority", "detected_at", "incident_id"),
             descending=(False, False, True, False, False),
+        )
+        and _startup_expression_index_contract(
+            conn,
+            table="incidents",
+            name="idx_evidence_recovery_hard",
+            expression="kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id",
+        )
+        and _startup_expression_index_contract(
+            conn,
+            table="controller_debt",
+            name="idx_evidence_recovery_debt",
+            expression="kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
+        )
+        and _startup_partial_index_contract(conn)
+        and _startup_partial_index_contract(
+            conn,
+            name="idx_hard_revalidation_queue",
+            expected=(
+                "CREATE INDEX idx_hard_revalidation_queue ON incidents(incident_id) "
+                "WHERE kind='hard' AND stage='blind' "
+                "AND status IN ('queued','retry_pending')"
+            ),
         )
     )
 
@@ -755,6 +832,43 @@ def memory(cfg: Mapping[str, Any], *, allow_schema_migration: bool = False) -> _
             "CREATE INDEX idx_incident_queue "
             "ON incidents(status,stage,kind,priority DESC,detected_at)"
         )
+    for table, name, expression in (
+        (
+            "incidents",
+            "idx_evidence_recovery_hard",
+            "kind,CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END,priority DESC,detected_at DESC,incident_id",
+        ),
+        (
+            "controller_debt",
+            "idx_evidence_recovery_debt",
+            "kind,status,(next_retry_at IS NOT NULL),next_retry_at,debt_id",
+        ),
+    ):
+        if not _startup_expression_index_contract(
+            conn, table=table, name=name, expression=expression
+        ):
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
+            conn.execute(f"CREATE INDEX {name} ON {table}({expression})")
+    if not _startup_partial_index_contract(conn):
+        conn.execute("DROP INDEX IF EXISTS idx_settled_no_bid_backlog")
+        conn.execute(
+            "CREATE INDEX idx_settled_no_bid_backlog "
+            "ON incidents(detected_at,incident_id,position_id) "
+            "WHERE crossing_kind='no_bid' "
+            "AND status IN ('queued','retry_pending')"
+        )
+    hard_revalidation_index = (
+        "CREATE INDEX idx_hard_revalidation_queue ON incidents(incident_id) "
+        "WHERE kind='hard' AND stage='blind' "
+        "AND status IN ('queued','retry_pending')"
+    )
+    if not _startup_partial_index_contract(
+        conn,
+        name="idx_hard_revalidation_queue",
+        expected=hard_revalidation_index,
+    ):
+        conn.execute("DROP INDEX IF EXISTS idx_hard_revalidation_queue")
+        conn.execute(hard_revalidation_index)
     return _ClosingConnection(conn)
 
 
@@ -1012,17 +1126,31 @@ def _position_with_exposure(
 def revalidate_blind_hard_incidents(
     mem: sqlite3.Connection,
     trades: sqlite3.Connection,
+    *,
+    limit: int = 4,
 ) -> int:
-    """Retire queued legacy triggers disproved by current detector invariants."""
+    """Fairly recheck a bounded slice of queued legacy hard triggers."""
 
-    rows = mem.execute(
-        "SELECT incident_id,position_id,crossing_evidence_id,crossing_kind,floor_price "
-        "FROM incidents WHERE kind='hard' AND stage='blind' "
-        "AND status IN ('queued','retry_pending')"
-    ).fetchall()
+    cursor = meta_get(mem, "hard_revalidation_cursor", "")
+    query = (
+        "SELECT incident_id,position_id,"
+        "crossing_evidence_id,crossing_kind,floor_price "
+        "FROM incidents INDEXED BY idx_hard_revalidation_queue "
+        "WHERE kind='hard' AND stage='blind' "
+        "AND status IN ('queued','retry_pending') AND incident_id>? "
+        "ORDER BY incident_id LIMIT ?"
+    )
+    rows = mem.execute(query, (cursor, max(1, int(limit)))).fetchall()
+    if not rows and cursor:
+        cursor = ""
+        rows = mem.execute(query, (cursor, max(1, int(limit)))).fetchall()
+    if rows:
+        meta_set(mem, "hard_revalidation_cursor", str(rows[-1]["incident_id"]))
     retired = 0
     for row in rows:
+        _maintenance_guard()
         position = _position_with_exposure(trades, str(row["position_id"]))
+        _maintenance_guard()
         quote_row = trades.execute(
             "SELECT * FROM execution_feasibility_evidence WHERE evidence_id=?",
             (row["crossing_evidence_id"],),
@@ -1173,6 +1301,9 @@ def _observe_quote(
     position: Mapping[str, Any],
     quote: Mapping[str, Any],
     floor: float,
+    *,
+    historical_backfill: bool = False,
+    corroborated_seen_at: str | None = None,
 ) -> str | None:
     position_id = str(position["position_id"])
     evidence_id = str(quote["evidence_id"])
@@ -1195,6 +1326,27 @@ def _observe_quote(
     previous_at = parse_time(str(previous[1])) if previous else None
     seen_time = parse_time(seen_at)
     out_of_order = previous_at is not None and seen_time is not None and seen_time < previous_at
+    corroborated_time = parse_time(corroborated_seen_at)
+    if (
+        out_of_order
+        and (below or no_bid)
+        and corroborated_time is not None
+        and _quote_within_exposure(position, str(corroborated_seen_at))
+        and (previous_at is None or corroborated_time >= previous_at)
+    ):
+        # The older full book remains the executable authority, while the
+        # newer incomplete SELL projection independently proves there was no
+        # recovery. Persist one current floor episode at the corroboration
+        # clock; otherwise every newer full-book carrier would look like a new
+        # crossing behind the already-newer incomplete projection.
+        seen_at = str(corroborated_seen_at)
+        seen_time = corroborated_time
+        out_of_order = False
+    # A historical no-bid row older than durable live state cannot start a new
+    # causal episode. Replaying it would manufacture one incident per evidence
+    # row while intentionally preserving the newer quote state.
+    if historical_backfill and out_of_order and no_bid:
+        return None
     no_bid_episode: sqlite3.Row | None = None
     if no_bid:
         no_bid_episode = mem.execute(
@@ -1343,6 +1495,54 @@ def _latest_quotes(
         authoritative["_current_quote"] = current
         result[str(position["position_id"])] = authoritative
     return result
+
+
+def _incomplete_current_corroborates_floor(
+    authoritative: Mapping[str, Any],
+    current: Mapping[str, Any] | None,
+    floor: float,
+) -> bool:
+    """Return true when a newer scalar quote confirms an older full book loss.
+
+    The SELL latest projection can omit depth while the same held token's
+    current BUY-side evidence retains the authoritative book. Missing depth
+    alone must never invent a crossing, but it also must not erase a real one
+    when the newer scalar independently confirms there was no recovery.
+    """
+
+    if not isinstance(current, Mapping):
+        return False
+    if reconcile_held_quote(current)[0] != "quote_incomplete":
+        return False
+    authoritative_status, authoritative_bid = reconcile_held_quote(authoritative)
+    current_bid = _float(current.get("best_bid_before"))
+    current_ask = _float(current.get("best_ask_before"))
+    current_book_hash = str(current.get("book_hash_before") or "").strip()
+    current_at = parse_time(str(current.get("quote_seen_at") or ""))
+    authoritative_at = parse_time(str(authoritative.get("quote_seen_at") or ""))
+    if (
+        current_at is None
+        or authoritative_at is None
+        or current_at < authoritative_at
+    ):
+        return False
+    if authoritative_status == "no_bid":
+        return bool(
+            (current_bid is not None and current_bid <= 0)
+            or (
+                current_bid is None
+                and current_ask is not None
+                and 0 < current_ask <= 1
+                and current_book_hash
+            )
+        )
+    return bool(
+        authoritative_status == "executable"
+        and authoritative_bid is not None
+        and authoritative_bid < floor
+        and current_bid is not None
+        and current_bid < floor
+    )
 
 
 def _new_quote_rows(
@@ -1698,6 +1898,60 @@ def _consolidate_legacy_settlement_incidents(
         )
 
 
+def _consolidate_settled_quote_incident_backlog(
+    mem: sqlite3.Connection,
+    *,
+    limit: int,
+) -> int:
+    """Boundedly drain stale no-bid debt already owned by valid settlement."""
+
+    rows = mem.execute(
+        "SELECT q.incident_id,q.stage,q.status,q.position_id,"
+        "(SELECT s.incident_id FROM incidents AS s "
+        "  WHERE s.position_id=q.position_id "
+        "    AND s.crossing_kind='settlement_full_loss' "
+        "    AND s.status IN ('queued','running','retry_pending','blocked','completed') "
+        "  ORDER BY s.detected_at DESC,s.incident_id DESC LIMIT 1) AS canonical_id "
+        "FROM incidents AS q INDEXED BY idx_settled_no_bid_backlog "
+        "WHERE q.crossing_kind='no_bid' "
+        "AND q.status IN ('queued','retry_pending') "
+        "AND EXISTS (SELECT 1 FROM incidents AS s "
+        "            WHERE s.position_id=q.position_id "
+        "              AND s.crossing_kind='settlement_full_loss' "
+        "              AND s.status IN "
+        "                  ('queued','running','retry_pending','blocked','completed')) "
+        "ORDER BY q.detected_at,q.incident_id LIMIT ?",
+        (max(1, int(limit)),),
+    ).fetchall()
+    stamp = iso()
+    retired = 0
+    for row in rows:
+        incident_id = str(row["incident_id"])
+        canonical_id = str(row["canonical_id"])
+        if not _transition_if_status(
+            mem,
+            incident_id,
+            str(row["stage"]),
+            expected_status=str(row["status"]),
+            reason=f"superseded_by_settlement_full_loss:{canonical_id}",
+            status="observing",
+        ):
+            continue
+        retired += 1
+        mem.execute(
+            "UPDATE controller_debt SET status='resolved',"
+            "reason=?,updated_at=?,next_retry_at=NULL "
+            "WHERE debt_id=? AND kind='evidence_snapshot' "
+            "AND status='retry_pending'",
+            (
+                f"superseded_by_settlement_full_loss:{canonical_id}",
+                stamp,
+                _evidence_debt_id(incident_id),
+            ),
+        )
+    return retired
+
+
 def _revise_settlement_non_loss_incidents(
     mem: sqlite3.Connection,
     trades: sqlite3.Connection,
@@ -1796,45 +2050,10 @@ def _settlement_backfill_positions(
     return result
 
 
-def _velocity(
-    trades: sqlite3.Connection,
-    token_id: str,
-    carrier_direction: str,
-) -> tuple[float, float]:
-    rows = trades.execute(
-        """
-        SELECT quote_seen_at,best_bid_before
-          FROM execution_feasibility_evidence
-         WHERE token_id=? AND direction=?
-           AND best_bid_before IS NOT NULL
-         ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3
-        """,
-        (token_id, carrier_direction),
-    ).fetchall()
-    points: list[tuple[datetime | None, float]] = []
-    for row in reversed(rows):
-        bid = _float(row[1])
-        if bid is not None:
-            points.append((parse_time(row[0]), bid))
-    if len(points) < 2:
-        return 0.0, 0.0
-    velocities: list[float] = []
-    for left, right in zip(points, points[1:]):
-        if left[0] is None or right[0] is None:
-            continue
-        seconds = (right[0] - left[0]).total_seconds()
-        if seconds > 0:
-            velocities.append((right[1] - left[1]) / seconds)
-    if not velocities:
-        return 0.0, 0.0
-    acceleration = velocities[-1] - velocities[-2] if len(velocities) > 1 else 0.0
-    return velocities[-1], acceleration
-
-
 def _monitor_dynamics(
     trades: sqlite3.Connection,
     position_id: str,
-) -> tuple[float, float, float | None, bool, datetime | None]:
+) -> tuple[float, float, float, float | None, bool, datetime | None]:
     rows = trades.execute(
         "SELECT occurred_at,payload_json FROM position_events "
         "WHERE position_id=? AND event_type='MONITOR_REFRESHED' "
@@ -1859,15 +2078,30 @@ def _monitor_dynamics(
         )
         latest_at = at
 
-    def slope(index: int) -> float:
+    def dynamics(index: int) -> tuple[float, float]:
         valid = [(at, values[index]) for at, *values in points if values[index] is not None]
         if len(valid) < 2:
-            return 0.0
-        left, right = valid[-2:]
-        seconds = (right[0] - left[0]).total_seconds()
-        return (float(right[1]) - float(left[1])) / seconds if seconds > 0 else 0.0
+            return 0.0, 0.0
+        velocities = []
+        for left, right in zip(valid, valid[1:]):
+            seconds = (right[0] - left[0]).total_seconds()
+            if seconds > 0:
+                velocities.append((float(right[1]) - float(left[1])) / seconds)
+        if not velocities:
+            return 0.0, 0.0
+        acceleration = velocities[-1] - velocities[-2] if len(velocities) > 1 else 0.0
+        return velocities[-1], acceleration
 
-    return slope(0), slope(1), latest_probability, latest_fresh, latest_at
+    probability_velocity, _ = dynamics(0)
+    market_velocity, market_acceleration = dynamics(1)
+    return (
+        probability_velocity,
+        market_velocity,
+        market_acceleration,
+        latest_probability,
+        latest_fresh,
+        latest_at,
+    )
 
 
 def refresh_precursor(
@@ -1904,23 +2138,25 @@ def refresh_precursor(
             continue
         if bid < floor:
             continue
-        velocity, acceleration = _velocity(
+        (
+            probability_velocity,
+            velocity,
+            acceleration,
+            probability,
+            monitor_fresh,
+            monitor_at,
+        ) = _monitor_dynamics(
             trades,
-            str(position["held_token_id"]),
-            str(position["direction"]),
+            str(position["position_id"]),
         )
         distance = max(0.0, bid - floor)
         time_to_floor = distance / max(-velocity, 1e-9) if velocity < 0 else float("inf")
         current_quote = quote.get("_current_quote", quote)
         quote_at = parse_time(str(current_quote["quote_seen_at"])) if current_quote else None
         quote_age = max(0.0, (now() - quote_at).total_seconds()) if quote_at else 1e9
-        probability_velocity, monitor_market_velocity, probability, monitor_fresh, monitor_at = _monitor_dynamics(
-            trades,
-            str(position["position_id"]),
-        )
         monitor_age = max(0.0, (now() - monitor_at).total_seconds()) if monitor_at else 1e9
         depth_loss = 1.0 if current_quote is None or reconcile_held_quote(current_quote)[0] == "quote_incomplete" else 0.0
-        market_ahead = max(0.0, probability_velocity - min(velocity, monitor_market_velocity))
+        market_ahead = max(0.0, probability_velocity - velocity)
         belief_gap = max(0.0, probability - bid) if probability is not None else 0.0
         score = (
             (1.0 / max(distance, 0.001))
@@ -1997,7 +2233,35 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
     created: list[str] = []
     with _maintenance_connections(cfg, detector_deadline) as (trades, mem):
         _maintenance_guard()
-        revalidate_blind_hard_incidents(mem, trades)
+        consolidation_batch = max(
+            1, int(cfg["loop"].get("legacy_incident_consolidation_batch_size", 16))
+        )
+        consolidated = _consolidate_settled_quote_incident_backlog(
+            mem,
+            limit=consolidation_batch,
+        )
+        saturated_cycles = 0
+        if consolidated >= consolidation_batch:
+            saturated_cycles = int(
+                meta_get(mem, "legacy_consolidation_saturated_cycles", "0")
+            ) + 1
+        meta_set(mem, "legacy_consolidation_saturated_cycles", saturated_cycles)
+        # This bounded debt retirement must survive later expensive read-side
+        # maintenance hitting its deadline; it does not alter trading truth.
+        mem.commit()
+        fairness_interval = max(
+            1,
+            int(cfg["loop"].get("legacy_consolidation_fairness_interval", 16)),
+        )
+        if saturated_cycles and saturated_cycles % fairness_interval:
+            return _MaintenanceOutcome([], postcommit_deferred=True)
+        _maintenance_guard()
+        revalidate_blind_hard_incidents(
+            mem,
+            trades,
+            limit=int(cfg["loop"].get("hard_revalidation_batch_size", 4)),
+        )
+        mem.commit()
         _maintenance_guard()
         positions = tracked_positions(trades, history_days=history_days)
         # Settlement is an independent terminal truth path.  It must run even
@@ -2082,7 +2346,9 @@ def _detect_maintenance(cfg: Mapping[str, Any], deadline: float | None = None) -
         for quote in quote_rows:
             _maintenance_guard()
             for position in by_token.get(str(quote["token_id"]), []):
-                ident = _observe_quote(mem, position, quote, floor)
+                ident = _observe_quote(
+                    mem, position, quote, floor, historical_backfill=True
+                )
                 if ident:
                     created.append(ident)
         if quote_rows:
@@ -2173,7 +2439,22 @@ def _detect_trigger(
                     quote = latest.get(str(position["position_id"]))
                     if quote is None:
                         continue
-                    observed_quote = quote.get("_current_quote", quote)
+                    current_quote = quote.get("_current_quote")
+                    if _incomplete_current_corroborates_floor(
+                        quote,
+                        current_quote if isinstance(current_quote, Mapping) else None,
+                        floor,
+                    ):
+                        incident_id = _observe_quote(
+                            mem,
+                            position,
+                            quote,
+                            floor,
+                            corroborated_seen_at=str(current_quote["quote_seen_at"]),
+                        )
+                        if incident_id:
+                            created.append(incident_id)
+                    observed_quote = current_quote if current_quote is not None else quote
                     if observed_quote is None:
                         continue
                     incident_id = _observe_quote(mem, position, observed_quote, floor)
@@ -3529,6 +3810,29 @@ def _memory_only_evidence_due_filter(
     created_order: Iterable[str],
     debt_order: Mapping[str, int],
 ) -> tuple[list[str], list[str]]:
+    """Run the durable due gate without inheriting canonical-build deadlines."""
+
+    global _EVIDENCE_BUILD_CONTEXT
+    previous_context = _EVIDENCE_BUILD_CONTEXT
+    _EVIDENCE_BUILD_CONTEXT = None
+    try:
+        return _memory_only_evidence_due_filter_inner(
+            cfg,
+            candidate_ids,
+            created_order=created_order,
+            debt_order=debt_order,
+        )
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous_context
+
+
+def _memory_only_evidence_due_filter_inner(
+    cfg: Mapping[str, Any],
+    candidate_ids: Iterable[str],
+    *,
+    created_order: Iterable[str],
+    debt_order: Mapping[str, int],
+) -> tuple[list[str], list[str]]:
     """Choose one new/due evidence lane before opening canonical databases.
 
     SCOPE: one controller evidence slice. DRAIN: the selected new or due lane
@@ -3771,6 +4075,21 @@ def _record_emergency_evidence_debt(
         conn = sqlite3.connect(runtime_dir(cfg) / "memory.db", timeout=remaining)
         conn.execute(f"PRAGMA busy_timeout={max(1, int(remaining * 1000))}")
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        incident_row = conn.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,evidence_revision "
+            "FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        if incident_row is not None:
+            retry_identity = _memory_only_evidence_retry_identity(
+                cfg,
+                {
+                    "incident_id": incident_row[0],
+                    "position_id": incident_row[1],
+                    "crossing_evidence_id": incident_row[2],
+                    "evidence_revision": incident_row[3],
+                },
+            )
         prior = conn.execute(
             "SELECT retry_identity,next_retry_at,attempts FROM controller_debt "
             "WHERE debt_id=? AND kind='evidence_snapshot'",
@@ -4025,12 +4344,28 @@ def _capture_hard_evidence_inner(
         candidate_order = list(
             dict.fromkeys([*created_order, *queued_ids, *debt_order])
         )
-        ordered, memory_deferred = _memory_only_evidence_due_filter(
-            cfg,
-            candidate_order,
-            created_order=created_order,
-            debt_order=debt_order,
-        )
+        try:
+            ordered, memory_deferred = _memory_only_evidence_due_filter(
+                cfg,
+                candidate_order,
+                created_order=created_order,
+                debt_order=debt_order,
+            )
+        except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+            # A failed memory-only gate did not classify these candidates.
+            # Preserve existing debt and leave one bounded controller receipt;
+            # per-incident debt would turn an unreadable gate into new work.
+            remainder = candidate_order[:queue_limit]
+            _record_evidence_recovery_remainder(
+                cfg,
+                remainder,
+                reason=f"evidence_snapshot_due_filter_failed:{type(exc).__name__}:{exc}",
+            )
+            _publish_evidence_controller_degraded(
+                "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
+            )
+            summary["deferred"].extend(remainder)
+            return finish()
         summary["deferred"].extend(memory_deferred)
         if not ordered:
             return finish()
@@ -4239,6 +4574,7 @@ def _capture_hard_evidence_inner(
 
 
 _EVIDENCE_CANDIDATE_RECOVERY_SECONDS = 0.25
+_EVIDENCE_RECOVERY_REMAINDER_RECEIPT = "evidence-recovery-remainder.json"
 
 
 def _recover_evidence_candidate_ids(
@@ -4277,6 +4613,78 @@ def _recover_evidence_candidate_ids(
             conn.close()
 
 
+def _record_evidence_recovery_remainder(
+    cfg: Mapping[str, Any],
+    incident_ids: Iterable[str],
+    *,
+    reason: str,
+) -> None:
+    """Persist one controller-level next-cycle receipt for a bounded remainder."""
+
+    remainder = list(dict.fromkeys(str(value) for value in incident_ids if str(value)))
+    if not remainder:
+        return
+    payload = {
+        "kind": "evidence_snapshot_recovery_remainder",
+        "status": "retry_pending",
+        "reason": reason[:1000],
+        "incident_ids": remainder,
+        "remainder_count": len(remainder),
+        "updated_at": iso(),
+    }
+    try:
+        atomic_json(runtime_dir(cfg) / _EVIDENCE_RECOVERY_REMAINDER_RECEIPT, payload)
+    except OSError as exc:
+        _publish_evidence_controller_degraded(
+            "EVIDENCE_RECOVERY_REMAINDER_RECEIPT_FAILED",
+            f"{type(exc).__name__}:{exc}",
+        )
+
+
+def _pid_command(pid: object) -> str:
+    try:
+        numeric_pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return ""
+    if numeric_pid <= 0:
+        return ""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(numeric_pid), "-o", "command="],
+            text=True,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def controller_status_health(
+    cfg: Mapping[str, Any], payload: Mapping[str, Any] | None = None, *, observed_at: datetime | None = None
+) -> dict[str, Any]:
+    """Return fail-closed controller liveness, not its last self-reported state."""
+    payload = payload if payload is not None else read_json(runtime_dir(cfg) / "status.json", {})
+    if not isinstance(payload, Mapping) or payload.get("alive") is not True:
+        return {"healthy": False, "reason": "controller_status_not_alive"}
+    at = parse_time(str(payload.get("at") or ""))
+    maximum_age = max(
+        1.0,
+        float(cfg["loop"].get("controller_status_max_age_seconds", 5.0)),
+    )
+    checked_at = observed_at or now()
+    if at is None or (age := (checked_at - at).total_seconds()) < 0 or age > maximum_age:
+        return {"healthy": False, "reason": "controller_status_stale", "at": payload.get("at")}
+    pid = payload.get("pid")
+    if not _pid_alive(pid):
+        return {"healthy": False, "reason": "controller_pid_dead", "pid": pid}
+    command = _pid_command(pid)
+    if "total_loss_loop.py" not in command or "daemon" not in command:
+        return {"healthy": False, "reason": "controller_command_mismatch", "pid": pid}
+    return {"healthy": True, "reason": "controller_healthy", "pid": int(pid), "at": at.isoformat()}
+
+
 def _publish_evidence_controller_degraded(reason_code: str, error: str) -> dict[str, Any]:
     payload = {"status": "controller_degraded", "reason_code": reason_code, "error": error}
     _LAST_EVIDENCE_CYCLE["controller_degraded"] = payload
@@ -4298,36 +4706,74 @@ def _capture_hard_evidence(
     incident_ids = tuple(dict.fromkeys(str(value) for value in incident_ids if str(value)))
     budget = budget or _new_evidence_budget(cfg)
     if time.monotonic() >= float(budget["deadline"]):
-        recovered, recovery_error = _recover_evidence_candidate_ids(cfg)
-        candidates = list(dict.fromkeys([*incident_ids, *recovered]))
-        if recovery_error:
-            _publish_evidence_controller_degraded("EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error)
-        # Even an exhausted cycle must classify retry debt from memory before it
-        # records another backoff: a future memory identity is not executable
-        # work, while a revision change is the bounded wake signal.
-        eligible, deferred = _memory_only_evidence_due_filter(
-            cfg,
-            candidates,
-            created_order=incident_ids,
-            debt_order={},
-        )
-        retry_identities = {
-            incident_id: _memory_only_evidence_retry_identity_for_debt(cfg, incident_id)
-            for incident_id in eligible
-        }
         previous_context = _EVIDENCE_BUILD_CONTEXT
         _EVIDENCE_BUILD_CONTEXT = budget
         try:
-            for incident_id in eligible:
-                _record_evidence_debt(
+            queue_limit = max(1, int(cfg["loop"].get("evidence_queue_batch_size", 32)))
+            recovered, recovery_error = _recover_evidence_candidate_ids(
+                cfg, limit=queue_limit
+            )
+            # Caller-known candidates are the only IDs that survive a recovery
+            # read failure, and they outrank recovered scan rows.  Bound the
+            # entire tranche before any due filtering or emergency write.
+            candidates = list(dict.fromkeys([*incident_ids, *recovered]))
+            selected = candidates[:queue_limit]
+            remainder = candidates[queue_limit:]
+            if recovery_error:
+                _publish_evidence_controller_degraded(
+                    "EVIDENCE_CANDIDATE_RECOVERY_FAILED", recovery_error
+                )
+            gate_context = _EVIDENCE_BUILD_CONTEXT
+            _EVIDENCE_BUILD_CONTEXT = None
+            gate_failed = False
+            try:
+                try:
+                    # A future memory identity is not executable work, while a
+                    # revision change is the bounded wake signal.  The expired
+                    # build deadline must not govern this memory-only gate.
+                    eligible, deferred = _memory_only_evidence_due_filter(
+                        cfg,
+                        selected,
+                        created_order=incident_ids,
+                        debt_order={},
+                    )
+                except (EvidenceCapacityExceeded, OSError, sqlite3.Error) as exc:
+                    # These candidates were not classified.  Keep existing
+                    # debt untouched and emit one bounded controller receipt.
+                    gate_failed = True
+                    eligible, deferred = [], selected
+                    _record_evidence_recovery_remainder(
+                        cfg,
+                        selected[:queue_limit],
+                        reason=f"evidence_snapshot_due_filter_failed:{type(exc).__name__}:{exc}",
+                    )
+                    _publish_evidence_controller_degraded(
+                        "EVIDENCE_DUE_FILTER_FAILED", f"{type(exc).__name__}:{exc}"
+                    )
+                retry_identities = {
+                    incident_id: _memory_only_evidence_retry_identity_for_debt(
+                        cfg, incident_id
+                    )
+                    for incident_id in eligible
+                }
+                for incident_id in eligible:
+                    _record_evidence_debt(
+                        cfg,
+                        incident_id,
+                        "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
+                        retry_identity=retry_identities[incident_id],
+                    )
+            finally:
+                _EVIDENCE_BUILD_CONTEXT = gate_context
+            if remainder and not gate_failed:
+                _record_evidence_recovery_remainder(
                     cfg,
-                    incident_id,
-                    "evidence_snapshot_capacity_failure:evidence_snapshot_deferred:time_budget",
-                    retry_identity=retry_identities[incident_id],
+                    [*selected, *remainder][:queue_limit],
+                    reason="evidence_snapshot_deferred:recovery_tranche_limit",
                 )
         finally:
             _EVIDENCE_BUILD_CONTEXT = previous_context
-        all_deferred = list(dict.fromkeys([*deferred, *eligible]))
+        all_deferred = list(dict.fromkeys([*deferred, *eligible, *remainder]))
         summary = {"built": [], "deferred": all_deferred, "attempted": 0, "validated": 0, "bytes": int(budget.get("bytes", 0))}
         if _LAST_EVIDENCE_CYCLE.get("controller_degraded") is not None:
             summary["controller_degraded"] = _LAST_EVIDENCE_CYCLE["controller_degraded"]
@@ -7758,6 +8204,7 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "capabilities": read_json(runtime_dir(cfg) / "capabilities.json", None),
         "provider_backoff": _provider_backoff(cfg),
         "halted": (runtime_dir(cfg) / "HALT").exists(),
+        "controller": controller_status_health(cfg),
     }
 
 

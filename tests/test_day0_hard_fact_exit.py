@@ -852,6 +852,33 @@ class TestSourceDiscipline:
         )
         return conn
 
+    @classmethod
+    def _noaa_fast_hard_fact_conn(
+        cls, *, payload_source_type: str = "noaa", event_station: str = "LTFM"
+    ):
+        conn = cls._seoul_fast_hard_fact_conn()
+        conn.execute(
+            "UPDATE observation_prints SET city = ?, station_id = ?, "
+            "raw_report = replace(raw_report, 'RKSI', 'LTFM')",
+            ("Istanbul", "LTFM"),
+        )
+        row = conn.execute(
+            "SELECT event_id, payload_json FROM opportunity_events "
+            "WHERE received_at <= ? ORDER BY received_at DESC LIMIT 1",
+            ("2026-08-19T02:34:30+00:00",),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload.update(
+            city="Istanbul",
+            settlement_source_type=payload_source_type,
+            station_id=event_station,
+        )
+        conn.execute(
+            "UPDATE opportunity_events SET payload_json = ? WHERE event_id = ?",
+            (json.dumps(payload, sort_keys=True), row["event_id"]),
+        )
+        return conn
+
     def test_seoul_fast_event_is_statistical_not_wu_settlement_finality(self):
         """A fast same-station print cannot create exact WU payoff authority."""
 
@@ -868,6 +895,58 @@ class TestSourceDiscipline:
             city=_seoul(),
             now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
             world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is None
+
+    def test_noaa_same_station_event_authorizes_absorbing_held_probability(self):
+        conn = self._noaa_fast_hard_fact_conn()
+
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Istanbul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_istanbul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is not None
+        assert verdict.action == "HOLD_STRUCTURAL_WIN"
+        assert verdict.rounded_extreme == pytest.approx(29.0)
+        assert verdict.evidence is not None
+        assert verdict.evidence.source == "aviationweather_metar:durable_monotone_bound"
+        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(1.0)
+
+    @pytest.mark.parametrize(
+        ("payload_source_type", "event_station"),
+        (("wu_icao", "LTFM"), ("noaa", "NOT_LTFM")),
+    )
+    def test_noaa_event_identity_mismatch_cannot_authorize_hard_fact(
+        self, payload_source_type, event_station
+    ):
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Istanbul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_istanbul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=self._noaa_fast_hard_fact_conn(
+                payload_source_type=payload_source_type,
+                event_station=event_station,
+            ),
             durable_only=True,
         )
 

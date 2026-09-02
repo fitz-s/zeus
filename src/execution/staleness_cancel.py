@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from src.data import replacement_input_hwm as _replacement_input_hwm
@@ -62,6 +62,87 @@ _REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 _Q_AUTHORITY_BLOCKED_PREFIX = "__Q_AUTHORITY_BLOCKED__:"
 
 FamilyKey = tuple[str, str, str]
+
+
+def maker_rest_escalation_armed_token_ids(
+    conn: sqlite3.Connection,
+    *,
+    token_ids: Iterable[str],
+    decision_time: datetime,
+) -> frozenset[str]:
+    """Return BUY tokens whose real maker window ended with a terminal remainder.
+
+    SCOPE: only the supplied native token ids. DRAIN: a terminal order fact after
+    the existing maker-window floor arms the next current global cut. RESET: the
+    evidence expires with the same 24-hour recency window as the local
+    rest-then-cross policy; a later cut may therefore admit a genuinely new rest.
+
+    Query failure returns no armed tokens, preserving the existing conservative
+    maker default rather than licensing a taker from unavailable provenance.
+    """
+
+    selected = tuple(
+        sorted(
+            {
+                str(token_id).strip()
+                for token_id in token_ids
+                if str(token_id).strip()
+            }
+        )
+    )
+    if not selected or decision_time.tzinfo is None:
+        return frozenset()
+    from src.events.continuous_redecision import REST_VALUE_REFRESH_MIN_AGE_SECONDS
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
+
+    arm_floor_seconds = min(
+        float(MAKER_REST_ESCALATION_DEADLINE_MINUTES) * 60.0,
+        float(REST_VALUE_REFRESH_MIN_AGE_SECONDS),
+    )
+    now = decision_time.astimezone(UTC)
+    placeholders = ",".join("?" for _ in selected)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT vc.token_id, vc.created_at, lf.state, lf.observed_at
+              FROM venue_commands AS vc
+              JOIN venue_order_facts AS lf
+                ON lf.venue_order_id = vc.venue_order_id
+               AND lf.local_sequence = (
+                    SELECT MAX(local_sequence)
+                      FROM venue_order_facts
+                     WHERE venue_order_id = vc.venue_order_id
+                )
+             WHERE vc.intent_kind = 'ENTRY'
+               AND upper(vc.side) = 'BUY'
+               AND vc.token_id IN ({placeholders})
+               AND vc.created_at >= ?
+            """,
+            (*selected, (now - timedelta(hours=24)).isoformat()),
+        ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError):
+        return frozenset()
+
+    armed: set[str] = set()
+    for row in rows:
+        token_id = str(row[0] or "").strip()
+        state = str(row[2] or "").strip().upper()
+        if not token_id or state not in {"CANCEL_CONFIRMED", "EXPIRED"}:
+            continue
+        try:
+            created_at = datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
+            observed_at = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            created_at.tzinfo is not None
+            and observed_at.tzinfo is not None
+            and (observed_at - created_at).total_seconds() >= arm_floor_seconds
+        ):
+            armed.add(token_id)
+    return frozenset(armed)
 
 
 def _venue_commands_q_version_select_expr(conn: sqlite3.Connection) -> str:

@@ -21,6 +21,7 @@ from src.execution.staleness_cancel import (
     _merge_cancel_proposals,
     classify_cancel_set,
     find_open_entry_rests,
+    maker_rest_escalation_armed_token_ids,
     read_current_family_q_versions,
     resolve_order_families,
     run_c3_staleness_cancel_cycle,
@@ -338,6 +339,59 @@ def _seed_submit_requested_forecast_q_payload(
         ),
     )
     conn.commit()
+
+
+def test_maker_rest_escalation_arms_only_terminal_tokens_after_real_window(
+    monkeypatch,
+):
+    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    monkeypatch.setenv("ZEUS_MODE", "dry_run")
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            venue_order_id TEXT,
+            token_id TEXT,
+            side TEXT,
+            intent_kind TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            state TEXT,
+            observed_at TEXT,
+            local_sequence INTEGER
+        );
+        """
+    )
+    for command_id, age_minutes, fact_state in (
+        ("armed", 10, "CANCEL_CONFIRMED"),
+        ("early", 2, "CANCEL_CONFIRMED"),
+        ("live", 10, "LIVE"),
+    ):
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, ?, ?, 'BUY', 'ENTRY', ?)",
+            (
+                command_id,
+                f"v-{command_id}",
+                f"tok-{command_id}",
+                (NOW - timedelta(minutes=age_minutes)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts VALUES (?, ?, ?, 1)",
+            (f"v-{command_id}", fact_state, NOW.isoformat()),
+        )
+
+    armed = maker_rest_escalation_armed_token_ids(
+        conn,
+        token_ids=("tok-armed", "tok-early", "tok-live"),
+        decision_time=NOW,
+    )
+
+    assert armed == frozenset({"tok-armed"})
 
 
 def _seed_market_event(conn, *, token_id: str, city: str, target_date: str, metric: str) -> None:

@@ -1,5 +1,5 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-08-23
+# Last reused/audited: 2026-09-01
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
@@ -98,12 +98,6 @@ def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> 
         "_replacement_forecast_materialize_interval_minutes",
         lambda: 5,
     )
-    monkeypatch.setattr(
-        daemon,
-        "_replacement_forecast_materialize_poll_seconds",
-        lambda: 1,
-    )
-
     daemon._register_replacement_forecast_production_jobs(Scheduler())
 
     materialize = next(
@@ -254,6 +248,30 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE source_run_coverage (
+            source_run_id TEXT,
+            city TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            completeness_status TEXT,
+            readiness_status TEXT,
+            expires_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            range_label TEXT
+        )
+        """
+    )
     eligible = (
         "Amsterdam",
         "2026-08-11",
@@ -272,8 +290,35 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         (
             eligible,
             ("Paris", "2026-08-11", "high", *eligible[3:]),
+            ("Rotterdam", "2026-08-11", "high", *eligible[3:]),
             ("London", "2026-08-11", "high", "other-run", *eligible[4:]),
             ("Milan", "2026-08-11", "high", *eligible[3:7], "UNKNOWN", *eligible[8:]),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO source_run_coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                eligible[3],
+                city,
+                "2026-08-11",
+                "high",
+                completeness,
+                readiness,
+                "2099-01-01T00:00:00+00:00",
+            )
+            for city, completeness, readiness in (
+                ("Amsterdam", "COMPLETE", "LIVE_ELIGIBLE"),
+                ("Paris", "COMPLETE", "LIVE_ELIGIBLE"),
+                ("Rotterdam", "PARTIAL", "BLOCKED"),
+            )
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO market_events VALUES (?, '2026-08-11', 'high', ?, ?)",
+        (
+            (city, f"{city}-token", f"{city}-range")
+            for city in ("Amsterdam", "Paris", "Rotterdam")
         ),
     )
     captured: dict[str, object] = {}
@@ -293,7 +338,7 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         report = daemon._enqueue_committed_opendata_cycle_advance_reseeds(
             conn,
             {
-                "snapshots_inserted": 4,
+                "snapshots_inserted": 5,
                 "source_run_id": eligible[3],
             },
         )

@@ -159,6 +159,11 @@ def _scheduler_job_fresh(
     job = health.get(job_name)
     if not isinstance(job, dict):
         return None
+    # A real failed M5 attempt revokes its durable authority immediately.  A
+    # RUNNING/SKIPPED marker may coexist with the prior unexpired success, but
+    # FAILED cannot authorize a new submit until a later M5 succeeds.
+    if job.get("status") == "FAILED":
+        return None
     last_success_at = job.get("last_success_at")
     if last_success_at:
         return _fresh_timestamp(
@@ -205,6 +210,25 @@ def _durable_sidecar_status(*, now: datetime) -> WSGapStatus | None:
     health_path = state_path("scheduler_jobs_health.json")
     heartbeat = _read_json(heartbeat_path)
     health = _read_json(health_path)
+
+    reconcile_job = health.get("edli_user_channel_reconcile")
+    if not isinstance(reconcile_job, dict):
+        return None
+    reconcile_liveness = reconcile_job.get("business_liveness")
+    heartbeat_generation = heartbeat.get("generation")
+    if (
+        heartbeat.get("daemon") != "price-channel-ingest"
+        or heartbeat.get("status") != "READY"
+        or heartbeat.get("ready") is not True
+        or not isinstance(heartbeat.get("pid"), int)
+        or not isinstance(heartbeat_generation, str)
+        or not heartbeat_generation
+        or not isinstance(reconcile_liveness, dict)
+        or reconcile_liveness.get("daemon_pid") != heartbeat.get("pid")
+        or reconcile_liveness.get("heartbeat_generation") != heartbeat_generation
+        or not reconcile_liveness.get("heartbeat_receipt")
+    ):
+        return None
 
     heartbeat_at = _fresh_timestamp(
         heartbeat.get("alive_at"),

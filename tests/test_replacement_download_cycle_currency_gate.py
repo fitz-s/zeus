@@ -1,6 +1,6 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-21
-# Lifecycle: created=2026-06-09; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused or audited: 2026-08-30
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
@@ -57,7 +57,8 @@ CREATE TABLE raw_forecast_artifacts (
     artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
     trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
     training_allowed INTEGER NOT NULL DEFAULT 0,
-    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, product_id, data_version, source_cycle_time, sha256)
 )
 """
 
@@ -115,11 +116,12 @@ def test_current_target_download_prioritizes_held_families_before_alphabetic() -
     rotated, start, rotating_count, generation, _ = dl._rotate_current_target_rows(
         ordered,
         cycle=AVAILABLE_CYCLE.replace(hour=4),
+        pinned_prefix_count=2,
     )
 
     assert [row.city for row in ordered] == ["Wellington", "Dallas", "Amsterdam"]
     assert start == 0
-    assert rotating_count == 3
+    assert rotating_count == 1
     assert generation == 0
     assert [row.city for row in rotated] == ["Wellington", "Dallas", "Amsterdam"]
 
@@ -169,7 +171,7 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
 
 
-def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
+def test_durable_rotation_keeps_held_prefix_while_rotating_ordinary_lane(
     tmp_path: Path,
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
@@ -189,6 +191,7 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         ordered,
         cycle=cycle,
         state_path=state_path,
+        pinned_prefix_count=1,
     )
     assert first[0].city == "Dallas"
     next_start, applied = dl._advance_current_target_rotation(
@@ -208,10 +211,11 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         ordered,
         cycle=cycle,
         state_path=state_path,
+        pinned_prefix_count=1,
     )
 
     assert start == 1
-    assert after_restart[0].city == "Amsterdam"
+    assert [row.city for row in after_restart] == ["Dallas", "Ankara", "Amsterdam"]
 
 
 def test_rotation_cursor_normalizes_when_same_cycle_universe_shrinks(
@@ -1254,6 +1258,354 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
     assert persisted == (original_capture, original_capture, 1)
 
 
+@pytest.mark.parametrize(
+    ("sibling_metric", "wanted_metric"),
+    (("high", "low"), ("low", "high")),
+)
+def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
+    tmp_path,
+    monkeypatch,
+    sibling_metric: str,
+    wanted_metric: str,
+) -> None:
+    """One canonical hourly payload supplies both metric manifests at one cycle."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    target = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric=wanted_metric,
+        covered=True,
+        missing_openmeteo_manifest=True,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    output_dir = tmp_path / "raw"
+    raw_dir = output_dir / AVAILABLE_CYCLE.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    sibling_target_date = "2026-06-09"
+    sibling_path = raw_dir / (
+        f"openmeteo_Dallas_{sibling_target_date}_{sibling_metric}_20260609T000000Z.json"
+    )
+    sibling_path.write_text(json.dumps(_anchor_payload()) + "\n")
+    captured_at = "2026-06-09T13:59:45+00:00"
+    raw = sibling_path.read_bytes()
+    sibling_data_version = (
+        dl.OPENMETEO_HIGH_DATA_VERSION
+        if sibling_metric == "high"
+        else dl.OPENMETEO_LOW_DATA_VERSION
+    )
+    wanted_data_version = (
+        dl.OPENMETEO_HIGH_DATA_VERSION
+        if wanted_metric == "high"
+        else dl.OPENMETEO_LOW_DATA_VERSION
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts (
+            source_id, product_id, data_version, source_cycle_time,
+            source_available_at, captured_at, artifact_path, sha256,
+            byte_size, artifact_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            dl.OPENMETEO_SOURCE_ID,
+            dl.OPENMETEO_PRODUCT_ID,
+            sibling_data_version,
+            AVAILABLE_CYCLE.isoformat(),
+            captured_at,
+            captured_at,
+            str(sibling_path),
+            hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            json.dumps(
+                {
+                    "city": "Dallas",
+                    "target_date": sibling_target_date,
+                    "metric": sibling_metric,
+                    "openmeteo_endpoint": "standard_api_meta_stamped",
+                    "run_authority": "provider_meta_declared",
+                    "openmeteo_payload_json": str(sibling_path),
+                    "precision_metadata_json": str(raw_dir / "unused-high-precision.json"),
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda *args, **kwargs: pytest.fail("verified sibling bytes must avoid network"),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", wanted_metric),),
+    )
+
+    conn = sqlite3.connect(db)
+    low = conn.execute(
+        "SELECT data_version, source_cycle_time, artifact_path, sha256, "
+        "json_extract(artifact_metadata_json, '$.metric'), "
+        "json_extract(artifact_metadata_json, '$.raw_metric_sibling_reuse'), "
+        "json_extract(artifact_metadata_json, '$.raw_target_date_sibling_reuse') "
+        "FROM raw_forecast_artifacts WHERE data_version = ?",
+        (wanted_data_version,),
+    ).fetchone()
+    conn.close()
+    assert report["sibling_payload_reuse_count"] == 1
+    assert report["written_manifest_count"] == 1
+    assert low[:2] == (wanted_data_version, AVAILABLE_CYCLE.isoformat())
+    assert Path(low[2]).name.endswith(
+        f"_{wanted_metric}_20260609T000000Z.json"
+    )
+    assert low[3] == hashlib.sha256(Path(low[2]).read_bytes()).hexdigest()
+    assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
+
+
+def test_scoped_download_closes_active_metric_twin_from_one_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?)",
+        (
+            ("Dallas", "2026-06-10", "high"),
+            ("Dallas", "2026-06-10", "low"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    fetches = []
+
+    def _resolve(**kwargs):
+        fetches.append((kwargs["city"], kwargs["target_date"]))
+        return (
+            _anchor_payload(),
+            {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            },
+        )
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _resolve)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", "high"),),
+    )
+
+    conn = sqlite3.connect(db)
+    metrics = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT json_extract(artifact_metadata_json, '$.metric')
+              FROM raw_forecast_artifacts
+            """
+        ).fetchall()
+    }
+    conn.close()
+    assert len(fetches) == 1
+    assert report["required_scope_count"] == 2
+    assert report["written_manifest_count"] == 2
+    assert metrics == {"high", "low"}
+
+
+def test_identical_run_payloads_persist_distinct_target_certificates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Content identity must not collapse two target dates onto one artifact row."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
+    fetches: list[tuple[tuple[str, str], ...]] = []
+
+    def _wave(requests, **_kwargs):
+        keys = tuple(requests)
+        fetches.append(keys)
+        captured_at = datetime.now(timezone.utc)
+        return {
+            key: (
+                _anchor_payload(),
+                {
+                    "openmeteo_endpoint": "single_runs_api",
+                    "run_authority": "run_pinned_single_runs",
+                },
+                captured_at,
+            )
+            for key in keys
+        }
+
+    monkeypatch.setattr(dl, "_fetch_run_pinned_anchor_wave", _wave)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(
+            ("Dallas", "2026-06-10", "high"),
+            ("Dallas", "2026-06-11", "high"),
+        ),
+    )
+
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT sha256, artifact_path, "
+        "json_extract(artifact_metadata_json, '$.target_date') "
+        "FROM raw_forecast_artifacts ORDER BY artifact_id"
+    ).fetchall()
+    conn.close()
+
+    assert len(fetches) == 1
+    assert report["written_manifest_count"] == 2
+    assert len(rows) == 2
+    assert len({row[0] for row in rows}) == 2
+    assert {row[2] for row in rows} == {"2026-06-10", "2026-06-11"}
+    for _sha, artifact_path, target_date in rows:
+        payload = json.loads(Path(artifact_path).read_text())
+        assert payload["_zeus_current_target_scope"] == {
+            "city": "Dallas",
+            "target_date": target_date,
+            "metric": "high",
+        }
+
+
+def test_current_cycle_wave_fetches_identical_city_run_once_and_fans_out_dates() -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    first_key = ("Dallas", "2026-06-10")
+    second_key = ("Dallas", "2026-06-11")
+    request = dl.build_anchor_request(
+        latitude=32.8998,
+        longitude=-97.0403,
+        run=AVAILABLE_CYCLE,
+        timezone_name="America/Chicago",
+        forecast_hours=120,
+        past_hours=dl.CURRENT_RUN_CONTEXT_HOURS,
+    )
+    requests = {first_key: request, second_key: request}
+
+    representatives, fanout = dl._dedupe_pending_anchor_requests(requests)
+    payload = {
+        "utc_offset_seconds": -18000,
+        "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {
+            "time": ["2026-06-10T12:00", "2026-06-11T12:00"],
+            "temperature_2m": [30.0, 31.0],
+        },
+    }
+    fetched = {
+        first_key: (
+            payload,
+            {"run_authority": "run_pinned_single_runs"},
+            AVAILABLE_CYCLE,
+        )
+    }
+    expanded = dl._fan_out_anchor_payloads(
+        fetched,
+        requests=requests,
+        fanout=fanout,
+    )
+
+    assert representatives == {first_key: request}
+    assert fanout == {first_key: (first_key, second_key)}
+    assert set(expanded) == {first_key, second_key}
+    assert all(
+        row[1]["request_payload_fanout_count"] == 2
+        for row in expanded.values()
+    )
+
+
+def test_zero_manifest_transport_failure_is_retryable_not_downloaded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        BucketTransportNotAdmissible,
+    )
+
+    target = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=False,
+        missing_openmeteo_manifest=True,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: False)
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BucketTransportNotAdmissible("no verified transport")
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=((target.city, target.target_date, target.temperature_metric),),
+    )
+
+    assert report["written_manifest_count"] == 0
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE"
+
+
 def test_canonical_reuse_refuses_and_repairs_semantically_wrong_precision_sidecar(
     tmp_path: Path,
     monkeypatch,
@@ -1540,6 +1892,40 @@ def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(
     assert calls[0]["limit"] is None
 
 
+def test_ordinary_scoped_current_anchor_coverage_skips_transport(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": AVAILABLE_CYCLE.isoformat(),
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Moscow", "2026-08-31", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production."
+        "_critical_scopes_missing_current_anchor",
+        lambda _db, scopes, _cycle: () if tuple(scopes) == (scope,) else tuple(scopes),
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+    )
+
+    assert report == {
+        "status": "CURRENT_TARGETS_ALREADY_COVERED",
+        "available_cycle": AVAILABLE_CYCLE.isoformat(),
+        "downloaded_cycle": AVAILABLE_CYCLE.isoformat(),
+        "target_count": 1,
+        "written_manifest_count": 0,
+    }
+    assert calls == []
+
+
 def test_exact_held_day0_scope_enters_critical_quota_lane(
     tmp_path, monkeypatch
 ) -> None:
@@ -1583,7 +1969,7 @@ def test_exact_held_day0_scope_enters_critical_quota_lane(
     assert calls[0]["required_scopes"] == (scope,)
 
 
-def test_nonheld_scope_cannot_borrow_critical_quota(
+def test_active_held_scope_can_borrow_critical_quota(
     tmp_path, monkeypatch
 ) -> None:
     db = _make_db(
@@ -1601,13 +1987,118 @@ def test_nonheld_scope_cannot_borrow_critical_quota(
         lambda: {scope: 1},
     )
 
-    with pytest.raises(ValueError, match="exact canonical day0_window/pending_exit"):
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report is not None
+    assert calls[0]["required_scopes"] == (scope,)
+
+
+def test_nonheld_scope_cannot_borrow_critical_quota(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Cape Town", "2026-08-19", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {},
+    )
+
+    with pytest.raises(ValueError, match="exact canonical open-held scopes"):
         _download_replacement_forecast_current_targets_if_needed(
             _cfg(db, tmp_path),
             required_scopes=(scope,),
             quota_critical=True,
         )
 
+    assert calls == []
+
+
+def test_past_held_scope_does_not_block_current_held_anchor(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    past_scope = ("Dallas", "2026-06-08", "high")
+    current_scope = ("Dallas", "2026-06-10", "low")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {past_scope: 0, current_scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(past_scope, current_scope),
+        quota_critical=True,
+    )
+
+    assert report is not None
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == (current_scope,)
+    assert report["structurally_unservable_scope_count"] == 1
+    assert report["structurally_unservable_scopes"] == [list(past_scope)]
+    assert report["scope_exclusions"] == [
+        {
+            "scope": list(past_scope),
+            "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+        }
+    ]
+
+
+def test_only_past_held_scopes_close_forecast_lane_without_http(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {"openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO},
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Dallas", "2026-06-08", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report == {
+        "status": "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
+        "available_cycle": AVAILABLE_CYCLE.isoformat(),
+        "downloaded_cycle": datetime.fromisoformat(STALE_CYCLE_ISO).isoformat(),
+        "target_count": 1,
+        "structurally_unservable_scope_count": 1,
+        "structurally_unservable_scopes": [list(scope)],
+        "scope_exclusions": [
+            {
+                "scope": list(scope),
+                "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+            }
+        ],
+        "written_manifest_count": 0,
+    }
     assert calls == []
 
 
@@ -1619,6 +2110,7 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
         {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO},
     )
     scope = ("Dallas", "2026-08-17", "high")
+    past_scope = ("Dallas", "2026-06-08", "low")
     payload_path = tmp_path / "openmeteo_Dallas_2026-08-17_high.json"
     payload_path.write_text(json.dumps(_anchor_payload("2026-08-17")) + "\n")
     payload_bytes = payload_path.read_bytes()
@@ -1662,18 +2154,25 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
-        lambda: {scope: 0},
+        lambda: {past_scope: 0, scope: 0},
     )
 
     report = _download_replacement_forecast_current_targets_if_needed(
         _cfg(db, tmp_path),
-        required_scopes=(scope,),
+        required_scopes=(past_scope, scope),
         quota_critical=True,
     )
 
     assert report["status"] == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     assert report["target_count"] == 1
     assert report["written_manifest_count"] == 0
+    assert report["structurally_unservable_scopes"] == [list(past_scope)]
+    assert report["scope_exclusions"] == [
+        {
+            "scope": list(past_scope),
+            "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
+        }
+    ]
     assert calls == []
     assert pool.close_count == 0
     production._close_current_target_bucket_pool()

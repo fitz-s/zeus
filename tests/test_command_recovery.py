@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-09-01
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1814,6 +1814,119 @@ def test_bounded_recovery_read_factory_interrupts_query_at_deadline(monkeypatch)
         conn.close()
 
 
+def test_priming_read_unit_is_query_only_and_closes_after_rollback(tmp_path):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-ro.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE candidates (value INTEGER)")
+    seed.executemany("INSERT INTO candidates VALUES (?)", [(1,), (2,)])
+    seed.commit()
+    seed.close()
+
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    state = {}
+    with command_recovery._open_recovery_priming_read_connection(
+        _read_factory,
+        deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        preempt_callback=lambda: False,
+        state=state,
+    ) as conn:
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert conn.execute("SELECT sum(value) FROM candidates").fetchone()[0] == 3
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE forbidden (value INTEGER)")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert state == {}
+
+
+def test_priming_read_interrupts_on_monitor_preemption_and_releases_read_unit(
+    tmp_path,
+):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-preempt.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE candidates (value INTEGER)")
+    seed.commit()
+    seed.close()
+
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    callback_calls = []
+
+    def _preempt():
+        callback_calls.append(True)
+        return True
+
+    state = {}
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        with command_recovery._open_recovery_priming_read_connection(
+            _read_factory,
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+            preempt_callback=_preempt,
+            state=state,
+        ) as conn:
+            conn.execute(
+                "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                "SELECT n + 1 FROM seq WHERE n < 1000000) "
+                "SELECT sum(n) FROM seq"
+            ).fetchone()
+
+    assert callback_calls
+    assert state["reason"] == "monitor_preempted"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+
+
+def test_priming_callback_exception_is_fail_closed_preemption(tmp_path):
+    from src.execution import command_recovery
+
+    db_path = tmp_path / "priming-callback-error.db"
+    sqlite3.connect(db_path).close()
+    opened = []
+
+    def _read_factory():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        opened.append(conn)
+        return conn
+
+    state = {}
+
+    def _broken_callback():
+        raise RuntimeError("monitor state unavailable")
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        with command_recovery._open_recovery_priming_read_connection(
+            _read_factory,
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+            preempt_callback=_broken_callback,
+            state=state,
+        ) as conn:
+            conn.execute(
+                "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                "SELECT n + 1 FROM seq WHERE n < 1000000) "
+                "SELECT sum(n) FROM seq"
+            ).fetchone()
+
+    assert state["reason"] == "monitor_preempted"
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+
+
 def test_live_tick_snapshot_uses_complete_account_truth_and_shared_deadline():
     from src.execution import command_recovery
 
@@ -1876,6 +1989,47 @@ def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
         conn.close()
 
 
+def test_exact_capital_apply_ignores_monitor_preemption_but_keeps_deadline(monkeypatch):
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+
+    class Coordinator:
+        @staticmethod
+        def has_pending_monitor_waiter(_dbs):
+            return True
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: Coordinator(),
+    )
+
+    def _factory(**_kwargs):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE rows (value INTEGER)")
+        conn.executemany(
+            "INSERT INTO rows VALUES (?)",
+            ((i,) for i in range(200)),
+        )
+        return conn
+
+    _factory.supports_nonblocking_flocks = True
+    exact_capital_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="live_tick",
+        deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        monitor_preemptible=False,
+    )
+
+    with exact_capital_factory() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM rows first, rows second, rows third"
+        ).fetchone()[0] == 8_000_000
+    assert not bool(
+        getattr(command_recovery._RECOVERY_MONITOR_PREEMPTION, "pending", False)
+    )
+
+
 def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
     from src.execution import command_recovery
 
@@ -1923,6 +2077,7 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         return conn
 
     def _project_exit(_conn, **_kwargs):
+        assert _kwargs["command_ids"] == ("cmd-current-exit",)
         calls.append("recorded_exit_fill_projection_fast")
         return {"scanned": 1, "projected": 1, "stayed": 0, "errors": 0}
 
@@ -1937,6 +2092,11 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         command_recovery,
         "_recorded_exit_fill_projection_candidates",
         lambda _conn: True,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_filled_exit_projection_blocker_command_ids",
+        lambda _conn: ("cmd-current-exit",),
     )
     monkeypatch.setattr(
         command_recovery._exchange_reconcile,
@@ -1996,8 +2156,8 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
         command_recovery,
-        "_authenticated_entry_trade_fact_candidates",
-        _candidates,
+        "_bounded_authenticated_entry_trade_fact_candidates",
+        lambda _conn, *, states: _candidates(_conn),
     )
     monkeypatch.setattr(
         command_recovery,
@@ -2023,6 +2183,76 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
         ("review_required_matched_submit_trade_fact", None),
     ]
     assert summary["authenticated_terminal_fill_review_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["db_budget_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
+
+
+def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
+    monkeypatch,
+):
+    """A confirmed FILLED increment projects before general recovery work."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _authenticated(_conn, *, command_id=None):
+        calls.append(("authenticated_terminal_entry_projection_fast", command_id))
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _later_review(_conn):
+        calls.append(("review_required_matched_submit_trade_fact", None))
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_bounded_authenticated_entry_trade_fact_candidates",
+        lambda _conn, *, states: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_filled_entry_projection_blocker_command_ids",
+        lambda _conn: ("cmd-current-filled",),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _authenticated,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _later_review,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-01T22:22:59+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        ("authenticated_terminal_entry_projection_fast", "cmd-current-filled"),
+        ("review_required_matched_submit_trade_fact", None),
+    ]
+    assert summary["authenticated_terminal_entry_projection_fast"] == {
         "scanned": 1,
         "advanced": 1,
         "stayed": 0,
@@ -2447,6 +2677,10 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
         calls.append("terminal_entry_exposure_obligations")
         return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
 
+    def _obligation_execution_fact(_conn):
+        calls.append("open_entry_obligation_execution_fact_repair")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
     def _matched_cancel_review(_conn):
         calls.append("matched_cancel_review_required_entries")
         return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -2477,6 +2711,11 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
     )
     monkeypatch.setattr(
         command_recovery,
+        "reconcile_open_entry_obligation_execution_fact_repairs",
+        _obligation_execution_fact,
+    )
+    monkeypatch.setattr(
+        command_recovery,
         "reconcile_matched_cancel_review_required_entries",
         _matched_cancel_review,
     )
@@ -2500,6 +2739,7 @@ def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_def
     )
 
     assert calls == [
+        "open_entry_obligation_execution_fact_repair",
         "terminal_entry_exposure_obligations",
         "matched_cancel_review_required_entries",
         "terminal_order_facts",
@@ -5481,25 +5721,27 @@ class TestAuthenticatedEntryTradeFactProjection:
         ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
-    def test_price_improved_fak_overfill_bootstraps_missing_position(
-        self, conn, monkeypatch
+    @pytest.mark.parametrize("order_type", ["FAK", "FOK"])
+    def test_price_improved_taker_overfill_bootstraps_missing_position(
+        self, conn, monkeypatch, order_type
     ):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
         )
 
-        command_id = "cmd-authenticated-fak-price-improvement"
-        position_id = "pos-authenticated-fak-price-improvement"
-        order_id = "ord-authenticated-fak-price-improvement"
-        token_id = "tok-authenticated-fak-price-improvement"
+        suffix = order_type.lower()
+        command_id = f"cmd-authenticated-{suffix}-price-improvement"
+        position_id = f"pos-authenticated-{suffix}-price-improvement"
+        order_id = f"ord-authenticated-{suffix}-price-improvement"
+        token_id = f"tok-authenticated-{suffix}-price-improvement"
         _insert(
             conn,
             command_id=command_id,
             position_id=position_id,
-            decision_id="dec-authenticated-fak-price-improvement",
+            decision_id=f"dec-authenticated-{suffix}-price-improvement",
             token_id=token_id,
             event_slug="highest-temperature-in-singapore-on-july-24-2026-30c",
-            order_type="FAK",
+            order_type=order_type,
             size=173.0,
             price=0.09,
         )
@@ -5572,13 +5814,31 @@ class TestAuthenticatedEntryTradeFactProjection:
             "src.state.db.get_forecasts_connection_read_only",
             forecasts_connection,
         )
-        _append_confirmed_trade_fact(
+        trade_id = f"trade-authenticated-{suffix}-price-improvement"
+        _append_trade_fact(
             conn,
             command_id=command_id,
             order_id=order_id,
-            trade_id="trade-authenticated-fak-price-improvement",
+            trade_id=trade_id,
+            state="CONFIRMED" if order_type == "FAK" else "MATCHED",
+            source="REST" if order_type == "FAK" else "WS_USER",
             filled_size="189.77",
             fill_price="0.08",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": (
+                    "partial_remainder_point_order_filled_without_full_trade_fact"
+                ),
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+            },
         )
 
         summary = reconcile_authenticated_entry_trade_facts(
@@ -5588,6 +5848,15 @@ class TestAuthenticatedEntryTradeFactProjection:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "FILLED"
+        fill_payload = json.loads(_get_events(conn, command_id)[-1]["payload_json"])
+        assert fill_payload["fill_bound_semantics"] == (
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+        )
+        assert fill_payload["proof_class"] == (
+            "authenticated_trade_fact_full_fill"
+            if order_type == "FAK"
+            else "authenticated_trade_fact_terminal_fill"
+        )
         position = conn.execute(
             """
             SELECT phase, city, target_date, temperature_metric, unit, bin_label, token_id,
@@ -5791,6 +6060,7 @@ class TestAuthenticatedEntryTradeFactProjection:
         ("order_type", "filled_size", "fill_price"),
         [
             ("FAK", "200", "0.08"),
+            ("FOK", "200", "0.08"),
             ("GTC", "189.77", "0.08"),
         ],
     )
@@ -7104,6 +7374,427 @@ class TestRecoveryResolutionTable:
             "reason": "recovery_order_not_found_at_venue",
             "venue_order_id": "vord-empty",
         }
+
+    def test_bound_entry_authenticated_absence_terminalizes_zero_exposure(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """Exact point/account absence must release a bound no-fill ENTRY."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        command_id = "cmd-bound-entry-absent"
+        position_id = "pos-bound-entry-absent"
+        order_id = "ord-bound-entry-absent"
+        token_id = "tok-bound-entry-absent"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+            size=12,
+            price=0.51,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class CompleteVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:05:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, command_id) == "EXPIRED"
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert {
+            "state": fact["state"],
+            "matched_size": fact["matched_size"],
+            "remaining_size": fact["remaining_size"],
+        } == {
+            "state": "VENUE_WIPED",
+            "matched_size": "0",
+            "remaining_size": "0",
+        }
+        terminal = json.loads(fact["raw_payload_json"])
+        assert terminal["venue_read_proof"]["point_order_query_complete"] is True
+        assert terminal["venue_read_proof"]["point_order_absent"] is True
+        event = _get_events(conn, command_id)[-1]
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        assert payload["proof_class"] == "bound_entry_terminal_no_fill"
+        assert payload["venue_absence_proof"]["point_order_absence_reason"] == (
+            "authenticated_order_404"
+        )
+        projection = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(projection) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+        }
+
+        # The final append boundary must independently reject forged remote
+        # completeness even after a real terminal fact exists locally.
+        forged = json.loads(event["payload_json"])
+        forged["venue_absence_proof"]["point_order_query_complete"] = False
+        conn.execute(
+            "DELETE FROM venue_command_events WHERE event_id = ?",
+            (event["event_id"],),
+        )
+        latest = conn.execute(
+            """
+            SELECT event_id, occurred_at
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        conn.execute(
+            "UPDATE venue_commands SET state = 'REVIEW_REQUIRED', "
+            "last_event_id = ?, updated_at = ? WHERE command_id = ?",
+            (latest["event_id"], latest["occurred_at"], command_id),
+        )
+        with pytest.raises(ValueError, match="point_order_query_complete"):
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type="REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+                occurred_at="2026-04-26T00:05:01+00:00",
+                payload=forged,
+            )
+
+    def test_bound_entry_absence_preserves_certified_existing_increment_position(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """No-fill is command-specific; an older synced position stays active."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        order_id = "ord-bound-entry-increment"
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, order_id=order_id)
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        before = dict(
+            conn.execute(
+                "SELECT phase, shares, chain_shares, cost_basis_usd, "
+                "chain_cost_basis_usd, order_id FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class CompleteVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:05:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        after = dict(
+            conn.execute(
+                "SELECT phase, shares, chain_shares, cost_basis_usd, "
+                "chain_cost_basis_usd, order_id FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+        )
+        assert after == before
+        payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert payload["required_predicates"][
+            "no_positive_position_projection"
+        ] is False
+        assert payload["required_predicates"][
+            "persisted_reconciled_position_increment"
+        ] is True
+        assert payload["existing_position_increment_proof"][
+            "increment_position_id"
+        ] == "pos-001"
+
+    def test_bound_entry_unverified_or_conflicting_absence_stays_review_required(
+        self,
+        conn,
+    ):
+        """Neither an unverified None nor a contradictory open order is absence."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        command_id = "cmd-bound-entry-incomplete"
+        order_id = "ord-bound-entry-incomplete"
+        _insert(conn, command_id=command_id, position_id="pos-bound-entry-incomplete")
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": order_id,
+            },
+        )
+
+        class UnverifiedVenue:
+            @staticmethod
+            def get_order(_order_id):
+                return None
+
+            @staticmethod
+            def get_open_orders():
+                return []
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        incomplete = command_recovery.reconcile_unresolved_commands(
+            conn,
+            UnverifiedVenue(),
+        )
+        assert incomplete["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+        class ConflictingVenue:
+            venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
+
+            @staticmethod
+            def get_order(read_order_id):
+                raise VenueOrderNotFound(read_order_id)
+
+            @staticmethod
+            def get_open_orders():
+                return [{
+                    "id": order_id,
+                    "asset_id": "tok-001",
+                    "side": "BUY",
+                    "price": "0.5",
+                    "original_size": "10",
+                    "status": "LIVE",
+                }]
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        conflicting = command_recovery.reconcile_unresolved_commands(
+            conn,
+            ConflictingVenue(),
+        )
+        assert conflicting["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+
+    def test_bound_entry_live_order_or_confirmed_trade_restores_exact_truth(
+        self,
+        conn,
+        mock_client,
+    ):
+        """The symmetric positive branches must not be mistaken for absence."""
+        from src.execution import command_recovery
+        from src.state.venue_command_repo import append_event
+
+        live_command = "cmd-bound-entry-live"
+        live_order = "ord-bound-entry-live"
+        live_token = "tok-bound-entry-live"
+        _insert(
+            conn,
+            command_id=live_command,
+            position_id="pos-bound-entry-live",
+            token_id=live_token,
+            size=10,
+            price=0.52,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=live_command,
+            venue_order_id=live_order,
+        )
+        append_event(
+            conn,
+            command_id=live_command,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": live_order,
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": live_order,
+            "asset_id": live_token,
+            "side": "BUY",
+            "price": "0.52",
+            "original_size": "10",
+            "status": "LIVE",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        live_summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            mock_client,
+        )
+        assert live_summary["advanced"] == 1
+        assert _get_state(conn, live_command) == "ACKED"
+        live_payload = json.loads(_get_events(conn, live_command)[-1]["payload_json"])
+        assert live_payload["proof_class"] == "bound_entry_venue_order_live"
+
+        trade_command = "cmd-bound-entry-trade"
+        trade_order = "ord-bound-entry-trade"
+        trade_token = "tok-bound-entry-trade"
+        _insert(
+            conn,
+            command_id=trade_command,
+            position_id="pos-bound-entry-trade",
+            token_id=trade_token,
+            size=10,
+            price=0.53,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=trade_command,
+            venue_order_id=trade_order,
+        )
+        append_event(
+            conn,
+            command_id=trade_command,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "reason": "recovery_order_not_found_at_venue",
+                "venue_order_id": trade_order,
+            },
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [{
+            "id": "trade-bound-entry",
+            "status": "CONFIRMED",
+            "match_time": "2026-04-26T00:04:00Z",
+            "transaction_hash": "0xboundentry",
+            "maker_orders": [{
+                "asset_id": trade_token,
+                "order_id": trade_order,
+                "side": "BUY",
+                "price": "0.53",
+                "matched_amount": "10",
+            }],
+        }]
+
+        trade_summary = command_recovery.reconcile_unresolved_commands(
+            conn,
+            mock_client,
+        )
+        assert trade_summary["advanced"] >= 1
+        assert _get_state(conn, trade_command) == "FILLED"
+        trade_payload = json.loads(
+            _get_events(conn, trade_command)[-1]["payload_json"]
+        )
+        assert trade_payload["proof_class"] == (
+            "recovery_order_not_found_at_venue_confirmed_trade"
+        )
 
     def test_bound_fak_exit_absence_releases_to_fresh_redecision(
         self,
@@ -12015,6 +12706,63 @@ class TestRecoveryResolutionTable:
         assert payload["rest_then_cross_escalated_after_rest"] is True
         assert payload["rest_then_cross_escalation_source"] == "terminal_no_fill"
 
+    def test_terminal_no_fill_capital_pass_defers_redecision_until_after_commit(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """Forecast work cannot roll back an already-proven capital release."""
+        from src.execution import command_recovery
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+        )
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_emit_terminal_no_fill_redecision_from_recovery",
+            lambda *args, **kwargs: pytest.fail(
+                "bounded capital pass must not run forecast redecision in its transaction"
+            ),
+        )
+
+        summary = reconcile_terminal_order_facts(
+            conn,
+            collect_continuations=True,
+            emit_immediate_redecision=False,
+        )
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert "immediate_redecision_events" not in summary
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
@@ -12089,6 +12837,76 @@ class TestRecoveryResolutionTable:
 
         assert summary["projection"]["advanced"] == 1
         assert _get_state(conn, "cmd-001") == "EXPIRED"
+
+    def test_restart_preflight_folds_durable_terminal_fact_before_point_read(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Deploy recovery must not require REST for an ingested cancel fact."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "restart-durable-terminal-fact.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-001")
+        _seed_pending_entry_projection(seed)
+        _append_order_fact(
+            seed,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        client = MagicMock(
+            spec_set=[
+                "get_account_truth",
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+            ]
+        )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
+        )
+        client.get_order.side_effect = pytest.fail
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope="restart_preflight",
+            deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+        )
+
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "CANCELLED"
+        finally:
+            verified.close()
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert summary["terminal_no_fill_continuations"][0]["command_id"] == "cmd-001"
+        client.get_order.assert_not_called()
 
     def test_live_tick_primes_acked_order_before_projection_creates_terminal_candidate(
         self,
@@ -15719,7 +16537,8 @@ class TestRecoveryResolutionTable:
         current = conn.execute(
             """
             SELECT phase, condition_id, token_id, no_token_id, shares, cost_basis_usd,
-                   entry_price, order_id, order_status, strategy_key, temperature_metric
+                   entry_price, order_id, order_status, strategy_key,
+                   temperature_metric, fill_authority
               FROM position_current
              WHERE position_id = 'pos-001'
             """
@@ -15736,6 +16555,7 @@ class TestRecoveryResolutionTable:
             "order_status": "filled",
             "strategy_key": "opening_inertia",
             "temperature_metric": "high",
+            "fill_authority": "venue_confirmed_full",
         }
         events = conn.execute(
             """
@@ -15786,6 +16606,29 @@ class TestRecoveryResolutionTable:
             "venue_status": "MATCHED",
             "terminal_exec_status": "filled",
         }
+        conn.execute(
+            "UPDATE position_current SET fill_authority = NULL "
+            "WHERE position_id = 'pos-001'"
+        )
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        authority_repair = reconcile_filled_entry_projection_repairs(
+            conn,
+            mock_client,
+        )
+        assert authority_repair == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT fill_authority FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()["fill_authority"] == "venue_confirmed_full"
+
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_projection_repair"] == {
             "scanned": 0,
@@ -25683,6 +26526,320 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_cancelled_increment_repairs_its_bound_fact_and_releases_obligation(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+            reconcile_open_entry_obligation_execution_fact_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.ledger import append_many_and_project
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-cancelled-increment"
+        baseline_command = "cmd-cancelled-increment-baseline"
+        baseline_order = "ord-cancelled-increment-baseline"
+        _insert(
+            conn,
+            command_id=baseline_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-baseline",
+            size=5.0,
+            price=0.30,
+            created_at="2026-04-26T00:01:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=baseline_command,
+            venue_order_id=baseline_order,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+            (baseline_command,),
+        )
+        _append_trade_fact(
+            conn,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            trade_id="trade-cancelled-increment-baseline",
+            filled_size="5",
+            fill_price="0.30",
+        )
+        _append_order_fact(
+            conn,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            state="MATCHED",
+            matched_size="5",
+            remaining_size="0",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=baseline_command,
+            order_id=baseline_order,
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=baseline_command,
+            order_id=baseline_order,
+            shares=5.0,
+            cost_basis_usd=1.50,
+            size_usd=1.50,
+            entry_price=0.30,
+        )
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry:{baseline_command}",
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-baseline",
+            command_id=baseline_command,
+            order_role="entry",
+            posted_at="2026-04-26T00:01:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            fill_price=0.30,
+            shares=5.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+
+        increment_command = "cmd-cancelled-increment"
+        increment_order = "ord-cancelled-increment"
+        _insert(
+            conn,
+            command_id=increment_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment",
+            size=10.0,
+            price=0.35,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _open_test_entry_obligation(conn, increment_command)
+        _advance_to_acked(
+            conn,
+            command_id=increment_command,
+            venue_order_id=increment_order,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            trade_id="trade-cancelled-increment-1",
+            filled_size="4",
+            fill_price="0.35",
+            observed_at="2026-04-26T00:10:00Z",
+        )
+        _append_trade_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            trade_id="trade-cancelled-increment-2",
+            filled_size="2",
+            fill_price="0.35",
+            observed_at="2026-04-26T00:11:00Z",
+        )
+        _append_order_fact(
+            conn,
+            command_id=increment_command,
+            order_id=increment_order,
+            state="PARTIALLY_MATCHED",
+            matched_size="6",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "terminal_partial_order_fact",
+                "status": "PARTIALLY_MATCHED",
+            },
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:12:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:13:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        append_event(
+            conn,
+            command_id=increment_command,
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:14:00Z",
+            payload={"venue_order_id": increment_order},
+        )
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry:{increment_command}",
+            position_id=position_id,
+            decision_id="dec-cancelled-increment",
+            command_id=increment_command,
+            order_role="entry",
+            posted_at="2026-04-26T00:07:00Z",
+            filled_at="2026-04-26T00:10:00Z",
+            fill_price=0.35,
+            shares=4.0,
+            venue_status="PARTIAL",
+            terminal_exec_status="partial",
+        )
+        projection = dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        )
+        projection.update(
+            phase="active",
+            shares=11.0,
+            cost_basis_usd=3.60,
+            size_usd=3.60,
+            entry_price=3.60 / 11.0,
+            order_id=increment_order,
+            order_status="partial",
+            fill_authority="venue_position_observed",
+            chain_state="synced",
+            chain_shares=11.0,
+            chain_cost_basis_usd=3.60,
+            chain_avg_price=3.60 / 11.0,
+            updated_at="2026-04-26T00:15:00Z",
+        )
+        append_many_and_project(
+            conn,
+            [
+                {
+                    "event_id": f"{position_id}:filled:{increment_command}",
+                    "position_id": position_id,
+                    "event_version": 1,
+                    "sequence_no": 4,
+                    "event_type": "ENTRY_ORDER_FILLED",
+                    "occurred_at": "2026-04-26T00:15:00Z",
+                    "phase_before": "active",
+                    "phase_after": "active",
+                    "strategy_key": "opening_inertia",
+                    "decision_id": "dec-cancelled-increment",
+                    "snapshot_id": "snap-pos-001",
+                    "order_id": increment_order,
+                    "command_id": increment_command,
+                    "caused_by": None,
+                    "idempotency_key": f"{position_id}:filled:{increment_command}",
+                    "venue_status": "PARTIAL",
+                    "source_module": "tests.test_command_recovery",
+                    "env": "live",
+                    "payload_json": json.dumps(
+                        {"shares": 6.0, "size_usd": 2.10, "entry_price": 0.35},
+                        sort_keys=True,
+                    ),
+                }
+            ],
+            projection,
+        )
+
+        assert reconcile_open_entry_obligation_execution_fact_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        facts = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE position_id = ? AND order_role = 'entry'
+             ORDER BY command_id
+            """,
+            (position_id,),
+        ).fetchall()
+        assert [dict(row) for row in facts] == [
+            {
+                "command_id": increment_command,
+                "shares": 6.0,
+                "fill_price": pytest.approx(0.35),
+                "venue_status": "PARTIAL",
+                "terminal_exec_status": "filled",
+            },
+            {
+                "command_id": baseline_command,
+                "shares": 5.0,
+                "fill_price": 0.30,
+                "venue_status": "FILLED",
+                "terminal_exec_status": "filled",
+            },
+        ]
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (increment_command,),
+        ).fetchone()[0] == "RESOLVED"
+
+        ambiguous_command = "cmd-cancelled-increment-unbound"
+        ambiguous_order = "ord-cancelled-increment-unbound"
+        _insert(
+            conn,
+            command_id=ambiguous_command,
+            position_id=position_id,
+            decision_id="dec-cancelled-increment-unbound",
+            size=2.0,
+            price=0.35,
+            created_at="2026-04-26T00:16:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=ambiguous_command,
+            venue_order_id=ambiguous_order,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=ambiguous_command,
+            order_id=ambiguous_order,
+            trade_id="trade-cancelled-increment-unbound",
+            filled_size="1",
+            fill_price="0.35",
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:17:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:18:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+        append_event(
+            conn,
+            command_id=ambiguous_command,
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:19:00Z",
+            payload={"venue_order_id": ambiguous_order},
+        )
+
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
+            (ambiguous_command,),
+        ).fetchone()[0] == 0
+
     def test_filled_entry_execution_fact_uses_exact_fok_envelope_economics(
         self,
         conn,
@@ -27394,6 +28551,131 @@ class TestRecoveryResolutionTable:
         assert proof["point_order_query_complete"] is False
         assert proof["point_order_error_type"] == "RuntimeError"
         assert proof["venue_order_id"] == "vord-point-503"
+
+    def test_unknown_exact_absence_detaches_older_terminal_exchange_ghost(self, conn):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.execution.exchange_reconcile import record_finding
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-old-ghost",
+            position_id="pos-old-ghost",
+            price=0.49,
+            size=11.0,
+            created_at="2026-04-26T00:00:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-old-ghost",
+            venue_order_id="vord-old-ghost",
+        )
+        append_event(
+            conn,
+            command_id="cmd-old-ghost",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "vord-old-ghost"},
+        )
+        record_finding(
+            conn,
+            kind="exchange_ghost_order",
+            subject_id="vord-old-ghost",
+            context="operator",
+            evidence={
+                "reason": "terminal_command_venue_order_reappeared_open",
+                "command_id": "cmd-old-ghost",
+            },
+            recorded_at="2026-04-26T00:04:00Z",
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-current-unknown",
+            position_id="pos-current-unknown",
+            price=0.50,
+            size=10.0,
+            created_at="2026-04-26T00:10:00Z",
+        )
+        _advance_to_unknown_side_effect(
+            conn,
+            command_id="cmd-current-unknown",
+            venue_order_id="vord-current-absent",
+        )
+        record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="vord-current-absent",
+            context="ws_gap",
+            evidence={"reason": "exact_current_order_unobserved"},
+            recorded_at="2026-04-26T00:12:00Z",
+        )
+        conn.commit()
+
+        class CompleteVenue:
+            authenticated_point_reads_are_complete = True
+            venue_reads_are_complete = True
+
+            @staticmethod
+            def get_order(order_id):
+                assert order_id == "vord-current-absent"
+                return None
+
+            @staticmethod
+            def get_open_orders():
+                return [
+                    {
+                        "id": "vord-old-ghost",
+                        "status": "LIVE",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.49",
+                        "size": "11",
+                    }
+                ]
+
+            @staticmethod
+            def get_trades():
+                return []
+
+        summary = reconcile_unresolved_commands(conn, CompleteVenue())
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-current-unknown") == "SUBMIT_REJECTED"
+        assert _get_state(conn, "cmd-old-ghost") == "EXPIRED"
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-current-unknown")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["lookup_method"] == "authenticated_exact_absence_detached_ghost"
+        proof = payload["venue_absence_proof"]
+        assert proof["matching_open_order_count"] == 1
+        assert proof["effective_current_submit_matching_open_order_count"] == 0
+        assert payload["resolved_m5_local_orphan_findings"] == 1
+        assert proof["matching_open_orders_detached_from_current_submit"] == [
+            {
+                "venue_order_id": "vord-old-ghost",
+                "owner_command_id": "cmd-old-ghost",
+                "owner_command_state": "EXPIRED",
+                "owner_created_at": "2026-04-26T00:00:00Z",
+                "exchange_ghost_finding_id": proof[
+                    "matching_open_orders_detached_from_current_submit"
+                ][0]["exchange_ghost_finding_id"],
+            }
+        ]
+        ghost = conn.execute(
+            "SELECT resolved_at FROM exchange_reconcile_findings "
+            "WHERE kind='exchange_ghost_order' AND subject_id='vord-old-ghost'"
+        ).fetchone()
+        assert ghost["resolved_at"] is None
+        current_orphan = conn.execute(
+            "SELECT resolved_at, resolution FROM exchange_reconcile_findings "
+            "WHERE kind='local_orphan_order' AND subject_id='vord-current-absent'"
+        ).fetchone()
+        assert current_orphan["resolved_at"] is not None
+        assert current_orphan["resolution"] == "command_recovery_exact_submit_absence"
 
     def test_unknown_side_effect_known_order_point_503_with_trade_stays_unknown(
         self, conn, mock_client
@@ -33934,6 +35216,58 @@ def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_f
 
     assert capital_blocking_command_count(conn) == 2
 
+    # A later legitimate close must not resurrect already-complete ENTRY
+    # projection debt and globally preempt every unrelated family.
+    conn.execute(
+        "UPDATE position_current SET phase = 'economically_closed' "
+        "WHERE position_id = 'pos-filled-unprojected'"
+    )
+
+    assert capital_blocking_command_count(conn) == 2
+
+
+def test_capital_blocker_counts_terminal_no_fill_open_obligation_until_release(conn):
+    """A rejected entry cannot leave its cash bound hidden behind monitor debt."""
+    from src.execution.command_recovery import (
+        capital_blocking_command_scope,
+        reconcile_terminal_entry_exposure_obligations,
+    )
+    from src.state.venue_command_repo import append_event
+
+    command_id = _insert(
+        conn,
+        command_id="cmd-terminal-obligation",
+        market_id="mkt-terminal-obligation",
+    )
+    _open_test_entry_obligation(conn, command_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-09-02T01:50:06Z",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-09-02T02:05:20Z",
+        payload={"reason": "authenticated_venue_absence"},
+    )
+
+    scope = capital_blocking_command_scope(conn)
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("mkt-terminal-obligation",)
+    assert scope.projection_count == 0
+
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert capital_blocking_command_scope(conn).total_count == 0
+
 
 def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
     """A known confirmed fill cannot yield forever behind monitor bootstrap."""
@@ -33978,10 +35312,31 @@ def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
     assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
 
 
+def test_capital_blocker_prioritizes_terminal_late_entry_fill(conn, monkeypatch):
+    """Late authenticated fill projection debt cannot yield to monitor I/O."""
+    import src.execution.command_recovery as recovery
+
+    monkeypatch.setattr(
+        recovery._exchange_reconcile,
+        "persisted_terminal_late_entry_fill_command_ids",
+        lambda _conn: ["cmd-terminal-late-fill"],
+    )
+
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 1
+    assert scope.projection_count == 1
+    assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
+
+
 def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
     from src.execution.command_recovery import (
+        _recorded_exit_fill_projection_candidates,
+        _terminal_filled_exit_projection_blocker_command_ids,
         capital_blocking_command_count,
-        reconcile_exit_pending_projections,
+    )
+    from src.execution.exchange_reconcile import (
+        reconcile_recorded_exit_fill_projections,
     )
 
     _insert(
@@ -34043,9 +35398,16 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
     )
 
     assert capital_blocking_command_count(conn) == 1
-    assert reconcile_exit_pending_projections(conn) == {
+    assert _terminal_filled_exit_projection_blocker_command_ids(conn) == (
+        "cmd-capital-exit",
+    )
+    assert _recorded_exit_fill_projection_candidates(conn)
+    assert reconcile_recorded_exit_fill_projections(
+        conn,
+        command_ids=("cmd-capital-exit",),
+    ) == {
         "scanned": 1,
-        "advanced": 1,
+        "projected": 1,
         "stayed": 0,
         "errors": 0,
     }
@@ -34062,6 +35424,21 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
         "exit_price": pytest.approx(0.40),
     }
     assert capital_blocking_command_count(conn) == 0
+    assert not _recorded_exit_fill_projection_candidates(conn)
+    execution = conn.execute(
+        """
+        SELECT command_id, order_role, terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = 'pos-capital-exit'
+           AND command_id = 'cmd-capital-exit'
+           AND order_role = 'exit'
+        """
+    ).fetchone()
+    assert dict(execution) == {
+        "command_id": "cmd-capital-exit",
+        "order_role": "exit",
+        "terminal_exec_status": "filled",
+    }
 
 
 def test_capital_blocker_excludes_completed_partial_exit_with_live_residual(conn):
@@ -34172,6 +35549,43 @@ def test_single_market_capital_blocker_is_scoped_not_global(conn, monkeypatch):
     assert scope.unscopeable_count == 0
     assert scope.projection_count == 0
     assert scope.requires_global_handoff(systemic_market_count_limit=2) is False
+
+
+def test_capital_blocker_authenticated_scan_is_exact_command_bounded(
+    conn,
+    monkeypatch,
+):
+    """Current blocker discovery never launches the global fill projection scan."""
+    import src.execution.command_recovery as recovery
+
+    exact_calls = []
+    monkeypatch.setattr(
+        recovery,
+        "_authenticated_entry_trade_fact_command_ids",
+        lambda _conn, *, states: ("cmd-exact",),
+    )
+
+    def _exact_candidates(_conn, *, command_id=None):
+        exact_calls.append(command_id)
+        return []
+
+    monkeypatch.setattr(
+        recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        _exact_candidates,
+    )
+    monkeypatch.setattr(recovery, "_capital_blocking_cancel_commands", lambda _conn: [])
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_entry_projection_blocker_count", lambda _conn: 0
+    )
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_exit_projection_blocker_count", lambda _conn: 0
+    )
+
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 0
+    assert exact_calls == ["cmd-exact"]
 
 
 @pytest.mark.parametrize(
@@ -34449,11 +35863,99 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
         verified.close()
 
 
+def test_unavailable_identity_submit_does_not_starve_cancel_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    """A timed-out submit point read still yields to an independent cancel."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "identity-unavailable-cancel-fairness.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-unreadable", position_id="pos-unreadable")
+    _advance_to_submitting(
+        seed,
+        command_id="cmd-unreadable",
+        venue_order_id="ord-unreadable",
+    )
+    _insert(seed, command_id="cmd-cancel", position_id="pos-cancel")
+    _advance_to_cancel_pending(
+        seed,
+        command_id="cmd-cancel",
+        venue_order_id="ord-cancel",
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    point_read_timeouts = []
+
+    def _point_orders(_order_ids, *, timeout_seconds):
+        point_read_timeouts.append(timeout_seconds)
+        return {}, True
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        _point_orders,
+    )
+    snapshot = SimpleNamespace(
+        get_order=lambda order_id: (
+            {
+                "orderID": "ord-cancel",
+                "status": "CANCELED",
+                "original_size": "5",
+                "size_matched": "0",
+            }
+            if order_id == "ord-cancel"
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    client = MagicMock(spec_set=["get_order", "place_limit_order"])
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["identity_bound_inflight_point_read_timed_out"] is True
+    assert summary["identity_bound_inflight_yielded_to_other_capital"] is True
+    assert summary["cancel_recovery_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert point_read_timeouts == [pytest.approx(20.0, abs=0.1)]
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+        assert _get_state(verified, "cmd-cancel") == "CANCELLED"
+    finally:
+        verified.close()
+
+
 def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     tmp_path,
     monkeypatch,
 ):
-    """A durable terminal fact must not inherit the spent maintenance lease."""
+    """Terminal release gets a fresh sanctioned WORLD+TRADE writer lease."""
     from contextlib import nullcontext
 
     from src.execution import command_recovery, venue_sync_contract
@@ -34495,8 +35997,11 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
         conn.row_factory = sqlite3.Row
         return conn
 
+    full_factory_calls = []
+
     def _full_factory(**_kwargs):
-        pytest.fail("capital APPLY must use the trade-only writer base")
+        full_factory_calls.append(dict(_kwargs))
+        return _conn_factory()
 
     _full_factory.requires_writer_flocks = True
     _full_factory.supports_nonblocking_flocks = True
@@ -34550,12 +36055,318 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     )
 
     assert summary["terminal_order_facts"]["advanced"] == 1
+    assert full_factory_calls
     assert lease_deadlines
     assert lease_deadlines[0] > 0
     verified = _conn_factory()
     try:
         assert _get_state(verified, "cmd-release") == "EXPIRED"
         assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+    finally:
+        verified.close()
+
+
+@pytest.mark.parametrize(
+    ("command_state", "expected_state", "expected_release_reason"),
+    (
+        ("ACKED", "EXPIRED", "EXPIRED"),
+        ("CANCEL_PENDING", "CANCELLED", "CANCELLED"),
+    ),
+)
+def test_terminal_zero_fill_top_up_releases_on_trade_only_fast_lane(
+    tmp_path,
+    monkeypatch,
+    command_state,
+    expected_state,
+    expected_release_reason,
+):
+    """A proven terminal top-up must not wait for a cross-DB writer."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "terminal-zero-fill-top-up.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(
+        seed,
+        command_id="cmd-top-up",
+        position_id="pos-active",
+        size=21.0,
+        price=0.51,
+    )
+    if command_state == "CANCEL_PENDING":
+        _advance_to_cancel_pending(
+            seed,
+            command_id="cmd-top-up",
+            venue_order_id="ord-top-up",
+        )
+    else:
+        _advance_to_acked(
+            seed,
+            command_id="cmd-top-up",
+            venue_order_id="ord-top-up",
+        )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-active",
+        command_id="cmd-top-up",
+        order_id="ord-top-up",
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               shares = 5.0,
+               chain_shares = 5.0,
+               cost_basis_usd = 3.0,
+               size_usd = 3.0,
+               entry_price = 0.60
+         WHERE position_id = 'pos-active'
+        """
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-top-up",
+        order_id="ord-top-up",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="21",
+        source="WS_USER",
+    )
+    seed.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount, created_at
+        ) VALUES ('cmd-top-up', 'PUSD_BUY', NULL, 10710000, ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    seed.commit()
+    seed.close()
+
+    def _trade_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    full_factory_calls = []
+
+    def _full_factory(**_kwargs):
+        full_factory_calls.append(dict(_kwargs))
+        raise AssertionError("terminal top-up cancel must not acquire WORLD+TRADE")
+
+    _trade_factory.supports_nonblocking_flocks = True
+    _full_factory.supports_nonblocking_flocks = True
+    _full_factory.requires_writer_flocks = True
+    _full_factory.trade_only_factory = _trade_factory
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _full_factory,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_read_conn_factory",
+        _trade_factory,
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "durable terminal order fact must release capital before venue I/O"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["existing_position_terminal_no_fill_cancels_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert not full_factory_calls
+    verified = _trade_factory()
+    try:
+        assert _get_state(verified, "cmd-top-up") == expected_state
+        reservation = verified.execute(
+            """
+            SELECT released_at, release_reason
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-top-up'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == expected_release_reason
+        position = verified.execute(
+            """
+            SELECT phase, shares, chain_shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-active'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 5.0,
+            "chain_shares": 5.0,
+            "cost_basis_usd": 3.0,
+        }
+    finally:
+        verified.close()
+
+
+def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
+    tmp_path,
+    monkeypatch,
+):
+    """A zero-fill cancelled top-up cannot reserve cash behind an active lot."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "cancelled-increment-capital-release.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(
+        seed,
+        command_id="cmd-cancelled-increment",
+        position_id="pos-active",
+        size=9.25,
+        price=0.52,
+    )
+    _open_test_entry_obligation(seed, "cmd-cancelled-increment")
+    _advance_to_acked(
+        seed,
+        command_id="cmd-cancelled-increment",
+        venue_order_id="ord-cancelled-increment",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-active",
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               shares = 6.0,
+               cost_basis_usd = 3.18,
+               size_usd = 3.18,
+               entry_price = 0.53
+         WHERE position_id = 'pos-active'
+        """
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="9.25",
+        source="REST",
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-08-28T12:12:00Z",
+        payload={"venue_order_id": "ord-cancelled-increment"},
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-08-28T12:13:00Z",
+        payload={
+            "venue_order_id": "ord-cancelled-increment",
+            "venue_status": "CANCELED",
+        },
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "durable cancel proof must release capital before venue I/O"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["cancel_ack_terminal_no_fill_facts_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["terminal_entry_exposure_obligations_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        obligation = verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """,
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "remaining_size": "9.25",
+        }
+        position = verified.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-active'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 6.0,
+            "cost_basis_usd": 3.18,
+        }
     finally:
         verified.close()
 
@@ -34795,6 +36606,62 @@ def test_identity_bound_submit_candidates_are_bounded_with_durable_remainder(con
     assert {candidate["command_id"] for candidate in first + second} == {
         f"cmd-bounded-{index}" for index in range(5)
     }
+
+
+def test_identity_bound_candidates_keep_unknown_side_effect_on_positive_point_lane(conn):
+    from src.execution.command_recovery import (
+        _identity_bound_submitting_candidates,
+        _reconcile_identity_bound_submitting_commands,
+    )
+
+    _insert(
+        conn,
+        command_id="cmd-unknown-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        size=10.0,
+        price=0.28,
+    )
+    _advance_to_unknown_side_effect(
+        conn,
+        command_id="cmd-unknown-exit",
+        venue_order_id="ord-unknown-exit",
+    )
+
+    candidates, deferred = _identity_bound_submitting_candidates(
+        conn,
+        rotation_slot=0,
+    )
+
+    assert deferred == 0
+    assert [(row["command_id"], row["state"]) for row in candidates] == [
+        ("cmd-unknown-exit", "SUBMIT_UNKNOWN_SIDE_EFFECT")
+    ]
+
+    summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids={"cmd-unknown-exit"},
+        point_orders={
+            "ord-unknown-exit": {
+                "orderID": "ord-unknown-exit",
+                "status": "LIVE",
+                "price": "0.28",
+                "original_size": "10",
+                "size_matched": "0",
+            }
+        },
+    )
+
+    assert summary == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-unknown-exit") == "ACKED"
+    assert [
+        event["event_type"] for event in _get_events(conn, "cmd-unknown-exit")
+    ] == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_TIMEOUT_UNKNOWN", "SUBMIT_ACKED"]
 
 
 def test_identity_bound_rotation_reserves_exit_priority(conn):
@@ -35533,6 +37400,98 @@ def test_full_priming_limits_historical_matched_orders_to_one_network_quantum(
     assert priming["active_quantum_remaining"] is True
     assert priming["matched_quantum_remaining"] is True
     assert "filled-order-4" not in priming["order_ids"]
+
+
+def test_full_priming_isolates_priority_unknown_from_historical_orders(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    unknown = {
+        "command_id": "unknown-priority",
+        "state": "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "venue_order_id": "order-priority",
+        "idempotency_key": "idem-priority",
+    }
+    historical = {
+        "command_id": "historical-review",
+        "state": "REVIEW_REQUIRED",
+        "venue_order_id": "order-historical",
+        "idempotency_key": "idem-historical",
+    }
+    monkeypatch.setattr(
+        command_recovery,
+        "_full_quantum_candidates",
+        lambda _conn: [unknown, historical],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_active_venue_command_priming_rows",
+        lambda *_args, **_kwargs: pytest.fail(
+            "historical priming must not run before priority unknown truth"
+        ),
+    )
+
+    priming = command_recovery._collect_recovery_priming_keys(
+        object(),
+        scope="full",
+    )
+
+    assert priming == {
+        "order_ids": {"order-priority"},
+        "idempotency_keys": {"idem-priority"},
+        "condition_ids": set(),
+        "full_priority_inflight_command_id": "unknown-priority",
+        "full_priority_inflight_quantum_remaining": True,
+    }
+    kwargs = command_recovery._scheduled_venue_snapshot_kwargs(
+        "full",
+        priming,
+        deadline_monotonic=123.0,
+    )
+    assert kwargs["order_ids"] == {"order-priority"}
+    assert kwargs["derive_orders_from_account_truth"] is True
+    assert kwargs["account_truth_deadline_seconds"] == 30.0
+
+
+def test_unrelated_submit_error_skips_deterministic_rejection_fact_scans(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    events = [{
+        "event_type": "SUBMIT_TIMEOUT_UNKNOWN",
+        "payload_json": json.dumps({
+            "exception_message": (
+                "PolyApiException[status_code=503, "
+                "error_message={'error': 'trading is disabled'}]"
+            ),
+        }),
+    }]
+    monkeypatch.setattr(
+        command_recovery,
+        "_command_events",
+        lambda _conn, _command_id: events,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_count_position_rows_for_command",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unrelated submit errors must not scan position history"
+        ),
+    )
+    command = {"command_id": "cmd-trading-disabled"}
+
+    assert command_recovery._terminalize_submit_unknown_geoblock_403_if_proven(
+        object(),
+        command,
+        occurred_at="2026-08-31T00:00:00+00:00",
+    ) is None
+    assert command_recovery._terminalize_submit_unknown_invalid_amount_400_if_proven(
+        object(),
+        command,
+        occurred_at="2026-08-31T00:00:00+00:00",
+    ) is None
 
 
 def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecision(

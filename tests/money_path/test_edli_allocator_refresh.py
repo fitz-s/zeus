@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-08-28
 # Authority basis: /tmp/edli_submit_gate_trace.md (EDLI submit gate: allocator_not_configured
 #   root) + src/engine/cycle_runner.py:705-728 legacy refresh_global_allocator contract.
 """Relationship test for the EDLI live-path risk-allocator refresh seam.
@@ -332,30 +332,109 @@ def test_main_edli_cycle_wires_live_path_allocator_refresh_source():
     # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     source = Path("src/events/reactor.py").read_text()
 
-    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator(")
+    refresh_call = source.index("_alloc_refresh = _construct_sql(")
     adapter_build = source.index("submit_adapter = event_bound_live_adapter_from_trade_conn(")
     assert refresh_call < adapter_build
+    assert "_edli_refresh_global_allocator(" in source[refresh_call:adapter_build]
     assert 'if not _alloc_refresh.get("configured")' in source[refresh_call:adapter_build]
 
 
-def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
-    """Held-position exits must not run before the risk allocator singleton is configured.
+def test_held_monitor_redecision_consumes_independently_refreshed_allocator_snapshot():
+    """Global allocator I/O cannot precede the held probability read.
 
-    R4-b (2026-07-08): the exit-monitor job BODY moved from src.main._exit_monitor_cycle
-    (now a thin scheduler-hook delegate) to src.execution.exit_lifecycle.run_exit_monitor_cycle
-    (its owning module — same P1 order-daemon process, same scheduled job). The ordering
-    invariant this test protects now lives there.
+    The 60-second bankroll-warm lane owns allocator recomputation. The monitor
+    consumes its published snapshot; an unconfigured snapshot keeps submit
+    fail-closed without turning global lot/reconcile scans into a prerequisite
+    for current probability redecision.
     """
     import inspect
 
+    from src import main
     from src.execution import exit_lifecycle
 
-    source = inspect.getsource(exit_lifecycle.run_exit_monitor_cycle)
+    bootstrap_source = inspect.getsource(exit_lifecycle._load_held_monitor_bootstrap)
+    monitor_source = inspect.getsource(exit_lifecycle.run_exit_monitor_cycle)
+    warm_source = inspect.getsource(main._edli_bankroll_warm_cycle)
+    authority_source = inspect.getsource(main._refresh_global_execution_authority)
 
-    assert "_refresh_global_allocator_for_held_position_monitor(" in source
-    assert source.index("_refresh_global_allocator_for_held_position_monitor(") < source.index(
+    assert "allocator_summary()" in bootstrap_source
+    assert "refresh_global_allocator(" not in bootstrap_source
+    assert "_refresh_global_execution_authority()" in warm_source
+    assert "_edli_refresh_global_allocator(" in authority_source
+    assert monitor_source.index("held_monitor_allocator_snapshot =") < monitor_source.index(
         "_execute_monitoring_phase("
     )
+    assert 'held_monitor_allocator_snapshot.get("configured")' in monitor_source
+
+
+def test_expired_allocator_snapshot_blocks_reduce_only_submit_and_retry_release(
+    monkeypatch,
+):
+    """A once-configured singleton is not perpetual actuation authority."""
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.risk_allocator import (
+        AllocationDenied,
+        CapPolicy,
+        GovernorState,
+        RiskAllocator,
+        assert_global_submit_allows,
+        configure_global_allocator,
+        snapshot_global_auction_capital_authority,
+        summary,
+    )
+    from src.risk_allocator import governor as governor_module
+    from src.risk_allocator.governor import (
+        assert_global_red_force_exit_submit_allows,
+    )
+
+    clock = [100.0]
+    monkeypatch.setattr(governor_module.time, "monotonic", lambda: clock[0])
+    allocator = RiskAllocator(
+        CapPolicy(allocator_authority_max_age_seconds=5)
+    )
+    state = GovernorState(
+        current_drawdown_pct=0.0,
+        heartbeat_health=HeartbeatHealth.HEALTHY,
+        ws_gap_active=False,
+        unknown_side_effect_count=0,
+        reconcile_finding_count=0,
+    )
+    configure_global_allocator(allocator, state)
+
+    fresh = summary()
+    assert fresh["configured"] is True
+    assert fresh["authority_fresh"] is True
+    assert_global_submit_allows(reduce_only=True)
+
+    clock[0] = 106.0
+    stale = summary()
+    assert stale["configured"] is False
+    assert stale["authority_fresh"] is False
+    assert stale["kill_switch_reason"] == "allocator_authority_stale"
+    assert stale["entry"]["allow_submit"] is False
+    with pytest.raises(AllocationDenied, match="allocator_authority_stale"):
+        assert_global_submit_allows(reduce_only=True)
+    with pytest.raises(AllocationDenied, match="allocator_authority_stale"):
+        snapshot_global_auction_capital_authority()
+    red_decision = assert_global_red_force_exit_submit_allows()
+    assert red_decision.allowed is True
+    assert red_decision.reason == "red_force_exit_allocator_stale_allowed"
+
+    configure_global_allocator(
+        allocator,
+        GovernorState(
+            current_drawdown_pct=0.0,
+            heartbeat_health=HeartbeatHealth.HEALTHY,
+            ws_gap_active=False,
+            unknown_side_effect_count=0,
+            reconcile_finding_count=0,
+            kill_switch_armed=True,
+            manual_reason="operator_manual_halt",
+        ),
+    )
+    clock[0] = 112.0
+    with pytest.raises(AllocationDenied, match="operator_manual_halt"):
+        assert_global_red_force_exit_submit_allows()
 
 
 def test_chain_sync_read_lane_cannot_submit_exits():

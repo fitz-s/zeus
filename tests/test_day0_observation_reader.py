@@ -516,6 +516,42 @@ def _insert_hko_official_snapshot(
     )
 
 
+def test_hko_rollover_prefers_attached_world_over_empty_main_ghost() -> None:
+    conn = _make_conn()
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        _CREATE_TABLE.replace(
+            "observation_instants", "world.observation_instants"
+        )
+    )
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-08-28",
+        observed_at="2026-08-28T15:50:00+00:00",
+        high_c=33.1,
+        low_c=27.4,
+    )
+    _insert_hko_official_snapshot(
+        conn,
+        target_date="2026-08-29",
+        observed_at="2026-08-28T16:10:00+00:00",
+        high_c=29.2,
+        low_c=28.2,
+    )
+    conn.execute(
+        "INSERT INTO world.observation_instants SELECT * FROM observation_instants"
+    )
+    conn.execute("DELETE FROM observation_instants")
+    conn.commit()
+
+    assert hko_rollover_carryover_status(
+        conn,
+        target_date="2026-08-29",
+        decision_time=datetime(2026, 8, 28, 16, 20, tzinfo=timezone.utc),
+    ) == "RESET_CONFIRMED"
+    conn.close()
+
+
 def test_hko_rollover_carryover_requires_new_target_day_pair() -> None:
     conn = _make_conn()
     _insert_hko_official_snapshot(

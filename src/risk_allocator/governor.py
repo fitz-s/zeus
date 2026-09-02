@@ -14,7 +14,9 @@ cancels, redeems, mutates production DB/state artifacts, or authorizes cutover.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -79,6 +81,7 @@ class CapPolicy:
     optimistic_exposure_weight: float = 0.5
     taker_min_depth_micro: int = 50_000_000
     maker_deadline_seconds: int = 30 * 60
+    allocator_authority_max_age_seconds: int = 150
 
     def __post_init__(self) -> None:
         positive_int_fields = (
@@ -87,6 +90,7 @@ class CapPolicy:
             "max_correlated_exposure_micro",
             "taker_min_depth_micro",
             "maker_deadline_seconds",
+            "allocator_authority_max_age_seconds",
         )
         for name in positive_int_fields:
             if int(getattr(self, name)) <= 0:
@@ -561,14 +565,20 @@ _DEFAULT_ALLOCATOR = RiskAllocator()
 _GLOBAL_GOVERNOR: PortfolioGovernor | None = None
 _GLOBAL_ALLOCATOR: RiskAllocator | None = None
 _GLOBAL_GOVERNOR_STATE: GovernorState | None = None
+_GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC: float | None = None
 _GLOBAL_ALLOCATION_LOCK = RLock()
 
 
 def configure_global_allocator(allocator: RiskAllocator | None, governor_state: GovernorState | None = None) -> None:
-    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE
+    global _GLOBAL_ALLOCATOR, _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC, _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_ALLOCATOR = allocator
         _GLOBAL_GOVERNOR_STATE = governor_state
+        _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC = (
+            time.monotonic()
+            if allocator is not None and governor_state is not None
+            else None
+        )
 
 
 @contextmanager
@@ -587,9 +597,11 @@ def global_actuation_authority_lease() -> Iterator[None]:
 
 
 def configure_global_governor_state(governor_state: GovernorState | None) -> None:
-    global _GLOBAL_GOVERNOR_STATE
+    global _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC, _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_GOVERNOR_STATE = governor_state
+        if governor_state is None:
+            _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC = None
 
 
 def clear_global_allocator() -> None:
@@ -599,11 +611,26 @@ def clear_global_allocator() -> None:
 def snapshot_global_auction_capital_authority() -> AuctionCapitalAuthority:
     """Freeze current exposure and caps without freezing actuation readiness."""
 
-    with _GLOBAL_ALLOCATION_LOCK:
-        allocator = _GLOBAL_ALLOCATOR
-    if allocator is None:
-        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
+    allocator, _governor_state = _snapshot_global_actuation_authority()
     return AuctionCapitalAuthority(allocator)
+
+
+def _global_allocator_authority_age_seconds_locked() -> float | None:
+    published_at = _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC
+    if published_at is None:
+        return None
+    age_seconds = time.monotonic() - published_at
+    if not math.isfinite(age_seconds) or age_seconds < 0.0:
+        return None
+    return age_seconds
+
+
+def _global_allocator_authority_is_fresh_locked(allocator: RiskAllocator) -> bool:
+    age_seconds = _global_allocator_authority_age_seconds_locked()
+    return bool(
+        age_seconds is not None
+        and age_seconds <= allocator.cap_policy.allocator_authority_max_age_seconds
+    )
 
 
 def _snapshot_global_actuation_authority() -> tuple[RiskAllocator, GovernorState]:
@@ -612,11 +639,15 @@ def _snapshot_global_actuation_authority() -> tuple[RiskAllocator, GovernorState
     with _GLOBAL_ALLOCATION_LOCK:
         allocator = _GLOBAL_ALLOCATOR
         governor_state = _GLOBAL_GOVERNOR_STATE
-    if allocator is None or governor_state is None:
-        raise AllocationDenied(
-            AllocationDecision(False, "allocator_not_configured", 0)
-        )
-    return allocator, governor_state
+        if allocator is None or governor_state is None:
+            raise AllocationDenied(
+                AllocationDecision(False, "allocator_not_configured", 0)
+            )
+        if not _global_allocator_authority_is_fresh_locked(allocator):
+            raise AllocationDenied(
+                AllocationDecision(False, "allocator_authority_stale", 0)
+            )
+        return allocator, governor_state
 
 
 def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecision:
@@ -679,6 +710,48 @@ def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecis
     return AllocationDecision(True, "allowed", 0, reduce_only=reduce_only)
 
 
+def assert_global_red_force_exit_submit_allows() -> AllocationDecision:
+    """Preserve RED reduction when only allocator freshness has expired.
+
+    The execution layer may call this boundary only after independently
+    validating one canonical ``RED_FORCE_EXIT`` protective authority.  That
+    authority is rebound to a fresh executable snapshot there and a later B2
+    risk attestation must still be RED immediately before command persistence.
+    This narrow boundary therefore ignores only allocator snapshot age; a
+    missing allocator/governor pair or a true kill switch remains blocking.
+    """
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        allocator = _GLOBAL_ALLOCATOR
+        governor_state = _GLOBAL_GOVERNOR_STATE
+        if allocator is None or governor_state is None:
+            raise AllocationDenied(
+                AllocationDecision(
+                    False,
+                    "allocator_not_configured",
+                    0,
+                    reduce_only=True,
+                )
+            )
+        kill_reason = allocator.kill_switch_reason(governor_state)
+        if kill_reason:
+            raise AllocationDenied(
+                AllocationDecision(
+                    False,
+                    kill_reason,
+                    0,
+                    reduce_only=True,
+                )
+            )
+        stale = not _global_allocator_authority_is_fresh_locked(allocator)
+    return AllocationDecision(
+        True,
+        "red_force_exit_allocator_stale_allowed" if stale else "allowed",
+        0,
+        reduce_only=True,
+    )
+
+
 def select_global_order_type(snapshot: Any) -> str:
     """Return the concrete venue order type allowed by the current governor.
 
@@ -702,21 +775,46 @@ def summary() -> dict[str, Any]:
     with _GLOBAL_ALLOCATION_LOCK:
         allocator = _GLOBAL_ALLOCATOR
         governor_state = _GLOBAL_GOVERNOR_STATE
+        age_seconds = _global_allocator_authority_age_seconds_locked()
+        authority_fresh = bool(
+            allocator is not None
+            and governor_state is not None
+            and _global_allocator_authority_is_fresh_locked(allocator)
+        )
     if governor_state is None:
-        return {"configured": False, "entry": {"allow_submit": False, "reason": "allocator_not_configured"}}
+        return {
+            "configured": False,
+            "authority_fresh": False,
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
     if allocator is None:
         return {
             "configured": False,
+            "authority_fresh": False,
             "state": governor_state.to_dict(),
             "kill_switch_reason": "allocator_not_configured",
             "reduce_only": True,
             "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
+    if not authority_fresh:
+        return {
+            "configured": False,
+            "authority_fresh": False,
+            "authority_age_seconds": age_seconds,
+            "authority_max_age_seconds": allocator.cap_policy.allocator_authority_max_age_seconds,
+            "state": governor_state.to_dict(),
+            "kill_switch_reason": "allocator_authority_stale",
+            "reduce_only": True,
+            "entry": {"allow_submit": False, "reason": "allocator_authority_stale"},
         }
     kill_reason = allocator.kill_switch_reason(governor_state)
     reduce_only = allocator.reduce_only_mode_active(governor_state)
     entry_reason = kill_reason or ("reduce_only_mode_active" if reduce_only else "ok")
     return {
         "configured": True,
+        "authority_fresh": True,
+        "authority_age_seconds": age_seconds,
+        "authority_max_age_seconds": allocator.cap_policy.allocator_authority_max_age_seconds,
         "state": governor_state.to_dict(),
         "kill_switch_reason": kill_reason,
         "reduce_only": reduce_only,
@@ -801,6 +899,12 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
         optimistic_exposure_weight=float(data.get("optimistic_exposure_weight", CapPolicy().optimistic_exposure_weight)),
         taker_min_depth_micro=int(data.get("taker_min_depth_micro", CapPolicy().taker_min_depth_micro)),
         maker_deadline_seconds=int(data.get("maker_deadline_seconds", CapPolicy().maker_deadline_seconds)),
+        allocator_authority_max_age_seconds=int(
+            data.get(
+                "allocator_authority_max_age_seconds",
+                CapPolicy().allocator_authority_max_age_seconds,
+            )
+        ),
     )
 
 
@@ -837,19 +941,15 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     with _named_sqlite_rows(conn) as read_conn:
         current_rows = _load_current_position_exposure_rows(read_conn)
         current_position_ids = {
-            str(_row_mapping(row).get("position_id") or "") for row in current_rows
+            str(_row_mapping(row).get("position_id") or "")
+            for row in current_rows
+            if str(_row_mapping(row).get("position_id") or "")
         }
-        covered_position_ids = (
-            current_position_ids | _load_closed_position_ids(read_conn)
-        )
-        rows = _load_legacy_position_lot_rows(
-            read_conn,
-            covered_position_ids=covered_position_ids,
-        )
+        rows = _load_legacy_position_lot_rows(read_conn)
     lots: list[ExposureLot] = []
     for row in rows:
         row_map = _row_mapping(row)
-        if str(row_map.get("runtime_position_id") or "") in covered_position_ids:
+        if str(row_map.get("runtime_position_id") or "") in current_position_ids:
             continue
         payload = _coerce_payload(row_map.get("raw_payload_json"))
         submit_payload = _coerce_payload(row_map.get("submit_payload_json"))
@@ -892,35 +992,7 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     return tuple(lots)
 
 
-def _load_closed_position_ids(conn: Any) -> set[str]:
-    if not _has_table(conn, "position_current"):
-        return set()
-    if not _has_column(conn, "position_current", "position_id"):
-        return set()
-    if not _has_column(conn, "position_current", "phase"):
-        return set()
-    return {
-        str(_row_mapping(row).get("position_id") or "")
-        for row in conn.execute(
-            """
-            SELECT position_id
-              FROM position_current
-             WHERE phase IN (
-                 'economically_closed',
-                 'settled',
-                 'voided',
-                 'admin_closed'
-             )
-            """
-        ).fetchall()
-    }
-
-
-def _load_legacy_position_lot_rows(
-    conn: Any,
-    *,
-    covered_position_ids: set[str] | None = None,
-) -> list[Mapping[str, Any]]:
+def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
     if not _has_table(conn, "position_lots"):
         return []
     has_commands = _has_table(conn, "venue_commands")
@@ -950,26 +1022,28 @@ def _load_legacy_position_lot_rows(
         else "LEFT JOIN (SELECT NULL AS command_id, NULL AS market_id, NULL AS token_id, NULL AS decision_id) cmd ON 0"
     )
     command_provenance_predicate = "AND cmd.command_id IS NOT NULL" if has_commands else ""
+    has_projected_runtime_positions = (
+        has_commands
+        and _has_column(conn, "venue_commands", "position_id")
+        and _has_table(conn, "position_current")
+        and _has_column(conn, "position_current", "position_id")
+        and _has_column(conn, "position_current", "phase")
+    )
+    projection_join = (
+        "LEFT JOIN position_current pc ON pc.position_id = cmd.position_id "
+        "AND pc.phase IN "
+        "('economically_closed', 'settled', 'voided', 'admin_closed')"
+        if has_projected_runtime_positions
+        else ""
+    )
+    projection_predicate = (
+        "AND pc.position_id IS NULL" if has_projected_runtime_positions else ""
+    )
     state_index = (
         " INDEXED BY idx_position_lots_state"
         if _has_index(conn, "idx_position_lots_state")
         else ""
     )
-    covered = sorted(
-        str(position_id)
-        for position_id in (covered_position_ids or set())
-        if str(position_id)
-    )
-    covered_predicate = ""
-    params: list[object] = []
-    if covered and has_commands:
-        # One JSON parameter keeps statement shape and SQLite bind count
-        # bounded as terminal position history grows.  The compatibility lane
-        # must scale with unresolved lots, not with every settled position.
-        covered_predicate = (
-            "AND cmd.position_id NOT IN (SELECT value FROM json_each(?))"
-        )
-        params.append(json.dumps(covered, separators=(",", ":")))
     return list(
         conn.execute(
             f"""
@@ -987,13 +1061,14 @@ def _load_legacy_position_lot_rows(
               {runtime_position_expr}
             FROM position_lots lot{state_index}
             {command_join}
+            {projection_join}
             WHERE lot.state IN (
               'OPTIMISTIC_EXPOSURE',
               'CONFIRMED_EXPOSURE',
               'EXIT_PENDING'
             )
               {command_provenance_predicate}
-              {covered_predicate}
+              {projection_predicate}
               AND NOT EXISTS (
                   SELECT 1
                     FROM position_lots newer
@@ -1002,7 +1077,6 @@ def _load_legacy_position_lot_rows(
               )
             ORDER BY lot.position_id, lot.lot_id
             """,
-            params,
         ).fetchall()
     )
 
@@ -1698,7 +1772,7 @@ def classify_reconcile_finding_scope(
             joins: list[str] = []
             if {"venue_order_id", "market_id"}.issubset(command_columns):
                 joins.append(
-                    "(f.kind = 'local_orphan_order' "
+                    "(f.kind IN ('local_orphan_order', 'exchange_ghost_order') "
                     "AND vc.venue_order_id = f.subject_id)"
                 )
             if {"token_id", "market_id", "intent_kind"}.issubset(command_columns):
@@ -1736,6 +1810,7 @@ def classify_reconcile_finding_scope(
         row = _row_mapping(raw_row)
         market = str(row.get("market_id") or "").strip()
         if str(row.get("kind") or "") in {
+            "exchange_ghost_order",
             "local_orphan_order",
             "position_drift",
             "unrecorded_trade",

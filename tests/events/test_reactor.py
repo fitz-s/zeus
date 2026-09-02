@@ -61,6 +61,89 @@ from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
+def _day0_causal_bundle_test_witness(vector_id: str) -> dict[str, object]:
+    return {
+        "vector_ids_by_model": {"ecmwf_ifs": vector_id},
+        "expected_models": ["ecmwf_ifs"],
+        "actual_models": ["ecmwf_ifs"],
+        "capture_times_utc": ["2026-08-28T10:00:00+00:00"],
+        "capture_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-28T10:00:00+00:00"
+        },
+    }
+
+
+def test_day0_causal_bundle_consumer_waits_for_successor(monkeypatch):
+    import src.data.day0_hourly_vectors as vectors
+    import src.engine.event_reactor_adapter as era
+
+    witness = _day0_causal_bundle_test_witness("vector-old")
+    expected = vectors.build_day0_causal_evidence_bundle(
+        city="Karachi",
+        target_date="2026-08-28",
+        metric="high",
+        observation_context={"observation_time": "2026-08-28T09:00:00+00:00"},
+        cutoff_utc="2026-08-28T10:05:00+00:00",
+        vector_witness=witness,
+    )
+    payload = {"_edli_day0_causal_evidence_bundle": expected}
+    family = SimpleNamespace(city="Karachi", target_date="2026-08-28", metric="high")
+    current = _day0_causal_bundle_test_witness("vector-new")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *args, **kwargs: False,
+    )
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=sqlite3.connect(":memory:"),
+            payload=payload,
+            family=family,
+            decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+            vector_witness=current,
+        )
+    receipt = payload["_edli_day0_causal_evidence_bundle_validation"]
+    assert receipt["reason"] == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+    assert receipt["expected_bundle_identity"] != receipt["actual_bundle_identity"]
+    assert payload[
+        "_edli_day0_causal_evidence_bundle_successor_materialized"
+    ] is False
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *args, **kwargs: True,
+    )
+    # The old certificate still cannot be switched in-place.  A later prepare
+    # must read the successor bundle and then pass validation with its witness.
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=sqlite3.connect(":memory:"),
+            payload=payload,
+            family=family,
+            decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+            vector_witness=current,
+        )
+    successor_bundle = vectors.build_day0_causal_evidence_bundle(
+        city="Karachi",
+        target_date="2026-08-28",
+        metric="high",
+        observation_context={"observation_time": "2026-08-28T09:00:00+00:00"},
+        cutoff_utc="2026-08-28T10:05:00+00:00",
+        vector_witness=current,
+    )
+    payload["_edli_day0_causal_evidence_bundle"] = successor_bundle
+    actual = era._validate_day0_causal_bundle_successor(
+        conn=sqlite3.connect(":memory:"),
+        payload=payload,
+        family=family,
+        decision_time=datetime(2026, 8, 28, 10, 5, tzinfo=timezone.utc),
+        vector_witness=current,
+    )
+    assert actual["bundle_identity"] == successor_bundle["bundle_identity"]
+    assert payload["_edli_day0_causal_evidence_bundle_validation"]["reason"] is None
+    assert payload[
+        "_edli_day0_causal_evidence_bundle_successor_materialized"
+    ] is True
+
 @pytest.mark.parametrize("post_only,expected_order_type", [(False, "FOK"), (True, "GTC")])
 def test_global_sealed_provider_recaptures_selected_book_after_slow_gates(
     monkeypatch, post_only, expected_order_type
@@ -610,6 +693,235 @@ def test_paused_forecast_held_auction_is_wired_through_reduce_only_completion_cu
         "                _monitor_completion_mode.reduce_only"
     ) in source[completion_mode:process_pending]
     assert materialized < completion_mode < process_pending
+
+
+def test_generic_family_completion_requires_canonical_held_target_before_cut():
+    """A generic wake cannot be completed by an unrelated global family."""
+    from src.engine import global_batch_runtime
+    from src.events.candidate_binding import weather_family_id
+
+    conn, store = _store()
+    assert store is not None
+    event = _forecast_event("required-held-missing")
+    required = weather_family_id(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    decision_at = datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc)
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda *_args: pytest.fail(
+                "missing held target must fail before probability preparation"
+            ),
+            actuate_winner=lambda *_args: pytest.fail(
+                "missing held target must never actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_args: None,
+            current_time_provider=lambda: decision_at,
+            required_held_family_keys=frozenset({required}),
+        )
+    finally:
+        conn.close()
+
+    assert result.economic_cut_completed is True
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_NO_LONGER_EXPOSED:" + required
+    )
+
+
+def test_generic_family_completion_does_not_clear_when_other_family_prepares(
+    monkeypatch,
+):
+    """A target preparation failure remains incomplete even with another q."""
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    from src.engine import global_batch_runtime
+    from src.engine.global_auction_universe import (
+        current_global_auction_scope_from_events,
+    )
+    from src.events.candidate_binding import weather_family_id
+
+    conn, store = _store()
+    assert store is not None
+    target = _forecast_event("required-target")
+    other_payload = json.loads(target.payload_json)
+    other_payload["city"] = "Dallas"
+    other = replace(
+        target,
+        event_id="required-other-family",
+        entity_key="Dallas|2026-05-24|high|required-other",
+        payload_json=json.dumps(other_payload, sort_keys=True),
+    )
+    decision_at = datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc)
+    target_key = weather_family_id(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    other_key = weather_family_id(
+        city="Dallas",
+        target_date="2026-05-24",
+        metric="high",
+    )
+    scope = current_global_auction_scope_from_events(
+        (target, other),
+        captured_at_utc=decision_at,
+    )
+    prepared_calls: list[str] = []
+    held_calls: list[str] = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Chicago", "2026-05-24", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_kwargs: scope,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: SimpleNamespace(economic_identity="wealth"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_obligations",
+        lambda *_args, **_kwargs: (SimpleNamespace(family_key=target_key),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_forecast_carrier_matches",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def prepared_for(event):
+        family_key = target_key if event.event_id == target.event_id else other_key
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=family_key,
+                captured_at_utc=decision_at,
+            )
+        )
+
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (target, other),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda event, _at: (
+                prepared_calls.append(event.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    prepared_global_family=prepared_for(event),
+                )
+            ),
+            prepare_held_event=lambda event, _at: (
+                held_calls.append(event.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:test",
+                )
+            ),
+            actuate_winner=lambda *_args: pytest.fail(
+                "incomplete required target must never actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_args: None,
+            current_time_provider=lambda: decision_at,
+            required_held_family_keys=frozenset({target_key}),
+        )
+    finally:
+        conn.close()
+
+    assert set(prepared_calls) == {target.event_id, other.event_id}
+    assert held_calls == [target.event_id]
+    assert result.economic_cut_completed is False
+    assert result.winner_event_id is None
+    assert all(
+        receipt.reason.startswith(
+            "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE:"
+        )
+        for receipt in result.receipts.values()
+    )
+
+
+def test_generic_family_completion_contract_is_separate_from_exact_v4_scope():
+    """Wake family requirements flow to the real batch without V4 scope reuse."""
+    from src.engine import event_reactor_adapter, global_batch_runtime
+    from src.events import reactor
+
+    adapter_source = inspect.getsource(
+        event_reactor_adapter.event_bound_live_adapter_from_trade_conn
+    )
+    batch_source = inspect.getsource(global_batch_runtime.process_current_global_batch)
+    reactor_source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+
+    assert "required_held_family_keys=required_held_family_keys" in adapter_source
+    assert "required_held_family_keys=required_held_family_keys" in batch_source
+    assert "required_held_family_keys=required_held_family_keys" in reactor_source
+    assert "GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT" in adapter_source
+    assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE" in batch_source
+    assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE" in batch_source
+
+
+def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(
+    tmp_path,
+):
+    """One family wake stays queued until its own global cut is terminal."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "required-family-wake.json"
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        for _ in range(2):
+            assert reactor.request_global_auction_completion(
+                reason="GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED",
+                position_id="held-position",
+                family=("Chicago", "2026-05-24", "high"),
+                wake_path=wake_path,
+            )
+        wakes = reactor_wake.reactor_wakes_since(None, path=wake_path)
+        assert len(wakes) == 1
+        assert wakes[0].forecast_families == (("Chicago", "2026-05-24", "high"),)
+        assert wakes[0].held_sell_reauction_requests == ()
+
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=0),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+        )
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_durable_exact_completion_debt_gets_one_bounded_fairness_turn(monkeypatch):
@@ -1348,7 +1660,9 @@ def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch)
     assert pauses == ["control_plane_command_drain_failed"]
 
 
-def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch):
+def test_main_monitor_cadence_debt_blocks_buy_without_preempting_ordinary_reactor(
+    monkeypatch,
+):
     import src.events.reactor as reactor_module
     import src.main as main
 
@@ -1379,6 +1693,11 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
         canonical_debt.is_set,
     )
     monkeypatch.setattr(
+        main,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
         reactor_module,
         "run_edli_event_reactor_cycle",
         lambda **kwargs: captured.update(kwargs) or True,
@@ -1393,7 +1712,7 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     assert monitor_pending() is False
     monitor_debt_pending = captured["held_position_monitor_debt_pending"]
     assert callable(monitor_debt_pending)
-    assert monitor_debt_pending() is True
+    assert monitor_debt_pending() is False
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
@@ -1865,7 +2184,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_day0_hourly_refresher",
-        lambda: (lambda *_args, **_kwargs: None),
+        lambda **_factory_kwargs: (lambda *_args, **_kwargs: None),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -2033,7 +2352,9 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+    ).fetchone() == (
+        ("pending", 0) if carrier_branch == "day0" else ("processed", 1)
+    )
     check.close()
     assert not resumed_queue_file.exists()
 
@@ -6278,7 +6599,7 @@ def test_generic_completion_cannot_reacquire_before_monitor_successor(
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
+def test_exact_executable_completion_yields_monitor_debt_before_broad_setup(
     monkeypatch,
 ):
     import src.events.reactor as reactor_module
@@ -6287,9 +6608,6 @@ def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
     from src.runtime.reactor_wake import make_held_sell_reauction_request
-
-    class SetupReached(RuntimeError):
-        pass
 
     request = make_held_sell_reauction_request(
         position_id="buenos-aires-exact-completion",
@@ -6333,15 +6651,21 @@ def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
     monkeypatch.setattr(
         db,
         "get_world_connection",
-        lambda: (_ for _ in ()).throw(SetupReached()),
+        lambda: pytest.fail("exact SELL must not protect broad reactor setup"),
+    )
+    reservations: list[str] = []
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        lambda **kwargs: reservations.append(kwargs["reason"]) or True,
     )
 
     lock = threading.Lock()
-    with pytest.raises(SetupReached):
-        reactor_module.run_edli_event_reactor_cycle(
-            active_lock=lock,
-            held_position_monitor_debt_pending=lambda: True,
-        )
+    assert reactor_module.run_edli_event_reactor_cycle(
+        active_lock=lock,
+        held_position_monitor_debt_pending=lambda: True,
+    ) is False
+    assert reservations == ["periodic_monitor_preemption"]
     assert not lock.locked()
 
 
@@ -6594,7 +6918,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["held_position_monitor_pending"]() is False
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
-        assert captured["held_position_monitor_pending"]() is False
+        assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_successor_pending.set()
         assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_fairness_debt.set()
@@ -6843,8 +7167,8 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_late_periodic_successor_waits_for_fresh_reserved_completion():
-    """A fresh reserved cut completes instead of phase-locking every 30 seconds."""
+def test_late_durable_monitor_debt_preempts_reserved_completion():
+    """A reserved cut yields once its waiting monitor misses the handoff."""
     from src.events import reactor
 
     monitor_claimed = [False]
@@ -6859,8 +7183,9 @@ def test_late_periodic_successor_waits_for_fresh_reserved_completion():
         )
         assert generic_cancelled() is False
         monitor_claimed[0] = True
-        monitor_debt[0] = True
         assert generic_cancelled() is False
+        monitor_debt[0] = True
+        assert generic_cancelled() is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
 
         _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(

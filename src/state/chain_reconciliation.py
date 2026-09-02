@@ -2961,11 +2961,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         from src.state.chain_mirror_reconciler import (
                             SIZE_CORRECTED as _MIRROR_SIZE_CORRECTED,
                             MirrorFinding as _MirrorFinding,
-                            apply_size_correction_finding as _apply_mirror_size_correction,
+                            apply_size_correction_finding_coordinated as _apply_mirror_size_correction,
                         )
 
                         wrote_via_mirror_shape = _apply_mirror_size_correction(
-                            conn,
                             _MirrorFinding(
                                 classification=_MIRROR_SIZE_CORRECTED,
                                 position_id=pos.trade_id,
@@ -2979,6 +2978,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                                 },
                             ),
                             now=datetime.now(timezone.utc),
+                            conn=conn,
                         )
                     if wrote_via_mirror_shape:
                         stats["updated"] += 1

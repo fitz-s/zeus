@@ -17,12 +17,14 @@ Public surface:
     load_settlement_lookup(forecasts_conn) -> dict[tuple, SettlementFact]
     is_zeus_origin_asset(conn, asset_id) -> bool
     has_open_orders_for_position(conn, position_id) -> bool
-    apply_size_correction_finding(conn, finding, *, now) — shared CHAIN_SIZE_CORRECTED
-        writer; also called directly by src.state.chain_reconciliation's size-mismatch
-        branch (P0b) as the ungated fallback when no canonical baseline is available.
+    apply_size_correction_finding(conn, finding, *, now) — in-transaction
+        CHAIN_SIZE_CORRECTED primitive.
+    apply_size_correction_finding_coordinated(finding, *, now) — bounded public
+        fallback used by src.state.chain_reconciliation.
     reconcile(conn_trades, conn_forecasts, chain_by_asset, *, apply, now) -> ReconcileReport
     run_cycle() — scheduler entrypoint (fetches chain positions + DB conns,
-        calls reconcile(apply=True), commits). R4-b: moved from
+        classifies read-only, then applies one bounded position quantum at a
+        time). R4-b: moved from
         src.main::_chain_mirror_reconcile_cycle (main.py registers it on a
         10-minute APScheduler cadence).
 
@@ -45,14 +47,17 @@ mutation) — see _has_prior_review_open_absent_marker.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
 import secrets
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Iterable, Optional
 
 from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
 
@@ -106,6 +111,11 @@ _SIZE_MISMATCH_TOLERANCE = 0.05  # shares; below this the chain/local delta is n
 # cadence plus jitter between the last durable observation and fail-closed
 # expiry.
 _CHAIN_OBSERVATION_REFRESH_SECONDS = _CHAIN_SEEN_AT_MAX_AGE_SECONDS // 2
+
+# Chain mirror is a recovery/backstop lane.  Its writes must yield to the
+# held-position MONITOR lane, and no one transaction may cover the full book.
+_CHAIN_MIRROR_WRITE_DEADLINE_MS = 250
+_CHAIN_MIRROR_WRITE_MAX_HOLD_MS = 250
 
 # Phases considered "still open" for the purposes of the REVIEW (e) class —
 # mirrors the phases that require an on-chain holding per position_current's
@@ -688,10 +698,21 @@ _LOCAL_ROW_COLUMNS = (
 )
 
 
-def load_local_position_rows(conn: sqlite3.Connection) -> list[LocalPositionRow]:
-    rows = conn.execute(
-        f"SELECT {', '.join(_LOCAL_ROW_COLUMNS)} FROM position_current"
-    ).fetchall()
+def load_local_position_rows(
+    conn: sqlite3.Connection,
+    *,
+    position_ids: Iterable[str] | None = None,
+) -> list[LocalPositionRow]:
+    requested_ids = tuple(dict.fromkeys(str(position_id) for position_id in position_ids or ()))
+    if position_ids is not None and not requested_ids:
+        return []
+    sql = f"SELECT {', '.join(_LOCAL_ROW_COLUMNS)} FROM position_current"
+    params: tuple[str, ...] = ()
+    if requested_ids:
+        placeholders = ", ".join("?" for _ in requested_ids)
+        sql += f" WHERE position_id IN ({placeholders})"
+        params = requested_ids
+    rows = conn.execute(sql, params).fetchall()
     out = []
     for row in rows:
         out.append(
@@ -1357,9 +1378,9 @@ def apply_size_correction_finding(
     to correct durably (the in-memory Position side of a chain-truth
     correction is the caller's concern, not this writer's).
 
-    Public (P0b, 2026-07-04): also called directly by
-    src.state.chain_reconciliation's size-mismatch branch as the ungated
-    fallback when no canonical baseline is available for
+    Internal primitive: the coordinator-bound public fallback lives in
+    ``apply_size_correction_finding_coordinated``. It is used when no canonical
+    baseline is available for
     _append_canonical_size_correction_if_available (that helper's
     _canonical_chain_observation_phase gate raises on a non-open starting
     phase, e.g. quarantined — this writer has no such restriction: chain size
@@ -1651,6 +1672,10 @@ def reconcile(
     *,
     apply: bool,
     now: Optional[datetime] = None,
+    position_ids: Iterable[str] | None = None,
+    settlement_by_key: dict[tuple, SettlementFact] | None = None,
+    include_chain_only_assets: bool = True,
+    raise_on_error: bool = False,
 ) -> ReconcileReport:
     """Classify every local row + every chain-only asset, optionally applying
     the safe repair classes (SETTLED closes, size corrections, and
@@ -1663,10 +1688,11 @@ def reconcile(
     now = now or datetime.now(timezone.utc)
     report = ReconcileReport(generated_at=now.isoformat(), dry_run=not apply)
 
-    local_rows = load_local_position_rows(conn_trades)
-    settlement_by_key = (
-        load_settlement_lookup(conn_forecasts) if conn_forecasts is not None else {}
-    )
+    local_rows = load_local_position_rows(conn_trades, position_ids=position_ids)
+    if settlement_by_key is None:
+        settlement_by_key = (
+            load_settlement_lookup(conn_forecasts) if conn_forecasts is not None else {}
+        )
 
     matched_assets: set[str] = set()
     for row in local_rows:
@@ -1791,24 +1817,200 @@ def reconcile(
                 exc,
             )
             report.errors.append({"position_id": row.position_id, "error": str(exc)})
+            if raise_on_error:
+                raise
 
-    for asset, chain_fact in chain_by_asset.items():
-        if asset in matched_assets:
-            continue
-        try:
-            zeus_origin = is_zeus_origin_asset(conn_trades, asset)
-            finding = classify_chain_only_asset(asset, chain_fact, matched_assets, zeus_origin)
-            if finding is not None:
-                report.findings.append(finding)
-        except Exception as exc:  # per-row isolation -- never abort the pass
-            logger.error(
-                "chain_mirror_reconciler: chain-only asset classification failed for %s: %s",
-                asset,
-                exc,
-            )
-            report.errors.append({"asset": asset, "error": str(exc)})
+    if include_chain_only_assets:
+        for asset, chain_fact in chain_by_asset.items():
+            if asset in matched_assets:
+                continue
+            try:
+                zeus_origin = is_zeus_origin_asset(conn_trades, asset)
+                finding = classify_chain_only_asset(asset, chain_fact, matched_assets, zeus_origin)
+                if finding is not None:
+                    report.findings.append(finding)
+            except Exception as exc:  # per-row isolation -- never abort the pass
+                logger.error(
+                    "chain_mirror_reconciler: chain-only asset classification failed for %s: %s",
+                    asset,
+                    exc,
+                )
+                report.errors.append({"asset": asset, "error": str(exc)})
 
     return report
+
+
+@contextlib.contextmanager
+def _bounded_chain_mirror_transaction(
+    conn: sqlite3.Connection,
+    *,
+    owner: str,
+    coordinator,
+):
+    """Run one 250ms point write on an already selected TRADE connection."""
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    quantum_deadline = time.monotonic() + (
+        _CHAIN_MIRROR_WRITE_MAX_HOLD_MS / 1000.0
+    )
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner=owner,
+        write_class=WriteClass.LIVE,
+        priority=WritePriority.BACKGROUND_RECOVERY,
+        deadline_ms=_CHAIN_MIRROR_WRITE_DEADLINE_MS,
+        max_hold_ms=_CHAIN_MIRROR_WRITE_MAX_HOLD_MS,
+    ) as lease:
+        def _interrupt_over_budget() -> int:
+            return int(time.monotonic() >= quantum_deadline)
+
+        conn.set_progress_handler(_interrupt_over_budget, 1_000)
+        began = False
+        savepoint: str | None = None
+        before_changes = int(conn.total_changes)
+        try:
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_CHAIN_MIRROR_WRITE_MAX_HOLD_MS,
+            ):
+                if conn.in_transaction:
+                    savepoint = f"sp_chain_mirror_caller_{secrets.token_hex(6)}"
+                    conn.execute(f"SAVEPOINT {savepoint}")
+                else:
+                    conn.execute("BEGIN IMMEDIATE")
+                    began = True
+                yield conn
+                if time.monotonic() >= quantum_deadline:
+                    raise WriteLeaseTimeout(
+                        f"chain mirror apply quantum exhausted for owner={owner}"
+                    )
+                if savepoint is not None:
+                    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                else:
+                    commit_started = time.monotonic()
+                    conn.commit()
+                    lease.record_commit(
+                        commit_ms=(time.monotonic() - commit_started) * 1_000.0,
+                        rows_changed=max(0, int(conn.total_changes) - before_changes),
+                    )
+        except BaseException:
+            if savepoint is not None:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            elif began and conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.set_progress_handler(None, 0)
+
+
+def _trade_connection_path(conn: sqlite3.Connection) -> Path:
+    for _sequence, name, file_name in conn.execute("PRAGMA database_list"):
+        if name == "main" and str(file_name or "").strip():
+            return Path(str(file_name)).resolve()
+    raise ValueError("chain-mirror caller connection has no verified on-disk TRADE DB")
+
+
+def _coordinator_for_trade_connection(conn: sqlite3.Connection):
+    """Return the canonical coordinator only for its exact canonical DB path."""
+    from src.state.db import _zeus_trade_db_path
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteCoordinator,
+        default_runtime_write_coordinator,
+    )
+
+    db_path = _trade_connection_path(conn)
+    if db_path == _zeus_trade_db_path().resolve():
+        return default_runtime_write_coordinator()
+    return WriteCoordinator({DBIdentity.TRADE: db_path})
+
+
+@contextlib.contextmanager
+def _chain_mirror_trade_transaction(*, owner: str):
+    """Yield one 250ms TRADE apply quantum after bounded connection bootstrap.
+
+    SCOPE: one token-registry row or one exact position id.  DRAIN: the next
+    scheduled/operator pass retries only the failed unit.  RESET: successful
+    commit reclassifies the position as consistent.  Bootstrap deliberately
+    precedes the coordinator lease: journal/cutover work must never consume a
+    MONITOR-visible writer quantum.
+    """
+    from src.state.db import get_trade_connection
+    from src.state.db_writer_lock import WriteClass
+
+    bootstrap_deadline = time.monotonic() + (
+        _CHAIN_MIRROR_WRITE_DEADLINE_MS / 1000.0
+    )
+    conn = get_trade_connection(
+        write_class=WriteClass.LIVE,
+        busy_timeout_ms=_CHAIN_MIRROR_WRITE_DEADLINE_MS,
+        deadline_monotonic=bootstrap_deadline,
+    )
+    try:
+        with _bounded_chain_mirror_transaction(
+            conn,
+            owner=owner,
+            coordinator=_coordinator_for_trade_connection(conn),
+        ):
+            yield conn
+    finally:
+        conn.close()
+
+
+def apply_reconcile_position(
+    position_id: str,
+    *,
+    chain_by_asset: dict[str, ChainPositionFact],
+    settlement_by_key: dict[tuple, SettlementFact],
+    now: datetime,
+    owner: str = "chain_mirror_reconcile_position",
+) -> ReconcileReport:
+    """Re-read and apply one exact position through the bounded writer seam."""
+    with _chain_mirror_trade_transaction(owner=owner) as conn:
+        conn.row_factory = sqlite3.Row
+        return reconcile(
+            conn,
+            None,
+            chain_by_asset,
+            apply=True,
+            now=now,
+            position_ids=(position_id,),
+            settlement_by_key=settlement_by_key,
+            include_chain_only_assets=False,
+            raise_on_error=True,
+        )
+
+
+def apply_size_correction_finding_coordinated(
+    finding: MirrorFinding,
+    *,
+    now: datetime,
+    conn: sqlite3.Connection | None = None,
+    owner: str = "chain_mirror_size_correction_fallback",
+) -> bool:
+    """Apply fallback on the caller's verified DB, never redirecting its truth."""
+    if conn is None:
+        with _chain_mirror_trade_transaction(owner=owner) as write_conn:
+            write_conn.row_factory = sqlite3.Row
+            return apply_size_correction_finding(write_conn, finding, now=now)
+    with _bounded_chain_mirror_transaction(
+        conn,
+        owner=owner,
+        coordinator=_coordinator_for_trade_connection(conn),
+    ):
+        return apply_size_correction_finding(conn, finding, now=now)
+
+
+def _finding_requires_canonical_write(finding: MirrorFinding) -> bool:
+    return finding.writes or finding.classification == REVIEW_OPEN_ABSENT
 
 
 def run_cycle() -> None:
@@ -1841,7 +2043,10 @@ def run_cycle() -> None:
     from src.config import get_mode
     from src.data.polymarket_client import PolymarketClient
     from src.state.ctf_token_registry import record_token_seen
-    from src.state.db import get_forecasts_connection_read_only, get_trade_connection
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+    )
 
     if get_mode() != "live":
         return
@@ -1852,8 +2057,6 @@ def run_cycle() -> None:
         return
 
     chain_by_asset = load_chain_positions_by_asset(raw_positions)
-    conn_trades = get_trade_connection(write_class="live")
-    conn_trades.row_factory = sqlite3.Row
     conn_forecasts = None
     try:
         # LX-T2-a discovery hook (docs/rebuild/local_ledger_excision_2026-07-12.md
@@ -1867,12 +2070,15 @@ def run_cycle() -> None:
             if not chain_fact.condition_id:
                 continue
             try:
-                record_token_seen(
-                    conn_trades,
-                    token_id=asset,
-                    condition_id=chain_fact.condition_id,
-                    source="positions_api_discovery",
-                )
+                with _chain_mirror_trade_transaction(
+                    owner="chain_mirror_token_registry"
+                ) as write_conn:
+                    record_token_seen(
+                        write_conn,
+                        token_id=asset,
+                        condition_id=chain_fact.condition_id,
+                        source="positions_api_discovery",
+                    )
             except Exception as exc:
                 logger.warning(
                     "chain_mirror_reconcile: ctf_token_registry record failed for token %s: %s",
@@ -1890,14 +2096,59 @@ def run_cycle() -> None:
                 "grading skipped this cycle: %s", exc,
             )
             conn_forecasts = None
-        report = reconcile(conn_trades, conn_forecasts, chain_by_asset, apply=True)
-        conn_trades.commit()
+        settlement_by_key = (
+            load_settlement_lookup(conn_forecasts)
+            if conn_forecasts is not None
+            else {}
+        )
+        read_conn = get_trade_connection_read_only()
+        read_conn.row_factory = sqlite3.Row
+        try:
+            now = datetime.now(timezone.utc)
+            report = reconcile(
+                read_conn,
+                None,
+                chain_by_asset,
+                apply=False,
+                now=now,
+                settlement_by_key=settlement_by_key,
+            )
+        finally:
+            read_conn.close()
+
+        # Re-read one position under each bounded transaction before applying.
+        # The initial read is only a work queue: an intervening writer can change
+        # the canonical row, so the write transaction must classify afresh.
+        position_ids = tuple(
+            dict.fromkeys(
+                finding.position_id
+                for finding in report.findings
+                if finding.position_id and _finding_requires_canonical_write(finding)
+            )
+        )
+        report.dry_run = False
+        for position_id in position_ids:
+            try:
+                applied = apply_reconcile_position(
+                    position_id,
+                    chain_by_asset=chain_by_asset,
+                    settlement_by_key=settlement_by_key,
+                    now=now,
+                )
+                report.applied += applied.applied
+                report.errors.extend(applied.errors)
+            except Exception as exc:
+                logger.error(
+                    "chain_mirror_reconcile: coordinated write failed for position %s: %s",
+                    position_id,
+                    exc,
+                )
+                report.errors.append({"position_id": position_id, "error": str(exc)})
         if report.applied or report.by_classification():
             logger.info(
                 "chain_mirror_reconcile: applied=%d counts=%s",
                 report.applied, report.by_classification(),
             )
     finally:
-        conn_trades.close()
         if conn_forecasts is not None:
             conn_forecasts.close()

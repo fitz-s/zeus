@@ -633,6 +633,35 @@ def get_forecasts_connection_read_only(
     )
 
 
+@contextlib.contextmanager
+def get_forecasts_connection_with_world_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+):
+    """Yield forecasts-MAIN plus a read-only ``world`` attachment.
+
+    This is the read authority counterpart to
+    :func:`get_forecasts_connection_with_world`, not a writer shortcut: both
+    database files use SQLite ``mode=ro``, ``query_only`` remains enabled after
+    the attachment, and the context owns the connection lifetime.  It is for
+    one coherent read that needs forecast-class tables and world-class evidence
+    such as ``world.observation_prints``; it must never be used for a cross-DB
+    write transaction.
+    """
+    conn = get_forecasts_connection_read_only(
+        deadline_monotonic=deadline_monotonic,
+    )
+    try:
+        world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+        conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
+        # ``_connect_read_only`` sets this before ATTACH; repeat it so the
+        # full attached connection has an explicit no-write backstop.
+        conn.execute("PRAGMA query_only = ON")
+        yield conn
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # zeus-world.db IN-PROCESS WRITE SERIALIZATION (2026-05-31)
 # --------------------------------------------------------------------------
@@ -1074,6 +1103,41 @@ def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
         ckpt_frames = int(row[2]) if row is not None else -1
         page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         return (busy, log_frames, ckpt_frames, page_size)
+    finally:
+        conn.close()
+
+
+def truncate_checkpointed_wal(db_path: Path) -> tuple[int, int, int]:
+    """Fail-fast TRUNCATE for a WAL already drained by ``checkpoint_wal``.
+
+    The scheduler calls this only after PASSIVE reported every frame copied and
+    the allocated WAL file crossed its maintenance threshold.  A zero busy
+    timeout preserves live-writer priority: if a reader, writer, or concurrent
+    checkpointer owns a conflicting lock, SQLite returns ``busy=1`` immediately
+    and the next scheduler cycle retries.  The precondition makes the normal
+    success path metadata-only file reclamation rather than a second bulk
+    checkpoint.
+
+    A new writer can race between PASSIVE and this call.  SQLite remains the
+    authority in that race; this helper never assumes the earlier frame counts
+    are still current and returns TRUNCATE's own ``(busy, log, checkpointed)``
+    result for the caller to record.
+    """
+    path = db_path.resolve(strict=True)
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
+        path.as_uri() + "?mode=rw",
+        canonical_db_path=path,
+        uri=True,
+        timeout=0.0,
+    )
+    try:
+        _apply_busy_timeout(conn, busy_timeout_ms=0)
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None:
+            return (1, -1, -1)
+        return (int(row[0]), int(row[1]), int(row[2]))
     finally:
         conn.close()
 

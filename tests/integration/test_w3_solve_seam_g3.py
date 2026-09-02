@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-08-31
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -1488,14 +1489,14 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
         venue_submit_count_after=3,
     )
 
-    diagnostic = receipt["winner"][
-        "confidence_cost_amplification_diagnostic"
+    evidence = receipt["winner"][
+        "confidence_cost_amplification_evidence"
     ]
     assert receipt["winner"]["candidate_id"] == "proof-buy"
     assert receipt["winner"]["family_key"] == "family-buy"
     assert receipt["winner"]["city"] == "Taipei"
-    assert diagnostic == {
-        "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+    assert evidence == {
+            "role": "OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
         "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
         "readiness": "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE",
         "selected_side_q_mean": pytest.approx(0.30),
@@ -1646,10 +1647,10 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
         "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
     assert frontier["probe_expected_delta_log_wealth"] == pytest.approx(-0.002)
-    diagnostic = frontier["confidence_cost_amplification_diagnostic"]
-    assert diagnostic["mean_cost_margin_per_share"] == pytest.approx(-0.01)
-    assert diagnostic["confidence_cost_margin_per_share"] == pytest.approx(-0.23)
-    assert diagnostic["confidence_cost_margin_positive"] is False
+    evidence = frontier["confidence_cost_amplification_evidence"]
+    assert evidence["mean_cost_margin_per_share"] == pytest.approx(-0.01)
+    assert evidence["confidence_cost_margin_per_share"] == pytest.approx(-0.23)
+    assert evidence["confidence_cost_margin_positive"] is False
     assert receipt["venue_submit_count_before"] == 5
     assert receipt["venue_submit_count_after"] == 5
 
@@ -4407,6 +4408,21 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
     assert authority is not None
     assert authority.maker_witness_identity == maker_witness.witness_identity
+def test_global_escalated_buy_rejects_only_repeated_maker_proposal():
+    armed = frozenset({"token"})
+
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="BUY", execution_mode="MAKER_REST", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) == "GLOBAL_MAKER_REST_ALREADY_ESCALATED"
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="BUY", execution_mode="TAKER_LIMIT", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) is None
+    assert global_batch_runtime._global_maker_rest_escalation_rejection(
+        SimpleNamespace(action="SELL", execution_mode="MAKER_REST", token_id="token"),
+        armed_buy_token_ids=armed,
+    ) is None
 
 
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():
@@ -5392,7 +5408,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     assert preparation_calls[0]["required_condition_id"] == "c0"
     assert preparation_calls[0]["allow_partial_deterministic"] is False
     assert preparation_calls[0]["allow_unobserved_day0_replacement"] is False
-    assert preparation_calls[0]["allow_provisional_day0_replacement"] is False
+    assert preparation_calls[0]["allow_provisional_day0_replacement"] is True
 
     sell_curve = ExecutableSellCurve(
         token_id="sell-token",
@@ -5565,6 +5581,7 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
         era._CurrentProbabilityUse.ENTRY,
         era._CurrentProbabilityUse.HELD_MONITOR,
     ]
+    assert calls[0]["allow_provisional_day0_replacement"] is True
     assert calls[1]["required_condition_id"] == "c0"
     assert calls[1]["allow_partial_deterministic"] is False
     assert calls[1]["allow_unobserved_day0_replacement"] is True
@@ -6087,6 +6104,28 @@ def _stale_day0_carrier_and_current_observations():
         causal_snapshot_id="old-day0-carrier",
     )
     return conn, carrier
+
+
+def test_latest_authorized_day0_fact_sample_count_is_causal():
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, _carrier = _stale_day0_carrier_and_current_observations()
+    try:
+        fact = current_plan._latest_authorized_day0_fact(
+            conn,
+            city="Moscow",
+            target_date="2026-07-10",
+            temperature_metric="high",
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert fact is not None
+    assert fact["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert fact["sample_count"] == 2
 
 
 def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
@@ -6861,6 +6900,79 @@ def test_global_day0_held_conditioning_uses_named_physical_frontier(
     assert binding["observed_extreme_native"] == pytest.approx(27.0)
     assert binding["statistical_physical_boundary"]["source"] == (
         physical_source
+    )
+    conn.close()
+
+
+def test_global_day0_hko_held_conditioning_uses_spot_physical_frontier(
+    monkeypatch,
+):
+    from src.data import replacement_forecast_current_target_plan as current_plan
+
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    settlement_fact = {
+        "observed_extreme_native": 27.8,
+        "observation_time": "2026-09-01T01:40:00+00:00",
+        "observation_available_at": "2026-09-01T01:49:00+00:00",
+        "sample_count": 58,
+        "observation_source": "hko_hourly_accumulator",
+        "station_id": "HKO",
+        "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"hko-settlement-fact").hexdigest(),
+    }
+    physical_fact = {
+        "observed_extreme_native": 28.0,
+        "observation_time": "2026-09-01T01:02:00+00:00",
+        "observation_available_at": "2026-09-01T01:05:00+00:00",
+        "sample_count": 10,
+        "observation_source": "hko_rhrread_spot",
+        "station_id": "HKO",
+        "unit": "C",
+        "raw_payload_sha256": hashlib.sha256(b"hko-physical-fact").hexdigest(),
+    }
+    monkeypatch.setattr(
+        current_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, require_settlement_channel=False, **_kwargs: (
+            settlement_fact if require_settlement_channel else physical_fact
+        ),
+    )
+
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(
+            city="Hong Kong",
+            target_date="2026-09-01",
+            metric="high",
+        ),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="HKO"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-09-01T01:02:00+00:00",
+            "observed_extreme_c": 28.0,
+            "sample_count": 10,
+            "source": "hko_rhrread_spot",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026,
+            9,
+            1,
+            2,
+            0,
+            tzinfo=_dt.timezone.utc,
+        ),
+        posterior_id=471886,
+    )
+
+    assert rebound["settlement_source"] == "hko_hourly_accumulator"
+    assert rebound["_edli_day0_probability_boundary_native"] == pytest.approx(28.0)
+    binding = rebound["_edli_global_day0_binding"]
+    assert binding["observed_extreme_native"] == pytest.approx(27.8)
+    assert binding["statistical_physical_boundary"]["source"] == (
+        "hko_rhrread_spot"
     )
     conn.close()
 
@@ -7970,6 +8082,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         ("p2", (72.0 - 32.0) * 5.0 / 9.0, None),
     )
     source_clock_q = (0.1, 0.6, 0.3)
+    causal_bundle = {
+        "bundle_identity": "day0-causal-dallas-17",
+        "carrier_vector_identity": "vector-dallas-17",
+    }
     source_clock_bundle = SimpleNamespace(
         posterior_id=17,
         posterior_identity_hash="source-clock-posterior-17",
@@ -7983,6 +8099,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         },
         provenance_json={
             "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
+            "day0_causal_evidence_bundle": causal_bundle,
             "q_bootstrap_samples_basis": "global_simplex_v1",
             "q_bootstrap_samples_by_bin": {
                 key: [probability] * 400
@@ -8176,6 +8293,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert remaining_day_calls == 1
     assert day0_payload["q_source"] == "day0_remaining_day"
     assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert day0_payload["_edli_day0_causal_evidence_bundle"] == causal_bundle
     assert (
         day0_payload["probability_authority"]
         == "day0_remaining_day_global_probability_v1"
@@ -8427,6 +8545,21 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     missing_observations.close()
     observations.close()
     forecast.close()
+
+
+def test_day0_bundle_binding_clears_inherited_certificate_when_selected_missing():
+    payload = {
+        "_edli_day0_causal_evidence_bundle": {
+            "bundle_identity": "stale-event-certificate"
+        }
+    }
+
+    era._bind_day0_causal_evidence_bundle(
+        payload,
+        SimpleNamespace(provenance_json={}),
+    )
+
+    assert "_edli_day0_causal_evidence_bundle" not in payload
 
 
 def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
@@ -10176,6 +10309,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
     assert all(
         kwargs["allow_partial_deterministic"] is True
+        for kwargs in prepared_with
+    )
+    assert all(
+        kwargs["allow_provisional_day0_replacement"] is True
         for kwargs in prepared_with
     )
 
@@ -16749,11 +16886,14 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
-    ("execution_mode", "bid_price", "expected_accepted"),
+    ("execution_mode", "bid_price", "bid_size", "expected_accepted"),
     (
-        ("TAKER_LIMIT", "0.04", False),
-        ("TAKER_LIMIT", "0.05", True),
-        ("MAKER_REST", "0.04", False),
+        ("TAKER_LIMIT", "0.04", "100", False),
+        ("TAKER_LIMIT", "0.05", "100", True),
+        # Selection admitted 20 shares on an earlier book; submit JIT sees
+        # only six legal unwind shares and must force a new decision.
+        ("TAKER_LIMIT", "0.05", "6", False),
+        ("MAKER_REST", "0.04", "100", False),
     ),
 )
 def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hold(
@@ -16761,6 +16901,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
     execution_mode,
     side,
     bid_price,
+    bid_size,
     expected_accepted,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -16814,7 +16955,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
+            BookLevel(price=Decimal(bid_price), size=Decimal(bid_size)),
         ),
         **maker_terms,
     )
@@ -16871,7 +17012,7 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": bid_price, "size": "100"}],
+            "bids": [{"price": bid_price, "size": bid_size}],
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )
@@ -17767,6 +17908,105 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch(monke
     assert provider.fetches == 0
 
 
+def test_global_jit_snapshot_persist_avoids_stale_shared_wal_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    writer = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=0")
+    writer.execute("PRAGMA busy_timeout=0")
+    init_snapshot_schema(conn)
+    conn.commit()
+    captured = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    snapshot = ExecutableMarketSnapshot(
+        snapshot_id="jit-snapshot",
+        gamma_market_id="gamma-a",
+        event_id="market-event-a",
+        event_slug="event-a",
+        condition_id="condition-a",
+        question_id="question-a",
+        yes_token_id="token-yes-a",
+        no_token_id="token-no-a",
+        selected_outcome_token_id="token-no-a",
+        outcome_label="NO",
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.0},
+            source="fixture",
+            token_id="token-no-a",
+        ),
+        token_map_raw={},
+        rfqe=None,
+        neg_risk=False,
+        orderbook_top_bid=Decimal("0.39"),
+        orderbook_top_ask=Decimal("0.40"),
+        orderbook_depth_jsonb=json.dumps(
+            {
+                "bids": [{"price": "0.39", "size": "100"}],
+                "asks": [{"price": "0.40", "size": "100"}],
+            }
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured,
+        freshness_deadline=captured + _dt.timedelta(seconds=30),
+    )
+
+    conn.execute("BEGIN")
+    conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()
+    insert_snapshot(
+        writer,
+        replace(
+            snapshot,
+            snapshot_id="other-snapshot",
+            raw_orderbook_hash="d" * 64,
+        ),
+    )
+    writer.commit()
+
+    from src.state import db as state_db
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    isolated_persist = era._persist_global_jit_authority_snapshot_isolated
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        era,
+        "_persist_global_jit_authority_snapshot_isolated",
+        lambda authority, **kwargs: isolated_persist(
+            authority,
+            coordinator=coordinator,
+            **kwargs,
+        ),
+    )
+    persisted = era._persist_global_jit_authority_snapshot_for_preflight(
+        conn,
+        SimpleNamespace(snapshot=snapshot),
+    )
+
+    assert persisted == snapshot
+    assert conn.in_transaction is True
+    conn.rollback()
+    assert get_snapshot(conn, snapshot.snapshot_id) == snapshot
+    conn.close()
+    writer.close()
+
+
 def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatch):
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)
@@ -18448,7 +18688,7 @@ def test_global_scope_reports_a_held_family_without_probability_carrier(
     assert missing == [("Held", "2026-07-08", "high")]
 
 
-def test_reserved_completion_auction_ignores_scheduler_monitor_debt(
+def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
     monkeypatch,
 ):
     from src.events import reactor
@@ -18506,20 +18746,23 @@ def test_reserved_completion_auction_ignores_scheduler_monitor_debt(
     )
     started = time.monotonic()
     try:
-        scope = universe.scan_current_global_auction_scope(
-            world_conn=world_conn,
-            forecasts_conn=forecasts_conn,
-            decision_at_utc=_dt.datetime(
-                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
-            ),
-            cancelled=cancellation_probe,
-        )
+        with pytest.raises(
+            universe.GlobalAuctionScopeCancelled,
+            match="GLOBAL_SELECTION_CANCELLED",
+        ):
+            universe.scan_current_global_auction_scope(
+                world_conn=world_conn,
+                forecasts_conn=forecasts_conn,
+                decision_at_utc=_dt.datetime(
+                    2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+                ),
+                cancelled=cancellation_probe,
+            )
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
     assert due_at_start is True
     assert monitor_debt.is_set()
-    assert scope.events == (available,)
     assert time.monotonic() - started < 1.0
     calls_before_probe = prior_handler_calls
     forecasts_conn.execute(
@@ -26013,6 +26256,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
                 **vars(witness),
                 "witness_identity": "entry-q",
                 "probability_content_identity": "entry-q-content",
+                "sample_matrix_identity": "entry-samples-moved",
             }
         )
         entry_prepared = SimpleNamespace(probability_witness=entry_witness)
@@ -26062,9 +26306,37 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             family_key: "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
         }
 
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        lane_entry_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "entry-lane-q",
+                "probability_content_identity": "entry-lane-content",
+                "q_version": (
+                    f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:entry"
+                ),
+                "posterior_identity_hash": "run-a",
+                "source_truth_identity": "entry-lane-source",
+                "yes_point_q": np.asarray((0.2, 0.8), dtype=np.float64),
+            }
+        )
+        lane_held_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "held-lane-q",
+                "probability_content_identity": "held-lane-content",
+                "q_version": (
+                    f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:held"
+                ),
+                "posterior_identity_hash": "held-lane-posterior",
+                "source_truth_identity": "held-lane-source",
+                "yes_point_q": np.asarray((0.2, 0.8), dtype=np.float64),
+            }
+        )
         same_entry = bridge.PreparedGlobalFamily(
             decision_id="entry-decision",
-            probability_witness=witness,
+            probability_witness=lane_entry_witness,
             candidate_seeds=("entry-seed",),
             day0_exit_authority_status="unavailable",
             day0_exit_authority_reason="entry-authority",
@@ -26072,7 +26344,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
         same_held = bridge.PreparedGlobalFamily(
             decision_id="held-decision",
-            probability_witness=witness,
+            probability_witness=lane_held_witness,
             candidate_seeds=(),
             day0_exit_authority_status="immature",
             day0_exit_authority_reason="held-current-authority",
@@ -26110,6 +26382,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
 
         merged = next(iter(selected_kwargs["prepared_by_event"].values()))
+        assert merged.probability_witness is lane_entry_witness
         assert merged.candidate_seeds == same_entry.candidate_seeds
         assert merged.day0_exit_authority_status == "immature"
         assert merged.day0_exit_authority_reason == "held-current-authority"
@@ -27571,6 +27844,90 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     assert receipt.reason.startswith(
         "GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:RuntimeError:"
     )
+
+
+def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch):
+    import src.runtime.reactor_wake as reactor_wake
+
+    captured = {}
+    routine_monitor_pending = [True]
+    wake_revision = [1]
+    wake_reason = ["held_position_monitor_pending"]
+    stable_receipt = EventSubmissionReceipt(
+        False,
+        "event-1",
+        "snapshot-1",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: wake_revision[0],
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: wake_reason[0],
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda *_args, **_kwargs: stable_receipt,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_authority_receipt",
+        lambda _event, receipt, **_kwargs: receipt,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_jit_receipt",
+        lambda _event, receipt, **_kwargs: receipt,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        selection_cancelled=lambda: routine_monitor_pending[0],
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
+    adapter.process_global_batch((event,), decision_at)
+    cancelled = captured["selection_cancelled"]
+    preflight = captured["preflight_winner"]
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=(("family-alpha", "q-1"),),
+        book_epoch_identity="book-1",
+        book_economics_manifest=(("family-alpha", "book-1"),),
+        wealth_witness_identity="wealth-1",
+        actuation_deadline=decision_at + _dt.timedelta(seconds=30),
+    )
+
+    assert cancelled() is True
+    result = preflight(
+        event,
+        SimpleNamespace(
+            actuation_identity="actuation-1",
+            decision=SimpleNamespace(candidate=SimpleNamespace(action="BUY")),
+        ),
+        decision_at,
+        authority,
+    )
+    assert result.status == "STABLE"
+    assert cancelled() is False
+
+    wake_revision[0] += 1
+    wake_reason[0] = "day0_extreme_event_committed"
+    assert cancelled() is True
 
 
 def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(
@@ -29613,9 +29970,47 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
     times = iter((decision_at, wealth_at, book_at, selection_at))
     wealth_checks = []
     stages = []
+    bounded_reads = []
+    trade_conn = sqlite3.connect(":memory:")
+
+    real_bounded_work_sqlite = global_batch_runtime.bounded_work_sqlite
+
+    @contextmanager
+    def recording_bounded_work_sqlite(
+        conn,
+        work_context,
+        *,
+        stage,
+        shared_connection=False,
+        keep_independent_connection_open=False,
+    ):
+        bounded_reads.append((stage, shared_connection))
+        with real_bounded_work_sqlite(
+            conn,
+            work_context,
+            stage=stage,
+            shared_connection=shared_connection,
+            keep_independent_connection_open=keep_independent_connection_open,
+        ) as read_conn:
+            yield read_conn
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "bounded_work_sqlite",
+        recording_bounded_work_sqlite,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "probe_inflight_buy_ambiguity",
+        lambda _conn: False,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (),
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -29658,7 +30053,7 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
         decision_time=decision_at,
         world_conn=object(),
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade_conn,
         payload_reader=lambda current: json.loads(current.payload_json),
         prepare_event=lambda current, _at: EventSubmissionReceipt(
             False,
@@ -29671,17 +30066,22 @@ def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
         venue_submit_count=lambda: 0,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: next(times),
-        current_book_epoch_provider=lambda probabilities, _at: stages.append("book")
+        portfolio_state_provider=lambda: SimpleNamespace(positions=()),
+        current_book_epoch_provider=lambda probabilities, _at, *_: stages.append("book")
         or (
             probabilities,
             _global_test_book("book", price="0.40", captured_at=book_at),
         ),
+        work_context=universe.WorkContext(deadline_monotonic=None),
     )
 
     assert wealth_checks == [wealth_at]
     assert stages == ["wealth", "book"]
+    assert ("scope:trade_obligations", True) in bounded_reads
+    assert ("wealth_capture", False) in bounded_reads
     assert result.winner_event_id is None
     assert set(result.receipts) == {event.event_id}
+    trade_conn.close()
 
 
 def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
@@ -30224,6 +30624,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         "preflight": [],
         "excluded": [],
         "epoch": [],
+        "q_correction_resolvers": [],
         "venue": 0,
     }
 
@@ -30252,6 +30653,9 @@ def test_global_batch_falls_through_family_local_preflight_block(
     def select(_prepared, **kwargs):
         calls["excluded"].append(kwargs["preflight_excluded_by_family"])
         calls["epoch"].append(kwargs["selection_epoch_identity"])
+        calls["q_correction_resolvers"].append(
+            kwargs["payoff_q_correction_resolver"]
+        )
         return next(selections)
 
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
@@ -30322,6 +30726,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
         {scope.family_keys[0]: blocked_reason},
     ]
     assert calls["epoch"][1] != calls["epoch"][0]
+    assert calls["q_correction_resolvers"] == [None, None]
     assert calls["venue"] == 1
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
@@ -30402,6 +30807,13 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
             "token_id=token-a:best_bid=0.39:best_ask=0.39",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+            "token_id=token-a:required_shares=34.4:precliff_bid_shares=0",
             "BUY",
             "SELL",
         ),
@@ -30590,6 +31002,25 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         candidate = actuation.decision.candidate
         calls["preflight"].append(candidate.candidate_id)
         if candidate is candidate_a:
+            if reason.startswith(
+                "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            ):
+                receipt = EventSubmissionReceipt(
+                    False,
+                    _event.event_id,
+                    _event.causal_snapshot_id,
+                    reason=reason,
+                    proof_accepted=False,
+                )
+                supersession = era._global_curve_supersession_from_receipt(receipt)
+                assert supersession is not None
+                status, replacement_candidate, preflight_reason = supersession
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status=status,
+                    replacement_candidate=replacement_candidate,
+                    reason=preflight_reason,
+                    rejection_receipt=receipt,
+                )
             if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"):
                 proof_failure = reason.partition(":")[2]
 
@@ -34116,6 +34547,31 @@ def test_global_sell_durable_market_channel_authority_is_exact_and_fail_closed()
             conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
             side=candidate.side, submit_at=now,
         )
+    fresh_raw_book = {"asset_id": candidate.token_id, **depth}
+    raw, authority = era._durable_global_sell_market_authority(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        submit_at=now,
+        current_raw_book=fresh_raw_book,
+        current_book_captured_at=now,
+    )
+    assert raw["asset_id"] == candidate.token_id
+    assert authority.snapshot.captured_at == now
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            side=candidate.side,
+            submit_at=now,
+            current_raw_book=fresh_raw_book,
+            current_book_captured_at=now - _dt.timedelta(seconds=2),
+        )
+    assert era._is_global_jit_authority_failure(
+        "ValueError:GLOBAL_JIT_DURABLE_BOOK_INVALID"
+    ) is True
     conn.execute(
         "UPDATE execution_feasibility_latest SET quote_seen_at = ?", (now.isoformat(),)
     )
@@ -34439,6 +34895,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         ctf_units = 10 * 1_000_000
         book_hash = "jit-sell-hash"
         fail_final_book = False
+        fail_metadata = False
 
         def __init__(self, **kwargs):
             if kwargs:
@@ -34459,7 +34916,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             assert tokens == ["yes-token"]
             if type(self).fail_final_book:
                 raise OSError("REST book unavailable")
-            return {
+            book = {
                 "yes-token": {
                     "asset_id": "yes-token",
                     "hash": type(self).book_hash,
@@ -34471,10 +34928,15 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     ],
                 }
             }
+            if type(self).fail_metadata:
+                book["yes-token"]["asks"] = [{"price": "0.61", "size": "10"}]
+            return book
 
         def get_held_clob_market_info(self, condition_id, *, timeout=None):
             actuation_steps.append("clob_metadata")
             assert condition_id == "condition-1"
+            if type(self).fail_metadata:
+                raise OSError("CLOB metadata unavailable")
             return {
                 "condition_id": condition_id,
                 "clobTokenIds": ["yes-token", "other-yes-token"],
@@ -34643,6 +35105,25 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     )
     assert preflight.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
     assert preflight.proof_accepted is True
+    Clob.fail_metadata = True
+    metadata_fallback = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=True,
+        preflight_receipt=None,
+    )
+    Clob.fail_metadata = False
+    assert metadata_fallback.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
+    assert metadata_fallback.proof_accepted is True
+    assert metadata_fallback.global_jit_candidate.raw_book["asks"] == [
+        {"price": "0.61", "size": "10"}
+    ]
     Clob.ctf_units = 0
     blocked = era._submit_current_global_sell(
         event,
@@ -36140,592 +36621,19 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
     )
 
 
-def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
-    from src.events.day0_authority import bind_day0_probability_semantics
-    from src.state.schema.no_trade_regret_events_schema import ensure_table
 
-    at = _dt.datetime(2026, 8, 11, 16, 0, tzinfo=_dt.timezone.utc)
 
-    def curve(token_id: str, price: str) -> ExecutableCostCurve:
-        return ExecutableCostCurve(
-            token_id=token_id,
-            side="YES",
-            snapshot_id=f"snapshot-{token_id}",
-            book_hash=f"book-{token_id}",
-            levels=(BookLevel(price=Decimal(price), size=Decimal("10")),),
-            fee_model=FeeModel(fee_rate=Decimal("0.02")),
-            min_tick=Decimal("0.01"),
-            min_order_size=Decimal("5"),
-            quote_ttl=_dt.timedelta(seconds=30),
-        )
+def test_global_capital_receipt_is_the_only_non_actuating_alpha_path():
+    """The live batch keeps the canonical receipt proof, not a second lane."""
 
-    def witness(family_key: str, q: float) -> SimpleNamespace:
-        return SimpleNamespace(
-            family_key=family_key,
-            bin_ids=("20C", "21C"),
-            bindings=(
-                SimpleNamespace(
-                    bin_id="20C",
-                    condition_id=f"condition-{family_key}",
-                    yes_token_id=f"token-{family_key}",
-                    no_token_id=f"no-token-{family_key}",
-                ),
-                SimpleNamespace(
-                    bin_id="21C",
-                    condition_id=f"condition-21-{family_key}",
-                    yes_token_id=f"token-21-{family_key}",
-                    no_token_id=f"no-token-21-{family_key}",
-                ),
-            ),
-            yes_point_q=np.array([q, 1.0 - q]),
-            yes_q_samples=np.tile(np.array([q, 1.0 - q]), (100, 1)),
-            q_version=bind_day0_probability_semantics(f"q-{family_key}"),
-            witness_identity=f"witness-{family_key}",
-            probability_content_identity=f"content-{family_key}",
-            posterior_identity_hash=f"posterior-{family_key}",
-            source_truth_identity=f"source-{family_key}",
-            resolution_identity=f"resolution-{family_key}",
-            topology_identity=f"topology-{family_key}",
-            band_alpha=0.05,
-            band_basis="current-day0",
-            captured_at_utc=at,
-        )
-
-    family_a = "family-a"
-    family_b = "family-b"
-    evaluations = tuple(
-        SimpleNamespace(
-            candidate_id=f"candidate-{family_key}",
-            family_key=family_key,
-            bin_id="20C",
-            condition_id=f"condition-{family_key}",
-            side="YES",
-            token_id=f"token-{family_key}",
-            action="BUY",
-            status="REJECTED",
-            rejection_reason=(
-                "STRATEGY_POLICY_GATED:day0_nowcast_entry:"
-                "sources=risk_action:gate"
-            ),
-        )
-        for family_key in (family_a, family_b)
+    assert hasattr(
+        global_batch_runtime,
+        "_capital_proof_counterfactual_receipt",
     )
-
-    def proof_for(evaluation: SimpleNamespace) -> SimpleNamespace:
-        # Live BUY candidates predate the explicit action field and rely on the
-        # solver's canonical BUY default. The shadow writer must preserve that
-        # runtime shape while matching the candidate id back to the gated row.
-        proof_candidate_fields = dict(vars(evaluation))
-        proof_candidate_fields.pop("action", None)
-        return SimpleNamespace(
-            decision=SimpleNamespace(
-                candidate=SimpleNamespace(**proof_candidate_fields),
-                shares=Decimal("5"),
-                cost_usd=Decimal("1.01"),
-                expected_growth=SimpleNamespace(
-                    expected_delta_log_wealth=0.01,
-                    expected_ev_usd=1.0,
-                ),
-            )
-        )
-
-    assets = tuple(
-        SimpleNamespace(
-            family_key=family_key,
-            bin_id="20C",
-            condition_id=f"condition-{family_key}",
-            side="YES",
-            token_id=f"token-{family_key}",
-            curve=curve(
-                f"token-{family_key}",
-                "0.20" if family_key == family_a else "0.30",
-            ),
-            captured_at_utc=at,
-        )
-        for family_key in (family_a, family_b)
+    assert not any(
+        "shadow" in name.lower()
+        for name in vars(global_batch_runtime)
     )
-    events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[0]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.90),
-            family_b: witness(family_b, 0.80),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-    )
-
-    assert len(events) == 1
-    assert events[0].city == "Alpha"
-    assert events[0].q_live == pytest.approx(0.90)
-    assert events[0].hypothetical_fill_price == pytest.approx(0.20)
-    envelope = json.loads(events[0].envelope_json)
-    assert envelope["schema_version"] == 3
-    assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
-    assert envelope["global_selection_revision"] == (
-        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    )
-    assert envelope["selection_rule"].endswith(
-        "posterior_mean_expected_growth_winner_v3"
-    )
-    assert envelope["global_proof_winner"] is True
-    assert envelope["global_proof_candidate_id"] == "candidate-family-a"
-    assert envelope["q"] == pytest.approx(0.90)
-    assert envelope["expected_net_edge_per_share"] > 0.0
-
-    no_capital_edge = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[0]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.10),
-            family_b: witness(family_b, 0.20),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-    )
-    assert no_capital_edge == ()
-
-    qkernel_evaluations = tuple(
-        SimpleNamespace(
-            **{
-                **vars(evaluation),
-                "rejection_reason": (
-                    "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
-                    "sources=risk_action:gate"
-                ),
-            }
-        )
-        for evaluation in evaluations
-    )
-    qkernel_witnesses = {
-        family_key: SimpleNamespace(
-            **{
-                **vars(witness(family_key, q)),
-                "q_version": f"qkernel-current-{family_key}",
-            }
-        )
-        for family_key, q in ((family_a, 0.90), (family_b, 0.80))
-    }
-    semantics_conn = sqlite3.connect(":memory:")
-    semantics_conn.execute(
-        "CREATE TABLE forecast_posteriors ("
-        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT)"
-    )
-    for family_key, revision, lag, reused in (
-        (
-            family_a,
-            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            0.0,
-            False,
-        ),
-        (
-            family_b,
-            "stale_ensemble_absolute_disagreement_v2",
-            6.0,
-            True,
-        ),
-    ):
-        semantics_conn.execute(
-            "INSERT INTO forecast_posteriors VALUES (?,?)",
-            (
-                f"posterior-{family_key}",
-                json.dumps(
-                    {
-                        "bayes_precision_fusion": {
-                            "current_evidence_shape": {
-                                "semantics_revision": revision,
-                                "translation_applied": False,
-                                "shape_lag_hours": lag,
-                                "stale_shape_reused": reused,
-                                "source_cycle_time": (
-                                    "2026-08-11T00:00:00+00:00"
-                                ),
-                                "between_cohort_status": (
-                                    "SIMULTANEOUS_PROVEN"
-                                ),
-                            }
-                        }
-                    }
-                ),
-            ),
-        )
-    semantics_by_posterior = (
-        global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-            semantics_conn,
-            qkernel_witnesses,
-        )
-    )
-    semantics_conn.close()
-    assert semantics_by_posterior == {
-        f"posterior-{family_a}": (
-            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
-        ),
-    }
-    qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
-        ),
-        proof_selected=proof_for(qkernel_evaluations[0]),
-        probability_witnesses=qkernel_witnesses,
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-        qkernel_semantics_by_posterior=semantics_by_posterior,
-        strategy_keys=("forecast_qkernel_entry",),
-    )
-    assert len(qkernel_events) == 1
-    qkernel_envelopes = [
-        json.loads(event.envelope_json) for event in qkernel_events
-    ]
-    assert {
-        envelope["probability_semantics_revision"]
-        for envelope in qkernel_envelopes
-    } == {
-        global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-    }
-    assert all(
-        envelope["strategy_key"] == "forecast_qkernel_entry"
-        for envelope in qkernel_envelopes
-    )
-    assert all(
-        event.rejection_reason
-        == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
-        and event.event_id.startswith(
-            "market-relative-alpha-shadow-v6-city-date-cluster:"
-        )
-        and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-        in event.event_id
-        for event in qkernel_events
-    )
-    stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(
-                candidate_evaluations=qkernel_evaluations
-            )
-        ),
-        proof_selected=proof_for(qkernel_evaluations[0]),
-        probability_witnesses=qkernel_witnesses,
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-        qkernel_semantics_by_posterior={
-            f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
-            for family_key in (family_a, family_b)
-        },
-        strategy_keys=("forecast_qkernel_entry",),
-    )
-    assert stale_events == ()
-    missing_posterior_witnesses = {
-        family_key: SimpleNamespace(
-            **{
-                **vars(qkernel_witness),
-                "posterior_identity_hash": "",
-            }
-        )
-        for family_key, qkernel_witness in qkernel_witnesses.items()
-    }
-    assert (
-        global_batch_runtime._market_relative_alpha_shadow_events(
-            selected=SimpleNamespace(
-                decision=SimpleNamespace(
-                    candidate_evaluations=qkernel_evaluations
-                )
-            ),
-            proof_selected=proof_for(qkernel_evaluations[0]),
-            probability_witnesses=missing_posterior_witnesses,
-            book_epoch=SimpleNamespace(
-                assets=assets,
-                witness_identity="book-epoch",
-            ),
-            family_context_by_key={
-                family_a: {
-                    "city": "Alpha",
-                    "target_date": "2026-08-11",
-                    "metric": "high",
-                },
-                family_b: {
-                    "city": "Beta",
-                    "target_date": "2026-08-11",
-                    "metric": "low",
-                },
-            },
-            selection_epoch_identity="selection-epoch",
-            selection_cut_at_utc=at,
-            decision_at_utc=at,
-            strategy_keys=("forecast_qkernel_entry",),
-        )
-        == ()
-    )
-
-    conn = sqlite3.connect(":memory:")
-    ensure_table(conn)
-    beta_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[1]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.90),
-            family_b: witness(family_b, 0.80),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch-beta",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch-beta",
-        selection_cut_at_utc=at + _dt.timedelta(seconds=1),
-        decision_at_utc=at + _dt.timedelta(seconds=1),
-    )
-    assert len(beta_events) == 1
-    assert beta_events[0].city == "Beta"
-    assert beta_events[0].target_date == events[0].target_date
-    assert beta_events[0].event_id != events[0].event_id
-    first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, events
-    )
-    second = global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, events
-    )
-    assert first == second
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 1
-    global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, beta_events
-    )
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 2
-    global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, qkernel_events
-    )
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 3
-
-    exit_at = at + _dt.timedelta(hours=1)
-    wealth = SimpleNamespace(
-        ledger_snapshot_id="ledger",
-        witness_identity="wealth-witness",
-        economic_identity="wealth-economics",
-        strategy_capital_allocation=SimpleNamespace(
-            utility_liquid_cash_usd=Decimal("100")
-        ),
-    )
-    holdings = SimpleNamespace(
-        family_key=family_a,
-        ledger_snapshot_id="ledger",
-        endowment_claims=(),
-    )
-
-    def exit_epoch(*, price: str, size: str = "5") -> SimpleNamespace:
-        return SimpleNamespace(
-            witness_identity=f"exit-book-{price}-{size}",
-            max_age=_dt.timedelta(seconds=30),
-            sell_assets=(
-                SimpleNamespace(
-                    family_key=family_a,
-                    bin_id="20C",
-                    condition_id=f"condition-{family_a}",
-                    side="YES",
-                    token_id=f"token-{family_a}",
-                    captured_at_utc=exit_at,
-                    neg_risk=False,
-                    curve=ExecutableSellCurve(
-                        token_id=f"token-{family_a}",
-                        side="YES",
-                        snapshot_id=f"exit-snapshot-{price}-{size}",
-                        book_hash=f"exit-book-hash-{price}-{size}",
-                        levels=(
-                            BidBookLevel(
-                                price=Decimal(price),
-                                size=Decimal(size),
-                            ),
-                        ),
-                        fee_model=FeeModel(fee_rate=Decimal("0.02")),
-                        min_tick=Decimal("0.01"),
-                        min_order_size=Decimal("5"),
-                        quote_ttl=_dt.timedelta(seconds=30),
-                    ),
-                ),
-            ),
-        )
-
-    exits = global_batch_runtime._market_relative_alpha_shadow_exit_events(
-        conn,
-        probability_witnesses={family_a: witness(family_a, 0.10)},
-        holdings_by_family={family_a: holdings},
-        wealth_witness=wealth,
-        book_epoch=exit_epoch(price="0.30"),
-        decision_at_utc=exit_at,
-    )
-    assert len(exits) == 1
-    assert exits[0].direction == "sell_yes"
-    assert exits[0].regret_bucket == "EXECUTABLE_GAIN_LOCKED"
-    exit_envelope = json.loads(exits[0].envelope_json)
-    assert exit_envelope["decision_law_id"].endswith("sell-over-hold-v1")
-    assert exit_envelope["global_selection_revision"] == (
-        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    )
-    assert Decimal(exit_envelope["locked_gain_usd"]) >= Decimal("0.05")
-    assert Decimal(exit_envelope["sell_over_hold_usd"]) >= Decimal("0.05")
-    assert exit_envelope["full_depth_executable"] is True
-    assert exit_envelope["venue_submit_count"] == 0
-
-    qkernel_exit_witness = SimpleNamespace(
-        **{
-            **vars(qkernel_witnesses[family_a]),
-            "yes_point_q": np.array([0.10, 0.90]),
-            "yes_q_samples": np.tile(np.array([0.10, 0.90]), (100, 1)),
-        }
-    )
-    qkernel_exits = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: qkernel_exit_witness},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30"),
-            decision_at_utc=exit_at,
-            qkernel_semantics_by_posterior={
-                f"posterior-{family_a}": (
-                    global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
-                )
-            },
-        )
-    )
-    assert len(qkernel_exits) == 1
-    assert json.loads(qkernel_exits[0].envelope_json)["strategy_key"] == (
-        "forecast_qkernel_entry"
-    )
-
-    hold_dominates = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.30)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert hold_dominates == ()
-    sub_tick_gain = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.10)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.21"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert sub_tick_gain == ()
-    no_full_depth = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.10)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30", size="4"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert no_full_depth == ()
-
-    first_exit = global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, exits
-    )
-    second_exit = global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, exits
-    )
-    assert first_exit == second_exit
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 4
-    conn.close()
 
 
 def test_global_auction_trade_receipt_yields_to_registered_monitor(

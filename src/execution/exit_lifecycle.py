@@ -74,6 +74,9 @@ HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
 _MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS = 250
 _MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS = 500
 _MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS = 5_000
+_MARKET_CLOSED_HOLD_WRITE_LEASE_DEADLINE_MS = 250
+_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS = 500
+_MARKET_CLOSED_HOLD_WRITE_RETRY_DEADLINE_MS = 5_000
 
 # Status is derived observability, never monitor-claim work. One daemon-owned
 # drain coalesces completed monitor summaries so an unhealthy status read model
@@ -89,6 +92,14 @@ class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
     DEBT = "DEBT"
     NO_DEBT = "NO_DEBT"
     DEFERRED = "DEFERRED"
+
+
+@dataclass(frozen=True)
+class _HeldMonitorBootstrap:
+    """One bounded, TRADE-only snapshot reused by the monitor's authority lane."""
+
+    portfolio: PortfolioState
+    allocator_snapshot: dict
 
 
 def preserve_held_sell_reauction_deadline(
@@ -2483,7 +2494,7 @@ class MonitorRiskAuthority:
 
 @dataclass(frozen=True)
 class ProtectiveSellExecutionAuthority:
-    """Immutable RED/hard-fact authority for one fresh FAK reduce-only SELL."""
+    """Immutable protective authority for one fresh FAK reduce-only SELL."""
 
     kind: str
     position_id: str
@@ -2497,7 +2508,10 @@ class ProtectiveSellExecutionAuthority:
     authority_identity: str
 
     def __post_init__(self) -> None:
-        if self.kind not in {"RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD"}:
+        if self.kind not in {
+            "RED_FORCE_EXIT",
+            "DAY0_HARD_FACT_BIN_DEAD",
+        }:
             raise ValueError("protective sell kind invalid")
         if not all((
             self.position_id,
@@ -2629,7 +2643,7 @@ def _protective_sell_execution_authority_error(
 
 
 def _protective_sell_semantic_receipt(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     *,
     position_id: str,
     token_id: str,
@@ -2638,6 +2652,8 @@ def _protective_sell_semantic_receipt(
     event_id: str | None = None,
 ) -> tuple[str, str] | None:
     """Bind a protective order to exact canonical semantic exit evidence."""
+    if conn is None:
+        return None
     try:
         row = conn.execute(
             """SELECT event_id, sequence_no, source_module, env, decision_id,
@@ -3841,76 +3857,190 @@ def _dual_write_market_closed_hold_if_available(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
-    try:
-        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-        from src.state.db import append_many_and_project
 
-        if _has_equivalent_market_closed_hold(
-            conn,
-            trade_id,
-            reason=reason,
-            error=error,
-        ):
-            return True
-        monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
-        idempotency_key = _market_closed_hold_idempotency_key(
-            trade_id=trade_id,
-            reason=reason,
-            error=error,
-            monitor_basis_sequence_no=monitor_basis_sequence_no,
-        )
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = datetime.now(timezone.utc).isoformat()
-        position.last_monitor_at = occurred_at
-        phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
-        events, projection = build_monitor_refreshed_canonical_write(
-            position,
-            sequence_no=sequence_no,
-            phase_after=phase_after,
-            source_module="src.execution.exit_lifecycle",
-            decision_unavailable_reason=reason,
-            decision_unavailable_trigger=reason,
-        )
-        event = dict(events[0])
-        payload = json.loads(str(event.get("payload_json") or "{}"))
-        payload.update(
-            {
-                "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
-                "hold_reason": reason,
-                "market_closed_error": error,
-                "exit_order_submitted": False,
-                "exit_failure": False,
-            }
-        )
-        event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
-        event["caused_by"] = "market_closed_hold_to_settlement"
-        event["idempotency_key"] = idempotency_key
-        event["occurred_at"] = occurred_at
-        event["venue_status"] = None
-        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
-        projection["updated_at"] = occurred_at
-        projection["phase"] = phase_after
-        projection["order_status"] = getattr(position, "order_status", "") or "filled"
-        projection["exit_reason"] = (
-            getattr(position, "exit_reason", "") or ""
-            if preserve_exit_reason
-            else reason
-        )
-        projection["exit_retry_count"] = 0
-        projection["next_exit_retry_at"] = ""
+    # This helper is reached from the long-lived held-monitor connection.  Do
+    # not wait for the canonical writer lease while retaining an earlier
+    # transaction: a competing writer can own the lease while waiting for this
+    # connection's SQLite write lock.  The closed-hold event itself is then
+    # appended and committed in its own short MONITOR lease.
+    if conn.in_transaction:
+        previous_busy_timeout = 0
+        cleanup_error: Exception | None = None
         try:
-            append_many_and_project(conn, [event], projection)
-        except sqlite3.IntegrityError as exc:
-            if _is_position_event_idempotency_collision(exc):
-                return _has_equivalent_market_closed_hold(
+            busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+            previous_busy_timeout = int(busy_row[0] if busy_row else 0)
+            conn.execute("PRAGMA busy_timeout = 0")
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - closed hold remains retryable.
+            cleanup_error = exc
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve the original failure.
+                pass
+        finally:
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout}")
+            except Exception as exc:  # noqa: BLE001 - do not enter the lease uncertain.
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            logger.warning(
+                "market closed hold pre-lease cleanup failed for %s: %s",
+                trade_id,
+                cleanup_error,
+            )
+            return False
+
+    from src.execution.executor import _canonical_trade_write_lease
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.write_coordinator import (
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    def persist_once(*, owner: str, deadline_ms: int) -> bool:
+        with _canonical_trade_write_lease(
+            conn,
+            owner=owner,
+            deadline_ms=deadline_ms,
+            max_hold_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
+        ) as lease:
+            def append_and_commit() -> bool:
+                if _has_equivalent_market_closed_hold(
                     conn,
                     trade_id,
                     reason=reason,
                     error=error,
+                ):
+                    return True
+                monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
+                idempotency_key = _market_closed_hold_idempotency_key(
+                    trade_id=trade_id,
+                    reason=reason,
+                    error=error,
+                    monitor_basis_sequence_no=monitor_basis_sequence_no,
                 )
-            raise
-        return True
+                sequence_no = _next_canonical_sequence_no(conn, trade_id)
+                occurred_at = datetime.now(timezone.utc).isoformat()
+                previous_monitor_at = getattr(position, "last_monitor_at", None)
+                position.last_monitor_at = occurred_at
+                phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
+                events, projection = build_monitor_refreshed_canonical_write(
+                    position,
+                    sequence_no=sequence_no,
+                    phase_after=phase_after,
+                    source_module="src.execution.exit_lifecycle",
+                    decision_unavailable_reason=reason,
+                    decision_unavailable_trigger=reason,
+                )
+                event = dict(events[0])
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+                payload.update(
+                    {
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": reason,
+                        "market_closed_error": error,
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                    }
+                )
+                event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
+                event["caused_by"] = "market_closed_hold_to_settlement"
+                event["idempotency_key"] = idempotency_key
+                event["occurred_at"] = occurred_at
+                event["venue_status"] = None
+                event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+                projection["updated_at"] = occurred_at
+                projection["phase"] = phase_after
+                projection["order_status"] = getattr(position, "order_status", "") or "filled"
+                projection["exit_reason"] = (
+                    getattr(position, "exit_reason", "") or ""
+                    if preserve_exit_reason
+                    else reason
+                )
+                projection["exit_retry_count"] = 0
+                projection["next_exit_retry_at"] = ""
+                try:
+                    append_many_and_project(conn, [event], projection)
+                    conn.commit()
+                except sqlite3.IntegrityError as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - preserve collision handling.
+                        pass
+                    position.last_monitor_at = previous_monitor_at
+                    if _is_position_event_idempotency_collision(exc):
+                        return _has_equivalent_market_closed_hold(
+                            conn,
+                            trade_id,
+                            reason=reason,
+                            error=error,
+                        )
+                    raise
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - preserve the write failure.
+                        pass
+                    position.last_monitor_at = previous_monitor_at
+                    raise
+                return True
+
+            if lease is None:
+                return append_and_commit()
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                return append_and_commit()
+
+    try:
+        return persist_once(
+            owner="market_closed_hold_canonical_append",
+            deadline_ms=_MARKET_CLOSED_HOLD_WRITE_LEASE_DEADLINE_MS,
+        )
+    except WriteLeaseTimeout as first_exc:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - retry remains fail closed.
+            pass
+        try:
+            return persist_once(
+                owner="market_closed_hold_canonical_append_retry",
+                deadline_ms=_MARKET_CLOSED_HOLD_WRITE_RETRY_DEADLINE_MS,
+            )
+        except WriteLeaseTimeout as retry_exc:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve retry failure.
+                pass
+            logger.warning(
+                "market closed hold projection deferred for %s: first=%s retry=%s",
+                trade_id,
+                first_exc,
+                retry_exc,
+            )
+            return False
+        except Exception as retry_exc:  # noqa: BLE001 - monitor can retry next cycle.
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - preserve retry failure.
+                pass
+            logger.warning(
+                "market closed hold projection failed on retry for %s: %s",
+                trade_id,
+                retry_exc,
+            )
+            return False
     except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the write failure.
+            pass
         logger.warning(
             "market closed hold projection failed for %s: %s",
             trade_id,
@@ -4090,6 +4220,7 @@ def _latest_fresh_snapshot_min_order_for_token(
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Decimal | None:
     """Return current min size from one fresh, non-invalidated token snapshot.
 
@@ -4105,40 +4236,56 @@ def _latest_fresh_snapshot_min_order_for_token(
     clean_token_id = str(token_id or "").strip()
     if not clean_token_id:
         return None
-    checked_at = (now or _utcnow()).astimezone(timezone.utc)
-    saved = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            """
-            SELECT snapshot_id
-              FROM executable_market_snapshots
-             WHERE selected_outcome_token_id = ?
-               AND freshness_deadline IS NOT NULL
-               AND datetime(freshness_deadline) >= datetime(?)
-             ORDER BY captured_at DESC, snapshot_id DESC
-             LIMIT 1
-            """,
-            (clean_token_id, checked_at.isoformat()),
-        ).fetchone()
-    except sqlite3.Error:
+    checked_at_raw = now or _utcnow()
+    if checked_at_raw.tzinfo is None:
         return None
-    finally:
-        conn.row_factory = saved
-    if row is None:
-        return None
+    checked_at = checked_at_raw.astimezone(timezone.utc)
+    deadline = (
+        _held_monitor_preparation_deadline(conn, deadline_monotonic)
+        if deadline_monotonic is not None
+        else nullcontext(lambda: None)
+    )
     try:
-        from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+        with deadline as ensure_live:
+            ensure_live()
+            saved = conn.row_factory
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    """
+                    SELECT snapshot_id
+                      FROM executable_market_snapshot_latest
+                     WHERE selected_outcome_token_id = ?
+                     ORDER BY captured_at DESC, snapshot_id DESC
+                     LIMIT 1
+                    """,
+                    (clean_token_id,),
+                ).fetchone()
+            finally:
+                conn.row_factory = saved
+            ensure_live()
+            if row is None:
+                return None
 
-        snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
-        if (
-            snapshot is None
-            or snapshot.selected_outcome_token_id != clean_token_id
-            or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
-        ):
-            return None
-        return _positive_decimal(snapshot.min_order_size)
-    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+            from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+            snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
+            ensure_live()
+            freshness_deadline = getattr(snapshot, "freshness_deadline", None)
+            if isinstance(freshness_deadline, str):
+                freshness_deadline = _parse_iso(freshness_deadline)
+            if (
+                snapshot is None
+                or snapshot.selected_outcome_token_id != clean_token_id
+                or freshness_deadline is None
+                or freshness_deadline.tzinfo is None
+                or freshness_deadline.astimezone(timezone.utc) < checked_at
+                or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
+            ):
+                return None
+            ensure_live()
+            return _positive_decimal(snapshot.min_order_size)
+    except (sqlite3.Error, TimeoutError, InvalidOperation, TypeError, ValueError):
         return None
 
 
@@ -4147,6 +4294,7 @@ def _latest_fresh_snapshot_min_order(
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Decimal | None:
     """min_order_size of the current executable snapshot for the exit token."""
 
@@ -4154,6 +4302,7 @@ def _latest_fresh_snapshot_min_order(
         _exit_token_id(position),
         conn=conn,
         now=now,
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -4173,6 +4322,7 @@ def _is_non_executable_dust_hold(
     *,
     conn: sqlite3.Connection | None = None,
     current_min_order_size: object = None,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """True for dust/min-size holds that redecision cannot make executable."""
 
@@ -4186,7 +4336,11 @@ def _is_non_executable_dust_hold(
     # Historical reason/error text is never current venue authority.
     fresh_min = _positive_decimal(current_min_order_size)
     if fresh_min is None:
-        fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
+        fresh_min = _latest_fresh_snapshot_min_order(
+            position,
+            conn=conn,
+            deadline_monotonic=deadline_monotonic,
+        )
     if fresh_min is None:
         return False
     shares = _positive_decimal(getattr(position, "effective_shares", None))
@@ -4341,6 +4495,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     conn: sqlite3.Connection | None = None,
     current_min_order_size: object = None,
     legacy_favorable_bid_authorized: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Release a still-held exhausted exit attempt back to live redecision.
 
@@ -4368,6 +4523,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
         position,
         conn=conn,
         current_min_order_size=current_min_order_size,
+        deadline_monotonic=deadline_monotonic,
     ):
         return False
     chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
@@ -7335,6 +7491,7 @@ def _execute_live_exit(
         if preliminary_error is not None and (
             not continuing_existing_exit
             or str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+            or str(exit_intent.reason or "").startswith("FLASH_CRASH_PANIC")
         ):
             logger.warning(
                 "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
@@ -7504,7 +7661,7 @@ def _execute_live_exit(
                 branchwise_sell_authority,
                 snapshot_context=snapshot_context,
             )
-        elif hard_fact_authorized or continuing_existing_exit:
+        elif protective_sell_authority is not None or continuing_existing_exit:
             authority_error = None
         else:
             authority_error = "hard_fact_sell_authority_invalid"
@@ -7803,7 +7960,10 @@ def _execute_live_exit(
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     if live_non_red and continuing_existing_exit and not (
-        global_authorized or branchwise_authorized or hard_fact_authorized
+        global_authorized
+        or branchwise_authorized
+        or hard_fact_authorized
+        or protective_sell_authority is not None
     ):
         logger.warning(
             "EXIT_REPLACEMENT_BLOCKED_FRESH_CAPITAL_AUTHORITY trade_id=%s",
@@ -8159,6 +8319,7 @@ def _execute_live_exit(
                         conn,
                         closed,
                         phase_before=phase_before,
+                        command_id=sell_result.command_id,
                     )
                     if conn is not None:
                         log_exit_fill_event(
@@ -8170,6 +8331,13 @@ def _execute_live_exit(
                             best_bid=best_bid,
                             timestamp=getattr(closed, "last_exit_at", None),
                         )
+                        # The executor has already committed the venue ACK and
+                        # FILL_CONFIRMED fact.  Commit the command-bound
+                        # economic-close projection before returning so a
+                        # long-lived monitor connection cannot retain sold
+                        # shares as private, uncommitted state while portfolio
+                        # readers count the released cash.
+                        conn.commit()
                     # Slice P5-1 (PR #19 closeout completion, 2026-04-26):
                     # construct typed RealizedFill at the fill-receipt seam.
                     # P3.3 commit message promised this; P3.3b delivered the
@@ -10591,6 +10759,7 @@ def check_pending_exits(
     cycle_budget_seconds: float | None = None,
     deadline_monotonic: float | None = None,
     global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+    recover_retry_pending: bool = True,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
 
@@ -10721,6 +10890,12 @@ def check_pending_exits(
             stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
             continue
         if exit_state == "retry_pending":
+            if not recover_retry_pending:
+                stats["unchanged"] += 1
+                stats["retry_recovery_deferred"] = (
+                    stats.get("retry_recovery_deferred", 0) + 1
+                )
+                continue
             import copy
 
             retry_released = False
@@ -13209,14 +13384,33 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
     position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
     if not position_ids:
         return {"released": 0, "position_ids": []}
-    released = _append_exit_retry_release_events_and_update_projection(
-        conn,
-        position_ids,
-        observed_at=observed_at,
-        release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
-        release_error="allocator_not_configured_released",
-        deadline_monotonic=deadline_monotonic,
+    from src.risk_allocator import (
+        AllocationDenied,
+        assert_global_submit_allows,
+        global_actuation_authority_lease,
     )
+
+    try:
+        with global_actuation_authority_lease():
+            assert_global_submit_allows(reduce_only=True)
+            released = _append_exit_retry_release_events_and_update_projection(
+                conn,
+                position_ids,
+                observed_at=observed_at,
+                release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
+                release_error="allocator_not_configured_released",
+                deadline_monotonic=deadline_monotonic,
+            )
+    except AllocationDenied as exc:
+        logger.info(
+            "Allocator authority changed before exit-retry release: %s",
+            exc.decision.reason,
+        )
+        return {
+            "released": 0,
+            "position_ids": [],
+            "error": exc.decision.reason,
+        }
     changed = int(released.get("released", 0) or 0)
     position_ids = list(released.get("position_ids", []) or [])
     id_set = set(position_ids)
@@ -13229,61 +13423,6 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
         position_ids,
     )
     return released
-
-
-def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict:
-    """Configure risk allocator before held-position exit decisions run.
-
-    The held-position monitor is an independent live lane and can run before the
-    EDLI reactor's allocator refresh after daemon restart. It must not reach the
-    executor with unconfigured risk singletons, because that turns real exit
-    decisions into ``allocator_not_configured`` backoff.
-    """
-
-    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
-    from src.control.ws_gap_guard import summary as _ws_gap_summary
-    from src.risk_allocator import configure_global_allocator, refresh_global_allocator
-    from src.riskguard.riskguard import get_current_level
-
-    try:
-        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
-        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
-        _drawdown_pct = (
-            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
-            if _baseline > 0.0
-            else 0.0
-        )
-        result = refresh_global_allocator(
-            conn,
-            ledger={
-                "current_drawdown_pct": _drawdown_pct,
-                "risk_level": get_current_level().value,
-            },
-            heartbeat=_heartbeat_summary(),
-            ws_status=_ws_gap_summary(),
-        )
-        logger.info(
-            "held-position monitor allocator refresh: configured=%r drawdown_pct=%.3f",
-            result.get("configured"),
-            _drawdown_pct,
-        )
-        return result
-    except Exception as exc:  # noqa: BLE001 - fail closed with explicit state.
-        try:
-            configure_global_allocator(None, None)
-        except Exception:  # noqa: BLE001
-            pass
-        logger.error(
-            "held-position monitor allocator refresh FAILED: %s; exit submit remains fail-closed",
-            exc,
-            exc_info=True,
-        )
-        return {
-            "configured": False,
-            "fail_closed": True,
-            "error": str(exc),
-            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
-        }
 
 
 def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
@@ -13425,33 +13564,15 @@ def _full_book_monitor_completed_canonical_coverage(
         for value in summary.get("held_monitor_discharged_position_ids", ()) or ()
         if str(value).strip()
     }
-    no_action_authority_ids = {
-        str(value).strip()
-        for value in summary.get(
-            "held_monitor_no_action_authority_position_ids",
-            (),
-        )
-        or ()
-        if str(value).strip()
-    }
-    non_executable_dust_ids = {
-        str(value).strip()
-        for value in summary.get(
-            "held_monitor_non_executable_dust_position_ids",
-            (),
-        )
-        or ()
-        if str(value).strip()
-    }
-    # A current fresh venue minimum can prove one exact residual impossible to
-    # express as a SELL.  That position keeps its independent health alarm and
-    # recurring monitor, but it cannot make unrelated families inherit an
-    # unresettable full-book debt.  SCOPE: canonical no-action rows that are
-    # also current-proven dust. DRAIN: the normal recurring monitor and
-    # settlement continue for that position. RESET: a changed current minimum
-    # omits the dust identity and restores ordinary action-authority debt.
-    unresolved_no_action_ids = no_action_authority_ids - non_executable_dust_ids
-    completed_ids = (canonical_ids - unresolved_no_action_ids) | discharged_ids
+    # Canonical coverage means that every admitted position produced a durable
+    # current-cycle redecision, including an explicit DATA_DEGRADED/no-action
+    # verdict.  Action authority is a separate fact: missing fresh probability
+    # must keep its source-health and entry gates closed, but it must not turn a
+    # completed full-book scan into process-global cadence debt.  Otherwise one
+    # degraded family drives the one-second recovery worker indefinitely and
+    # delays fresh q/book decisions for every healthy position.  The ordinary
+    # recurring pass re-evaluates the degraded position when authority returns.
+    completed_ids = canonical_ids | discharged_ids
     return (
         int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
         and candidate_ids.issubset(completed_ids)
@@ -13488,6 +13609,15 @@ def _held_monitor_preparation_deadline(
     try:
         yield ensure_live
         ensure_live()
+    except sqlite3.OperationalError as exc:
+        # SQLite reports a progress-handler deadline as ``interrupted`` rather
+        # than our typed timeout.  Preserve the monitor scheduler seam: this is
+        # a bounded preparation failure, never an UNKNOWN monitor outcome.
+        if expired() and "interrupted" in str(exc).lower():
+            raise TimeoutError(
+                "HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED"
+            ) from exc
+        raise
     finally:
         conn.set_progress_handler(None, 0)
         conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
@@ -13527,6 +13657,62 @@ def held_monitor_pre_artifact_reserve_seconds() -> float:
     from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
 
     return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+
+
+def _load_held_monitor_bootstrap(
+    *,
+    deadline_monotonic: float,
+    target_families: Collection[tuple[str, str, str]] | None,
+) -> _HeldMonitorBootstrap:
+    """Hydrate held exposure and read the published allocator snapshot.
+
+    The current held probability is causally independent of a global allocator
+    rebuild.  Recomputing lots, commands, and reconcile findings inside this
+    preparation tranche can consume the only complete probability-read reserve
+    and blind every held position under DB pressure.  The independent allocator
+    refresh lane publishes the process snapshot; an absent snapshot remains
+    fail-closed for submit without suppressing monitor redecision.
+
+    SCOPE: one monitor claim's open-position portfolio and the already-published
+    allocator snapshot. DRAIN: independent allocator refresh publishes a later
+    snapshot while recurring monitor attempts continue. RESET: every claim
+    re-reads both current exposure and the process snapshot.
+    """
+    from src.engine.cycle_runner import (
+        get_held_monitor_bootstrap_connection,
+        load_portfolio,
+    )
+    from src.risk_allocator import summary as allocator_summary
+
+    conn = get_held_monitor_bootstrap_connection(
+        deadline_monotonic=deadline_monotonic,
+    )
+    if conn is None:
+        raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+    try:
+        with _held_monitor_preparation_deadline(
+            conn,
+            deadline_monotonic,
+        ) as ensure_preparation_live:
+            portfolio = load_portfolio(
+                open_positions_only=True,
+                target_families=target_families,
+                connection=conn,
+                deadline_monotonic=deadline_monotonic,
+            )
+            ensure_preparation_live()
+            allocator_snapshot = allocator_summary()
+            ensure_preparation_live()
+            return _HeldMonitorBootstrap(
+                portfolio=portfolio,
+                allocator_snapshot=allocator_snapshot,
+            )
+    finally:
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        finally:
+            conn.close()
 
 
 def _persist_exit_monitor_artifact(
@@ -13786,7 +13972,6 @@ def run_exit_monitor_cycle(
         _execute_monitoring_phase,
         get_connection,
         get_tracker,
-        load_portfolio,
         save_tracker,
         save_portfolio,
     )
@@ -13840,12 +14025,32 @@ def run_exit_monitor_cycle(
         _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
-    conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
-    if conn is None:
-        logger.warning(
-            "exit_monitor: DB preparation deadline expired — preserving primary "
-            "redecision reserve for the recurring retry"
+    try:
+        bootstrap = _load_held_monitor_bootstrap(
+            deadline_monotonic=preparation_deadline_monotonic,
+            target_families=target_families,
         )
+    except TimeoutError as exc:
+        logger.warning(
+            "exit_monitor: TRADE-only bootstrap deadline expired — preserving "
+            "primary redecision reserve for the recurring retry: %s",
+            exc,
+        )
+        mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
+        return False
+    except sqlite3.OperationalError as exc:
+        logger.warning("exit_monitor: TRADE-only bootstrap unavailable: %s", exc)
+        mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
+        return False
+
+    # Bootstrap has closed its query-only TRADE connection.  Establish the
+    # existing cross-DB/write authority only for the subsequent belief and
+    # lifecycle lane; never reload portfolio or allocator state here.
+    conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)
+    if conn is None:
+        logger.warning("exit_monitor: authority connection unavailable after bootstrap")
         mark_held_position_monitor_complete()
         _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
         return False
@@ -13867,24 +14072,12 @@ def run_exit_monitor_cycle(
     succeeded = False
     monitor_completion_marked = False
     try:
+        portfolio = bootstrap.portfolio
+        held_monitor_allocator_snapshot = bootstrap.allocator_snapshot
         with _held_monitor_preparation_deadline(
             conn,
-            preparation_deadline_monotonic,
-        ) as ensure_preparation_live:
-            # Cadence detection is owned by the independent durable recovery
-            # lane in ``src.main``.  Re-reading the same event history here put
-            # optional diagnosis ahead of portfolio/allocator preparation: on
-            # an I/O-contended canonical DB it could consume this whole claim
-            # and prevent every held position from reaching redecision.  Keep
-            # the actuation prerequisite tranche free of diagnostic reads.
-            ensure_preparation_live()
-            portfolio = load_portfolio(
-                open_positions_only=True,
-                target_families=target_families,
-                connection=conn,
-                deadline_monotonic=preparation_deadline_monotonic,
-            )
-            ensure_preparation_live()
+            monitor_deadline_monotonic,
+        ) as ensure_authority_live:
             if risk_level is RiskLevel.RED:
                 summary["force_exit_review_scope"] = "sweep_active_positions"
                 summary["force_exit_sweep_trigger"] = "risk_level_red"
@@ -13892,27 +14085,21 @@ def run_exit_monitor_cycle(
                     portfolio,
                     conn=conn,
                 )
-                ensure_preparation_live()
-            held_monitor_allocator_refresh = (
-                _refresh_global_allocator_for_held_position_monitor(
-                    conn,
-                    portfolio,
-                )
-            )
-            summary["held_monitor_allocator_refresh"] = (
-                held_monitor_allocator_refresh
+                ensure_authority_live()
+            summary["held_monitor_allocator_snapshot"] = (
+                held_monitor_allocator_snapshot
             )
             if (
                 target_families is None
-                and held_monitor_allocator_refresh.get("configured")
+                and held_monitor_allocator_snapshot.get("configured")
             ):
-                ensure_preparation_live()
+                ensure_authority_live()
                 summary["held_monitor_allocator_retry_release"] = (
                     _release_allocator_config_blocked_exit_retries_after_refresh(
                         conn,
                         portfolio,
                         observed_at=datetime.now(timezone.utc),
-                        deadline_monotonic=preparation_deadline_monotonic,
+                        deadline_monotonic=monitor_deadline_monotonic,
                     )
                 )
         summary["held_monitor_preparation_elapsed_seconds"] = max(

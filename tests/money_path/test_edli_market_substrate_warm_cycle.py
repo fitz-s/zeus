@@ -406,6 +406,23 @@ def test_pending_family_refresh_does_not_call_global_weather_discovery():
     assert "find_weather_markets_or_raise" not in src
 
 
+def test_substrate_snapshot_commits_never_run_implicit_wal_checkpoint():
+    """Snapshot writer commits must stay bounded to their row write unit."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA wal_autocheckpoint=1")
+
+    substrate_observer._disable_substrate_wal_autocheckpoint(conn)
+
+    assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+    refresh_src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+    discovery_src = inspect.getsource(substrate_observer._market_discovery_cycle)
+    for source in (refresh_src, discovery_src):
+        assert source.index("_disable_substrate_wal_autocheckpoint(") < source.index(
+            "refresh_executable_market_substrate_snapshots("
+        )
+
+
 def test_static_topology_reconstruction_reads_narrow_snapshot_columns():
     """Warm-lane reconstruction must not pull historical orderbook depth payloads."""
 
@@ -1911,7 +1928,11 @@ def test_day0_wake_waits_for_active_held_position_monitor(monkeypatch):
         def is_set(self) -> bool:
             return True
 
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda **_kwargs: wake,
+    )
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
     monkeypatch.setattr(

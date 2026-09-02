@@ -393,6 +393,7 @@ def _write_price_channel_heartbeat(*, status: str | None = None) -> bool:
             # heartbeat without an alive_at until the first successful M5 proof.
             "ready": bool(_heartbeat_ready),
             "pid": os.getpid(),
+            "generation": _HEARTBEAT_GENERATION,
             "git_head": _PROCESS_GIT_HEAD,
         }
         if _heartbeat_ready:

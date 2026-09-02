@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-27 (bounded M5 reconcile projection scan)
+# Last reused or audited: 2026-08-28 (bounded fill-bridge event discovery)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
@@ -185,6 +185,7 @@ def test_price_channel_starting_heartbeat_is_not_fresh_until_first_m5_success(
     assert ready["status"] == "READY"
     assert ready["ready"] is True
     assert ready["alive_at"]
+    assert ready["generation"] == daemon._HEARTBEAT_GENERATION
 
     daemon._write_price_channel_heartbeat(status="STOPPING")
     stopping = json.loads(
@@ -1305,6 +1306,8 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
     from src.events.edli_position_bridge import (
         DISPOSITION_SETTLED_MARKET,
         DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+        edli_bridge_position_id,
+        edli_bridge_position_id_legacy,
     )
     from src.ingest.price_channel_ingest import (
         _edli_durable_fill_bridge_candidate_ids,
@@ -1323,6 +1326,8 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         );
         CREATE INDEX idx_edli_live_order_events_aggregate
             ON edli_live_order_events(aggregate_id, event_sequence);
+        CREATE INDEX idx_edli_live_order_events_type
+            ON edli_live_order_events(event_type, occurred_at);
         CREATE TABLE position_current (position_id TEXT PRIMARY KEY);
         CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY,
@@ -1345,8 +1350,25 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         (
             ("settled", confirmed),
             ("manual-review", confirmed),
+            ("canonical-position", confirmed),
+            ("legacy-position", confirmed),
             ("live-orphan", confirmed),
         ),
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?)",
+        (
+            (edli_bridge_position_id("canonical-position"),),
+            (edli_bridge_position_id_legacy("legacy-position"),),
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, payload_json, occurred_at
+        ) VALUES (?, 1, 'DecisionProofAccepted', '{}', '2026-08-22T00:00:00+00:00')
+        """,
+        ((f"irrelevant-{index:05d}",) for index in range(25_000)),
     )
     conn.executemany(
         "INSERT INTO edli_fill_bridge_dispositions VALUES (?, ?)",
@@ -1356,9 +1378,20 @@ def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
         ),
     )
 
-    assert _edli_durable_fill_bridge_candidate_ids(conn, limit=8) == (
-        "live-orphan",
-    )
+    progress_calls = 0
+
+    def _fail_if_irrelevant_history_is_scanned():
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 200)
+
+    conn.set_progress_handler(_fail_if_irrelevant_history_is_scanned, 100)
+    try:
+        assert _edli_durable_fill_bridge_candidate_ids(conn, limit=8) == (
+            "live-orphan",
+        )
+    finally:
+        conn.set_progress_handler(None, 0)
     conn.close()
 
 
@@ -3758,7 +3791,7 @@ def test_market_channel_broad_partial_exit_retains_held_and_keeps_m5_debt(
     assert set(third.token_metadata) == {"held-token", "candidate-token"}
 
 
-def test_market_channel_canonical_identity_debt_fails_m5_for_all_typed_reasons(
+def test_market_channel_canonical_identity_debt_stays_scoped_for_all_typed_reasons(
     monkeypatch,
 ):
     from src.ingest import price_channel_ingest as lane
@@ -3773,7 +3806,7 @@ def test_market_channel_canonical_identity_debt_fails_m5_for_all_typed_reasons(
             "_market_channel_universe_refresh_debt",
             {"reason": reason},
         )
-        assert lane._edli_market_channel_universe_m5_failure_reason() == (
+        assert lane._edli_market_channel_universe_scoped_debt_reason() == (
             "canonical_held_identity"
         )
 
@@ -4670,6 +4703,82 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     assert ordered == ["missing-token", "stale-token", "newer-token"]
 
 
+@pytest.mark.parametrize("failed_token", [None, "held-05"])
+def test_held_rest_seed_refresh_is_per_token_and_only_drains_successes(failed_token):
+    """A quiet WS recovers canonical held books without batch-wide failure."""
+
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketChannelOnlineService,
+        MarketTokenMetadata,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    token_ids = [f"held-{index:02d}" for index in range(12)]
+    ingestor = MarketChannelIngestor(
+        None,
+        active_token_ids=set(token_ids),
+        token_metadata={
+            token_id: MarketTokenMetadata(
+                condition_id="condition-held",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snapshot-{token_id}",
+                market_end_at="2099-01-01T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+        feasibility_conn=conn,
+    )
+    fetched = []
+    drained = []
+
+    def fetch_orderbook(token_id):
+        fetched.append(token_id)
+        if token_id == failed_token:
+            raise RuntimeError("one held token failed")
+        return {
+            "asset_id": token_id,
+            "market": "condition-held",
+            "timestamp": "1781863200000",
+            "hash": f"hash-{token_id}",
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "10"}],
+        }
+
+    def drain_successes(events):
+        drained.extend(json.loads(event.payload_json)["token_id"] for event in events)
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=fetch_orderbook,
+        fetch_orderbooks=None,
+    )
+    written = service.seed_rest_books_in_chunks(
+        token_ids=token_ids,
+        received_at="2026-08-28T00:00:00+00:00",
+        write_gate=contextlib.nullcontext(),
+        commit=conn.commit,
+        chunk_size=4,
+        deadline_monotonic=time.monotonic() + 10.0,
+        past_end_exit_refresh=True,
+        post_commit_quote_sink=drain_successes,
+    )
+
+    expected = [token_id for token_id in token_ids if token_id != failed_token]
+    assert fetched == token_ids
+    assert drained == expected
+    assert written == len(expected)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2 * len(expected)
+
+
 def test_price_channel_sqlite_wait_is_bounded_by_writer_hold_budget(monkeypatch, tmp_path):
     from src.ingest import price_channel_ingest as lane
 
@@ -5237,7 +5346,15 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
                 "asks": [{"price": "0.75", "size": "10"}],
             }
 
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None) -> dict:  # noqa: ANN001
+            raise AssertionError("held refresh must isolate REST calls per token")
+
     monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic=None: sqlite3.connect(trade_path),
+    )
     monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
     monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
@@ -6055,6 +6172,11 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         state_db,
         "get_trade_connection",
         lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(trade_path),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic=None: sqlite3.connect(trade_path),
     )
     monkeypatch.setattr(
         lane,
@@ -7461,3 +7583,103 @@ def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_c
     assert "price_channel_snapshot_invalidate" in lane_src
     assert "db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE)" not in lane_src
     assert "refresh_executable_market_substrate_snapshots(" in lane_src
+
+
+def test_market_channel_snapshot_refresh_disables_autocheckpoint_before_refresh():
+    """The refresh writer must bound SQLite and configure WAL before any commit."""
+
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    refresh_action = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_refresh_snapshot_action"
+    )
+    trade_open = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "get_trade_connection"
+        and any(
+            keyword.arg == "write_class"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "live"
+            for keyword in node.value.keywords
+        )
+    )
+    autocheckpoint = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_disable_background_quote_autocheckpoint"
+    )
+    busy_bound = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_bound_price_channel_sqlite_wait"
+    )
+    refresh = next(
+        node
+        for node in ast.walk(refresh_action)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "refresh_executable_market_substrate_snapshots"
+    )
+
+    assert [target.id for target in trade_open.targets if isinstance(target, ast.Name)] == [
+        "trade_conn"
+    ]
+    assert len(autocheckpoint.args) == 1
+    assert isinstance(autocheckpoint.args[0], ast.Name)
+    assert autocheckpoint.args[0].id == "trade_conn"
+    busy_keywords = {keyword.arg: keyword.value for keyword in busy_bound.keywords}
+    assert isinstance(busy_keywords["timeout_ms"], ast.Name)
+    assert busy_keywords["timeout_ms"].id == "PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS"
+    assert trade_open.lineno < busy_bound.lineno < autocheckpoint.lineno < refresh.lineno
+
+
+def test_market_channel_snapshot_invalidation_bootstraps_before_write_lease():
+    """Connection setup cannot consume a background lease or block the monitor."""
+
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    invalidate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_invalidate_snapshot_action"
+    )
+    trade_open = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "get_trade_connection"
+    )
+    lease = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Call)
+            and isinstance(item.context_expr.func.func, ast.Name)
+            and item.context_expr.func.func.id
+            == "_edli_background_snapshot_trade_write_context_factory"
+            for item in node.items
+        )
+    )
+    background_bound = next(
+        node
+        for node in ast.walk(invalidate)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_bound_background_price_channel_sqlite_wait"
+    )
+
+    assert trade_open.lineno < background_bound.lineno < lease.lineno

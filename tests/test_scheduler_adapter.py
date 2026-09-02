@@ -671,12 +671,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     def _download_anchor(_cfg, **kwargs):
         call_order.append("anchor_scope_download")
         anchor_calls.append(kwargs)
-        city = kwargs["required_scopes"][0][0]
+        cities = tuple(scope[0] for scope in kwargs["required_scopes"])
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
-            "written_manifest_count": 1,
-            "written_manifests": [f"/tmp/{city.lower()}-high.manifest.json"],
+            "written_manifest_count": len(cities),
+            "written_manifests": [
+                f"/tmp/{city.lower()}-high.manifest.json" for city in cities
+            ],
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -753,18 +755,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "/tmp/seoul-high.manifest.json",
         "/tmp/wellington-high.manifest.json",
     )
-    assert len(anchor_calls) == 2
+    assert len(anchor_calls) == 1
     assert anchor_calls[0]["required_scopes"] == (
         ("Seoul", "2026-07-03", "high"),
+        ("Wellington", "2026-07-03", "high"),
     )
     assert anchor_calls[0]["quota_critical"] is True
     assert 0.0 < anchor_calls[0]["max_wall_clock_seconds"] <= 10.0
-    assert anchor_calls[1]["required_scopes"] == (
-        ("Wellington", "2026-07-03", "high"),
-    )
-    assert "quota_critical" not in anchor_calls[1]
-    assert anchor_calls[1]["quota_priority"] is True
-    assert 0.0 < anchor_calls[1]["max_wall_clock_seconds"] <= 10.0
+    assert "quota_priority" not in anchor_calls[0]
     assert cycle_calls[0]["scopes"] == (
         ("Seoul", "2026-07-03", "high"),
         ("Wellington", "2026-07-03", "high"),
@@ -776,7 +774,6 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert call_order == [
         "probe",
         "scoped_download",
-        "anchor_scope_download",
         "anchor_scope_download",
         "fusion_reseed",
         "cycle_reseed",
@@ -2104,6 +2101,7 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     import src.ingest_main as ingest_main
 
     held_scope = ("NYC", "2026-08-17", "low")
+    past_scope = ("Hong Kong", "2026-08-15", "high")
     now = [100.0]
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
@@ -2114,7 +2112,7 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     monkeypatch.setattr(
         ingest_main,
         "_all_held_current_target_scopes",
-        lambda: (held_scope,),
+        lambda: (past_scope, held_scope),
     )
     monkeypatch.setattr(
         ingest_main,
@@ -2138,7 +2136,8 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
         return {
             "status": held_status,
             "written_manifest_count": written_manifest_count,
-            "required_scope_count": 1,
+            "required_scope_count": 2,
+            "structurally_unservable_scopes": [list(past_scope)],
         }
 
     monkeypatch.setattr(
@@ -2169,7 +2168,10 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     second = ingest_main._replacement_maintenance_tick.__wrapped__()
 
     assert len(downloads) == 2
-    assert all(call["required_scopes"] == (held_scope,) for call in downloads)
+    assert all(
+        call["required_scopes"] == (past_scope, held_scope)
+        for call in downloads
+    )
     assert all(call["quota_critical"] is True for call in downloads)
     assert all(0 < call["max_wall_clock_seconds"] <= 10.0 for call in downloads)
     assert result["held_current_target_download"] == {
@@ -2209,6 +2211,11 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         ingest_main,
+        "_REPLACEMENT_HELD_PARTITION_FIRST",
+        "critical",
+    )
+    monkeypatch.setattr(
+        ingest_main,
         "_replacement_current_target_poll_timeout_seconds",
         lambda _poll_seconds: timeout_s,
     )
@@ -2241,7 +2248,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
 
     def _download(_cfg, **kwargs):
         downloads.append(kwargs)
-        if critical_timeout and kwargs.get("quota_critical"):
+        if critical_timeout and kwargs.get("required_scopes") == (day0_scope,):
             raise TimeoutError("critical lane deadline")
         return {
             "status": (
@@ -2287,6 +2294,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         {
             "max_wall_clock_seconds": lane_budget,
             "required_scopes": (future_scope,),
+            "quota_critical": True,
         },
     ]
     reseed_scopes = (
@@ -2304,7 +2312,7 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         else "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     )
     assert result["held_ordinary_current_target_download"]["status"] == (
-        "CURRENT_TARGETS_ALREADY_COVERED"
+        "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
     )
     assert result["broad_maintenance_status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
     if critical_timeout:
@@ -2313,6 +2321,34 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
         )
     else:
         assert "maintenance_errors" not in result
+
+
+def test_replacement_held_partitions_alternate_first_lane(monkeypatch) -> None:
+    """Repeated timeboxes cannot permanently strand the ordinary held partition."""
+    import src.ingest_main as ingest_main
+
+    critical_scope = ("NYC", "2026-08-17", "low")
+    ordinary_scope = ("Busan", "2026-08-19", "high")
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_HELD_PARTITION_FIRST",
+        "critical",
+    )
+
+    assert ingest_main._next_replacement_held_partition_order(
+        (critical_scope,),
+        (ordinary_scope,),
+    ) == (
+        ("critical", (critical_scope,)),
+        ("ordinary", (ordinary_scope,)),
+    )
+    assert ingest_main._next_replacement_held_partition_order(
+        (critical_scope,),
+        (ordinary_scope,),
+    ) == (
+        ("ordinary", (ordinary_scope,)),
+        ("critical", (critical_scope,)),
+    )
 
 
 def test_replacement_maintenance_repairs_full_extras_before_reseed(
@@ -2383,8 +2419,16 @@ def test_replacement_maintenance_repairs_full_extras_before_reseed(
     assert "maintenance_errors" not in result
 
 
+@pytest.mark.parametrize(
+    "zero_progress_status",
+    (
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+    ),
+)
 def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     monkeypatch,
+    zero_progress_status,
 ) -> None:
     """A transient broad fan-out cannot spend quota every minute without new rows."""
     import src.data.replacement_forecast_production as prod
@@ -2412,7 +2456,7 @@ def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     current_calls: list[float] = []
     extras_reports = [
         {
-            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "status": zero_progress_status,
             "written_row_count": 0,
         },
         {
@@ -2444,9 +2488,7 @@ def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
     )
 
     first = ingest_main._replacement_maintenance_tick.__wrapped__()
-    assert first["bayes_precision_fusion_extra_status"] == (
-        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-    )
+    assert first["bayes_precision_fusion_extra_status"] == zero_progress_status
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 1
 
     now[0] = 160.0

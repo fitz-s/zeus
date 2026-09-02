@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Last reused or audited: 2026-09-01
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -40,6 +40,7 @@ import pytest
 
 from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
+    build_day0_causal_evidence_bundle,
     Day0HourlyVector,
     align_day0_hourly_vectors_on_common_causal_grid,
     build_day0_remaining_probability_carrier,
@@ -50,6 +51,7 @@ from src.data.day0_hourly_vectors import (
     read_freshest_day0_hourly_vectors,
     remaining_day_extremes_c,
     select_ready_day0_hourly_vectors,
+    validate_day0_causal_evidence_bundle,
 )
 from src.types.market import Bin
 
@@ -65,6 +67,54 @@ UTC = timezone.utc
 # retention test still pins a target-day `now` so its 9-day-old "ancient" row is
 # correctly pruned and the fresh row is kept.
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+def test_day0_causal_bundle_binds_vector_and_observation_context() -> None:
+    witness = {
+        "vector_ids_by_model": {"ecmwf_ifs": "vector-1"},
+        "capture_times_by_model_utc": {"ecmwf_ifs": "2026-06-10T13:00:00+00:00"},
+        "request_hash_by_model": {"ecmwf_ifs": "request-1"},
+        "source_run_id_by_model": {"ecmwf_ifs": "day0_hourly:request-1"},
+    }
+    common = {
+        "city": "Paris",
+        "target_date": "2026-06-10",
+        "metric": "high",
+        "observation_context": {
+            "source": "aviationweather_metar",
+            "observation_time": "2026-06-10T12:00:00+00:00",
+            "observed_extreme_c": 25.0,
+            "unit": "C",
+        },
+        "cutoff_utc": "2026-06-10T13:00:00+00:00",
+    }
+    expected = build_day0_causal_evidence_bundle(
+        **common, vector_witness=witness
+    )
+    assert validate_day0_causal_evidence_bundle(
+        expected=expected, actual=expected
+    ).ok
+
+    actual = build_day0_causal_evidence_bundle(
+        **{
+            **common,
+            "observation_context": {
+                **common["observation_context"],
+                "observation_time": "2026-06-10T12:15:00+00:00",
+            },
+        },
+        vector_witness=witness,
+    )
+    validation = validate_day0_causal_evidence_bundle(
+        expected=expected, actual=actual
+    )
+
+    assert not validation.ok
+    assert validation.reason == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+    assert validation.receipt()["expected_carrier_vector_identity"] == (
+        expected["carrier_vector_identity"]
+    )
+    assert validation.receipt()["actual_bundle_identity"] == actual["bundle_identity"]
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])
@@ -516,6 +566,99 @@ def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
     assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
     conn.close()
 
+
+def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.replacement_forecast_materializer as materializer
+
+    monkeypatch.setattr(
+        materializer,
+        "_day0_noaa_future_vector_members",
+        lambda *_args, **_kwargs: (
+            (31.0, 32.0),
+            0.5,
+            "2026-08-31T02:57:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.station_forecast_adapter.load_station_forecast_config",
+        lambda: {"cwa_township": object()},
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            forecast_value_c REAL NOT NULL,
+            source_id TEXT,
+            coverage_status TEXT
+        )
+        """
+    )
+    for raw_id, captured_at, value in (
+        (11, "2026-08-31T02:33:55+00:00", 33.0),
+        (12, "2026-08-31T02:50:00+00:00", 35.0),
+    ):
+        conn.execute(
+            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                raw_id,
+                "cwa_township",
+                "Taipei",
+                "2026-08-31",
+                "high",
+                captured_at,
+                captured_at,
+                captured_at,
+                value,
+                "cwa_township_single_runs",
+                "COVERED",
+            ),
+        )
+    request = SimpleNamespace(
+        city="Taipei",
+        target_date="2026-08-31",
+        computed_at="2026-08-31T02:57:00+00:00",
+    )
+    fusion = SimpleNamespace(
+        used_models=("ecmwf_ifs", "cwa_township"),
+        current_value_serving={
+            "cwa_township": {"raw_model_forecast_id": 11}
+        },
+    )
+
+    future, sigma, cutoff, evidence = (
+        materializer._day0_noaa_carrier_future_members(
+            conn,
+            request,
+            metric="high",
+            fusion=fusion,
+        )
+    )
+
+    assert future == (31.0, 32.0, 33.0)
+    assert sigma == pytest.approx(float(np.std(np.asarray(future), ddof=0)))
+    assert cutoff == "2026-08-31T02:57:00+00:00"
+    assert evidence == (
+        {
+            "model": "cwa_township",
+            "raw_model_forecast_id": 11,
+            "forecast_value_c": 33.0,
+            "source_cycle_time": "2026-08-31T02:33:55+00:00",
+            "source_available_at": "2026-08-31T02:33:55+00:00",
+            "captured_at": "2026-08-31T02:33:55+00:00",
+        },
+    )
+    conn.close()
+
 def test_tel_aviv_no_confirmed_prior_uses_real_jeffreys_carrier(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -661,6 +804,50 @@ def test_noaa_prior_only_is_entry_blocked_but_held_allowed():
     )
     assert held["boundary_survival_probability"] == pytest.approx(0.5)
     conn.close()
+
+
+def test_probability_conditioning_source_outranks_settlement_channel_for_revision_model():
+    import src.engine.event_reactor_adapter as era
+
+    payload = {
+        "settlement_source": "wu_icao_history",
+        "statistical_probability_conditioning": {
+            "source": "aviationweather_metar",
+            "observed_extreme_c": 31.0,
+        },
+    }
+
+    assert era._day0_probability_conditioning_source(payload) == (
+        "aviationweather_metar"
+    )
+    assert payload["settlement_source"] == "wu_icao_history"
+
+
+def test_noaa_probability_conditioning_keeps_survival_scenarios_with_wu_settlement():
+    import src.engine.event_reactor_adapter as era
+
+    payload = {
+        "metric": "high",
+        "rounded_value": 31.0,
+        "high_so_far": 31.0,
+        "settlement_source": "wu_icao_history",
+        "_edli_day0_provisional_revision_likelihood": {
+            "boundary_survival_probability": 0.5,
+        },
+        "_edli_global_day0_binding": {
+            "statistical_probability_conditioning": {
+                "source": "aviationweather_metar",
+            },
+        },
+    }
+
+    scenarios = era._day0_probability_boundary_scenarios_native(
+        payload,
+        metric="high",
+        unit="C",
+    )
+
+    assert scenarios == ((31.0, 0.5), (None, 0.5))
 
 
 def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
@@ -1051,6 +1238,7 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
     decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
     witness = {
         "vector_id": "same-vector",
+        "vector_ids_by_model": {"ecmwf_ifs": "same-vector"},
         "expected_models": ["ecmwf_ifs"],
         "actual_models": ["ecmwf_ifs"],
         "capture_times_by_model_utc": {"ecmwf_ifs": decision_time.isoformat()},
@@ -1092,6 +1280,21 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
             "probability_base_identity": "posterior-77",
         },
     }
+    from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+    payload["_edli_day0_causal_evidence_bundle"] = (
+        build_day0_causal_evidence_bundle(
+            city="Tel Aviv",
+            target_date="2026-08-24",
+            metric="high",
+            observation_context={
+                "source": "aviationweather_metar",
+                "observation_time": "2026-08-24T12:00:00+00:00",
+            },
+            cutoff_utc=decision_time.isoformat(),
+            vector_witness=witness,
+        )
+    )
     vector = Day0HourlyVector(
         model="ecmwf_ifs",
         city="Tel Aviv",
@@ -1127,6 +1330,10 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
         era,
         "_forecast_snapshot_row_for_event",
         lambda *_args, **_kwargs: {"settlement_unit": "C"},
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *_args, **_kwargs: True,
     )
 
     class _EntrySeamReached(Exception):
@@ -1771,7 +1978,7 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
     )
 
     assert likelihood["semantics"] == (
-        "wu_applied_changed_payload_retraction_beta_jeffreys_prior_only_v2"
+        "wu_applied_changed_payload_retraction_beta_jeffreys_adaptive_prior_only_v3"
     )
     assert likelihood["transition_count"] == 0
     assert likelihood["retraction_count"] == 0
@@ -1803,6 +2010,52 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
             **kwargs,
             allow_prior_only=True,
         )
+    conn.close()
+
+
+def test_wu_revision_history_expands_causally_before_blocking_entry():
+    """A quiet seven-day slice must not hide recent same-city history."""
+
+    from src.data.day0_observation_reader import (
+        wu_provisional_revision_likelihood,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_revisions ("
+        "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, reason TEXT, "
+        "recorded_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1,
+            "observation_instants",
+            "Jinan",
+            "2026-08-24",
+            "wu_icao_history",
+            json.dumps({"running_max": 35.0, "running_min": 24.0}),
+            json.dumps({"running_max": 36.0, "running_min": 23.0}),
+            "payload_hash_mismatch_monotone_widening_applied",
+            "2026-08-24T03:00:00+00:00",
+        ),
+    )
+
+    likelihood = wu_provisional_revision_likelihood(
+        conn,
+        city="Jinan",
+        timezone_name="Asia/Shanghai",
+        target_date="2026-09-01",
+        temperature_metric="low",
+        decision_time=datetime(2026, 9, 1, 2, 30, tzinfo=UTC),
+    )
+
+    assert likelihood["semantics"].endswith("adaptive_v3")
+    assert likelihood["lookback_days"] == 30
+    assert likelihood["lookback_start"] == "2026-08-02"
+    assert likelihood["transition_count"] == 1
+    assert likelihood["retraction_count"] == 0
     conn.close()
 
 
@@ -2292,6 +2545,341 @@ class TestParsePayload:
     def test_garbage_payload_is_empty(self):
         assert parse_openmeteo_hourly_payload(None, city=_paris(), models=["icon_d2"], captured_at="x") == []
         assert parse_openmeteo_hourly_payload({"hourly": "no"}, city=_paris(), models=["icon_d2"], captured_at="x") == []
+
+    def test_hourly_ensemble_requires_complete_control_plus_50_members(self):
+        from src.data.day0_hourly_vectors import (
+            _day0_provider_run_meta,
+            day0_source_clock_ensemble_member_models,
+            parse_openmeteo_ensemble_hourly_payload,
+        )
+
+        now = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
+        models = day0_source_clock_ensemble_member_models()
+        meta = {
+            model: _day0_provider_run_meta(
+                model=model,
+                model_api_id="ecmwf_ifs025",
+                run=now - timedelta(hours=2),
+                available_at=now - timedelta(minutes=30),
+                modified_at=now - timedelta(minutes=29),
+                authority="provider_meta_declared",
+                endpoint_mode="ensemble_meta_stamped",
+                request_params={"endpoint": "ensemble"},
+                request_hash="sha256:test",
+                fetch_started_at=now - timedelta(minutes=2),
+                fetch_finished_at=now - timedelta(minutes=1),
+            )
+            for model in models
+        }
+        hourly = {"time": ["2026-08-31T22:00", "2026-08-31T23:00"]}
+        hourly["temperature_2m"] = [20.0, 19.0]
+        for index in range(1, 51):
+            hourly[f"temperature_2m_member{index:02d}"] = [
+                20.0 + index / 100.0,
+                19.0 + index / 100.0,
+            ]
+        vectors = parse_openmeteo_ensemble_hourly_payload(
+            {"hourly": hourly},
+            city=_paris(),
+            captured_at=now.isoformat(),
+            source_meta_by_member=meta,
+        )
+        assert len(vectors) == 51
+        assert vectors[0].model == "ecmwf_ifs025_member00"
+        assert vectors[-1].model == "ecmwf_ifs025_member50"
+
+        del hourly["temperature_2m_member50"]
+        assert parse_openmeteo_ensemble_hourly_payload(
+            {"hourly": hourly},
+            city=_paris(),
+            captured_at=now.isoformat(),
+            source_meta_by_member=meta,
+        ) == []
+
+
+def test_hourly_ensemble_fetch_binds_one_provider_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.day0_hourly_vectors import (
+        fetch_day0_source_clock_ensemble_vectors,
+    )
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs025",
+        last_run_initialisation_time=now - timedelta(hours=2),
+        last_run_availability_time=now - timedelta(minutes=30),
+        last_run_modification_time=now - timedelta(minutes=29),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (update,),
+    )
+    hourly = {"time": [f"2026-08-31T{hour:02d}:00" for hour in range(24)]}
+    hourly["temperature_2m"] = [20.0] * 24
+    for index in range(1, 51):
+        hourly[f"temperature_2m_member{index:02d}"] = [
+            20.0 + index / 100.0
+        ] * 24
+    monkeypatch.setattr(
+        openmeteo_client,
+        "fetch",
+        lambda *_args, **_kwargs: {"hourly": hourly},
+    )
+
+    vectors, request_hash = fetch_day0_source_clock_ensemble_vectors(
+        _paris(), now=now
+    )
+
+    assert len(vectors) == 51
+    assert request_hash.startswith("sha256:")
+    metadata = json.loads(vectors[0].source_run_meta_json or "{}")
+    assert metadata["model_api_id"] == "ecmwf_ifs025"
+    assert metadata["endpoint_mode"] == "ensemble_meta_stamped"
+    assert metadata["provider_source_cycle_time_utc"] == (
+        now - timedelta(hours=2)
+    ).isoformat()
+
+
+def test_direct_entry_carrier_binds_persisted_51_member_paths():
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import (
+        OPENMETEO_ENSEMBLE_URL,
+        _day0_provider_run_meta,
+        day0_source_clock_ensemble_member_models,
+        parse_openmeteo_ensemble_hourly_payload,
+        persist_day0_hourly_vectors,
+    )
+    from src.engine.event_reactor_adapter import (
+        _day0_direct_entry_source_clock_carrier,
+    )
+
+    decision_time = datetime(2026, 9, 1, 2, 30, tzinfo=UTC)
+    city = runtime_cities_by_name()["Jinan"]
+    models = day0_source_clock_ensemble_member_models()
+    request_hash = "sha256:" + "a" * 64
+    run = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+    available = datetime(2026, 9, 1, 1, 4, tzinfo=UTC)
+    captured = decision_time - timedelta(minutes=5)
+    times = [
+        (datetime(2026, 9, 1, 10, 0) + timedelta(hours=index)).isoformat(
+            timespec="minutes"
+        )
+        for index in range(48)
+    ]
+    hourly = {"time": times, "temperature_2m": [20.0] * len(times)}
+    for index in range(1, 51):
+        hourly[f"temperature_2m_member{index:02d}"] = [
+            20.0 + index / 100.0
+        ] * len(times)
+    metadata = {
+        model: _day0_provider_run_meta(
+            model=model,
+            model_api_id="ecmwf_ifs025",
+            run=run,
+            available_at=available,
+            modified_at=available - timedelta(minutes=1),
+            authority="provider_meta_declared",
+            endpoint_mode="ensemble_meta_stamped",
+            request_params={"endpoint": OPENMETEO_ENSEMBLE_URL},
+            request_hash=request_hash,
+            fetch_started_at=captured + timedelta(seconds=1),
+            fetch_finished_at=captured + timedelta(seconds=2),
+        )
+        for model in models
+    }
+    vectors = parse_openmeteo_ensemble_hourly_payload(
+        {"hourly": hourly},
+        city=city,
+        captured_at=captured.isoformat(),
+        source_meta_by_member=metadata,
+    )
+    forecast_conn = sqlite3.connect(":memory:")
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.execute(
+        """
+        CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY,
+            city TEXT,
+            publish_ts_utc TEXT,
+            value_native REAL,
+            unit TEXT,
+            station_id TEXT,
+            source_channel TEXT,
+            raw_report TEXT,
+            fetched_at_utc TEXT
+        )
+        """
+    )
+    world_conn.execute(
+        """
+        INSERT INTO observation_prints
+            (city, publish_ts_utc, value_native, unit, station_id,
+             source_channel, raw_report, fetched_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Jinan",
+            "2026-09-01T02:00:00+00:00",
+            27.0,
+            "C",
+            "ZSJN",
+            "wu_icao_history",
+            "",
+            "2026-09-01T02:01:00+00:00",
+        ),
+    )
+    assert persist_day0_hourly_vectors(
+        vectors,
+        target_date="2026-09-01",
+        conn=forecast_conn,
+        request_hash=request_hash,
+        endpoint=OPENMETEO_ENSEMBLE_URL,
+        now=decision_time,
+    ) == 51
+    family = SimpleNamespace(city="Jinan", target_date="2026-09-01", metric="low")
+
+    carrier = _day0_direct_entry_source_clock_carrier(
+        forecast_conn=forecast_conn,
+        world_conn=world_conn,
+        family=family,
+        decision_time=decision_time,
+    )
+
+    assert carrier is not None
+    assert carrier["member_count"] == 51
+    assert carrier["provider_source_cycle_time_utc"] == run.isoformat()
+    assert len(carrier["future_extremes_c"]) == 51
+    assert len(str(carrier["carrier_identity"])) == 64
+
+    deterministic_models = [
+        "ecmwf_ifs",
+        "icon_global",
+        "ukmo_global_deterministic_10km",
+    ]
+    deterministic_vectors = []
+    for index, model in enumerate(deterministic_models):
+        deterministic_vectors.append(
+            Day0HourlyVector(
+                model=model,
+                city="Jinan",
+                target_date="",
+                timezone_name="Asia/Shanghai",
+                captured_at=captured.isoformat(),
+                times=tuple(times),
+                temps_c=tuple(20.0 + index for _ in times),
+                source_run_meta_json=json.dumps(
+                    _day0_provider_run_meta(
+                        model=model,
+                        model_api_id=model,
+                        run=run,
+                        available_at=available,
+                        modified_at=available - timedelta(minutes=1),
+                        authority="provider_meta_declared",
+                        endpoint_mode="standard_meta_stamped",
+                        request_params={
+                            "endpoint": "https://api.open-meteo.com/v1/forecast"
+                        },
+                        request_hash="sha256:" + "b" * 64,
+                        fetch_started_at=captured + timedelta(seconds=1),
+                        fetch_finished_at=captured + timedelta(seconds=2),
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    assert persist_day0_hourly_vectors(
+        deterministic_vectors,
+        target_date="2026-09-01",
+        conn=forecast_conn,
+        request_hash="sha256:" + "b" * 64,
+        now=decision_time,
+    ) == 3
+    payload = {
+        "city": "Jinan",
+        "target_date": "2026-09-01",
+        "metric": "low",
+        "settlement_source": "wu_icao_history",
+        "station_id": "ZSJN",
+        "settlement_unit": "C",
+        "observation_time": "2026-09-01T02:00:00+00:00",
+        "observation_available_at": "2026-09-01T02:01:00+00:00",
+        "raw_value": 19.0,
+        "rounded_value": 19.0,
+        "low_so_far": 19.0,
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_direct_current_entry_authority": True,
+        "_edli_day0_direct_entry_source_clock_carrier": dict(carrier),
+        "_edli_day0_provisional_revision_likelihood": {
+            "identity_hash": "revision-likelihood",
+            "boundary_survival_probability": 0.95,
+        },
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+    }
+    from src.engine.event_reactor_adapter import _day0_remaining_day_members
+
+    remaining = _day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=decision_time,
+        probability_time=decision_time,
+        world_conn=world_conn,
+        forecast_conn=forecast_conn,
+        entry_authority=True,
+    )
+
+    assert remaining is not None and remaining.shape == (3,)
+    assert payload["_edli_day0_source_clock_predictive_sigma_native"] > 0.0
+    assert payload["_edli_day0_causal_evidence_bundle_authority"] == (
+        "entry_current_remaining_hourly_ens_v1"
+    )
+    assert payload["_edli_day0_remaining_vector_witness"][
+        "provider_source_cycle_time_utc"
+    ] == run.isoformat()
+
+
+def test_direct_entry_carrier_binds_source_clock_cap_without_readiness():
+    from src.engine.event_reactor_adapter import (
+        _direct_day0_source_clock_bound_identity,
+    )
+
+    samples = np.asarray([[0.2, 0.8], [0.3, 0.7]], dtype=float)
+    caps = (("bin-a", "condition-a", "YES", "buy_yes", 0.15),)
+    payload = {
+        "_edli_day0_direct_current_entry_authority": True,
+        "_edli_day0_causal_evidence_bundle": {
+            "bundle_identity": "causal-bundle"
+        },
+        "_edli_day0_source_clock_predictive_sigma_basis": (
+            "hourly_ifs025_within_plus_center_delta_plus_provider_between_v1"
+        ),
+    }
+
+    carrier_identity, bound_identity = (
+        _direct_day0_source_clock_bound_identity(
+            payload=payload,
+            carrier={"carrier_identity": "hourly-ens-carrier"},
+            samples=samples,
+            candidate_payoff_q_lcb_caps=caps,
+        )
+    )
+
+    assert carrier_identity == "hourly-ens-carrier"
+    assert len(bound_identity) == 64
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_DIRECT_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE",
+    ):
+        _direct_day0_source_clock_bound_identity(
+            payload={**payload, "_edli_day0_causal_evidence_bundle": {}},
+            carrier={"carrier_identity": "hourly-ens-carrier"},
+            samples=samples,
+            candidate_payoff_q_lcb_caps=caps,
+        )
 
 
 # ===========================================================================
@@ -3068,6 +3656,165 @@ class TestRemainingDayMembers:
         )
         assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
 
+    def test_station_extreme_provider_uses_posterior_pinned_row(self):
+        """A later HKO issue cannot be spliced onto an older causal posterior."""
+        import src.engine.event_reactor_adapter as era
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            CREATE TABLE raw_model_forecasts (
+                raw_model_forecast_id INTEGER PRIMARY KEY,
+                model TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                source_cycle_time TEXT NOT NULL,
+                source_available_at TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                forecast_value_c REAL NOT NULL,
+                source_id TEXT,
+                coverage_status TEXT
+            );
+            """
+        )
+        serving = {
+            "used_models": ["ecmwf_ifs", "hko_fnd"],
+            "current_value_serving": {
+                "hko_fnd": {"raw_model_forecast_id": 11},
+            },
+        }
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?)",
+            (
+                7,
+                "Hong Kong",
+                "2026-08-28",
+                "high",
+                json.dumps({"bayes_precision_fusion": serving}),
+            ),
+        )
+        for raw_id, captured_at, value in (
+            (11, "2026-08-28T01:09:00+00:00", 32.0),
+            (12, "2026-08-28T06:00:00+00:00", 35.0),
+        ):
+            conn.execute(
+                "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    raw_id,
+                    "hko_fnd",
+                    "Hong Kong",
+                    "2026-08-28",
+                    "high",
+                    "2026-08-28T00:50:00+00:00",
+                    captured_at,
+                    captured_at,
+                    value,
+                    "hko_fnd_single_runs",
+                    "COVERED",
+                ),
+            )
+
+        evidence = era._pinned_station_extreme_providers_c(
+            conn=conn,
+            payload={"_edli_global_day0_binding": {"posterior_id": 7}},
+            family=SimpleNamespace(
+                city="Hong Kong", target_date="2026-08-28", metric="high"
+            ),
+            decision_time=datetime(2026, 8, 28, 7, 0, tzinfo=UTC),
+            represented_models=("ecmwf_ifs",),
+        )
+
+        assert len(evidence) == 1
+        assert evidence[0]["model"] == "hko_fnd"
+        assert evidence[0]["raw_model_forecast_id"] == 11
+        assert evidence[0]["forecast_value_c"] == 32.0
+        conn.close()
+
+    def test_remaining_members_keep_pinned_station_final_extreme(
+        self, monkeypatch
+    ):
+        """Hourly reconstruction retains the station-native final-extreme center."""
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            _vector(model="ecmwf_ifs", temps=[30.0] * 24),
+            _vector(model="icon_global", temps=[31.0] * 24),
+        ]
+        monkeypatch.setattr(
+            era, "runtime_cities_by_name", lambda: {"Paris": _paris()}
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **_kwargs: vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {
+                    "ecmwf_ifs": "ecmwf-vector",
+                    "icon_global": "icon-vector",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            era,
+            "_validate_day0_causal_bundle_successor",
+            lambda **kwargs: {
+                "carrier_vector_witness": kwargs["vector_witness"]
+            },
+        )
+        monkeypatch.setattr(
+            era,
+            "_pinned_station_extreme_providers_c",
+            lambda **_kwargs: (
+                {
+                    "model": "hko_fnd",
+                    "raw_model_forecast_id": 11,
+                    "forecast_value_c": 32.0,
+                    "posterior_id": 7,
+                },
+            ),
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 31.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            forecast_conn=object(),
+        )
+
+        assert members is not None
+        assert members.tolist() == [30.0, 31.0, 32.0]
+        assert payload["_edli_day0_provider_representative_models"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "hko_fnd",
+        ]
+        assert payload["_edli_day0_remaining_model_names"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "hko_fnd",
+        ]
+        assert payload["_edli_day0_station_extreme_providers"][0][
+            "raw_model_forecast_id"
+        ] == 11
+
     def test_current_vector_witness_mismatch_blocks_before_carrier_rebuild(
         self, monkeypatch, caplog
     ):
@@ -3083,14 +3830,37 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(
             era,
             "_day0_current_vector_witness",
-            lambda **_kwargs: {"vector_id": "current-vector"},
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            },
         )
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        source_witness = {
+            "vector_id": "source-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "source-vector"},
+        }
         payload = {
             "metric": "high",
             "rounded_value": 20.0,
             "observation_time": "2026-06-10T13:00:00+00:00",
-            "_edli_day0_remaining_vector_witness": {"vector_id": "source-vector"},
+            "_edli_day0_remaining_vector_witness": source_witness,
+            "_edli_day0_causal_evidence_bundle": build_day0_causal_evidence_bundle(
+                city="Paris",
+                target_date="2026-06-10",
+                metric="high",
+                observation_context={
+                    "observation_time": "2026-06-10T13:00:00+00:00"
+                },
+                cutoff_utc="2026-06-10T15:00:00+00:00",
+                vector_witness=source_witness,
+            ),
         }
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: False,
+        )
 
         members = era._day0_remaining_day_members(
             payload=payload,
@@ -3101,12 +3871,169 @@ class TestRemainingDayMembers:
         )
 
         assert members is None
-        assert "DAY0_CURRENT_VECTOR_WITNESS_MISMATCH" in caplog.text
+        assert "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH" in caplog.text
 
-    def test_held_current_vector_witness_rebind_preserves_source_clock_provenance(
+    def test_held_direct_current_redecision_binds_exact_vector_revision(
         self, monkeypatch
     ):
-        """Held q may move to current vectors without rewriting its source carrier."""
+        """Boundary-impossible source-clock LOW cannot strand held/JIT q."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 21, 0, tzinfo=UTC),
+            temps=[25.0] * 24,
+        )
+        witness = {
+            "vector_id": "current-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            "capture_times_by_model_utc": {
+                "ecmwf_ifs": "2026-06-10T21:00:00+00:00"
+            },
+            "request_hash_by_model": {"ecmwf_ifs": "request-current"},
+            "source_run_id_by_model": {"ecmwf_ifs": "day0:current"},
+        }
+        monkeypatch.setattr(
+            era, "runtime_cities_by_name", lambda: {"Paris": _paris()}
+        )
+        vector_reads = []
+
+        def read_vectors(**kwargs):
+            vector_reads.append(kwargs["now"])
+            return [vector]
+
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+        monkeypatch.setattr(
+            era,
+            "_day0_current_vector_witness",
+            lambda **_kwargs: witness,
+        )
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader."
+            "day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: pytest.fail(
+                "direct current redecision must not request an impossible "
+                "source-clock successor"
+            ),
+        )
+        payload = {
+            "metric": "low",
+            "rounded_value": 20.0,
+            "low_so_far": 20.4,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "observation_available_at": "2026-06-10T13:05:00+00:00",
+            "sample_count": 14,
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+            "station_id": "LFPG",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_day0_redecision_authority_scope": (
+                "held_exposure_current_day0_only_v1"
+            ),
+            "_edli_day0_direct_current_redecision_authority": True,
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=SimpleNamespace(
+                city="Paris", target_date="2026-06-10", metric="low"
+            ),
+            unit="C",
+            decision_time=datetime(2026, 6, 11, 0, 30, tzinfo=UTC),
+            forecast_conn=object(),
+            entry_authority=False,
+        )
+
+        assert members is not None
+        assert vector_reads == [datetime(2026, 6, 10, 22, 0, tzinfo=UTC)]
+        assert payload[
+            "_edli_day0_remaining_vector_freshness_as_of_utc"
+        ] == "2026-06-10T22:00:00+00:00"
+        assert payload["_edli_day0_remaining_vector_witness"] == witness
+        bundle = payload["_edli_day0_causal_evidence_bundle"]
+        assert bundle["carrier_vector_ids_by_model"] == {
+            "ecmwf_ifs": "current-vector"
+        }
+        assert bundle["observation_context"]["observed_extreme_native"] == 20.4
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_validation"
+        ]["reason"] is None
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_successor_materialized"
+        ] is False
+        assert payload["_edli_day0_causal_evidence_bundle_authority"] == (
+            "held_current_redecision_direct_v1"
+        )
+
+    def test_current_vector_witness_is_complete_and_fresh_at_target_end(self):
+        """Post-local replay binds possession clocks without wall-clock decay."""
+        import src.engine.event_reactor_adapter as era
+
+        captured = "2026-06-10T21:00:00+00:00"
+        request_hash = "sha256:current-vector-request"
+        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+        meta = {
+            "provider_run_id": "openmeteo:ecmwf_ifs:2026-06-10T12:00:00+00:00",
+            "provider_source_cycle_time_utc": "2026-06-10T12:00:00+00:00",
+            "provider_source_available_at_utc": "2026-06-10T20:00:00+00:00",
+            "provider_source_modified_at_utc": "2026-06-10T20:00:00+00:00",
+            "fetch_started_at": "2026-06-10T21:01:00+00:00",
+            "fetch_finished_at": "2026-06-10T21:02:00+00:00",
+            "model_api_id": "ecmwf_ifs",
+            "source_run_authority": "run_pinned_single_runs",
+            "endpoint_mode": "single_runs",
+            "source_run_id": f"day0_hourly:{request_hash}",
+        }
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """CREATE TABLE day0_hourly_vectors (
+                model TEXT, city TEXT, target_date TEXT, captured_at TEXT,
+                vector_id TEXT, provider TEXT, endpoint TEXT,
+                request_hash TEXT, source_run_meta_json TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO day0_hourly_vectors VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "ecmwf_ifs", "Paris", "2026-06-10", captured,
+                "d0hv-current", "openmeteo", endpoint, request_hash,
+                json.dumps(meta, sort_keys=True),
+            ),
+        )
+        vector = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 21, 0, tzinfo=UTC),
+        )
+        decision_time = datetime(2026, 6, 11, 0, 30, tzinfo=UTC)
+
+        witness = era._day0_current_vector_witness(
+            conn=conn,
+            vectors=[vector],
+            family=self._family(),
+            expected_models=["ecmwf_ifs"],
+            decision_time=decision_time,
+        )
+
+        assert witness is not None
+        assert witness["fetch_finished_times_by_model_utc"] == {
+            "ecmwf_ifs": "2026-06-10T21:02:00+00:00"
+        }
+        assert witness["target_end_utc"] == "2026-06-10T22:00:00+00:00"
+        era._assert_day0_post_local_vector_witness(
+            witness,
+            family=self._family(),
+            decision_time=decision_time,
+            target_end=datetime(2026, 6, 10, 22, 0, tzinfo=UTC),
+        )
+        conn.close()
+
+    def test_held_current_vector_witness_waits_for_materialized_successor(
+        self, monkeypatch
+    ):
+        """A newer vector cannot be rebound onto the held posterior in-place."""
         import src.engine.event_reactor_adapter as era
 
         vector = _vector(model="ecmwf_ifs", temps=[25.0] * 24)
@@ -3118,8 +4045,17 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(
             era,
             "_day0_current_vector_witness",
-            lambda **_kwargs: {"vector_id": "current-vector"},
+            lambda **_kwargs: {
+                "vector_id": "current-vector",
+                "vector_ids_by_model": {"ecmwf_ifs": "current-vector"},
+            },
         )
+        from src.data.day0_hourly_vectors import build_day0_causal_evidence_bundle
+
+        source_witness = {
+            "vector_id": "source-vector",
+            "vector_ids_by_model": {"ecmwf_ifs": "source-vector"},
+        }
         payload = {
             "metric": "high",
             "rounded_value": 20.0,
@@ -3127,10 +4063,22 @@ class TestRemainingDayMembers:
             "_edli_day0_redecision_authority_scope": (
                 "held_exposure_current_bundle_day0_only_v1"
             ),
-            "_edli_day0_remaining_vector_witness": {
-                "vector_id": "source-vector"
-            },
+            "_edli_day0_remaining_vector_witness": source_witness,
+            "_edli_day0_causal_evidence_bundle": build_day0_causal_evidence_bundle(
+                city="Paris",
+                target_date="2026-06-10",
+                metric="high",
+                observation_context={
+                    "observation_time": "2026-06-10T13:00:00+00:00"
+                },
+                cutoff_utc="2026-06-10T15:00:00+00:00",
+                vector_witness=source_witness,
+            ),
         }
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+            lambda *_args, **_kwargs: True,
+        )
 
         members = era._day0_remaining_day_members(
             payload=payload,
@@ -3140,14 +4088,13 @@ class TestRemainingDayMembers:
             forecast_conn=object(),
         )
 
-        assert members is not None
-        assert payload["_edli_day0_remaining_vector_witness"] == {
-            "vector_id": "current-vector"
-        }
-        assert payload["_edli_day0_current_vector_witness_rebound"] is True
-        assert payload["_edli_day0_source_clock_carrier_provenance"][
-            "remaining_vector_witness"
-        ] == {"vector_id": "source-vector"}
+        assert members is None
+        receipt = payload["_edli_day0_causal_evidence_bundle_validation"]
+        assert receipt["reason"] == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+        assert payload[
+            "_edli_day0_causal_evidence_bundle_successor_materialized"
+        ] is True
+        assert payload["_edli_day0_remaining_vector_witness"] == source_witness
 
     def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era
@@ -3357,6 +4304,48 @@ class TestRemainingDayMembers:
             fetched_at_utc="2026-06-10T13:50:00+00:00",
             raw_report="METAR LFPG 101335Z 23010KT 22/12",
         )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+
+        current = era._latest_day0_current_temperature_native(
+            world_conn=conn,
+            family=self._family(),
+            decision_time=datetime(2026, 6, 10, 13, 40, tzinfo=UTC),
+        )
+        conn.close()
+
+        assert current == (
+            23.0,
+            datetime(2026, 6, 10, 13, 30, tzinfo=UTC),
+            "aviationweather_metar",
+        )
+
+    def test_current_temperature_prefers_attached_world_over_empty_main_ghost(
+        self, monkeypatch, tmp_path
+    ):
+        """A forecasts ghost cannot hide the canonical current-state ledger."""
+        import src.engine.event_reactor_adapter as era
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        world_path = tmp_path / "world.db"
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        append_print(
+            world,
+            city="Paris",
+            station_id="LFPG",
+            source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-10T13:30:00+00:00",
+            value_native=23.0,
+            unit="C",
+            fetched_at_utc="2026-06-10T13:34:00+00:00",
+            raw_report="METAR LFPG 101330Z 23010KT 23/12",
+        )
+        world.commit()
+        world.close()
+
+        conn = _conn()
+        ensure_table(conn)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
 
         current = era._latest_day0_current_temperature_native(
@@ -5190,6 +6179,194 @@ class TestRequestHashProvenance:
         assert captured["request_hash"] == "sha256:realhash"
         assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
+    def test_provider_hwm_obeys_public_usability_boundary(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        import src.data.openmeteo_model_updates as updates_module
+        from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+        update = OpenMeteoModelUpdate(
+            model="ukmo_global_deterministic_10km",
+            last_run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            last_run_availability_time=datetime(2026, 6, 10, 13, 6, 20, tzinfo=UTC),
+        )
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [update.model])
+        monkeypatch.setattr(
+            updates_module,
+            "fetch_model_updates",
+            lambda *_args, **_kwargs: (update,),
+        )
+
+        before = hv.probe_day0_provider_run_hwm(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 19, tzinfo=UTC),
+            timeout_s=1.0,
+        )
+        at_boundary = hv.probe_day0_provider_run_hwm(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            timeout_s=1.0,
+        )
+
+        assert before == {}
+        assert at_boundary[update.model].run_initialisation_time == (
+            update.last_run_initialisation_time
+        )
+
+    def test_release_due_tracks_persisted_provider_run_identity(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        conn = _conn()
+        hv._ensure_schema(conn)
+        model = "ecmwf_ifs"
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [model])
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+
+        def vector(run_hour: int, captured_minute: int) -> Day0HourlyVector:
+            meta = {
+                "model": model,
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": datetime(
+                    2026, 6, 10, run_hour, 0, tzinfo=UTC
+                ).isoformat(),
+                "provider_source_available_at_utc": datetime(
+                    2026, 6, 10, 12, 10, tzinfo=UTC
+                ).isoformat(),
+            }
+            return replace(
+                _refresh_vector(
+                    _paris(), model, datetime(2026, 6, 10, 8, captured_minute, tzinfo=UTC)
+                ),
+                source_run_meta_json=json.dumps(meta),
+            )
+
+        persist_day0_hourly_vectors(
+            [vector(0, 0)],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:old",
+            now=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+        )
+        assert hv.day0_hourly_release_due_city_dates(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            provider_run_hwm={model: hwm},
+            conn=conn,
+        ) == frozenset({("Paris", "2026-06-10")})
+
+        persist_day0_hourly_vectors(
+            [vector(6, 1)],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:new",
+            now=datetime(2026, 6, 10, 8, 1, tzinfo=UTC),
+        )
+        assert hv.day0_hourly_release_due_city_dates(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            provider_run_hwm={model: hwm},
+            conn=conn,
+        ) == frozenset()
+
+    def test_release_edge_bypasses_interval_but_rejects_old_exact_payload(
+        self, monkeypatch
+    ):
+        import src.data.day0_hourly_vectors as hv
+
+        model = "ecmwf_ifs"
+        clock = {"now": 101.0}
+        attempts = {"fetch": 0, "persist": 0}
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+        old_meta = json.dumps(
+            {
+                "model": model,
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T00:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T06:00:00+00:00",
+            }
+        )
+
+        def fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts["fetch"] += 1
+            return [
+                replace(_refresh_vector(city, model, now), source_run_meta_json=old_meta)
+            ], "sha256:old"
+
+        def persist(*_args, **_kwargs):
+            attempts["persist"] += 1
+            return 1
+
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda _city: [model])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", persist)
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
+        hv._LAST_REFRESH_MONOTONIC["Paris|2026-06-10"] = 100.0
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC),
+            interval_s=1800.0,
+            quota_critical_cities=1,
+            provider_run_hwm={model: hwm},
+            release_due_city_dates={("Paris", "2026-06-10")},
+            return_stats=True,
+        )
+
+        assert attempts == {"fetch": 1, "persist": 0}
+        assert stats.incomplete_expected_bundles == 1
+        assert stats.unavailable_bundles[0].reason == "DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED"
+
+    @pytest.mark.parametrize(
+        "meta",
+        (
+            {
+                "model": "wrong-model",
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00+00:00",
+            },
+            {
+                "model": "ecmwf_ifs",
+                "provider": "wrong-provider",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00+00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00+00:00",
+            },
+            {
+                "model": "ecmwf_ifs",
+                "provider": "openmeteo",
+                "provider_source_cycle_time_utc": "2026-06-10T06:00:00",
+                "provider_source_available_at_utc": "2026-06-10T12:10:00",
+            },
+        ),
+        ids=("wrong-model", "wrong-provider", "offsetless"),
+    )
+    def test_exact_hwm_rejects_cross_identity_and_offsetless_provenance(self, meta):
+        import src.data.day0_hourly_vectors as hv
+
+        model = "ecmwf_ifs"
+        vector = replace(
+            _refresh_vector(
+                _paris(), model, datetime(2026, 6, 10, 13, 16, 20, tzinfo=UTC)
+            ),
+            source_run_meta_json=json.dumps(meta),
+        )
+        hwm = hv.Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+            run_availability_time=datetime(2026, 6, 10, 12, 10, tzinfo=UTC),
+        )
+
+        assert hv._vectors_trailing_provider_hwm(
+            [vector], required_hwm={model: hwm}
+        ) == (model,)
+
     def test_refresh_lock_contention_does_not_throttle_next_attempt(self, monkeypatch):
         """A contended forecasts writer lock must not stall the trading reactor lane."""
         import src.data.day0_hourly_vectors as hv
@@ -5511,7 +6688,7 @@ class TestRequestHashProvenance:
         (
             (1, 0, 600.0),
             (0, 1, 600.0),
-            (0, 0, 1800.0),
+            (0, 0, 3600.0),
         ),
         ids=("held-capital", "missing-authority", "ordinary-authority"),
     )
@@ -5535,7 +6712,7 @@ class TestRequestHashProvenance:
         hv._INCOMPLETE_RETRY_STREAK.clear()
         decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
 
-        for expected_streak in range(1, 8):
+        for expected_streak in range(1, 9):
             stats = hv.maybe_refresh_day0_hourly_vectors(
                 [city],
                 decision_time=decision_time,
@@ -6437,6 +7614,92 @@ class TestRequestHashProvenance:
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
 
+    def test_provider_release_edge_gives_two_held_slots_and_one_priority_slot(
+        self, monkeypatch
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.events import reactor
+
+        held_cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("Held A", "Held B", "Held C")
+        ]
+        priority_city = SimpleNamespace(name="Priority", timezone="UTC")
+        cities = held_cities + [priority_city]
+        held_families = {
+            (city.name, "2026-06-10", "high") for city in held_cities
+        }
+        priority_family = ("Priority", "2026-06-10", "high")
+        due_scopes = frozenset(
+            (city.name, "2026-06-10") for city in held_cities
+        )
+        captured = {}
+        order_calls = 0
+
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_current_held_position_family_keys",
+            lambda: held_families,
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset({priority_family}),
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "probe_day0_provider_run_hwm",
+            lambda *_args, **_kwargs: {"ecmwf_ifs": object()},
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "day0_hourly_release_due_city_dates",
+            lambda *_args, **_kwargs: due_scopes,
+        )
+
+        def order(_cities, **_kwargs):
+            nonlocal order_calls
+            order_calls += 1
+            return (list(cities), 4 if order_calls == 1 else 3)
+
+        monkeypatch.setattr(reactor, "_edli_order_day0_hourly_refresh_cities", order)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_rotate_day0_hourly_refresh_order",
+            lambda ordered, **_kwargs: list(ordered),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_day0_hourly_refresh_max_cities",
+            lambda **_kwargs: 3,
+        )
+
+        def refresh(ordered, **kwargs):
+            captured["cities"] = [city.name for city in ordered]
+            captured.update(kwargs)
+            return SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=0,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                priority_reserve_exhausted=False,
+                budget_exhausted=False,
+            )
+
+        monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert captured["cities"] == ["Held A", "Held B", "Priority"]
+        assert captured["quota_critical_cities"] == 2
+        assert captured["quota_priority_cities"] == 1
+        assert captured["release_due_city_dates"] == due_scopes
+
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
         # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the
         # day0-hourly-refresh cluster. R4-b3 (2026-07-08): the reactor-cluster
@@ -6458,7 +7721,7 @@ class TestRequestHashProvenance:
         assert reactor._day0_hourly_refresh_budget_seconds() == 6.0
         assert reactor._day0_hourly_fetch_timeout_seconds() == 4.0
         assert reactor._reactor_day0_hourly_fetch_timeout_seconds() == 4.0
-        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 300.0
+        assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 3600.0
 
     def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
         self, monkeypatch
@@ -6489,7 +7752,7 @@ class TestRequestHashProvenance:
         )
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
-        assert captured["interval_s"] == 300.0
+        assert captured["interval_s"] == 3600.0
         assert captured["max_cities"] == 1
         assert captured["quota_critical_cities"] == 0
         assert captured["persist_lock_blocking"] is False

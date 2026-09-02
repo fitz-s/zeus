@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-08-31
 # Authority basis: operator directive 2026-06-11 ~16:30Z — stale-decision-vs-fresh-book
 #   races were TERMINAL. Live evidence: Miami 16:22:35Z cleared EVERY gate and aborted at
 #   JIT recapture (SUBMIT_ABORTED_PRICE_MOVED: recaptured all-in 0.5136 > max 0.5025 +
@@ -35,6 +35,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
+    _is_explicitly_transient_money_path_reason,
     _is_executable_snapshot_refresh_reason,
     _is_transient_money_path_reason,
     _runtime_authority_retry_delay_seconds,
@@ -113,6 +114,41 @@ def test_db_lock_certificate_failure_still_transient():
     assert _is_transient_money_path_reason(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED: database is locked"
     )
+
+
+def test_pre_submit_transport_failure_is_explicitly_transient():
+    reason = "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION"
+
+    assert _is_transient_money_path_reason(reason)
+    assert _is_explicitly_transient_money_path_reason(reason)
+
+
+def test_winner_target_pre_submit_transport_failure_requeues_not_dead_letters():
+    conn, store = _store()
+    original = _event("snap-pre-submit-transport")
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=original.entity_key,
+        source=f"global_auction_winner_target:{original.event_id}:economic-v1",
+        observed_at=original.observed_at,
+        available_at=original.available_at,
+        received_at=original.received_at,
+        causal_snapshot_id=original.causal_snapshot_id,
+        payload=_payload("snap-pre-submit-transport"),
+        priority=original.priority,
+    )
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.dead_lettered == 0
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_pre_submit_book_authority_gap_is_transient():
@@ -502,6 +538,26 @@ def test_current_wealth_ambiguity_requeue_waits_for_recovery_cadence(monkeypatch
         conn,
         store,
         "GLOBAL_AUCTION_FAILED:ValueError:CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=60)
+    ).isoformat()
+
+
+def test_expired_collateral_requeue_waits_for_refresh_cadence(monkeypatch):
+    monkeypatch.delenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", raising=False)
+    conn, store = _store()
+    event = _event("snap-expired-collateral-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "GLOBAL_AUCTION_FAILED:ValueError:CURRENT_WEALTH_COLLATERAL_EXPIRED",
     )
 
     result = reactor.process_pending(decision_time=_DT, limit=10)

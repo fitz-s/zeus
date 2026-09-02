@@ -2403,9 +2403,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # are the signal of a real upstream problem. Distinguish them from domain-excluded
     # (expected absence) so the operator can tell "complete global ensemble" from "degraded".
     global_models_expected = frozenset(
-        m for m in BAYES_PRECISION_FUSION_EXTRA_MODELS
-        if m in requested_models
-        and m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
+        m
+        for m in BAYES_PRECISION_FUSION_EXTRA_MODELS
+        if m in requested_models and m not in _DOMAIN_GATED_MODELS
     )
     global_single_dropped_scoped = {
         d.split(":")[0] for d in dropped if d.endswith(":single_runs")

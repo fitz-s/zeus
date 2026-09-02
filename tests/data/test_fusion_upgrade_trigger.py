@@ -69,6 +69,7 @@ def _insert_posterior(
     current_value_ids: dict[str, int] | None = None,
     configured_sources: list[str] | None = None,
     day0_vector_ids_by_model: dict[str, str] | None = None,
+    day0_causal_bundle: bool = False,
 ) -> None:
     fusion: dict[str, object] = {"used_models": used_models}
     if current_value_ids is not None:
@@ -82,10 +83,29 @@ def _insert_posterior(
         }
     prov = {"bayes_precision_fusion": fusion}
     if day0_vector_ids_by_model is not None:
-        prov["day0_remaining_vector_witness"] = {
+        witness = {
             "expected_models": list(day0_vector_ids_by_model),
             "vector_ids_by_model": day0_vector_ids_by_model,
         }
+        prov["day0_remaining_vector_witness"] = witness
+        if day0_causal_bundle:
+            from src.data.day0_hourly_vectors import (
+                build_day0_causal_evidence_bundle,
+            )
+
+            prov["day0_causal_evidence_bundle"] = (
+                build_day0_causal_evidence_bundle(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    observation_context={
+                        "source": "test_day0_observation",
+                        "observation_time": computed_at,
+                    },
+                    cutoff_utc=computed_at,
+                    vector_witness=witness,
+                )
+            )
     conn.execute(
         """
         INSERT INTO forecast_posteriors
@@ -251,6 +271,7 @@ def test_day0_hourly_vector_revision_signals_once_then_resets() -> None:
         current_value_ids={_DWD: raw_id},
         configured_sources=[_DWD],
         day0_vector_ids_by_model={vector_model: "vector-old"},
+        day0_causal_bundle=True,
     )
     conn.execute(
         """INSERT INTO day0_hourly_vectors
@@ -296,6 +317,7 @@ def test_day0_hourly_vector_revision_signals_once_then_resets() -> None:
         current_value_ids={_DWD: raw_id},
         configured_sources=[_DWD],
         day0_vector_ids_by_model={vector_model: "vector-new"},
+        day0_causal_bundle=True,
     )
     reset = scope_capture_offers_larger_provider_set(
         conn,
@@ -304,6 +326,89 @@ def test_day0_hourly_vector_revision_signals_once_then_resets() -> None:
         metric="high",
         changed_sources=[trigger._DAY0_HOURLY_VECTOR_SOURCE],
         decision_time=datetime(2026, 6, 12, 10, 4, tzinfo=UTC),
+    )
+
+    assert reset["is_upgrade"] is False
+    assert reset["input_revision_changed"] is False
+
+
+def test_missing_day0_causal_bundle_reseeds_unchanged_vector_then_resets() -> None:
+    """Legacy q gains one successor even when its vector IDs did not move."""
+    conn = _conn()
+    city = "Testville"
+    target_date = "2026-06-13"
+    cycle = "2026-06-12T06:00:00+00:00"
+    vector_model = "ecmwf_ifs"
+    _insert_single_runs(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        models=[_DWD],
+    )
+    raw_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts"
+        ).fetchone()[0]
+    )
+    conn.execute(
+        """INSERT INTO day0_hourly_vectors
+               (vector_id, model, city, target_date, timezone_name, captured_at,
+                provider, endpoint, request_hash, times_json, temps_c_json,
+                source_run_meta_json)
+           VALUES ('vector-stable', ?, ?, ?, 'UTC', ?, 'openmeteo', 'endpoint',
+                   'request', '[]', '[]', '{}')""",
+        (vector_model, city, target_date, "2026-06-12T10:01:00+00:00"),
+    )
+    _insert_posterior(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:02:00+00:00",
+        current_value_ids={_DWD: raw_id},
+        configured_sources=[_DWD],
+        day0_vector_ids_by_model={vector_model: "vector-stable"},
+    )
+
+    legacy = scope_capture_offers_larger_provider_set(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric="high",
+        changed_sources=[trigger._DAY0_HOURLY_VECTOR_SOURCE],
+        decision_time=datetime(2026, 6, 12, 10, 3, tzinfo=UTC),
+    )
+
+    assert legacy["is_upgrade"] is True
+    assert legacy["input_revision_changed"] is True
+    assert legacy["changed_input_sources"] == [
+        trigger._DAY0_CAUSAL_BUNDLE_SOURCE
+    ]
+
+    _insert_posterior(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:04:00+00:00",
+        current_value_ids={_DWD: raw_id},
+        configured_sources=[_DWD],
+        day0_vector_ids_by_model={vector_model: "vector-stable"},
+        day0_causal_bundle=True,
+    )
+    reset = scope_capture_offers_larger_provider_set(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric="high",
+        changed_sources=[trigger._DAY0_HOURLY_VECTOR_SOURCE],
+        decision_time=datetime(2026, 6, 12, 10, 5, tzinfo=UTC),
     )
 
     assert reset["is_upgrade"] is False
@@ -559,6 +664,10 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         observed.update(kwargs)
         return {"coverage": True}
 
+    def _latest_manifest(*_args, **kwargs):
+        observed["cycle_admissible"] = kwargs["cycle_admissible"]
+        return manifest
+
     output = tmp_path / "staging" / "seed.json"
     built = trigger._build_and_write_upgrade_seed(
         _conn(),
@@ -570,6 +679,7 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         seed_path=tmp_path / "seeds",
         seed_file=output,
         computed_at=computed_at,
+        source_cycle_time=cycle,
         build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
         latest_baseline_coverage=_coverage,
         market_bins=lambda *_args, **_kwargs: (object(),),
@@ -577,7 +687,7 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
             path.parent.mkdir(parents=True, exist_ok=True),
             path.write_text("{}\n", encoding="utf-8"),
         ),
-        latest_manifest=lambda *_args, **_kwargs: manifest,
+        latest_manifest=_latest_manifest,
         manifest_path_value=lambda *_args, **_kwargs: tmp_path / "input.json",
         manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
         resolve_path=lambda path, **_kwargs: path,
@@ -592,6 +702,10 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
     assert built == output
     assert observed["not_after_source_cycle_time"] == cycle
     assert observed["as_of_time"] == computed_at
+    assert observed["cycle_admissible"](manifest)
+    assert not observed["cycle_admissible"](
+        SimpleNamespace(source_cycle_time=cycle + timedelta(hours=6))
+    )
 
 
 def test_consumed_failed_publication_reclaims_same_transition_marker(
@@ -639,7 +753,17 @@ def test_active_exact_request_keeps_transition_fenced(
     def _build(_conn, **build_kwargs):
         path = Path(build_kwargs["seed_file"])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "city": build_kwargs["city"],
+                    "target_date": build_kwargs["target_date"],
+                    "temperature_metric": build_kwargs["metric"],
+                    "source_cycle_time": build_kwargs["source_cycle_time"],
+                }
+            ),
+            encoding="utf-8",
+        )
         return path
 
     monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
@@ -654,6 +778,35 @@ def test_active_exact_request_keeps_transition_fenced(
     assert duplicate["seeds_enqueued"] == 0
     assert duplicate["already_enqueued"] == 1
     assert request.is_file()
+
+
+def test_wrong_cycle_seed_does_not_fence_exact_transition(tmp_path: Path) -> None:
+    """A marker cannot treat another carrier cycle as active exact work."""
+
+    seed = tmp_path / "queue" / "seeds" / "Seoul.2026-07-25.high.seed.json"
+    seed.parent.mkdir(parents=True)
+    payload = {
+        "city": "Seoul",
+        "target_date": "2026-07-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-24T18:00:00+00:00",
+    }
+    seed.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert trigger._finalized_seed_has_active_queue_work(
+        str(seed),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        source_cycle_iso="2026-07-24T12:00:00+00:00",
+    ) is False
+    assert trigger._finalized_seed_has_active_queue_work(
+        str(seed),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        source_cycle_iso="2026-07-24T18:00:00+00:00",
+    ) is True
 
 
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:

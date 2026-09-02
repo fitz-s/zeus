@@ -16,12 +16,14 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 """
 
 import logging
+import math
 import sqlite3
 import copy
 import hashlib
 import json
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -81,7 +83,11 @@ from src.signal.day0_window import (
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes
 from src.observability.counters import increment as _cnt_inc
 from src.state.chain_reconciliation import resolve_position_metric
-from src.state.portfolio import Position
+from src.state.portfolio import (
+    Position,
+    flash_crash_catastrophe_velocity,
+    flash_crash_confirmations,
+)
 from src.strategy.market_fusion import (
     MODEL_ONLY_POSTERIOR_MODE,
     compute_alpha,
@@ -118,6 +124,7 @@ _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR = (
 )
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
+_FLASH_CRASH_CONFIRMATION_MAX_GAP_SECONDS = 120.0
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
 HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
@@ -135,6 +142,18 @@ _DAY0_MATERIALIZATION_VISIBILITY_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
         "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
+    }
+)
+_PINNED_CARRIER_CURRENT_EVENT_DEFERABLE_BLOCK_REASONS = frozenset(
+    {
+        # These establish that the older held carrier cannot name the current
+        # authorized Day0 event.  They do not disprove a separately rebuilt
+        # current-event posterior.
+        "REPLACEMENT_PINNED_DAY0_METRIC_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_STATION_MISMATCH",
+        "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH",
     }
 )
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
@@ -177,6 +196,9 @@ class _CurrentGlobalDay0FamilyCache:
     failures: dict[
         tuple[str, str, str], tuple[type[Exception], str]
     ] = field(default_factory=dict)
+    failure_receipts: dict[
+        tuple[str, str, str], Mapping[str, object]
+    ] = field(default_factory=dict)
 
 
 class _CachedCurrentGlobalDay0FamilyError(RuntimeError):
@@ -196,6 +218,94 @@ def _is_day0_materialization_visibility_gap(exc: Exception) -> bool:
     return any(code in reason for code in _DAY0_MATERIALIZATION_VISIBILITY_REASONS)
 
 
+def _pinned_complete_bundle_matches_current_day0_event(
+    bundle: object,
+    event: object,
+    *,
+    metric: str,
+    settlement_unit: str,
+) -> bool:
+    """Whether a prior-complete carrier names this event's exact provisional fact.
+
+    A prior carrier may bridge an incomplete forecast wave for a held family, but
+    it cannot bridge a newer Day0 observation.  Returning ``False`` deliberately
+    sends the caller through the current bundle/current-observation path, whose
+    missing-materialization handling remains fail-closed.
+    """
+
+    provenance = getattr(bundle, "provenance_json", None) or {}
+    provisional = (
+        provenance.get("day0_provisional_observation")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
+        return False
+    try:
+        payload = json.loads(str(getattr(event, "payload_json", "")))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+
+    expected_metric = str(payload.get("metric") or "").strip().lower()
+    expected_source = str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or payload.get("source")
+        or ""
+    ).strip().lower()
+    expected_time = str(payload.get("observation_time") or "").strip()
+    expected_unit = str(
+        payload.get("settlement_unit")
+        or payload.get("unit")
+        or settlement_unit
+        or ""
+    ).strip().upper()
+    raw_value = payload.get("high_so_far" if expected_metric == "high" else "low_so_far")
+    if raw_value in (None, ""):
+        raw_value = payload.get("raw_value")
+    if raw_value in (None, ""):
+        raw_value = payload.get("observed_extreme_native")
+    try:
+        expected_value_c = float(raw_value)
+        observed_value_c = float(provisional["observed_extreme_c"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if expected_unit == "F":
+        expected_value_c = (expected_value_c - 32.0) * 5.0 / 9.0
+
+    return bool(
+        expected_metric == str(metric).strip().lower()
+        and str(provisional.get("metric") or "").strip().lower() == expected_metric
+        and expected_source
+        and str(provisional.get("source") or "").strip().lower() == expected_source
+        and expected_time
+        and str(provisional.get("observation_time") or "").strip() == expected_time
+        and expected_unit
+        and str(provisional.get("unit") or "").strip().upper() == expected_unit
+        and math.isclose(
+            observed_value_c,
+            expected_value_c,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+
+
+def _pinned_carrier_block_defers_to_current_day0_event(reason_code: object) -> bool:
+    """Whether a rejected old carrier may defer to current-event authority.
+
+    This is intentionally a closed allow-list.  Carrier shape, clock, missing
+    witness, and likelihood-integrity failures remain fail-closed rather than
+    becoming a broad way to ignore reader ``BLOCKED`` results.
+    """
+
+    return str(reason_code or "").strip() in (
+        _PINNED_CARRIER_CURRENT_EVENT_DEFERABLE_BLOCK_REASONS
+    )
+
+
 def _day0_materialization_visibility_retry_deadline(
     deadline_monotonic: float | None,
 ) -> float:
@@ -211,12 +321,16 @@ def _day0_materialization_visibility_retry_deadline(
 def _day0_primary_snapshot_read_deadline(
     deadline_monotonic: float | None,
 ) -> float:
-    """Bound the primary authority read without borrowing the retry budget."""
+    """Bound the primary read while reserving the visibility-retry budget."""
     primary_deadline = (
         time.monotonic() + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
     )
     if deadline_monotonic is not None:
-        primary_deadline = min(primary_deadline, deadline_monotonic)
+        primary_deadline = min(
+            primary_deadline,
+            float(deadline_monotonic)
+            - _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS,
+        )
     return primary_deadline
 
 
@@ -1053,20 +1167,33 @@ def _causal_market_velocity_1h(
     token_id: str,
     current_price: float,
     observed_at: str | None,
-) -> float:
-    """Return the held-token price change from the latest causal 1h baseline."""
+) -> float | None:
+    """Return causal fractional drawdown from a bounded recent reference.
+
+    Prefer the latest quote from one-to-two hours ago so established positions
+    retain a stable one-hour comparison.  A newly held token has no such row;
+    in that case use the causal trailing-hour high instead of converting absent
+    history to a false zero move.  The result is scale-free: ``0.10 -> 0.06``
+    and ``0.50 -> 0.30`` are the same ``-0.40`` market-path observation.
+    """
     if conn is None or not observed_at:
-        return 0.0
+        return None
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=timezone.utc)
-        cutoff = (as_of.astimezone(timezone.utc) - timedelta(hours=1)).isoformat()
+        as_of = as_of.astimezone(timezone.utc)
+        cutoff = (as_of - timedelta(hours=1)).isoformat()
+        oldest_baseline = (as_of - timedelta(hours=2)).isoformat()
         row = conn.execute(
             """
             SELECT price
               FROM token_price_log
              WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) >= julianday(?)
                AND COALESCE(
                        julianday(NULLIF(source_timestamp, '')),
                        julianday(timestamp)
@@ -1078,17 +1205,125 @@ def _causal_market_velocity_1h(
                       id DESC
              LIMIT 1
             """,
-            (str(token_id), cutoff),
+            (str(token_id), oldest_baseline, cutoff),
         ).fetchone()
         if row is None:
-            return 0.0
+            row = conn.execute(
+                """
+                SELECT MAX(price) AS price
+                  FROM token_price_log
+                 WHERE token_id = ?
+                   AND COALESCE(
+                           julianday(NULLIF(source_timestamp, '')),
+                           julianday(timestamp)
+                       ) > julianday(?)
+                   AND COALESCE(
+                           julianday(NULLIF(source_timestamp, '')),
+                           julianday(timestamp)
+                       ) < julianday(?)
+                """,
+                (str(token_id), cutoff, as_of.isoformat()),
+            ).fetchone()
+            if row is None or row["price"] is None:
+                return None
         old_price = float(row["price"])
         now_price = float(current_price)
-        if not (np.isfinite(old_price) and np.isfinite(now_price)):
-            return 0.0
-        return now_price - old_price
+        if (
+            not (np.isfinite(old_price) and np.isfinite(now_price))
+            or old_price <= 0.0
+            or now_price < 0.0
+        ):
+            return None
+        return (now_price / old_price) - 1.0
     except (TypeError, ValueError, sqlite3.Error):
-        return 0.0
+        return None
+
+
+def _causal_deep_market_catastrophe_confirmations(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    current_price: float,
+    observed_at: str | None,
+) -> int:
+    """Count consecutive causal deep-collapse quotes ending at ``observed_at``.
+
+    Held positions are reconstructed from canonical DB truth on every monitor
+    claim, so an in-memory counter cannot prove persistence across claims.  This
+    derives the confirmation count from the persisted token-price timeline
+    instead.  The current quote is counted once; earlier samples must have a
+    distinct evidence timestamp, be strictly causal, and independently cross
+    the same deep one-hour velocity bound.
+    """
+    if conn is None or not observed_at or not token_id:
+        return 0
+    try:
+        as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        as_of = as_of.astimezone(timezone.utc)
+        required = max(1, int(flash_crash_confirmations()))
+        samples: list[tuple[float, str]] = [(float(current_price), as_of.isoformat())]
+        confirmation_start = (
+            as_of - timedelta(seconds=_FLASH_CRASH_CONFIRMATION_MAX_GAP_SECONDS)
+        ).isoformat()
+        rows = conn.execute(
+            """
+            SELECT price,
+                   COALESCE(NULLIF(source_timestamp, ''), timestamp) AS evidence_at
+              FROM token_price_log
+             WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) >= julianday(?)
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) < julianday(?)
+             ORDER BY COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) DESC,
+                      id DESC
+             LIMIT ?
+            """,
+            (
+                str(token_id),
+                confirmation_start,
+                as_of.isoformat(),
+                required * 8,
+            ),
+        ).fetchall()
+        seen_times = {as_of.isoformat()}
+        for row in rows:
+            evidence_at = str(row["evidence_at"] or "")
+            if not evidence_at or evidence_at in seen_times:
+                continue
+            seen_times.add(evidence_at)
+            samples.append((float(row["price"]), evidence_at))
+            if len(samples) >= required:
+                break
+
+        # SCOPE: this held token's market-path exit authority only. DRAIN: the
+        # live quote channel appends another causal sample and the recurring
+        # monitor re-evaluates it. RESET: no latch exists; every decision
+        # recomputes this bounded window and a gap/recovery returns zero/one.
+        count = 0
+        threshold = float(flash_crash_catastrophe_velocity())
+        for price, sample_at in samples:
+            velocity = _causal_market_velocity_1h(
+                conn,
+                token_id=token_id,
+                current_price=price,
+                observed_at=sample_at,
+            )
+            if velocity is None or velocity > threshold:
+                break
+            count += 1
+        return count
+    except (TypeError, ValueError, sqlite3.Error):
+        return 0
 
 
 def _model_only_native_posterior(p_native: float) -> float:
@@ -5326,11 +5561,19 @@ def _day0_family_snapshot_covers_condition(
 
 
 def _target_day_has_canonical_observation(conn, position: Position) -> bool:
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    table_ref = (
+        "world.observation_instants"
+        if "world" in attached
+        else "observation_instants"
+    )
     return (
         conn.execute(
-            """
+            f"""
             SELECT 1
-              FROM observation_instants
+              FROM {table_ref}
              WHERE city = ?
                AND target_date = ?
              LIMIT 1
@@ -5406,6 +5649,50 @@ def _materialize_current_global_day0_probability(
     is_deterministic_bin_payoff = (
         snapshot.probability_authority == "day0_deterministic_bin_payoff_v1"
     )
+    observation = snapshot.day0_payload.get("_edli_global_day0_binding")
+    causal_bundle_validation = snapshot.day0_payload.get(
+        "_edli_day0_causal_evidence_bundle_validation"
+    )
+    if is_remaining_day or is_held_pinned_recompute:
+        bundle = (
+            observation.get("day0_causal_evidence_bundle")
+            if isinstance(observation, Mapping)
+            else None
+        )
+        remaining_witness = (
+            observation.get("day0_remaining_vector_witness")
+            if isinstance(observation, Mapping)
+            else None
+        )
+        identity_pairs = (
+            ("bundle_identity", "actual_bundle_identity"),
+            ("carrier_vector_identity", "actual_carrier_vector_identity"),
+            ("carrier_vector_hash", "actual_carrier_vector_hash"),
+        )
+        provenance_complete = bool(
+            isinstance(observation, Mapping)
+            and str(observation.get("posterior_id") or "").strip()
+            and isinstance(bundle, Mapping)
+            and isinstance(remaining_witness, Mapping)
+            and remaining_witness == bundle.get("carrier_vector_witness")
+            and isinstance(causal_bundle_validation, Mapping)
+            and causal_bundle_validation.get("reason") is None
+            and all(
+                str(bundle.get(bundle_key) or "").strip()
+                and bundle.get(bundle_key)
+                == causal_bundle_validation.get(validation_key)
+                == causal_bundle_validation.get(
+                    validation_key.replace("actual_", "expected_")
+                )
+                for bundle_key, validation_key in identity_pairs
+            )
+        )
+        if not provenance_complete:
+            # SCOPE: this held city/date/metric snapshot only. DRAIN: the next
+            # normal monitor build reads a complete current posterior + causal
+            # vector bundle. RESET: that exact bundle validates and materializes
+            # normally; other families and deterministic hard facts continue.
+            raise ValueError("GLOBAL_DAY0_STATISTICAL_PROVENANCE_INCOMPLETE")
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
@@ -5507,7 +5794,6 @@ def _materialize_current_global_day0_probability(
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
     setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
 
-    observation = snapshot.day0_payload.get("_edli_global_day0_binding")
     setattr(
         refreshed,
         "_day0_monitor_probability_receipt",
@@ -5543,6 +5829,11 @@ def _materialize_current_global_day0_probability(
                 "held_side_summary": _monitor_receipt_quantiles(held_samples),
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
+            "causal_evidence_bundle_validation": (
+                dict(causal_bundle_validation)
+                if isinstance(causal_bundle_validation, Mapping)
+                else None
+            ),
             "remaining_window": {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
@@ -5582,17 +5873,10 @@ def _build_current_global_day0_family_snapshot(
     from src.events.opportunity_event import OpportunityEvent
     from src.state.db import (
         get_forecasts_connection_read_only,
-        get_world_connection_read_only,
+        get_forecasts_connection_with_world_read_only,
     )
-    from src.engine.global_auction_universe import (
-        WorkContext,
-        bounded_work_sqlite,
-    )
+    from src.engine.global_auction_universe import WorkContext
 
-    world = None
-    forecasts = None
-    world_seed = None
-    forecasts_seed = None
     hwm_forecasts = None
     try:
         prepare_deadline = _held_monitor_stage_deadline(
@@ -5606,40 +5890,19 @@ def _build_current_global_day0_family_snapshot(
         hwm_deadline: list[float | None] = [None]
         hwm_handoff_started = [False]
         with ExitStack() as prepare_sqlite:
-            world_seed = get_world_connection_read_only()
-            world = prepare_sqlite.enter_context(
-                (
-                    bounded_work_sqlite(
-                        world_seed,
-                        prepare_context,
-                        stage="held_monitor_probability_prepare:world",
-                        shared_connection=False,
-                        keep_independent_connection_open=True,
-                    )
-                    if isinstance(world_seed, sqlite3.Connection)
-                    else _day0_snapshot_sqlite_read_deadline(
-                        world_seed,
-                        prepare_deadline,
-                    )
-                )
+            forecasts_seed = prepare_sqlite.enter_context(
+                get_forecasts_connection_with_world_read_only()
             )
-            forecasts_seed = get_forecasts_connection_read_only()
             forecasts = prepare_sqlite.enter_context(
-                (
-                    bounded_work_sqlite(
-                        forecasts_seed,
-                        prepare_context,
-                        stage="held_monitor_probability_prepare:forecasts",
-                        shared_connection=False,
-                        keep_independent_connection_open=True,
-                    )
-                    if isinstance(forecasts_seed, sqlite3.Connection)
-                    else _day0_snapshot_sqlite_read_deadline(
-                        forecasts_seed,
-                        prepare_deadline,
-                    )
+                _day0_snapshot_sqlite_read_deadline(
+                    forecasts_seed,
+                    prepare_deadline,
                 )
             )
+            # The attached world schema is part of this read's source identity.
+            # Reopening forecasts alone would discard it before the NOAA
+            # likelihood carrier reads the raw observation ledger.
+            world = forecasts
             prepare_context.checkpoint("held_monitor_probability_prepare:connections")
 
             def _begin_raw_hwm_read() -> float:
@@ -5662,13 +5925,22 @@ def _build_current_global_day0_family_snapshot(
                     hwm_handoff_started[0] = True
                 return float(hwm_deadline[0])
 
+            attached = {
+                str(database[1])
+                for database in world.execute("PRAGMA database_list").fetchall()
+            }
+            opportunity_events_table = (
+                "world.opportunity_events"
+                if "world" in attached
+                else "opportunity_events"
+            )
             row = world.execute(
-                """
+                f"""
             SELECT event_id, event_type, entity_key, source, observed_at,
                    available_at, received_at, causal_snapshot_id, payload_hash,
                    idempotency_key, priority, expires_at, payload_json,
                    schema_version, created_at
-              FROM opportunity_events
+              FROM {opportunity_events_table}
                    INDEXED BY idx_opportunity_events_day0_family_extreme
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(payload_json, '$.city') = ?
@@ -5722,8 +5994,13 @@ def _build_current_global_day0_family_snapshot(
                 temperature_metric=metric,
                 decision_time=now,
             )
-            if pinned_result.status == "BLOCKED" and pinned_result.reason_code != (
-                "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE"
+            if (
+                pinned_result.status == "BLOCKED"
+                and pinned_result.reason_code
+                != "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE"
+                and not _pinned_carrier_block_defers_to_current_day0_event(
+                    pinned_result.reason_code
+                )
             ):
                 raise ValueError(
                     "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
@@ -5748,7 +6025,12 @@ def _build_current_global_day0_family_snapshot(
                     raw_input_hwm_deadline_monotonic=float(hwm_deadline[0]),
                     raw_input_hwm_read_max_seconds=HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
                 )
-                if pinned_result.status == "BLOCKED":
+                if (
+                    pinned_result.status == "BLOCKED"
+                    and not _pinned_carrier_block_defers_to_current_day0_event(
+                        pinned_result.reason_code
+                    )
+                ):
                     raise ValueError(
                         "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
                         f"{pinned_result.reason_code}"
@@ -5756,6 +6038,22 @@ def _build_current_global_day0_family_snapshot(
             pinned_complete_bundle = (
                 pinned_result.bundle if pinned_result.ok else None
             )
+            if pinned_complete_bundle is not None and not (
+                _pinned_complete_bundle_matches_current_day0_event(
+                    pinned_complete_bundle,
+                    event,
+                    metric=metric,
+                    settlement_unit=str(
+                        getattr(city, "settlement_unit", "") or ""
+                    ),
+                )
+            ):
+                # The latest authorized Day0 event is the observation authority.
+                # SCOPE: this held city/date/metric family. DRAIN: a successor
+                # posterior materialized from this exact fact. RESET: the next
+                # read can pin that matching carrier.  Never pass an older q as
+                # a pinned source identity while the successor is absent.
+                pinned_complete_bundle = None
             if pinned_complete_bundle is None:
                 if hwm_forecasts is None:
                     hwm_deadline[0] = _held_monitor_stage_deadline(
@@ -5807,14 +6105,6 @@ def _build_current_global_day0_family_snapshot(
     finally:
         if hwm_forecasts is not None:
             hwm_forecasts.close()
-        if forecasts is not None and forecasts is not forecasts_seed:
-            forecasts.close()
-        if world is not None and world is not world_seed:
-            world.close()
-        if forecasts_seed is not None:
-            forecasts_seed.close()
-        if world_seed is not None:
-            world_seed.close()
 
     witness = prepared.probability_witness
     condition_ids = tuple(binding.condition_id for binding in witness.bindings)
@@ -5938,7 +6228,15 @@ def _refresh_current_global_day0_probability(
                     raise _Day0UnobservedPrefixUnavailable(reason)
             else:
                 _cnt_inc("monitor_day0_family_failure_cache_hit_total")
-                raise _CachedCurrentGlobalDay0FamilyError(reason)
+                cached_error = _CachedCurrentGlobalDay0FamilyError(reason)
+                cached_receipt = family_cache.failure_receipts.get(family_key)
+                if isinstance(cached_receipt, Mapping):
+                    setattr(
+                        cached_error,
+                        "day0_causal_bundle_validation_receipt",
+                        dict(cached_receipt),
+                    )
+                raise cached_error
 
     primary_deadline = _day0_primary_snapshot_read_deadline(
         deadline_monotonic
@@ -5962,15 +6260,14 @@ def _refresh_current_global_day0_probability(
             effective_deadline = _day0_materialization_visibility_retry_deadline(
                 deadline_monotonic
             )
-            while time.monotonic() < effective_deadline:
-                remaining = effective_deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+            remaining = effective_deadline - time.monotonic()
+            if remaining > 0:
                 time.sleep(
                     min(_DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS, remaining)
                 )
-                if time.monotonic() >= effective_deadline:
-                    break
+            if time.monotonic() < effective_deadline:
+                # The builder owns its forecasts+world read-only pair.  Calling it
+                # again deliberately abandons the failed SQLite snapshot.
                 try:
                     snapshot = _build_current_global_day0_family_snapshot(
                         position,
@@ -5982,8 +6279,6 @@ def _refresh_current_global_day0_probability(
                     )
                 except Exception as retry_exc:
                     exc = retry_exc
-                    if not _is_day0_materialization_visibility_gap(exc):
-                        break
                 else:
                     _cnt_inc(
                         "monitor_day0_materialization_visibility_retry_recovered_total"
@@ -6000,6 +6295,11 @@ def _refresh_current_global_day0_probability(
             and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
         ):
             family_cache.failures[family_key] = (type(exc), str(exc))
+            receipt = getattr(
+                exc, "day0_causal_bundle_validation_receipt", None
+            )
+            if isinstance(receipt, Mapping):
+                family_cache.failure_receipts[family_key] = dict(receipt)
             _cnt_inc("monitor_day0_family_builder_failure_total")
         raise
     if family_cache is not None:
@@ -6295,6 +6595,36 @@ def monitor_probability_refresh(
                         return unobserved_prefix
                 stale = _clone_for_probability_refresh(pos)
                 _set_monitor_probability_fresh(stale, False)
+                bundle_receipt = getattr(
+                    exc, "day0_causal_bundle_validation_receipt", None
+                )
+                if isinstance(bundle_receipt, Mapping):
+                    bundle_monitor_receipt = {
+                        "schema_version": 1,
+                        "probability_authority": "day0_causal_bundle_successor_gate",
+                        "causal_evidence_bundle_validation": dict(
+                            bundle_receipt
+                        ),
+                    }
+                    setattr(
+                        stale,
+                        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+                        bundle_monitor_receipt,
+                    )
+                    setattr(
+                        stale,
+                        "_day0_monitor_probability_receipt",
+                        bundle_monitor_receipt,
+                    )
+                    _append_monitor_validation(
+                        stale,
+                        "day0_causal_evidence_bundle_validation:"
+                        + json.dumps(
+                            dict(bundle_receipt),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
                 post_day_final_missing = (
                     "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in str(exc)
                 )
@@ -6685,8 +7015,14 @@ def refresh_exact_zero_position(
     )
 
 
-def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
-    """Fetch fresh market price and recompute P_posterior for a held position.
+def refresh_position(
+    conn,
+    clob: PolymarketClient,
+    pos: Position,
+    *,
+    refresh_quote: bool = True,
+) -> EdgeContext:
+    """Recompute held q and optionally fetch its executable market price.
 
     Blueprint v2 §7 Layer 1: uses same method as entry (p_raw_vector with MC noise).
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
@@ -6735,7 +7071,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # 1. Refresh held-token quote
     market_refreshed = False
-    quote = monitor_quote_refresh(conn, clob, pos)
+    quote = monitor_quote_refresh(conn, clob, pos) if refresh_quote else None
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
@@ -6875,11 +7211,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     finally:
         release_hwm_snapshot()
 
-    # Probability refresh may persist a world-owned Day0 observation fact.
-    # Start the trade-owned quote evidence only after that write completes, so
-    # this thread cannot hold TRADE while waiting for WORLD.
-    _persist_monitor_quote(conn, pos, quote)
-
     _track_belief_staleness(pos)
 
     probability_authority_available = (
@@ -6916,6 +7247,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             current_price=current_p_market,
             observed_at=getattr(quote, "source_timestamp", None),
         )
+        pos.flash_crash_count = _causal_deep_market_catastrophe_confirmations(
+            conn,
+            token_id=tid,
+            current_price=current_p_market,
+            observed_at=getattr(quote, "source_timestamp", None),
+        )
+    else:
+        pos.flash_crash_count = 0
 
     # Wrap into verified EdgeContext
     current_forward_edge = (
@@ -7040,6 +7379,12 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
         ci_lower = current_forward_edge - ci_half_width
         ci_upper = current_forward_edge + ci_half_width
+
+    # Probability refresh may persist a world-owned Day0 observation fact, and
+    # stale-q toxicity may fetch an adjacent CLOB book. The remaining edge/CI
+    # work is read-only but can be expensive, so persist quote evidence only
+    # after all of it; the caller commits immediately on return before venue I/O.
+    _persist_monitor_quote(conn, pos, quote)
 
     return EdgeContext(
         p_raw=np.array([]),

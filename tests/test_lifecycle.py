@@ -7,7 +7,7 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-29
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Tests for exit triggers and harvester."""
 
@@ -23,7 +23,12 @@ from src.engine import monitor_refresh
 # Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin). TestExitTriggers
 #   repointed to Position.evaluate_exit (the one live path).
 from src.execution.harvester import harvest_settlement
-from src.state.portfolio import Position, PortfolioState, ExitContext
+from src.state.portfolio import (
+    ExitContext,
+    Position,
+    PortfolioState,
+    flash_crash_confirmations,
+)
 from src.state.db import get_connection, init_schema
 from src.config import City
 
@@ -1967,14 +1972,13 @@ class TestExitTriggers:
         assert not decision.should_exit
 
     def test_flash_crash_panic_fires_with_adverse_velocity(self):
-        """Sustained deep adverse velocity triggers FLASH_CRASH_PANIC.
+        """Causally reconstructed sustained deep velocity triggers panic.
 
-        Wave 3: live path requires probability authority (fresh_prob_is_fresh=True).
-        Flash crash is the live panic path after the model-divergence panic branch
-        was removed; bare divergence does not preempt it.
+        The monitor derives this count from persisted token-price evidence on
+        every claim; Position object lifetime is not persistence authority.
         """
         pos = _make_position()
-        _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.45)
+        pos.flash_crash_count = flash_crash_confirmations()
         decision = _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.45)
         assert decision.should_exit
         assert decision.trigger == "FLASH_CRASH_PANIC"

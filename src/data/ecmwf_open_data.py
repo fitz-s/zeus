@@ -1220,6 +1220,7 @@ def _observed_steps_for_snapshot(
 
 def _coverage_reason(reason_codes: list[str]) -> str:
     preferred = (
+        "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS",
         "MISSING_EXPECTED_MEMBERS",
         "MISSING_REQUIRED_STEPS",
         "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
@@ -1452,6 +1453,11 @@ def _write_source_authority_chain(
         attribution_status = str(row.get("forecast_window_attribution_status") or "")
         positive_attribution = attribution_status in POSITIVE_ATTRIBUTION_STATUSES
         if not (contributes_to_target_extrema and positive_attribution):
+            if (
+                attribution_status == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
+                and int(row.get("boundary_ambiguous") or 0) == 1
+            ):
+                reason_codes.append("TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS")
             reason_codes.append("EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA")
         grid_reason = _station_grid_provenance_reason(row)
         if grid_reason is not None:

@@ -1,21 +1,30 @@
 # Created: 2026-06-02
-# Last reused/audited: 2026-06-03 (Wave 3 consolidation — exit_triggers twin deleted)
+# Last reused/audited: 2026-09-01 (scale-free causal drawdown restoration)
 # Authority basis: BUG#127 (守護 SEV1, GOAL#36 "a short price change is NOT edge reversal");
 #   src/state/portfolio.py flash_crash_should_fire + Position.evaluate_exit (single live site)
 # Purpose: Lock the evidence gate on FLASH_CRASH_PANIC so a bare single-cycle quote wiggle
 #   (adverse market_velocity_1h with UNCHANGED belief) can no longer force an exit, while a
-#   belief-confirmed move OR a persistent deep catastrophe still exits. After unblock-W3
+#   persistent deep catastrophe from causal quote history still exits. After unblock-W3
 #   deleted the dead exit_triggers.py twin, the live gate lives solely in portfolio.py
 #   (flash_crash_should_fire, shared by Position.evaluate_exit).
 # Reuse: Run when FLASH_CRASH gating, exit_triggers ordering, or the flash_crash_* config changes.
 """BUG#127 antibody: FLASH_CRASH_PANIC must be evidence-gated, not a bare price-delta trigger."""
 from __future__ import annotations
 
+from dataclasses import replace
+import sqlite3
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from src.contracts.edge_context import EdgeContext
 from src.contracts.semantic_types import EntryMethod
+from src.engine.monitor_refresh import (
+    _causal_deep_market_catastrophe_confirmations,
+    _causal_market_velocity_1h,
+)
+from src.engine.cycle_runtime import _global_auction_owns_statistical_sell
 from src.state.portfolio import (
     ExitContext,
     Position,
@@ -92,6 +101,7 @@ def _exit_context(
         hours_to_settlement=12.0,
         position_state="holding",
         day0_active=False,
+        belief_available=True,
         whale_toxicity=False,
         divergence_score=divergence_score,
         market_velocity_1h=market_velocity_1h,
@@ -170,15 +180,230 @@ def test_portfolio_evaluate_exit_bare_wiggle_no_flash_crash():
     assert "FLASH_CRASH_PANIC" not in (decision.reason or "")
 
 
-def test_portfolio_evaluate_exit_belief_confirmed_crash_exits():
+def test_portfolio_evaluate_exit_shallow_belief_divergence_does_not_exit():
     pos = _held_position()
     ctx = _exit_context(
         market_velocity_1h=-0.20,
         divergence_score=divergence_soft_threshold() + 0.01,
     )
     decision = pos.evaluate_exit(ctx)
+    assert decision.should_exit is False
+    assert decision.trigger != "FLASH_CRASH_PANIC"
+
+
+def test_portfolio_evaluate_exit_persistent_deep_catastrophe_exits():
+    pos = _held_position()
+    pos.flash_crash_count = flash_crash_confirmations()
+    ctx = _exit_context(
+        market_velocity_1h=flash_crash_catastrophe_velocity() - 0.01,
+        divergence_score=0.0,
+    )
+
+    decision = pos.evaluate_exit(ctx)
+
     assert decision.should_exit is True
     assert decision.trigger == "FLASH_CRASH_PANIC"
+    assert "flash_crash_persistent_market_evidence" in decision.applied_validations
+
+
+def test_portfolio_evaluate_exit_persistent_counter_resets_on_recovery():
+    pos = _held_position()
+    pos.flash_crash_count = flash_crash_confirmations()
+    deep = _exit_context(
+        market_velocity_1h=flash_crash_catastrophe_velocity() - 0.01,
+    )
+    recovered = _exit_context(market_velocity_1h=0.0)
+
+    assert pos.evaluate_exit(deep).should_exit is True
+    assert pos.evaluate_exit(recovered).should_exit is False
+    assert pos.flash_crash_count == 0
+
+
+def test_portfolio_evaluate_exit_stale_market_resets_persistent_counter():
+    pos = _held_position()
+    pos.flash_crash_count = flash_crash_confirmations()
+    deep = _exit_context(
+        market_velocity_1h=flash_crash_catastrophe_velocity() - 0.01,
+    )
+    stale = replace(deep, current_market_price_is_fresh=False)
+
+    assert pos.evaluate_exit(deep).should_exit is True
+    assert pos.evaluate_exit(stale).should_exit is False
+    assert pos.flash_crash_count == 0
+
+
+def test_portfolio_evaluate_exit_guaranteed_settlement_lock_beats_catastrophe():
+    pos = _held_position()
+    pos.flash_crash_count = flash_crash_confirmations()
+    guaranteed = replace(
+        _exit_context(
+            market_velocity_1h=flash_crash_catastrophe_velocity() - 0.01,
+            fresh_prob=1.0,
+        ),
+        day0_zero_probability_exit_authority=True,
+    )
+
+    decision = pos.evaluate_exit(guaranteed)
+
+    assert decision.should_exit is False
+    assert decision.trigger == "HOLD"
+    assert "settlement_preimage_lock:guaranteed" in decision.applied_validations
+
+
+def test_portfolio_evaluate_exit_persistent_catastrophe_survives_stale_belief():
+    pos = _held_position()
+    pos.flash_crash_count = flash_crash_confirmations()
+    ctx = ExitContext(
+        fresh_prob=None,
+        fresh_prob_is_fresh=False,
+        current_market_price=0.20,
+        current_market_price_is_fresh=True,
+        best_bid=0.19,
+        best_ask=0.21,
+        market_vig=1.0,
+        hours_to_settlement=12.0,
+        position_state="holding",
+        day0_active=False,
+        whale_toxicity=False,
+        divergence_score=0.0,
+        market_velocity_1h=flash_crash_catastrophe_velocity() - 0.01,
+    )
+
+    decision = pos.evaluate_exit(ctx)
+
+    assert decision.should_exit is True
+    assert decision.trigger == "FLASH_CRASH_PANIC"
+
+
+def _price_log_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE token_price_log (
+            id INTEGER PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            source_timestamp TEXT,
+            timestamp TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def test_causal_deep_catastrophe_confirmation_survives_position_reload():
+    conn = _price_log_connection()
+    conn.executemany(
+        """
+        INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+        VALUES ('held', ?, ?, ?)
+        """,
+        [
+            (0.60, "2026-08-29T00:00:00+00:00", "2026-08-29T00:00:00+00:00"),
+            (0.15, "2026-08-29T01:00:00+00:00", "2026-08-29T01:00:00+00:00"),
+            # Future evidence must not confirm the current decision.
+            (0.90, "2026-08-29T01:03:00+00:00", "2026-08-29T01:03:00+00:00"),
+        ],
+    )
+
+    count = _causal_deep_market_catastrophe_confirmations(
+        conn,
+        token_id="held",
+        current_price=0.10,
+        observed_at="2026-08-29T01:02:00+00:00",
+    )
+
+    assert count == flash_crash_confirmations()
+
+
+def test_causal_deep_catastrophe_confirmation_stops_at_recovery():
+    conn = _price_log_connection()
+    conn.executemany(
+        """
+        INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+        VALUES ('held', ?, ?, ?)
+        """,
+        [
+            (0.60, "2026-08-29T00:00:00+00:00", "2026-08-29T00:00:00+00:00"),
+            (0.40, "2026-08-29T01:00:00+00:00", "2026-08-29T01:00:00+00:00"),
+        ],
+    )
+
+    count = _causal_deep_market_catastrophe_confirmations(
+        conn,
+        token_id="held",
+        current_price=0.10,
+        observed_at="2026-08-29T01:02:00+00:00",
+    )
+
+    assert count == 1
+
+
+def test_causal_market_velocity_refuses_ancient_baseline_bridge():
+    conn = _price_log_connection()
+    conn.execute(
+        """INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+           VALUES ('held', 0.90, '2025-08-01T00:00:00+00:00',
+                   '2025-08-01T00:00:00+00:00')"""
+    )
+
+    velocity = _causal_market_velocity_1h(
+        conn,
+        token_id="held",
+        current_price=0.10,
+        observed_at="2026-08-29T01:00:00+00:00",
+    )
+
+    assert velocity is None
+
+
+def test_causal_market_velocity_uses_recent_high_for_new_low_price_holding():
+    conn = _price_log_connection()
+    conn.executemany(
+        """INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+           VALUES ('held', ?, ?, ?)""",
+        [
+            (0.10, "2026-09-01T05:03:00+00:00", "2026-09-01T05:03:00+00:00"),
+            (0.07, "2026-09-01T05:20:00+00:00", "2026-09-01T05:20:00+00:00"),
+        ],
+    )
+
+    velocity = _causal_market_velocity_1h(
+        conn,
+        token_id="held",
+        current_price=0.06,
+        observed_at="2026-09-01T05:22:00+00:00",
+    )
+
+    assert velocity == pytest.approx(-0.40)
+
+
+def test_causal_catastrophe_confirmation_refuses_quote_gap():
+    conn = _price_log_connection()
+    conn.executemany(
+        """INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+           VALUES ('held', ?, ?, ?)""",
+        [
+            (0.90, "2026-08-28T23:30:00+00:00", "2026-08-28T23:30:00+00:00"),
+            (0.40, "2026-08-29T00:50:00+00:00", "2026-08-29T00:50:00+00:00"),
+            (0.60, "2026-08-29T00:00:00+00:00", "2026-08-29T00:00:00+00:00"),
+        ],
+    )
+
+    count = _causal_deep_market_catastrophe_confirmations(
+        conn,
+        token_id="held",
+        current_price=0.10,
+        observed_at="2026-08-29T01:00:00+00:00",
+    )
+
+    assert count == 1
+
+
+def test_flash_catastrophe_requires_global_capital_reauction():
+    decision = SimpleNamespace(trigger="FLASH_CRASH_PANIC")
+    assert _global_auction_owns_statistical_sell(decision, decision.trigger) is True
 
 
 # --- 4. Single-site coherence (Wave 3, 2026-06-03) -----------------------------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-08-12; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-08-12; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Grade exact current selection/probability revisions on causal capital outcomes.
 # Reuse: Run read-only against canonical WORLD/FORECAST/TRADES DBs; output is evidence, not authority.
 """Fail-closed evaluator for current-regime capital advantage.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import math
@@ -40,6 +41,10 @@ from src.contracts.global_auction_receipt import (  # noqa: E402
     assert_global_auction_receipt_artifact,
     assert_global_auction_summary_integrity,
 )
+from src.contracts.venue_submission_envelope import (  # noqa: E402
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 from src.events.day0_authority import (  # noqa: E402
     DAY0_PROBABILITY_SEMANTICS_REVISION,
 )
@@ -48,6 +53,10 @@ from src.state.db import (  # noqa: E402
     get_forecasts_connection_read_only,
     get_trade_connection_read_only,
     get_world_connection_read_only,
+)
+from src.state.fill_dedup import (  # noqa: E402
+    canonical_trade_fact_cte,
+    economic_trade_fact_cte,
 )
 from src.types.market import Bin  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
@@ -60,6 +69,8 @@ MIN_INDEPENDENT_TARGET_DATES = 30
 MIN_EXACT_LIVE_REALIZED_POSITIONS = 30
 GLOBAL_HOLD_RECEIPT_SCAN_ROWS = 5_000
 WINDOW_DAYS = 35.0
+CURRENT_CAPITAL_TRUTH_MAX_AGE_SECONDS = 180.0
+PORTFOLIO_OBSERVATION_MAX_POINTS = 2_048
 GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction",
     "global_single_order_auction_delta",
@@ -577,15 +588,17 @@ def _realized_proof_sample(
     )
     loss_before = loss_wealth - loss_payoff
     win_before = win_wealth - win_payoff
+    shares = _decimal(winner.get("shares"), "winner_shares")
+    cost = _decimal(winner.get("cost_usd"), "winner_cost")
     tolerance = Decimal("0.000001")
     if (
         loss_payoff >= 0
         or win_payoff <= 0
+        or shares <= 0
         or loss_before <= 0
         or win_before <= 0
-        or abs(loss_before - win_before) > tolerance
-        or abs(_decimal(winner.get("cost_usd"), "winner_cost") + loss_payoff)
-        > tolerance
+        or abs(cost + loss_payoff) > tolerance
+        or abs((win_payoff - loss_payoff) - shares) > tolerance
     ):
         raise ValueError("proof winner after-cost terminal wealth inconsistent")
     settlement = _verified_settlement(
@@ -609,7 +622,8 @@ def _realized_proof_sample(
     token_won = condition_yes if side == "YES" else not condition_yes
     payoff = win_payoff if token_won else loss_payoff
     wealth_after = win_wealth if token_won else loss_wealth
-    delta_log = math.log(float(wealth_after / loss_before))
+    wealth_before = win_before if token_won else loss_before
+    delta_log = math.log(float(wealth_after / wealth_before))
     if not math.isfinite(delta_log):
         raise ValueError("proof winner realized delta-log wealth invalid")
     return {
@@ -1062,6 +1076,782 @@ def _executable_bid_vwap(depth_json: object, shares: object) -> float | None:
         if remaining <= 1e-9:
             return proceeds / quantity
     return None
+
+
+def _banded_bid_liquidation(
+    depth_json: object,
+    shares: object,
+) -> dict[str, object]:
+    """Value the immediately sellable prefix under the live unit-price law."""
+
+    try:
+        quantity = float(shares)
+        raw_bids = json.loads(str(depth_json or ""))["bids"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {"status": "BOOK_DEPTH_UNAVAILABLE"}
+    if (
+        not math.isfinite(quantity)
+        or quantity <= 0.0
+        or not isinstance(raw_bids, list)
+    ):
+        return {"status": "POSITION_SIZE_INVALID"}
+    levels: list[tuple[float, float]] = []
+    for raw in raw_bids:
+        try:
+            if isinstance(raw, Mapping):
+                price = float(raw["price"])
+                size = float(raw["size"])
+            else:
+                price = float(raw[0])
+                size = float(raw[1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return {"status": "BOOK_DEPTH_INVALID"}
+        if (
+            not math.isfinite(price)
+            or not math.isfinite(size)
+            or not 0.0 < price < 1.0
+            or size <= 0.0
+        ):
+            return {"status": "BOOK_DEPTH_INVALID"}
+        levels.append((price, size))
+    if not levels:
+        return {"status": "NO_BID_DEPTH"}
+    levels.sort(reverse=True)
+    best_bid = Decimal(str(levels[0][0]))
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= best_bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+        return {
+            "status": "BEST_BID_OUTSIDE_LIVE_SUBMIT_BAND",
+            "best_bid": float(best_bid),
+            "executable_prefix_shares": 0.0,
+            "executable_prefix_gross_usd": 0.0,
+            "full_position_executable": False,
+        }
+    remaining = quantity
+    proceeds = 0.0
+    filled = 0.0
+    for price, available in levels:
+        if Decimal(str(price)) < LIVE_ORDER_MIN_UNIT_PRICE:
+            break
+        taken = min(remaining, available)
+        proceeds += taken * price
+        filled += taken
+        remaining -= taken
+        if remaining <= 1e-9:
+            break
+    full = remaining <= 1e-9
+    return {
+        "status": "FULL_POSITION_EXECUTABLE" if full else "PREFIX_ONLY_EXECUTABLE",
+        "best_bid": float(best_bid),
+        "executable_prefix_shares": round(filled, 9),
+        "executable_prefix_gross_usd": round(proceeds, 9),
+        "full_position_executable": full,
+        "full_position_vwap": round(proceeds / quantity, 9) if full else None,
+    }
+
+
+def _order_capital_ledger(
+    conn: sqlite3.Connection,
+    *,
+    as_of: datetime,
+) -> dict[str, object]:
+    """Reproduce every current-window venue command and its exact cash flow."""
+
+    cutoff = as_of - timedelta(days=WINDOW_DAYS)
+    canonical_facts: dict[str, list[dict[str, object]]] = {}
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='venue_trade_facts'"
+    ).fetchone():
+        source_scope = (
+            "JOIN venue_commands scope ON scope.command_id=fact.command_id "
+            "WHERE datetime(scope.created_at)>=datetime(?) "
+            "AND datetime(scope.created_at)<=datetime(?) "
+            "AND datetime(fact.observed_at)<=datetime(?)"
+        )
+        trade_rows = conn.execute(
+            f"WITH {canonical_trade_fact_cte(source_clause_sql=source_scope)},"
+            f"{economic_trade_fact_cte()} "
+            "SELECT command_id,trade_id,filled_size,fill_price,state,execution_ts "
+            "FROM economic_trade_fact "
+            "WHERE UPPER(COALESCE(state,'')) IN ('MATCHED','MINED','CONFIRMED') "
+            "AND CAST(COALESCE(filled_size,'0') AS REAL)>0 "
+            "AND CAST(COALESCE(fill_price,'0') AS REAL)>0 "
+            "ORDER BY command_id,execution_ts,trade_id",
+            (cutoff.isoformat(), as_of.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        for row in trade_rows:
+            command_id = str(row["command_id"] or "").strip()
+            canonical_facts.setdefault(command_id, []).append(
+                {
+                    "fact_id": str(row["trade_id"] or ""),
+                    "fill_price": row["fill_price"],
+                    "fill_shares": row["filled_size"],
+                    "filled_at": str(row["execution_ts"] or ""),
+                    "terminal_exec_status": str(row["state"] or ""),
+                }
+            )
+    rows = conn.execute(
+        "SELECT vc.command_id,vc.position_id,vc.decision_id,vc.intent_kind,"
+        "vc.side,vc.size,vc.price,vc.state,vc.created_at,vc.updated_at,"
+        "vc.envelope_id,vc.venue_order_id,vse.outcome_label,vse.post_only,"
+        "vse.fee_details_json,"
+        "ef.intent_id AS fact_id,ef.order_role,ef.fill_price,ef.shares AS fill_shares,"
+        "ef.filled_at,ef.terminal_exec_status "
+        "FROM venue_commands AS vc "
+        "LEFT JOIN venue_submission_envelopes AS vse "
+        "ON vse.envelope_id=vc.envelope_id "
+        "LEFT JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "AND (ef.filled_at IS NULL OR datetime(ef.filled_at)<=datetime(?)) "
+        "WHERE datetime(vc.created_at)>=datetime(?) "
+        "AND datetime(vc.created_at)<=datetime(?) "
+        "ORDER BY datetime(vc.created_at),vc.command_id,datetime(ef.filled_at),ef.intent_id",
+        (as_of.isoformat(), cutoff.isoformat(), as_of.isoformat()),
+    ).fetchall()
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        command_id = str(row["command_id"] or "").strip()
+        item = grouped.setdefault(
+            command_id,
+            {
+                "command_id": command_id,
+                "position_id": str(row["position_id"] or ""),
+                "decision_id": str(row["decision_id"] or ""),
+                "venue_order_id": str(row["venue_order_id"] or ""),
+                "intent_kind": str(row["intent_kind"] or ""),
+                "side": str(row["side"] or ""),
+                "outcome_label": str(row["outcome_label"] or ""),
+                "state": str(row["state"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+                "requested_shares": row["size"],
+                "requested_unit_price": row["price"],
+                "requested_notional_usd": round(
+                    float(row["size"] or 0.0) * float(row["price"] or 0.0),
+                    9,
+                ),
+                "post_only": row["post_only"],
+                "fee_details_json": row["fee_details_json"],
+                "facts": [],
+            },
+        )
+        if row["fact_id"] is not None:
+            item["facts"].append(
+                {
+                    "fact_id": str(row["fact_id"]),
+                    "order_role": str(row["order_role"] or "").lower(),
+                    "fill_price": row["fill_price"],
+                    "fill_shares": row["fill_shares"],
+                    "filled_at": str(row["filled_at"] or ""),
+                    "terminal_exec_status": str(
+                        row["terminal_exec_status"] or ""
+                    ),
+                    "post_only": row["post_only"],
+                    "fee_details_json": row["fee_details_json"],
+                }
+            )
+
+    terminal_no_fill_states = {
+        "CANCELLED",
+        "EXPIRED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+    }
+    orders: list[dict[str, object]] = []
+    incomplete_reasons: dict[str, int] = {}
+    state_counts: dict[str, int] = {}
+    intent_state_counts: dict[str, int] = {}
+    entry_outflow = 0.0
+    exit_inflow = 0.0
+    total_fees = 0.0
+    realized_exit_accounting_pnl = 0.0
+    gain_truth_incomplete = 0
+    for item in grouped.values():
+        execution_facts = tuple(item.pop("facts"))
+        command_id = str(item["command_id"])
+        authoritative_facts = tuple(canonical_facts.get(command_id, ()))
+        facts = authoritative_facts or execution_facts
+        if authoritative_facts:
+            fill_truth_source = "CANONICAL_ECONOMIC_VENUE_TRADE_FACT"
+        elif execution_facts:
+            fill_truth_source = "EXECUTION_FACT"
+        else:
+            fill_truth_source = "NO_FILL_FACT"
+        post_only = item.pop("post_only")
+        fee_details_json = item.pop("fee_details_json")
+        state = str(item["state"])
+        intent = str(item["intent_kind"])
+        state_counts[state] = state_counts.get(state, 0) + 1
+        intent_state = f"{intent}:{state}"
+        intent_state_counts[intent_state] = intent_state_counts.get(intent_state, 0) + 1
+        reasons: list[str] = []
+        gross = 0.0
+        fees = 0.0
+        filled_shares = 0.0
+        fill_times: list[str] = []
+        expected_role = intent.lower()
+        for fact in facts:
+            fact_role = str(fact.get("order_role") or expected_role)
+            if fact_role != expected_role:
+                reasons.append("ORDER_ROLE_MISMATCH")
+                continue
+            fee = rg._submission_schedule_fee_usd(
+                post_only=post_only,
+                fee_details_json=fee_details_json,
+                fill_price=fact["fill_price"],
+                shares=fact["fill_shares"],
+            )
+            try:
+                price = float(fact["fill_price"])
+                shares = float(fact["fill_shares"])
+            except (TypeError, ValueError):
+                reasons.append("FILL_VALUES_INVALID")
+                continue
+            if (
+                fee is None
+                or not all(math.isfinite(value) for value in (price, shares))
+                or not 0.0 < price < 1.0
+                or shares <= 0.0
+            ):
+                reasons.append("FILL_OR_FEE_UNAVAILABLE")
+                continue
+            gross += price * shares
+            fees += fee
+            filled_shares += shares
+            if fact["filled_at"]:
+                fill_times.append(str(fact["filled_at"]))
+        if state == "FILLED" and not facts:
+            reasons.append("FILLED_COMMAND_EXECUTION_FACT_MISSING")
+        if not facts and state not in terminal_no_fill_states and state != "FILLED":
+            reasons.append("NONTERMINAL_COMMAND_WITHOUT_CAPITAL_FACT")
+        reasons = sorted(set(reasons))
+        for reason in reasons:
+            incomplete_reasons[reason] = incomplete_reasons.get(reason, 0) + 1
+        if reasons:
+            cash_flow = None
+            effect = "CAPITAL_TRUTH_DEGRADED"
+        elif not facts:
+            cash_flow = 0.0
+            effect = "ZERO_CAPITAL_EFFECT_NO_FILL"
+        elif intent == "ENTRY":
+            cash_flow = -(gross + fees)
+            entry_outflow += -cash_flow
+            total_fees += fees
+            effect = "CAPITAL_COMMITTED_BY_FILL"
+        elif intent == "EXIT":
+            cash_flow = gross - fees
+            exit_inflow += cash_flow
+            total_fees += fees
+            effect = "CAPITAL_RELEASED_BY_FILL"
+        else:
+            cash_flow = None
+            effect = "CAPITAL_TRUTH_DEGRADED"
+            reason = "INTENT_KIND_UNSUPPORTED"
+            incomplete_reasons[reason] = incomplete_reasons.get(reason, 0) + 1
+            reasons.append(reason)
+        if not facts:
+            realized_pnl = 0.0 if not reasons else None
+            gain_status = (
+                "ZERO_REALIZED_GAIN_NO_FILL"
+                if realized_pnl is not None
+                else "GAIN_TRUTH_DEGRADED"
+            )
+        elif intent == "ENTRY":
+            realized_pnl = None
+            gain_status = "ENTRY_ACQUISITION_NOT_REALIZED_GAIN"
+        elif intent == "EXIT":
+            raw_exit_events = conn.execute(
+                "SELECT payload_json FROM position_events "
+                "WHERE position_id=? AND event_type='EXIT_ORDER_FILLED' "
+                "AND command_id=? AND datetime(occurred_at)<=datetime(?) "
+                "ORDER BY sequence_no LIMIT 2",
+                (
+                    str(item["position_id"]),
+                    str(item["command_id"]),
+                    as_of.isoformat(),
+                ),
+            ).fetchall()
+            exit_events: list[Mapping[str, object]] = []
+            for event in raw_exit_events:
+                try:
+                    payload = json.loads(str(event["payload_json"] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = {}
+                exit_events.append(payload)
+            raw_pnl = None
+            if len(exit_events) == 1:
+                raw_pnl = exit_events[0].get("pnl")
+                if raw_pnl is None:
+                    raw_pnl = exit_events[0].get("realized_pnl_usd")
+            gain_status = "EXIT_ACCOUNTING_GAIN_UNAVAILABLE"
+            if raw_pnl is None and str(item["venue_order_id"]):
+                raw_partial_events = conn.execute(
+                    "SELECT payload_json FROM position_events "
+                    "WHERE position_id=? "
+                    "AND caused_by IN "
+                    "('partial_exit_fill','partial_exit_economics_repair') "
+                    "AND datetime(occurred_at)<=datetime(?) "
+                    "AND (command_id=? OR lower(COALESCE(order_id,''))=lower(?) "
+                    "OR json_extract(payload_json,'$.command_id')=? "
+                    "OR lower(COALESCE(json_extract(payload_json,'$.venue_order_id'),''))"
+                    "=lower(?)) ORDER BY sequence_no,event_id",
+                    (
+                        str(item["position_id"]),
+                        as_of.isoformat(),
+                        command_id,
+                        str(item["venue_order_id"]),
+                        command_id,
+                        str(item["venue_order_id"]),
+                    ),
+                ).fetchall()
+                partial_deltas: list[float] = []
+                partial_complete = bool(raw_partial_events)
+                for event in raw_partial_events:
+                    try:
+                        payload = json.loads(str(event["payload_json"] or ""))
+                        delta = float(payload["realized_pnl_delta_usd"])
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
+                        partial_complete = False
+                        continue
+                    if not math.isfinite(delta):
+                        partial_complete = False
+                        continue
+                    partial_deltas.append(delta)
+                if partial_complete:
+                    raw_pnl = sum(partial_deltas)
+                    gain_status = "PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
+                elif raw_partial_events:
+                    gain_status = "LEGACY_PARTIAL_EXIT_GAIN_UNAVAILABLE"
+            try:
+                realized_pnl = float(raw_pnl) - fees
+            except (TypeError, ValueError):
+                realized_pnl = None
+            if realized_pnl is None or not math.isfinite(realized_pnl):
+                realized_pnl = None
+            else:
+                realized_exit_accounting_pnl += realized_pnl
+                if gain_status != "PARTIAL_EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE":
+                    gain_status = "EXIT_ACCOUNTING_GAIN_AFTER_EXIT_FEE"
+        else:
+            realized_pnl = None
+            gain_status = "GAIN_TRUTH_DEGRADED"
+        if gain_status in {
+            "GAIN_TRUTH_DEGRADED",
+            "EXIT_ACCOUNTING_GAIN_UNAVAILABLE",
+            "LEGACY_PARTIAL_EXIT_GAIN_UNAVAILABLE",
+        }:
+            gain_truth_incomplete += 1
+        orders.append(
+            {
+                **item,
+                "fill_fact_count": len(facts),
+                "canonical_trade_fact_count": len(authoritative_facts),
+                "execution_fact_count": len(execution_facts),
+                "fill_truth_source": fill_truth_source,
+                "filled_shares": round(filled_shares, 9),
+                "filled_gross_notional_usd": round(gross, 9),
+                "fee_usd": round(fees, 9) if not reasons else None,
+                "after_cost_cash_flow_usd": (
+                    round(cash_flow, 9) if cash_flow is not None else None
+                ),
+                "first_filled_at": min(fill_times) if fill_times else None,
+                "last_filled_at": max(fill_times) if fill_times else None,
+                "capital_effect": effect,
+                "capital_truth_complete": not reasons,
+                "capital_truth_failures": reasons,
+                "realized_accounting_gain_after_exit_fee_usd": (
+                    round(realized_pnl, 9) if realized_pnl is not None else None
+                ),
+                "gain_status": gain_status,
+                "settlement_graded_gain": False,
+            }
+        )
+    return {
+        "artifact_role": "EVERY_VENUE_COMMAND_AFTER_COST_CASH_FLOW_LEDGER",
+        "window_days": WINDOW_DAYS,
+        "window_start_utc": cutoff.isoformat(),
+        "evaluated_at": as_of.isoformat(),
+        "command_count": len(orders),
+        "capital_affecting_command_count": sum(
+            float(row["filled_shares"] or 0.0) > 0.0 for row in orders
+        ),
+        "capital_truth_complete": not incomplete_reasons,
+        "capital_truth_incomplete_command_count": sum(
+            not row["capital_truth_complete"] for row in orders
+        ),
+        "incomplete_reasons": dict(sorted(incomplete_reasons.items())),
+        "state_counts": dict(sorted(state_counts.items())),
+        "intent_state_counts": dict(sorted(intent_state_counts.items())),
+        "filled_entry_after_cost_outflow_usd": round(entry_outflow, 9),
+        "filled_exit_after_cost_inflow_usd": round(exit_inflow, 9),
+        "submission_schedule_fee_usd": round(total_fees, 9),
+        "realized_exit_accounting_gain_after_exit_fee_usd": round(
+            realized_exit_accounting_pnl,
+            9,
+        ),
+        "gain_truth_incomplete_command_count": gain_truth_incomplete,
+        "net_venue_cash_flow_usd_not_profit": round(
+            exit_inflow - entry_outflow,
+            9,
+        ),
+        "warning": (
+            "ORDER CASH FLOW IS NOT PROFIT; EXIT ACCOUNTING GAIN BECOMES "
+            "OUTCOME-CORRECT ONLY THROUGH THE SEPARATE VERIFIED SETTLEMENT GRADE"
+        ),
+        "orders": orders,
+    }
+
+
+def _current_total_portfolio_capital(
+    conn: sqlite3.Connection,
+    *,
+    as_of: datetime,
+) -> dict[str, object]:
+    """Bracket total capital from Chain cash and exact current held tokens."""
+
+    collateral = conn.execute(
+        "SELECT id,pusd_balance_micro,reserved_pusd_for_buys_micro,captured_at,"
+        "authority_tier FROM collateral_ledger_snapshots "
+        "WHERE datetime(captured_at)<=datetime(?) "
+        "ORDER BY datetime(captured_at) DESC,id DESC LIMIT 1",
+        (as_of.isoformat(),),
+    ).fetchone()
+    if collateral is None:
+        return {"ready": False, "reason": "CHAIN_COLLATERAL_SNAPSHOT_MISSING"}
+    try:
+        collateral_at = _parse_aware(collateral["captured_at"])
+        collateral_age = (as_of - collateral_at).total_seconds()
+        chain_cash = int(collateral["pusd_balance_micro"]) / 1_000_000.0
+        snapshot_reserved = (
+            int(collateral["reserved_pusd_for_buys_micro"]) / 1_000_000.0
+        )
+    except (TypeError, ValueError):
+        return {"ready": False, "reason": "CHAIN_COLLATERAL_SNAPSHOT_INVALID"}
+    reservation_row = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
+        "WHERE released_at IS NULL AND reservation_type='PUSD_BUY'"
+    ).fetchone()
+    unsettled_row = conn.execute(
+        "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
+        "WHERE settled_at IS NULL"
+    ).fetchone()
+    active_reserved = int(reservation_row[0] or 0) / 1_000_000.0
+    unsettled = int(unsettled_row[0] or 0) / 1_000_000.0
+    reservation_match = math.isclose(
+        snapshot_reserved,
+        active_reserved,
+        abs_tol=1e-6,
+    )
+    collateral_ready = bool(
+        str(collateral["authority_tier"] or "") == "CHAIN"
+        and 0.0 <= collateral_age <= CURRENT_CAPITAL_TRUTH_MAX_AGE_SECONDS
+        and reservation_match
+    )
+
+    positions = conn.execute(
+        "SELECT position_id,phase,city,target_date,temperature_metric,direction,"
+        "chain_state,chain_shares,token_id,no_token_id FROM position_current "
+        "WHERE phase IN ('active','day0_window','pending_exit') "
+        "ORDER BY position_id"
+    ).fetchall()
+    position_rows: list[dict[str, object]] = []
+    position_truth_failures: list[str] = []
+    payoff_ceiling = 0.0
+    executable_prefix_value = 0.0
+    executable_prefix_shares = 0.0
+    book_status_counts: dict[str, int] = {}
+    for row in positions:
+        position_id = str(row["position_id"] or "")
+        direction = str(row["direction"] or "")
+        try:
+            shares = float(row["chain_shares"])
+        except (TypeError, ValueError):
+            shares = float("nan")
+        raw_token = row["no_token_id"] if direction == "buy_no" else row["token_id"]
+        selected_token = str(raw_token or "").strip()
+        base = {
+            "position_id": position_id,
+            "phase": str(row["phase"] or ""),
+            "city": str(row["city"] or ""),
+            "target_date": str(row["target_date"] or ""),
+            "metric": str(row["temperature_metric"] or ""),
+            "direction": direction,
+            "selected_token_id": selected_token,
+            "chain_shares": shares if math.isfinite(shares) else None,
+        }
+        if (
+            str(row["chain_state"] or "") == "synced"
+            and math.isfinite(shares)
+            and shares == 0.0
+        ):
+            status = "ZERO_CHAIN_SHARES_NO_CAPITAL"
+            position_rows.append(
+                {
+                    **base,
+                    "valuation_status": status,
+                    "executable_prefix_shares": 0.0,
+                    "executable_prefix_gross_usd_before_exit_fee": 0.0,
+                    "full_position_executable": True,
+                    "full_position_vwap": None,
+                }
+            )
+            book_status_counts[status] = book_status_counts.get(status, 0) + 1
+            continue
+        if (
+            str(row["chain_state"] or "") != "synced"
+            or not math.isfinite(shares)
+            or shares < 0.0
+            or not selected_token
+        ):
+            status = "POSITION_CHAIN_TRUTH_INVALID"
+            position_truth_failures.append(position_id)
+            position_rows.append({**base, "valuation_status": status})
+            book_status_counts[status] = book_status_counts.get(status, 0) + 1
+            continue
+        payoff_ceiling += shares
+        book = conn.execute(
+            "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_latest "
+            "WHERE token_id=? AND direction=?",
+            (selected_token, direction),
+        ).fetchone()
+        if book is not None:
+            try:
+                latest_quote_at = _parse_aware(book["quote_seen_at"])
+            except (TypeError, ValueError):
+                latest_quote_at = None
+            if latest_quote_at is None or latest_quote_at > as_of:
+                book = conn.execute(
+                    "SELECT quote_seen_at,depth_before_json "
+                    "FROM execution_feasibility_evidence "
+                    "WHERE token_id=? AND direction=? "
+                    "AND datetime(quote_seen_at)<=datetime(?) "
+                    "ORDER BY datetime(quote_seen_at) DESC,rowid DESC LIMIT 1",
+                    (selected_token, direction, as_of.isoformat()),
+                ).fetchone()
+        if book is None:
+            liquidation = {"status": "CURRENT_BOOK_MISSING"}
+            quote_at = None
+            quote_age = None
+        else:
+            try:
+                quote_dt = _parse_aware(book["quote_seen_at"])
+                quote_age = (as_of - quote_dt).total_seconds()
+                quote_at = quote_dt.isoformat()
+            except (TypeError, ValueError):
+                quote_age = None
+                quote_at = None
+            if (
+                quote_age is None
+                or quote_age < 0.0
+                or quote_age > CURRENT_CAPITAL_TRUTH_MAX_AGE_SECONDS
+            ):
+                liquidation = {"status": "CURRENT_BOOK_STALE"}
+            else:
+                liquidation = _banded_bid_liquidation(
+                    book["depth_before_json"],
+                    shares,
+                )
+        status = str(liquidation["status"])
+        prefix_shares = float(liquidation.get("executable_prefix_shares") or 0.0)
+        prefix_value = float(
+            liquidation.get("executable_prefix_gross_usd") or 0.0
+        )
+        executable_prefix_shares += prefix_shares
+        executable_prefix_value += prefix_value
+        book_status_counts[status] = book_status_counts.get(status, 0) + 1
+        position_rows.append(
+            {
+                **base,
+                "quote_seen_at": quote_at,
+                "quote_age_seconds": (
+                    round(quote_age, 6) if quote_age is not None else None
+                ),
+                "valuation_status": status,
+                "best_bid": liquidation.get("best_bid"),
+                "executable_prefix_shares": round(prefix_shares, 9),
+                "executable_prefix_gross_usd_before_exit_fee": round(
+                    prefix_value,
+                    9,
+                ),
+                "full_position_executable": bool(
+                    liquidation.get("full_position_executable")
+                ),
+                "full_position_vwap": liquidation.get("full_position_vwap"),
+            }
+        )
+    terminal_floor = chain_cash + unsettled
+    executable_gross = terminal_floor + executable_prefix_value
+    terminal_ceiling = terminal_floor + payoff_ceiling
+    identity_payload = {
+        "collateral_snapshot_id": int(collateral["id"]),
+        "chain_cash_usd": round(chain_cash, 9),
+        "active_reservations_usd": round(active_reserved, 9),
+        "unsettled_proceeds_usd": round(unsettled, 9),
+        "positions": [
+            {
+                key: value
+                for key, value in row.items()
+                if key != "quote_age_seconds"
+            }
+            for row in position_rows
+        ],
+    }
+    return {
+        "artifact_role": "TOTAL_PORTFOLIO_CHAIN_CASH_PLUS_EXECUTABLE_HELD_VALUE",
+        "ready": bool(collateral_ready and not position_truth_failures),
+        "evaluated_at": as_of.isoformat(),
+        "collateral_snapshot_id": int(collateral["id"]),
+        "collateral_captured_at": collateral_at.isoformat(),
+        "collateral_age_seconds": round(collateral_age, 6),
+        "collateral_authority": str(collateral["authority_tier"] or ""),
+        "chain_cash_usd": round(chain_cash, 9),
+        "active_buy_reservations_usd": round(active_reserved, 9),
+        "snapshot_buy_reservations_usd": round(snapshot_reserved, 9),
+        "reservation_ledger_matches_snapshot": reservation_match,
+        "spendable_cash_usd": round(chain_cash - active_reserved, 9),
+        "unsettled_exit_proceeds_usd": round(unsettled, 9),
+        "open_position_count": len(position_rows),
+        "capital_bearing_position_count": sum(
+            float(row.get("chain_shares") or 0.0) > 0.0 for row in position_rows
+        ),
+        "open_contract_shares_binary_payoff_ceiling_usd": round(
+            payoff_ceiling,
+            9,
+        ),
+        "immediately_executable_prefix_shares": round(
+            executable_prefix_shares,
+            9,
+        ),
+        "immediately_executable_gross_value_before_exit_fee_usd": round(
+            executable_prefix_value,
+            9,
+        ),
+        "total_portfolio_terminal_floor_usd": round(terminal_floor, 9),
+        "total_portfolio_current_executable_gross_usd_before_exit_fee": round(
+            executable_gross,
+            9,
+        ),
+        "total_portfolio_binary_payoff_ceiling_usd": round(
+            terminal_ceiling,
+            9,
+        ),
+        "full_position_liquidation_coverage_complete": all(
+            row.get("full_position_executable") is True for row in position_rows
+        ),
+        "book_status_counts": dict(sorted(book_status_counts.items())),
+        "position_truth_failures": position_truth_failures,
+        "observation_identity": hashlib.sha256(
+            _canonical_json_bytes(identity_payload)
+        ).hexdigest(),
+        "positions": position_rows,
+        "warning": (
+            "EXECUTABLE_GROSS_VALUE_IS_DECISION_TIME_DEPTH_BEFORE_HYPOTHETICAL_"
+            "EXIT_FEES; TERMINAL_FLOOR_AND_CEILING_ARE PAYOFF BOUNDS, NOT PNL"
+        ),
+    }
+
+
+def _portfolio_observation_curve(
+    current: Mapping[str, object],
+    *,
+    prior: Sequence[Mapping[str, object]],
+    as_of: datetime,
+) -> dict[str, object]:
+    cutoff = as_of - timedelta(days=WINDOW_DAYS)
+    retained: list[dict[str, object]] = []
+    for raw in prior:
+        try:
+            observed = _parse_aware(raw.get("evaluated_at"))
+        except (TypeError, ValueError):
+            continue
+        if not cutoff <= observed <= as_of:
+            continue
+        if not str(raw.get("observation_identity") or "").strip():
+            continue
+        retained.append(dict(raw))
+    point_fields = (
+        "evaluated_at",
+        "observation_identity",
+        "ready",
+        "chain_cash_usd",
+        "active_buy_reservations_usd",
+        "unsettled_exit_proceeds_usd",
+        "open_position_count",
+        "capital_bearing_position_count",
+        "open_contract_shares_binary_payoff_ceiling_usd",
+        "immediately_executable_gross_value_before_exit_fee_usd",
+        "total_portfolio_terminal_floor_usd",
+        "total_portfolio_current_executable_gross_usd_before_exit_fee",
+        "total_portfolio_binary_payoff_ceiling_usd",
+        "full_position_liquidation_coverage_complete",
+        "book_status_counts",
+    )
+    current_point = {field: current.get(field) for field in point_fields}
+    if (
+        current.get("observation_identity")
+        and (
+            not retained
+            or retained[-1].get("observation_identity")
+            != current.get("observation_identity")
+        )
+    ):
+        retained.append(current_point)
+    retained = retained[-PORTFOLIO_OBSERVATION_MAX_POINTS:]
+    latest_delta = None
+    if len(retained) >= 2:
+        previous = retained[-2]
+        latest = retained[-1]
+        latest_delta = {
+            "from_evaluated_at": previous.get("evaluated_at"),
+            "to_evaluated_at": latest.get("evaluated_at"),
+            "chain_cash_delta_usd": round(
+                float(latest.get("chain_cash_usd") or 0.0)
+                - float(previous.get("chain_cash_usd") or 0.0),
+                9,
+            ),
+            "current_executable_gross_capital_delta_usd": round(
+                float(
+                    latest.get(
+                        "total_portfolio_current_executable_gross_usd_before_exit_fee"
+                    )
+                    or 0.0
+                )
+                - float(
+                    previous.get(
+                        "total_portfolio_current_executable_gross_usd_before_exit_fee"
+                    )
+                    or 0.0
+                ),
+                9,
+            ),
+            "binary_payoff_ceiling_delta_usd": round(
+                float(
+                    latest.get("total_portfolio_binary_payoff_ceiling_usd") or 0.0
+                )
+                - float(
+                    previous.get("total_portfolio_binary_payoff_ceiling_usd")
+                    or 0.0
+                ),
+                9,
+            ),
+            "external_flow_adjusted": False,
+        }
+    return {
+        "artifact_role": "TOTAL_PORTFOLIO_OBSERVATION_TRAJECTORY",
+        "observation_count": len(retained),
+        "latest_delta": latest_delta,
+        "external_flow_adjusted": False,
+        "profit_proof_eligible": False,
+        "warning": (
+            "TRAJECTORY_TRACKS TOTAL PORTFOLIO, NOT CASH; WITHOUT EXTERNAL-FLOW "
+            "ATTRIBUTION IT CANNOT BY ITSELF PROVE TRADING PROFIT"
+        ),
+        "curve": retained,
+    }
 
 
 def _globally_selected_exit_quality(
@@ -1517,21 +2307,21 @@ def _held_to_binary_settlement_quality(
 def _build_counterfactual_admission_verdict(
     *,
     receipt: dict[str, object],
-    shadows: dict[str, dict[str, object]],
+    counterfactuals: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
     failures: list[str] = []
     if receipt.get("ready") is not True:
         failures.append("CURRENT_GLOBAL_SELECTION_RECEIPT_UNPROVEN")
     independent = sum(
         int(row.get("independent_target_date_count") or 0)
-        for row in shadows.values()
+        for row in counterfactuals.values()
         if row.get("global_selection_revision_bound") is True
     )
     if independent < MIN_INDEPENDENT_TARGET_DATES:
         failures.append("INSUFFICIENT_CURRENT_REGIME_SETTLED_TARGET_DATES")
     lcbs = [
         row.get("delta_log_wealth_lcb95")
-        for row in shadows.values()
+        for row in counterfactuals.values()
         if row.get("global_selection_revision_bound") is True
     ]
     if not lcbs or any(
@@ -1545,12 +2335,12 @@ def _build_counterfactual_admission_verdict(
 def _build_verdict(
     *,
     receipt: dict[str, object],
-    shadows: dict[str, dict[str, object]],
+    counterfactuals: dict[str, dict[str, object]],
     live_curves: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
     _, failures = _build_counterfactual_admission_verdict(
         receipt=receipt,
-        shadows=shadows,
+        counterfactuals=counterfactuals,
     )
     exact_live = [
         row for row in live_curves.values()
@@ -1575,6 +2365,17 @@ def _build_verdict(
     return ("PASS" if not failures else "FAIL", failures)
 
 
+def _order_ledger_proof_failures(
+    ledger: Mapping[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    if ledger.get("capital_truth_complete") is not True:
+        failures.append("ORDER_CAPITAL_LEDGER_INCOMPLETE")
+    if int(ledger.get("gain_truth_incomplete_command_count") or 0) > 0:
+        failures.append("ORDER_GAIN_LEDGER_INCOMPLETE")
+    return failures
+
+
 def evaluate(
     *,
     world_path: Path,
@@ -1582,6 +2383,7 @@ def evaluate(
     trades_path: Path,
     as_of: datetime,
     prior_proof_registry: Sequence[Mapping[str, object]] = (),
+    prior_portfolio_observations: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     trades = _read_only(
         trades_path,
@@ -1590,10 +2392,15 @@ def evaluate(
                 "decision_log",
                 "venue_commands",
                 "venue_submission_envelopes",
+                "venue_trade_facts",
                 "execution_fact",
                 "execution_feasibility_evidence",
                 "position_events",
                 "position_current",
+                "collateral_ledger_snapshots",
+                "collateral_reservations",
+                "collateral_unsettled_proceeds",
+                "execution_feasibility_latest",
             }
         ),
         connection_factory=get_trade_connection_read_only,
@@ -1608,10 +2415,13 @@ def evaluate(
         frozenset({"edli_live_order_events"}),
         connection_factory=get_world_connection_read_only,
     )
+    for connection in (trades, forecasts, world):
+        connection.execute("BEGIN")
+        connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
 
     try:
         receipt = _latest_proof_receipt_coverage(trades)
-        shadows = {
+        counterfactuals = {
             "combined_current_global_selection": (
                 _settled_global_counterfactual_evidence(
                     trades,
@@ -1656,21 +2466,38 @@ def evaluate(
             forecasts,
             as_of=as_of,
         )
+        order_capital_ledger = _order_capital_ledger(trades, as_of=as_of)
+        total_portfolio_capital = _current_total_portfolio_capital(
+            trades,
+            as_of=as_of,
+        )
+        total_portfolio_trajectory = _portfolio_observation_curve(
+            total_portfolio_capital,
+            prior=prior_portfolio_observations,
+            as_of=as_of,
+        )
     finally:
         world.close()
         forecasts.close()
         trades.close()
     verdict, failures = _build_verdict(
         receipt=receipt,
-        shadows=shadows,
+        counterfactuals=counterfactuals,
         live_curves=live_curves,
     )
     admission_verdict, admission_failures = (
         _build_counterfactual_admission_verdict(
             receipt=receipt,
-            shadows=shadows,
+            counterfactuals=counterfactuals,
         )
     )
+    order_ledger_failures = _order_ledger_proof_failures(order_capital_ledger)
+    if order_ledger_failures:
+        failures.extend(order_ledger_failures)
+        verdict = "FAIL"
+    if total_portfolio_capital.get("ready") is not True:
+        failures.append("CURRENT_TOTAL_PORTFOLIO_CAPITAL_TRUTH_DEGRADED")
+        verdict = "FAIL"
     return {
         "schema_version": 1,
         "artifact_role": "OBSERVATIONAL_EVIDENCE_NOT_ORDER_AUTHORITY",
@@ -1690,6 +2517,9 @@ def evaluate(
             "delta_log_wealth_lcb95_must_exceed": 0.0,
             "live_capital_weighted_return_must_exceed": 0.0,
             "absolute_small_dollar_pnl_is_not_advantage_proof": True,
+            "every_venue_command_must_have_atomic_capital_disposition": True,
+            "every_realized_exit_must_have_atomic_gain_disposition": True,
+            "total_portfolio_not_cash_is_required": True,
             "global_selection_revision": (
                 CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
             ),
@@ -1706,20 +2536,50 @@ def evaluate(
             "trades": str(trades_path.resolve()),
         },
         "latest_global_receipt": receipt,
-        "settled_counterfactuals": shadows,
+        "settled_counterfactuals": counterfactuals,
         "live_realized_capital": live_curves,
         "globally_selected_exit_quality": selected_exit_quality,
         "globally_compared_hold_settlement_quality": held_settlement_quality,
+        "per_order_capital_ledger": order_capital_ledger,
+        "current_total_portfolio_capital": total_portfolio_capital,
+        "total_portfolio_capital_trajectory": total_portfolio_trajectory,
     }
 
 
-def _atomic_write(path: Path, payload: dict[str, object]) -> None:
+def _atomic_write(path: Path, payload: dict[str, object]) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(temp, path)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                existing_at = _parse_aware(existing.get("evaluated_at"))
+                candidate_at = _parse_aware(payload.get("evaluated_at"))
+            except (
+                AttributeError,
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                existing_at = None
+                candidate_at = None
+            if (
+                existing_at is not None
+                and candidate_at is not None
+                and existing_at > candidate_at
+            ):
+                return False
+        temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+    return True
 
 
 def _prior_proof_registry(path: Path) -> tuple[Mapping[str, object], ...]:
@@ -1739,6 +2599,21 @@ def _prior_proof_registry(path: Path) -> tuple[Mapping[str, object], ...]:
     return tuple(registry)
 
 
+def _prior_portfolio_observations(
+    path: Path,
+) -> tuple[Mapping[str, object], ...]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        curve = payload["total_portfolio_capital_trajectory"]["curve"]
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(curve, list) or any(
+        not isinstance(row, Mapping) for row in curve
+    ):
+        return ()
+    return tuple(curve)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trades", type=Path, required=True)
@@ -1749,6 +2624,7 @@ def main() -> int:
     world = args.world or args.trades.with_name("zeus-world.db")
     as_of = datetime.now(timezone.utc)
     prior_proof_registry = _prior_proof_registry(args.artifact)
+    prior_portfolio_observations = _prior_portfolio_observations(args.artifact)
     try:
         artifact = evaluate(
             world_path=world,
@@ -1756,6 +2632,7 @@ def main() -> int:
             trades_path=args.trades,
             as_of=as_of,
             prior_proof_registry=prior_proof_registry,
+            prior_portfolio_observations=prior_portfolio_observations,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         artifact = {
@@ -1770,7 +2647,8 @@ def main() -> int:
             ],
             "failures": [f"CAPITAL_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"],
         }
-    _atomic_write(args.artifact, artifact)
+    if not _atomic_write(args.artifact, artifact):
+        artifact = json.loads(args.artifact.read_text(encoding="utf-8"))
     print(json.dumps(artifact, indent=2, sort_keys=True))
     return 0 if artifact["verdict"] == "PASS" else 1
 

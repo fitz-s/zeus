@@ -228,8 +228,30 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _world_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
+    """Resolve world-owned truth before any same-named main ghost table."""
+
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    if "world" in attached:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master "
+            "WHERE type IN ('table', 'view') AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if row is not None:
+            return f"world.{table_name}"
+    return table_name if table_name in _table_names(conn) else None
+
+
 def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if "." in table_name:
+        schema, bare_name = table_name.split(".", 1)
+        pragma = f"PRAGMA {schema}.table_info({bare_name})"
+    else:
+        pragma = f"PRAGMA table_info({table_name})"
+    return {str(row["name"]) for row in conn.execute(pragma).fetchall()}
 
 
 def _raw_artifact_metadata_column(columns: set[str]) -> str | None:
@@ -799,13 +821,11 @@ def _latest_authorized_day0_fact(
     # A committed DAY0_EXTREME_UPDATED event remains a separate candidate
     # below.  Ledger rows retain their own source-issued and fetched clocks;
     # an older event availability must not rewrite either one.
-    if "observation_instants" in _table_names(conn):
+    observation_instants_ref = _world_table_ref(conn, "observation_instants")
+    if observation_instants_ref is not None:
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
-        instant_columns = {
-            str(column[1])
-            for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
-        }
+        instant_columns = _columns(conn, observation_instants_ref)
         observation_fact_time_sql = (
             _OBSERVATION_FACT_TIME_SQL
             if "provenance_json" in instant_columns
@@ -897,7 +917,7 @@ def _latest_authorized_day0_fact(
                        {optional_column('imported_at')},
                        {optional_column('raw_response')},
                        {optional_column('provenance_json')}
-                  FROM observation_instants
+                  FROM {observation_instants_ref}
                  WHERE city = ?
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
@@ -931,7 +951,6 @@ def _latest_authorized_day0_fact(
             SELECT observed_extreme_native,
                    utc_timestamp,
                    observation_fact_time AS observation_time,
-                   (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
                    temp_unit,
@@ -944,30 +963,33 @@ def _latest_authorized_day0_fact(
             """,
             query_params,
         ).fetchall()
-        # Keep every bounded local-day projection available until the
-        # append-only print ledger has canonicalized corrections below. A
-        # single SQL extreme can be retracted, while a later plateau row can
-        # own the writer-validated digest of the canonical extreme.
-        for row in instant_rows:
+        def is_causally_eligible(row: sqlite3.Row) -> bool:
             if not row["observation_time"] or row["observed_extreme_native"] is None:
-                continue
+                return False
             utc_clock = _utc_instant(row["utc_timestamp"])
             fact_clock = _utc_instant(row["observation_time"])
             available_clock = _utc_instant(row["observation_available_at"])
-            if (
+            return not (
                 utc_clock is None
                 or fact_clock is None
                 or available_clock is None
                 or utc_clock > decision_utc
                 or fact_clock > decision_utc
                 or available_clock > decision_utc
-            ):
-                continue
+            )
+
+        causal_rows = [row for row in instant_rows if is_causally_eligible(row)]
+        causal_sample_count = len(causal_rows)
+        # Keep every bounded local-day projection available until the
+        # append-only print ledger has canonicalized corrections below. A
+        # single SQL extreme can be retracted, while a later plateau row can
+        # own the writer-validated digest of the canonical extreme.
+        for row in causal_rows:
             facts.append(
                 {
                     "observed_extreme_native": float(row["observed_extreme_native"]),
                     "observation_time": str(row["observation_time"]),
-                    "sample_count": int(row["sample_count"] or 0),
+                    "sample_count": causal_sample_count,
                     "source": "durable_observation_instants",
                     "observation_source": str(row["observation_source"] or ""),
                     "station_id": str(row["station_id"] or ""),
@@ -987,20 +1009,26 @@ def _latest_authorized_day0_fact(
                 }
             )
 
-    if "opportunity_events" in _table_names(conn):
+    opportunity_events_ref = _world_table_ref(conn, "opportunity_events")
+    if opportunity_events_ref is not None:
+        opportunity_events_schema = (
+            opportunity_events_ref.split(".", 1)[0]
+            if "." in opportunity_events_ref
+            else "main"
+        )
         day0_family_index = (
             conn.execute(
-                "SELECT 1 FROM sqlite_master "
+                f"SELECT 1 FROM {opportunity_events_schema}.sqlite_master "
                 "WHERE type = 'index' "
                 "AND name = 'idx_opportunity_events_day0_family_extreme'"
             ).fetchone()
             is not None
         )
         event_table = (
-            "opportunity_events INDEXED BY "
+            f"{opportunity_events_ref} INDEXED BY "
             "idx_opportunity_events_day0_family_extreme"
             if day0_family_index
-            else "opportunity_events"
+            else opportunity_events_ref
         )
         event_rows = conn.execute(
             f"""
@@ -1175,7 +1203,8 @@ def _latest_authorized_day0_fact(
     # settled-history agreement against the other two facts, the day0
     # belief can read the ledger alone and the widening branch retires — not
     # yet, this only adds a third fact.
-    if "observation_prints" in _table_names(conn) and city_obj is not None:
+    observation_prints_ref = _world_table_ref(conn, "observation_prints")
+    if observation_prints_ref is not None and city_obj is not None:
         try:
             tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
             target_day = date.fromisoformat(str(target_date)[:10])
@@ -1199,11 +1228,14 @@ def _latest_authorized_day0_fact(
                 settlement_channels = {"wu_icao_history"}
                 physical_channels = {"wu_icao_history", "aviationweather_metar", "wu_api"}
             elif source_type == "hko":
-                # HKO rhrread is an instantaneous telemetry, not the official
-                # since-midnight 1-minute-mean extreme used by the contract.
-                # It may trigger collection, but it cannot become payoff support.
+                # HKO publishes both products from the same station and the
+                # same 1-minute-mean temperature basis.  The current print is
+                # therefore a causal physical bound on the eventual daily
+                # extreme, while remaining ineligible for settlement/payoff
+                # certainty.  ``require_settlement_channel`` keeps those two
+                # roles separate below.
                 settlement_channels = set()
-                physical_channels = set()
+                physical_channels = {"hko_rhrread_spot"}
             elif source_type == "noaa" and expected_station:
                 ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
                 settlement_channels = {ogimet_channel}
@@ -1220,7 +1252,7 @@ def _latest_authorized_day0_fact(
                     f"""
                     SELECT source_channel, publish_ts_utc, value_native, unit,
                            station_id, raw_report, fetched_at_utc
-                      FROM observation_prints
+                      FROM {observation_prints_ref}
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
                        AND julianday(publish_ts_utc) >= julianday(?)
@@ -1510,8 +1542,7 @@ def _latest_authorized_day0_fact(
     if source_type == "hko":
         # HKO publishes cumulative official snapshots. The provider may correct
         # a provisional snapshot, so cross-time MAX/MIN would make a retracted
-        # value falsely absorbing. Select the latest official HKO fact and never
-        # mix the rhrread spot statistic into settlement support.
+        # value falsely absorbing. Select the latest official HKO fact first.
         hko_facts = [
             fact
             for fact in facts
@@ -1533,7 +1564,36 @@ def _latest_authorized_day0_fact(
             return None
         if rollover_status != "RESET_CONFIRMED":
             return None
-        return max(hko_facts, key=fact_time)
+        latest_official = max(hko_facts, key=fact_time)
+        if require_settlement_channel:
+            return latest_official
+
+        # ``rhrread`` is HKO's latest 1-minute-mean temperature, whereas the
+        # official extrema product is the max/min of those 1-minute means since
+        # midnight.  A causal same-station spot can therefore advance the
+        # statistical physical frontier without becoming deterministic payoff
+        # truth.  Spot corrections are canonicalized per publication clock by
+        # the ledger code above; across distinct clocks the physical daily
+        # HIGH/LOW is absorbing in the corresponding direction.
+        hko_spot_facts = [
+            fact
+            for fact in facts
+            if str(fact.get("observation_source") or "").strip().lower()
+            == "hko_rhrread_spot"
+        ]
+        physical_facts = [latest_official, *hko_spot_facts]
+        best_extreme = (min if metric == "low" else max)(
+            float(fact["observed_extreme_native"])
+            for fact in physical_facts
+        )
+        return max(
+            (
+                fact
+                for fact in physical_facts
+                if float(fact["observed_extreme_native"]) == best_extreme
+            ),
+            key=fact_time,
+        )
     # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris
     # regression): the day-so-far extreme is the max (high) / min (low) across
     # every authorized source seen so far. Picking the temporally freshest

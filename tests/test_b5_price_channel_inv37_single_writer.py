@@ -152,6 +152,54 @@ def test_refresh_uses_trade_only_write_connection(func_name):
     )
 
 
+def test_held_quote_read_bootstrap_is_read_only_and_deadline_bound():
+    node = _func_node("_edli_refresh_held_position_quote_evidence")
+    calls = [
+        sub
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "get_trade_connection_read_only"
+    ]
+    assert len(calls) == 1
+    assert any(
+        keyword.arg == "deadline_monotonic"
+        and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "deadline"
+        for keyword in calls[0].keywords
+    )
+
+
+def test_held_snapshot_invalidation_query_pushes_exact_time_window_into_sql():
+    node = _func_node("_edli_held_snapshot_refresh_report")
+    query_texts = [
+        str(call.args[0].value)
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "execute"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and "SELECT invalidated_at" in str(call.args[0].value)
+        and "executable_market_snapshot_invalidations" in str(call.args[0].value)
+    ]
+    assert len(query_texts) == 1
+    assert "invalidated_at BETWEEN ? AND ?" in query_texts[0]
+    assert "condition_id = ? OR token_id IN (?, ?, ?)" in query_texts[0]
+
+
+def test_prepared_rest_bridge_rechecks_grace_and_preflight_races():
+    bridge = _REPO_ROOT / "src" / "events" / "edli_trade_fact_bridge.py"
+    source = bridge.read_text(encoding="utf-8")
+    append_at = source.index("def append_prepared_trade_fact_bridge_evidence")
+    prepared_append = source[append_at:source.index("def _revalidate_trade_fact_candidate", append_at)]
+    assert "grace_minutes: float" in source
+    assert "default_now.timestamp() - evidence.grace_minutes * 60.0" in prepared_append
+    assert "source = 'WS_USER'" in prepared_append
+    assert "_has_user_trade_observed(" in prepared_append
+    assert "TRADE_FACT_BRIDGE_PREPARED_EVIDENCE_STALE" in prepared_append
+
+
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
 def test_refresh_feasibility_write_targets_trade_main_without_world_writer(func_name):
     node = _func_node(func_name)
@@ -1059,6 +1107,10 @@ def test_fill_bridge_repair_releases_writer_between_exact_candidates(monkeypatch
     scan_candidates: list[tuple[str, ...]] = []
 
     class _Conn:
+        def execute(self, sql):
+            assert sql == "BEGIN"
+            lease_events.append("begin")
+
         def commit(self):
             lease_events.append("commit")
 
@@ -1087,10 +1139,16 @@ def test_fill_bridge_repair_releases_writer_between_exact_candidates(monkeypatch
         lambda *, limit: ("aggregate-a", "aggregate-b")[:limit],
     )
     monkeypatch.setattr(lane, "_PriceChannelWriteGate", _gate)
+
+    def _open_attached(**_kwargs):
+        assert lease_events.count("enter") == lease_events.count("exit")
+        lease_events.append("bootstrap")
+        return _Conn()
+
     monkeypatch.setattr(
         state_db,
         "get_trade_connection_with_world_required",
-        lambda *, write_class: _Conn(),
+        _open_attached,
     )
     monkeypatch.setattr(lane, "_bound_price_channel_sqlite_wait", lambda *a, **k: None)
 
@@ -1112,9 +1170,127 @@ def test_fill_bridge_repair_releases_writer_between_exact_candidates(monkeypatch
     assert result["edli_positions_bridged"] == 2
     assert scan_candidates == [("aggregate-a",), ("aggregate-b",)]
     assert lease_events == [
-        "enter", "commit", "exit", "close",
-        "enter", "commit", "exit", "close",
+        "bootstrap", "enter", "begin", "commit", "exit", "close",
+        "bootstrap", "enter", "begin", "commit", "exit", "close",
     ]
+
+
+def test_trade_fact_bridge_bootstrap_happens_before_world_writer_lease(monkeypatch):
+    from src.events import edli_trade_fact_bridge
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    events: list[str] = []
+
+    class _Conn:
+        def execute(self, sql):
+            assert sql == "BEGIN"
+            events.append("begin")
+
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    @contextlib.contextmanager
+    def _gate(*, owner, **_kwargs):
+        events.append(f"enter:{owner}")
+        try:
+            yield
+        finally:
+            events.append(f"exit:{owner}")
+
+    def _open_world(**_kwargs):
+        assert not any(event.startswith("enter:") for event in events)
+        events.append("bootstrap")
+        return _Conn()
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        lambda: (({"aggregate_id": "a"},), (), ()),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: (),
+    )
+    monkeypatch.setattr(lane, "_PriceChannelWriteGate", _gate)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _open_world)
+    monkeypatch.setattr(lane, "_bound_price_channel_sqlite_wait", lambda *a, **k: None)
+    monkeypatch.setattr(
+        edli_trade_fact_bridge,
+        "append_prepared_trade_fact_bridge_evidence",
+        lambda *_a, **_k: (events.append("write") or 1),
+    )
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    result = lane._edli_fill_bridge_repair_cycle()
+
+    assert result["scheduler_failed"] is False
+    assert events == [
+        "bootstrap",
+        "enter:price_channel_fill_bridge_reconcile",
+        "begin",
+        "write",
+        "commit",
+        "exit:price_channel_fill_bridge_reconcile",
+        "close",
+    ]
+
+
+def test_slow_fill_bridge_bootstrap_expires_before_writer_lease(monkeypatch):
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    events: list[str] = []
+    clock = [100.0]
+    monkeypatch.setattr(lane.time, "monotonic", lambda: clock[0])
+
+    class _Conn:
+        def close(self):
+            events.append("close")
+
+    def _slow_open(**_kwargs):
+        events.append("bootstrap")
+        clock[0] += 1.0
+        return _Conn()
+
+    def _gate(**_kwargs):
+        raise AssertionError("expired bootstrap must not acquire writer lease")
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        lambda: ((), (), ()),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: ("aggregate-a",)[:limit],
+    )
+    monkeypatch.setattr(lane, "_PriceChannelWriteGate", _gate)
+    monkeypatch.setattr(state_db, "get_trade_connection_with_world_required", _slow_open)
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    result = lane._edli_fill_bridge_repair_cycle()
+
+    assert result["scheduler_failed"] is True
+    assert events == ["bootstrap", "close"]
 
 
 def test_fill_bridge_repair_discovers_before_writer_lease():
@@ -1125,6 +1301,79 @@ def test_fill_bridge_repair_discovers_before_writer_lease():
     assert discovery_at < writer_at
     assert "candidate_aggregate_ids=(aggregate_id,)" in source
     assert "limit=1" in source
+    assert source.index("_prepare_fill_bridge_write_connection") < writer_at
+    assert "deadline_monotonic=deadline_monotonic" in source
+
+
+def test_fill_bridge_commit_failure_releases_tranche_before_monitor(monkeypatch):
+    """A busy/over-budget tranche releases the shared lease before MONITOR runs."""
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    events: list[str] = []
+
+    class _Conn:
+        def execute(self, sql):
+            assert sql == "BEGIN"
+            events.append("begin")
+
+        def commit(self):
+            events.append("commit")
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    @contextlib.contextmanager
+    def _gate(*, owner, **kwargs):
+        events.append(f"enter:{owner}")
+        assert kwargs["max_hold_ms"] <= 1000
+        try:
+            yield
+        finally:
+            events.append(f"exit:{owner}")
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        lambda: ((), (), ()),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: ("aggregate-a",)[:limit],
+    )
+    monkeypatch.setattr(lane, "_PriceChannelWriteGate", _gate)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda **_kwargs: (events.append("bootstrap") or _Conn()),
+    )
+    monkeypatch.setattr(lane, "_bound_price_channel_sqlite_wait", lambda *a, **k: None)
+    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_scan", lambda *_a, **_k: 1)
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    result = lane._edli_fill_bridge_repair_cycle()
+    assert result["scheduler_failed"] is True
+    assert events[:3] == ["bootstrap", "enter:price_channel_fill_bridge", "begin"]
+    assert events.index("exit:price_channel_fill_bridge") < events.index("close")
+
+    with lane._PriceChannelWriteGate(
+        owner="monitor",
+        scope="world_trade",
+        deadline_ms=1,
+        max_hold_ms=1000,
+    ):
+        events.append("monitor")
+    assert events.index("exit:price_channel_fill_bridge") < events.index("monitor")
 
 
 def test_price_channel_passes_background_quote_batch_to_its_service_instance():
@@ -1257,7 +1506,9 @@ def test_user_channel_reconcile_uses_world_main_with_trades_attached():
         for target in sub.targets
         if isinstance(target, ast.Name)
     }
-    assert repair_openers["bridge_conn"] == "get_trade_connection_with_world_required"
+    assert repair_openers["bridge_conn"] == "_prepare_fill_bridge_write_connection"
+    repair_source = ast.unparse(repair_node)
+    assert "get_trade_connection_with_world_required" in repair_source
     bridge_gate = next(
         sub
         for sub in ast.walk(repair_node)

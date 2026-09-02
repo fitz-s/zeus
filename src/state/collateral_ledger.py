@@ -55,7 +55,7 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = (
 )
 COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
 DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS = 30_000
-_COLLATERAL_WRITE_LEASE_DEADLINE_MS = 250
+_COLLATERAL_WRITE_LEASE_DEADLINE_MS = 2_000
 _COLLATERAL_WRITE_LEASE_MAX_HOLD_MS = 250
 
 COLLATERAL_LEDGER_SCHEMA = """
@@ -1003,8 +1003,8 @@ class CollateralLedger:
             write=True,
             owner="collateral_snapshot_persist",
             # Current wealth is monitor authority for every global comparison.
-            # Register it ahead of STANDARD churn; the same 250ms deadline and
-            # hold limit keep this one-row DML path bounded and fail closed.
+            # Register it ahead of STANDARD churn. Acquisition may wait across
+            # adjacent monitor tranches, while the one-row DML hold stays 250ms.
             priority="monitor",
         ) as conn:
             if conn is None:
@@ -1343,8 +1343,7 @@ def restore_reservation_for_late_fill(
         or filled_size <= 0
         or remaining < 0
         or (partial and remaining <= 0)
-        or (not partial and remaining != 0)
-        or converted_amount != 0
+        or (not partial and remaining > Decimal("0.01"))
         or not released_at
     ):
         raise CollateralInsufficient("late_partial_fill_reservation_shape_invalid")
@@ -1361,25 +1360,41 @@ def restore_reservation_for_late_fill(
             )
         )
         token_guard = "token_id IS NULL"
-        params: tuple[Any, ...] = (original_amount, command_id)
+        params: tuple[Any, ...] = (
+            original_amount,
+            command_id,
+            converted_amount,
+        )
         remainder_params: tuple[Any, ...] = (remainder_amount, command_id)
     elif (intent_kind, side, reservation_type) == ("EXIT", "SELL", "CTF_SELL"):
         original_amount = _token_required_units(requested)
         remainder_amount = _token_required_units(remaining)
         token_guard = "token_id = ?"
-        params = (original_amount, command_id, token_id)
+        params = (original_amount, command_id, token_id, converted_amount)
         remainder_params = (remainder_amount, command_id, token_id)
     else:
         raise CollateralInsufficient("late_partial_fill_reservation_identity_invalid")
 
+    newly_proven_converted = int(
+        (
+            Decimal(original_amount)
+            * min(Decimal("1"), filled_size / requested)
+        ).to_integral_value(rounding=ROUND_FLOOR)
+    )
+    if converted_amount < 0 or converted_amount >= newly_proven_converted:
+        raise CollateralInsufficient(
+            "late_fill_reservation_does_not_advance_conversion"
+        )
+
     cursor = conn.execute(
         f"""
         UPDATE collateral_reservations
-           SET amount = ?, released_at = NULL, release_reason = NULL
+           SET amount = ?, released_at = NULL, release_reason = NULL,
+               converted_amount = 0
          WHERE command_id = ?
            AND {token_guard}
            AND released_at IS NOT NULL
-           AND converted_amount = 0
+           AND converted_amount = ?
         """,
         params,
     )
@@ -1549,7 +1564,16 @@ def convert_reservation_on_fill(
                 INSERT INTO collateral_unsettled_proceeds (
                   command_id, direction, reservation_type, token_id, amount_micro, created_at
                 ) VALUES (?, 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, ?, ?)
-                ON CONFLICT(command_id) DO NOTHING
+                ON CONFLICT(command_id) DO UPDATE SET
+                  amount_micro = MAX(
+                    collateral_unsettled_proceeds.amount_micro,
+                    excluded.amount_micro
+                  ),
+                  created_at = excluded.created_at,
+                  settled_at = NULL,
+                  settle_reason = NULL
+                WHERE excluded.amount_micro >
+                      collateral_unsettled_proceeds.amount_micro
                 """,
                 (command_id, converted, now),
             )
@@ -1562,7 +1586,16 @@ def convert_reservation_on_fill(
                 INSERT INTO collateral_unsettled_proceeds (
                   command_id, direction, reservation_type, token_id, amount_micro, created_at
                 ) VALUES (?, 'INCOMING_PROCEEDS', 'CTF_SELL', ?, ?, ?)
-                ON CONFLICT(command_id) DO NOTHING
+                ON CONFLICT(command_id) DO UPDATE SET
+                  amount_micro = MAX(
+                    collateral_unsettled_proceeds.amount_micro,
+                    excluded.amount_micro
+                  ),
+                  created_at = excluded.created_at,
+                  settled_at = NULL,
+                  settle_reason = NULL
+                WHERE excluded.amount_micro >
+                      collateral_unsettled_proceeds.amount_micro
                 """,
                 (command_id, token_id, proceeds_micro, now),
             )

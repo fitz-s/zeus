@@ -97,25 +97,44 @@ def collect_monitor_cadence_evidence(
     review_managed: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
-        if _position_is_min_order_dust_held_to_settlement(position):
-            settlement_recoverable.append(
-                {
-                    "position_id": position["position_id"],
-                    "phase": position["phase"],
-                    "chain_state": position["chain_state"],
-                    "cadence_source": "EXIT_ORDER_REJECTED",
-                    "closed_market_validation": "snapshot_min_order_dust",
-                    "restart_resolution": "settlement_harvester_or_chain_size_change",
-                }
-            )
-            if not monitor_refreshed_only:
-                fresh_count += 1
-                continue
         monitor_event = _latest_monitor_refreshed_event(
             conn,
             str(position["position_id"]),
             event_columns,
         )
+        if _position_is_terminal_subprecision_dust_held_to_settlement(position):
+            evidence = {
+                "position_id": position["position_id"],
+                "phase": position["phase"],
+                "chain_state": position["chain_state"],
+                "cadence_source": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                "closed_market_validation": "sell_share_precision_dust",
+                "restart_resolution": "settlement_harvester_or_chain_size_change",
+            }
+            if monitor_event is not None and monitor_event.get("occurred_at"):
+                evidence["last_monitor_refreshed_at"] = monitor_event["occurred_at"]
+            settlement_recoverable.append(evidence)
+            # The venue cannot represent a SELL below one share quantum.  Keep
+            # the positive residual in the monitor identity, but do not make a
+            # permanently unavailable book a restart debt after the terminal
+            # partial-exit fact has removed every live order.
+            continue
+        backoff_dust_validation = _backoff_dust_held_to_settlement(position)
+        if backoff_dust_validation is not None:
+            evidence = {
+                "position_id": position["position_id"],
+                "phase": position["phase"],
+                "chain_state": position["chain_state"],
+                "cadence_source": "EXIT_ORDER_REJECTED",
+                "closed_market_validation": backoff_dust_validation,
+                "restart_resolution": "settlement_harvester_or_chain_size_change",
+            }
+            if monitor_event is not None and monitor_event.get("occurred_at"):
+                evidence["last_monitor_refreshed_at"] = monitor_event["occurred_at"]
+            settlement_recoverable.append(evidence)
+            if not monitor_refreshed_only:
+                fresh_count += 1
+            continue
         occurred_at = None if monitor_event is None else str(monitor_event.get("occurred_at") or "")
         position_evidence = {
             "position_id": position["position_id"],
@@ -744,35 +763,73 @@ def _monitor_cadence_position_rows(
     return monitored
 
 
-_MIN_ORDER_DUST_RE = re.compile(
+_BACKOFF_DUST_RE = re.compile(
     r"\[DUST:\s*executable_snapshot_gate:\s*size\s+"
     r"(?P<size>[0-9]+(?:\.[0-9]+)?)\s+is below snapshot min_order_size\s+"
-    r"(?P<minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
+    r"(?P<snapshot_minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
+    r"|\[DUST:\s*executable_snapshot_gate:\s*size\s+"
+    r"(?P<precision_size>[0-9]+(?:\.[0-9]+)?)\s+is below sell share precision\s+"
+    r"(?P<share_precision>[0-9]+(?:\.[0-9]+)?)\s*\]"
 )
 
+_SELL_SHARE_QUANTUM = Decimal("0.01")
 
-def _position_is_min_order_dust_held_to_settlement(position: dict[str, object]) -> bool:
-    """Recognize the exact exit-lifecycle proof that no venue SELL is feasible."""
 
-    if str(position.get("phase") or "") != "pending_exit":
+def _position_is_terminal_subprecision_dust_held_to_settlement(
+    position: dict[str, object],
+) -> bool:
+    """Recognize a terminal partial-exit remainder that cannot form a SELL."""
+
+    if str(position.get("order_status") or "") != "filled":
         return False
-    if str(position.get("order_status") or "") != "backoff_exhausted":
+    if (
+        str(position.get("exit_reason") or "")
+        != "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED"
+    ):
         return False
-    match = _MIN_ORDER_DUST_RE.search(str(position.get("exit_reason") or ""))
-    if match is None:
+    if bool(position.get("exposure_unknown")):
         return False
     exposure = max(
         Decimal(str(position.get("shares") or 0)),
         Decimal(str(position.get("chain_shares") or 0)),
     )
-    cited_size = Decimal(match.group("size"))
-    minimum = Decimal(match.group("minimum"))
-    return (
+    return Decimal("0") < exposure < _SELL_SHARE_QUANTUM
+
+
+def _backoff_dust_held_to_settlement(position: dict[str, object]) -> str | None:
+    """Return the exact backoff proof that no venue SELL is representable."""
+
+    if str(position.get("phase") or "") != "pending_exit":
+        return None
+    if str(position.get("order_status") or "") != "backoff_exhausted":
+        return None
+    match = _BACKOFF_DUST_RE.search(str(position.get("exit_reason") or ""))
+    if match is None:
+        return None
+    exposure = max(
+        Decimal(str(position.get("shares") or 0)),
+        Decimal(str(position.get("chain_shares") or 0)),
+    )
+    if match.group("size") is not None:
+        cited_size = Decimal(match.group("size"))
+        minimum = Decimal(match.group("snapshot_minimum"))
+        validation = "snapshot_min_order_dust"
+    else:
+        cited_size = Decimal(match.group("precision_size"))
+        minimum = Decimal(match.group("share_precision"))
+        validation = "sell_share_precision_dust"
+    exact_infeasible = (
         exposure > 0
         and minimum > 0
         and abs(exposure - cited_size) <= Decimal("0.000001")
         and cited_size < minimum
     )
+    # SCOPE: only a canonical pending_exit/backoff_exhausted row whose exact
+    # projected exposure matches an explicit venue infeasibility receipt.
+    # DRAIN: settlement or chain reconciliation changes exposure/phase.
+    # RESET: any later executable size, lifecycle, status, or reason mismatch
+    # removes this restart-only classification and restores ordinary monitoring.
+    return validation if exact_infeasible else None
 
 
 def _position_requires_monitor_cadence(

@@ -112,7 +112,13 @@ class OpenMeteoQuotaTracker:
 
     @contextlib.contextmanager
     def critical_lane(self):
-        """Allow held Day0 probability refresh to consume the final reserve."""
+        """Keep exact held-capital refresh provider-authoritative.
+
+        The local counters remain telemetry and still reserve capacity from every
+        lower-priority lane.  They do not manufacture an upstream refusal for an
+        already-held position: only the existing request embargo, provider 429
+        cooldown, terminal HTTP outcome, or single-flight lease may stop it.
+        """
 
         depth = int(getattr(self._critical, "depth", 0))
         self._critical.depth = depth + 1
@@ -519,6 +525,13 @@ class OpenMeteoQuotaTracker:
         blocked_until = cls._blocked_until_from_state(state, endpoint)
         if blocked_until is not None and now < blocked_until:
             return False, f"cooldown_until={blocked_until.isoformat()}"
+        # SCOPE: only callers inside the exact held-capital critical context.
+        # DRAIN: one bounded HTTP lease records success, retry, terminal HTTP, or
+        # provider 429; all four retain their existing request-scoped controls.
+        # RESET: context exit returns every ordinary/source-clock call to its
+        # local count cap.  A provider cooldown still blocks the critical lane.
+        if critical:
+            return True, None
         limits = cls._limits(priority, critical, recovery)
         counts = (
             int(state.get("day_count") or 0),
@@ -544,6 +557,8 @@ class OpenMeteoQuotaTracker:
         blocked_until = self._local_blocked_until(endpoint)
         if blocked_until is not None and now < blocked_until:
             return False, f"cooldown_until={blocked_until.isoformat()}"
+        if critical:
+            return True, None
         limits = self._limits(priority, critical, recovery)
         counts = (self._count, self._hour_count, self._minute_count)
         labels = ("day", "hour", "minute")
@@ -1063,6 +1078,8 @@ class OpenMeteoQuotaTracker:
         waits: list[float] = []
         if blocked_until is not None and blocked_until > now:
             waits.append((blocked_until - now).total_seconds())
+        if critical:
+            return max(0, int(max(waits, default=0.0)) + (1 if waits else 0))
         limits = cls._limits(priority, critical, recovery)
         if counts[0] >= limits[0]:
             next_day = datetime.combine(

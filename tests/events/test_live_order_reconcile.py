@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -33,6 +33,183 @@ from src.events.triggers.user_channel_ingestor import (
 
 
 NOW = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+
+
+def test_prepared_rest_bridge_rechecks_grace_and_preserves_prepared_grace(monkeypatch):
+    from src.events import edli_trade_fact_bridge as bridge
+
+    observed_at = NOW - timedelta(seconds=30)
+    row = {
+        "aggregate_id": "event-1:intent-1",
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "execution_command_id": "decision-1",
+        "command_id": "command-1",
+        "command_occurred_at": NOW.isoformat(),
+        "command_state": "FILLED",
+        "trade_fact_id": 7,
+        "trade_id": "trade-1",
+        "venue_order_id": "venue-1",
+        "state": "MATCHED",
+        "trade_source": "REST",
+        "filled_size": "1",
+        "fill_price": "0.50",
+        "tx_hash": "tx-1",
+        "observed_at": observed_at.isoformat(),
+        "raw_payload_hash": "payload-1",
+        "raw_payload_json": "{}",
+    }
+    candidate = bridge.TradeFactBridgeCandidate(
+        aggregate_id=row["aggregate_id"],
+        execution_command_id=row["execution_command_id"],
+        trade_fact_id=row["trade_fact_id"],
+        trade_id=row["trade_id"],
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_revalidate_rest_filled_orphan_trade_fact_candidate",
+        lambda *_a, **_k: dict(row),
+    )
+    monkeypatch.setattr(bridge, "_schema_with_table", lambda *_a, **_k: "main")
+    monkeypatch.setattr(bridge, "_has_user_trade_observed", lambda *_a, **_k: False)
+    monkeypatch.setattr(bridge, "LiveOrderAggregateLedger", lambda _conn: object())
+    monkeypatch.setattr(bridge, "_ensure_recovered_submit_binding", lambda *_a, **_k: None)
+    appended_graces = []
+    monkeypatch.setattr(
+        bridge,
+        "_append_one_recovered_fill",
+        lambda *_a, **kwargs: appended_graces.append(_a[-1]),
+    )
+
+    class _Result:
+        def __init__(self, value):
+            self.value = value
+
+        def fetchone(self):
+            return self.value
+
+    class _Conn:
+        def execute(self, sql, _params):
+            if "SELECT raw_payload_hash" in sql:
+                return _Result({
+                    "raw_payload_hash": row["raw_payload_hash"],
+                    "trade_id": row["trade_id"],
+                    "venue_order_id": row["venue_order_id"],
+                })
+            if "SELECT trade_fact_id" in sql:
+                return _Result({"trade_fact_id": row["trade_fact_id"]})
+            if "source = 'WS_USER'" in sql:
+                return _Result(None)
+            raise AssertionError(sql)
+
+    conn = _Conn()
+    prepared = bridge.prepare_trade_fact_bridge_evidence(
+        conn, candidate, kind="rest_orphan", trade_schema="main", event_schema="main", grace_minutes=1.0
+    )
+    assert prepared is not None
+    assert bridge.append_prepared_trade_fact_bridge_evidence(conn, prepared, now=NOW) == 0
+    assert appended_graces == []
+
+    immediate = bridge.prepare_trade_fact_bridge_evidence(
+        conn, candidate, kind="rest_orphan", trade_schema="main", event_schema="main", grace_minutes=0.0
+    )
+    assert immediate is not None
+    assert bridge.append_prepared_trade_fact_bridge_evidence(conn, immediate, now=NOW) == 1
+    assert appended_graces == [0.0]
+
+    row["state"] = "CONFIRMED"
+    confirmed = bridge.prepare_trade_fact_bridge_evidence(
+        conn, candidate, kind="rest_orphan", trade_schema="main", event_schema="main", grace_minutes=60.0
+    )
+    assert confirmed is not None
+    assert bridge.append_prepared_trade_fact_bridge_evidence(conn, confirmed, now=NOW) == 1
+    assert appended_graces == [0.0, 60.0]
+
+
+def test_prepared_confirmed_bridge_ignores_later_rest_confirmation(monkeypatch) -> None:
+    from src.events import edli_trade_fact_bridge as bridge
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_trade_fact
+
+    conn = _conn()
+    monkeypatch.setattr(bridge, "_schema_with_table", lambda *_a, **_k: "main")
+    init_schema(conn)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (
+            'cmd-1', 'snap-1', 'env-1', 'pos-1', 'command-1',
+            'idem-1', 'ENTRY', 'market-1', 'token-1', 'BUY', 5,
+            0.50, 'venue-1', 'FILLED', ?, ?
+        )
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-1",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="a" * 64,
+        raw_payload_json="{}",
+    )
+    ws_fact_id = conn.execute(
+        "SELECT MAX(trade_fact_id) FROM venue_trade_facts"
+    ).fetchone()[0]
+    append_trade_fact(
+        conn,
+        trade_id="trade-1",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.50",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=1),
+        venue_timestamp=NOW + timedelta(minutes=1),
+        raw_payload_hash="b" * 64,
+        raw_payload_json="{}",
+    )
+    candidates = bridge.discover_confirmed_trade_fact_candidates(
+        conn,
+        trade_schema="main",
+        event_schema="main",
+        projection_schema="main",
+    )
+    assert len(candidates) == 1
+    prepared = bridge.prepare_trade_fact_bridge_evidence(
+        conn,
+        candidates[0],
+        kind="confirmed",
+        trade_schema="main",
+        event_schema="main",
+    )
+    assert prepared is not None
+
+    assert bridge.append_prepared_trade_fact_bridge_evidence(
+        conn, prepared, now=NOW + timedelta(minutes=2)
+    ) == 1
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM edli_live_order_events "
+            "WHERE event_type = 'UserTradeObserved'"
+        ).fetchone()[0]
+    )
+    assert payload["source_trade_fact_id"] == ws_fact_id
+    assert payload["source_trade_fact_authority"] == (
+        "venue_trade_facts:WS_USER:CONFIRMED"
+    )
 
 
 def test_public_market_channel_cannot_write_user_trade_or_fill_truth():

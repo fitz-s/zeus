@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-28
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Last reused/audited: 2026-09-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -52,6 +52,119 @@ def allow_cancel_cutover_for_exit_safety_tests(monkeypatch):
 
 def _ctf_units(shares: float) -> int:
     return int(round(float(shares) * _CTF_SCALE))
+
+
+def test_scalar_statistical_sell_queues_family_global_preparation_without_v4_debt(
+    conn,
+    monkeypatch,
+    tmp_path,
+):
+    """A normal replacement scalar wakes canonical q preparation, never V4."""
+
+    from src.engine import cycle_runtime
+    from src.events import reactor
+    from src.events.event_store import EventStore
+    from src.runtime import reactor_wake
+
+    position = SimpleNamespace(
+        trade_id="scalar-replacement-held-sell",
+        city="Paris",
+        target_date="2026-08-28",
+        temperature_metric="high",
+        direction="buy_yes",
+        token_id="scalar-replacement-yes",
+        no_token_id="scalar-replacement-no",
+        last_monitor_at="2026-08-28T12:00:00+00:00",
+        _monitor_probability_receipt={
+            "held_side_probability": 0.8028004,
+            "posterior_id": 9970,
+        },
+    )
+    exit_context = SimpleNamespace(best_bid=0.84)
+
+    # This is the incident shape: the local scalar has a negative exit edge,
+    # but no canonical full-family probability content identity.
+    assert 0.8028004 - 0.84 < 0
+    assert cycle_runtime._monitor_global_sell_request_context(
+        position, exit_context
+    )["probability_content_identity"] == ""
+
+    wake_path = tmp_path / "scalar-family-preparation-wake.json"
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        assert cycle_runtime._request_current_global_family_preparation(
+            position,
+            wake_path=wake_path,
+        )
+        wake = reactor_wake.read_reactor_wake(path=wake_path)
+        assert wake is not None
+        assert wake.forecast_families == (("Paris", "2026-08-28", "high"),)
+        assert wake.held_sell_reauction_requests == ()
+        assert not hasattr(position, "_held_sell_reauction_obligation")
+
+        # The generic wake reaches the existing current-global seam. A fake
+        # terminal no-trade cut proves it is consumable without a V4 request,
+        # local scalar SELL, or venue side effect.
+        batch_calls: list[tuple[object, ...]] = []
+
+        def submit(*_args, **_kwargs):
+            return None
+
+        def process_global_batch(events, *_args, **_kwargs):
+            batch_calls.append(tuple(events))
+            return reactor.GlobalBatchSubmitResult(
+                receipts={},
+                winner_event_id=None,
+                venue_submit_count=0,
+                economic_cut_completed=True,
+            )
+
+        submit.process_global_batch = process_global_batch
+        generic_reactor = reactor.OpportunityEventReactor(
+            EventStore(conn),
+            source_truth_gate=lambda _event: True,
+            executable_snapshot_gate=lambda _event: True,
+            riskguard_gate=lambda _event: True,
+            final_intent_submit=submit,
+            reject=lambda *_args: None,
+        )
+        result = generic_reactor.process_pending(
+            decision_time=datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc),
+            limit=1,
+            allow_empty_global_completion=True,
+        )
+        assert batch_calls == [()]
+        assert result.global_auction_completed_non_cancelled == 1
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    # An incomplete family cannot be published as a generic wake, and a
+    # durable-publication failure cannot fall through to a local scalar SELL.
+    incomplete_position = SimpleNamespace(
+        trade_id="scalar-family-missing-city",
+        city="",
+        target_date="2026-08-28",
+        temperature_metric="high",
+    )
+    missing_wake_path = tmp_path / "missing-family-wake.json"
+    assert not cycle_runtime._request_current_global_family_preparation(
+        incomplete_position,
+        wake_path=missing_wake_path,
+    )
+    assert not missing_wake_path.exists()
+
+    failed_wake_path = tmp_path / "failed-family-wake.json"
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: False,
+    )
+    assert not cycle_runtime._request_current_global_family_preparation(
+        position,
+        wake_path=failed_wake_path,
+    )
+    assert not failed_wake_path.exists()
+    assert not hasattr(position, "_held_sell_reauction_obligation")
 
 
 def _fresh_exit_collateral_payload(
@@ -7338,6 +7451,37 @@ def test_exit_snapshot_helpers_fail_closed_on_malformed_decimal(conn, monkeypatc
     )
 
 
+def test_latest_min_order_rejects_expired_head_without_scanning_older_fresh_snapshot(conn):
+    """Freshness never changes which immutable snapshot is the latest fact."""
+    from src.execution import exit_lifecycle
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-min-order-older-fresh",
+        captured_at=_NOW - timedelta(minutes=2),
+        freshness_deadline=_NOW + timedelta(minutes=10),
+        min_order_size="7",
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-min-order-newer-expired",
+        captured_at=_NOW - timedelta(minutes=1),
+        freshness_deadline=_NOW - timedelta(seconds=30),
+        min_order_size="5",
+    )
+
+    assert (
+        exit_lifecycle._latest_fresh_snapshot_min_order_for_token(
+            YES_TOKEN,
+            conn=conn,
+            now=_NOW,
+        )
+        is None
+    )
+
+
 def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
@@ -7478,7 +7622,10 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     }
 
 
-def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypatch):
+def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(
+    conn,
+    monkeypatch,
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
@@ -7501,10 +7648,56 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
         env="test",
     )
     portfolio = PortfolioState(positions=[position])
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, target_date, bin_label,
+            direction, size_usd, shares, cost_basis_usd, entry_price,
+            strategy_key, chain_state, token_id, no_token_id, condition_id,
+            updated_at, temperature_metric
+        ) VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, ?, ?, ?, 'high')
+        """,
+        (
+            position.trade_id,
+            position.market_id,
+            position.city,
+            position.target_date,
+            position.bin_label,
+            position.direction,
+            position.size_usd,
+            position.shares,
+            position.cost_basis_usd,
+            position.entry_price,
+            position.strategy_key,
+            position.token_id,
+            position.no_token_id,
+            position.condition_id,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        outcome_label="NO",
+        snapshot_id="snap-exact-submit-exit",
+        orderbook_top_bid="0.74",
+        orderbook_top_ask="0.75",
+        captured_at=datetime.now(timezone.utc),
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_hash": _snapshot_hash(conn, snapshot_id),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+            "executable_snapshot_orderbook_top_bid": "0.74",
+        },
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7515,6 +7708,11 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_existing_canonical_entry_event_types",
+        lambda *_args, **_kwargs: set(exit_lifecycle._CANONICAL_ENTRY_EVENT_TYPES),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7555,7 +7753,7 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
             close_position=True,
         ),
         NoSecondPoll(),
-        conn=None,
+        conn=conn,
         execution_evidence=None,
         is_red_force_exit=False,
         exit_intent_already_recorded=True,
@@ -7565,6 +7763,24 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(monkeypa
     assert position.state == "economically_closed"
     assert position.exit_state == "sell_filled"
     assert position.exit_price == pytest.approx(0.74)
+    assert conn.in_transaction is False
+    filled = conn.execute(
+        """
+        SELECT command_id, phase_after
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert filled["command_id"] == "cmd-exact-submit-exit"
+    assert filled["phase_after"] == "economically_closed"
+    projection = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert projection["phase"] == "economically_closed"
+    assert projection["shares"] == pytest.approx(12.0)
 
 
 def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_token(
@@ -11851,6 +12067,181 @@ def test_market_closed_hold_write_failure_restores_position(conn, monkeypatch):
         conn=conn,
     ) is False
     assert vars(position) == before
+
+
+def test_market_closed_hold_prelease_cleanup_is_nonblocking_and_restores_timeout():
+    """An inherited transaction cannot spend the monitor lease budget on commit."""
+    from src.execution import exit_lifecycle
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.portfolio import Position
+
+    class BusyCommitConnection(sqlite3.Connection):
+        fail_commit = False
+        commit_busy_timeout = None
+        rollback_busy_timeout = None
+
+        def commit(self):
+            if self.fail_commit:
+                self.commit_busy_timeout = self.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0]
+                raise sqlite3.OperationalError("database is locked")
+            return super().commit()
+
+        def rollback(self):
+            self.rollback_busy_timeout = self.execute(
+                "PRAGMA busy_timeout"
+            ).fetchone()[0]
+            return super().rollback()
+
+    conn = sqlite3.connect(":memory:", factory=BusyCommitConnection)
+    conn.row_factory = sqlite3.Row
+    try:
+        init_schema(conn)
+        init_schema_trade_only(conn)
+        conn.commit()
+        conn.execute("PRAGMA busy_timeout = 731")
+        conn.execute("BEGIN")
+        conn.fail_commit = True
+        position = Position(
+            trade_id="pos-market-closed-prelease-cleanup",
+            market_id="condition-prelease-cleanup",
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-06-24",
+            bin_label="88F",
+            direction="buy_no",
+            token_id="yes-token",
+            no_token_id="no-token",
+            condition_id="condition-prelease-cleanup",
+            state="active",
+            chain_state="synced",
+            shares=12.0,
+            chain_shares=12.0,
+            cost_basis_usd=8.4,
+            chain_cost_basis_usd=8.4,
+            strategy_key="center_buy",
+            env="live",
+            entered_at="2026-06-24T10:00:00+00:00",
+            order_status="retry_pending",
+            exit_state="retry_pending",
+            exit_reason="EDGE_REVERSAL",
+        )
+        before = copy.deepcopy(vars(position))
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=conn,
+        ) is False
+        assert vars(position) == before
+        assert conn.commit_busy_timeout == 0
+        assert conn.rollback_busy_timeout == 0
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 731
+        assert conn.in_transaction is False
+        assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_market_closed_hold_canonical_write_retries_after_raw_sqlite_lock(
+    tmp_path,
+    monkeypatch,
+):
+    """A raw writer cannot leave a closed-market monitor decision half-persisted."""
+    from src.execution import executor, exit_lifecycle
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.write_coordinator import WriteLeaseTimeout
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "market_closed_hold.sqlite"
+    primary = sqlite3.connect(str(db_path), timeout=0)
+    primary.row_factory = sqlite3.Row
+    blocker = None
+    observer = None
+    try:
+        init_schema(primary)
+        init_schema_trade_only(primary)
+        primary.commit()
+        blocker = sqlite3.connect(str(db_path), timeout=0)
+        observer = sqlite3.connect(str(db_path), timeout=0)
+        observer.row_factory = sqlite3.Row
+        position = Position(
+            trade_id="pos-market-closed-raw-lock",
+            market_id="condition-raw-lock",
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-06-24",
+            bin_label="88F",
+            direction="buy_no",
+            token_id="yes-token",
+            no_token_id="no-token",
+            condition_id="condition-raw-lock",
+            state="active",
+            chain_state="synced",
+            shares=12.0,
+            chain_shares=12.0,
+            cost_basis_usd=8.4,
+            chain_cost_basis_usd=8.4,
+            strategy_key="center_buy",
+            env="live",
+            entered_at="2026-06-24T10:00:00+00:00",
+            order_status="retry_pending",
+            exit_state="retry_pending",
+            exit_reason="EDGE_REVERSAL",
+            last_monitor_prob=0.21,
+            last_monitor_prob_is_fresh=True,
+            last_monitor_edge=-0.33,
+            last_monitor_market_price=0.54,
+            last_monitor_market_price_is_fresh=True,
+            last_monitor_best_bid=0.53,
+        )
+        before = copy.deepcopy(vars(position))
+
+        @contextmanager
+        def monitored_lease(*_args, **_kwargs):
+            yield SimpleNamespace(
+                acquired_at=exit_lifecycle._time_module.monotonic(),
+            )
+
+        monkeypatch.setattr(executor, "_canonical_trade_write_lease", monitored_lease)
+        blocker.execute("BEGIN IMMEDIATE")
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is False
+        assert vars(position) == before
+        assert primary.in_transaction is False
+        assert primary.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 0
+
+        blocker.rollback()
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is True
+        assert primary.in_transaction is False
+        assert observer.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 1
+
+        assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            conn=primary,
+        ) is True
+        assert observer.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0] == 1
+    finally:
+        if blocker is not None:
+            blocker.close()
+        if observer is not None:
+            observer.close()
+        primary.close()
 
 
 def test_position_projection_round_trips_zero_monitor_bid(conn):

@@ -133,6 +133,8 @@ def _legacy_global_governor_mode() -> bool:
 def _endpoint_key(
     url: str,
     *,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
     endpoint_class_override: EndpointClass | None = None,
 ) -> tuple[str, EndpointClass]:
     """Return the circuit key (host[:class[:identity]]) and classified role."""
@@ -142,9 +144,24 @@ def _endpoint_key(
     if endpoint_class_override is not None:
         parsed = httpx.URL(url)
         path = parsed.path.rstrip("/") or "/"
-        held_risk_prefix = "/markets/"
-        if path.startswith(held_risk_prefix):
-            held_risk_identity = path.removeprefix(held_risk_prefix)
+        if path.startswith("/markets/"):
+            held_risk_identity = path.removeprefix("/markets/")
+        elif path == "/book" and isinstance(params, dict):
+            held_risk_identity = str(params.get("token_id") or "").strip()
+        elif path == "/books" and isinstance(json_body, list):
+            token_ids = sorted(
+                {
+                    str(item.get("token_id") or "").strip()
+                    for item in json_body
+                    if isinstance(item, dict)
+                    and str(item.get("token_id") or "").strip()
+                }
+            )
+            if token_ids and len(token_ids) == len(json_body):
+                digest = hashlib.sha256(
+                    "\n".join(token_ids).encode("utf-8")
+                ).hexdigest()
+                held_risk_identity = f"books-{digest}"
         if not (
             endpoint_class_override is EndpointClass.HELD_RISK
             and str(parsed.host) == "clob.polymarket.com"
@@ -541,11 +558,19 @@ class PolymarketRequestGovernor:
         lease_seconds: float = _LEASE_SECONDS,
         endpoint_class_override: EndpointClass | None = None,
     ) -> RequestLease:
-        request_id = request_identity(method, url, params=params, json_body=json_body)
         endpoint, endpoint_class = _endpoint_key(
             url,
+            params=params,
+            json_body=json_body,
             endpoint_class_override=endpoint_class_override,
         )
+        request_id = request_identity(method, url, params=params, json_body=json_body)
+        if endpoint_class is EndpointClass.HELD_RISK:
+            # A failed FC-03/discovery request for the same URL must not stop
+            # the exact held token/condition lane before its own venue attempt.
+            request_id = hashlib.sha256(
+                f"{request_id}\n{endpoint}".encode("utf-8")
+            ).hexdigest()
         route_limits = _routes(url)
         rate_limit_route = _rate_limit_route(url)
         lease_id = secrets.token_hex(16)
@@ -637,7 +662,15 @@ class PolymarketRequestGovernor:
                         if not _is_low_tier(priority)
                         else int(route_limit * _LOW_PRIORITY_FRACTION)
                     )
-                    if len(live_attempts) >= allowed:
+                    # SCOPE: exact HELD_RISK token/condition reads only. Local
+                    # route accounting remains observable, but it cannot stop
+                    # monitoring before the venue answers. DRAIN: each attempt
+                    # remains caller-deadline bounded. RESET: venue 429 uses the
+                    # route embargo; transport/5xx uses the exact held circuit.
+                    if (
+                        endpoint_class is not EndpointClass.HELD_RISK
+                        and len(live_attempts) >= allowed
+                    ):
                         denial["reason"] = "ROUTE_LIMIT"
                         denial["wait_seconds"] = 0.0
                         raise RequestAdmissionDenied(

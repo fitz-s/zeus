@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-29
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -15,6 +15,7 @@ import io
 import json
 import plistlib
 import sqlite3
+import subprocess
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -363,6 +364,99 @@ def test_restart_preflight_terminal_fak_debt_missing_surface_fails_closed(
     assert result.ok is False
     assert result.restart_blocking is True
     assert "venue_commands" in result.evidence["missing_tables"]
+    conn.close()
+
+
+def test_restart_preflight_skips_entry_repair_scan_for_aligned_open_orders():
+    preflight = _load(
+        "preflight_aligned_entry_repair_scan",
+        "check_live_restart_preflight.py",
+    )
+
+    assert preflight._resting_entry_projection_repair_needed(
+        [
+            {"intent_kind": "ENTRY", "position_phase": "active"},
+            {"intent_kind": "EXIT", "position_phase": "pending_exit"},
+        ]
+    ) is False
+    assert preflight._resting_entry_projection_repair_needed(
+        [{"intent_kind": "ENTRY", "position_phase": None}]
+    ) is True
+
+
+def test_restart_preflight_exit_retry_scan_is_scoped_to_pending_positions(
+    monkeypatch,
+):
+    preflight = _load(
+        "preflight_pending_exit_retry_scope",
+        "check_live_restart_preflight.py",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            exit_retry_count INTEGER,
+            next_exit_retry_at TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            venue_status TEXT,
+            occurred_at TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'pos-command', 'pending_exit', 2, '2026-08-29T17:00:00+00:00'
+        );
+        INSERT INTO position_current VALUES (
+            'pos-event', 'pending_exit', 3, '2026-08-29T17:05:00+00:00'
+        );
+        INSERT INTO position_current VALUES (
+            'historical', 'settled', 9, '2026-08-29T17:10:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+            'cmd-rejected', 'pos-command', 'EXIT', 'REJECTED', '',
+            '2026-08-29T16:50:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+            'cmd-historical', 'historical', 'EXIT', 'REJECTED', '',
+            '2026-08-29T16:55:00+00:00'
+        );
+        INSERT INTO position_events VALUES (
+            'evt-rejected', 'pos-event', 1, 'EXIT_ORDER_REJECTED',
+            'backoff_exhausted', '2026-08-29T16:51:00+00:00'
+        );
+        INSERT INTO position_events VALUES (
+            'evt-historical', 'historical', 99, 'EXIT_ORDER_REJECTED',
+            'backoff_exhausted', '2026-08-29T16:56:00+00:00'
+        );
+        """
+    )
+
+    @contextlib.contextmanager
+    def _connected():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _connected)
+    result = preflight._exit_retry_resumable_by_position()
+
+    assert set(result) == {"pos-command", "pos-event"}
+    assert result["pos-command"]["command_id"] == "cmd-rejected"
+    assert result["pos-event"]["restart_resolution"] == (
+        "global_redecision_pre_submit_resume"
+    )
     conn.close()
 
 
@@ -2447,6 +2541,99 @@ def test_deploy_live_trading_restart_accepts_price_band_attestation(monkeypatch,
     assert detail == "live restart preflight passed"
 
 
+def test_deploy_live_warm_preflight_defers_only_monitor_cadence_to_handoff(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_warm_monitor_handoff", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    monitor_blocker = {
+        "name": "monitor_cadence_restart_evidence",
+        "ok": False,
+        "restart_blocking": True,
+    }
+    payload = {
+        "ok": False,
+        "expected_live_process_state": "running",
+        "checks": [
+            {
+                "name": "absolute_live_unit_price_band",
+                "ok": True,
+                "restart_blocking": True,
+            },
+            monitor_blocker,
+        ],
+        "blockers": [monitor_blocker],
+    }
+
+    monkeypatch.setattr(
+        dl.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, json.dumps(payload), ""
+        ),
+    )
+
+    ok, detail = dl._run_restart_preflight_if_needed(
+        [dl.LIVE_TRADING_LABEL],
+        expected_live_process_state="running",
+        defer_running_monitor_cadence=True,
+    )
+
+    assert ok is True
+    assert "handoff remains mandatory immediately before stop" in detail
+
+
+def test_deploy_live_warm_preflight_never_defers_another_blocker(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_warm_other_blocker", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    blockers = [
+        {
+            "name": "monitor_cadence_restart_evidence",
+            "ok": False,
+            "restart_blocking": True,
+        },
+        {
+            "name": "collateral_snapshot_freshness",
+            "ok": False,
+            "restart_blocking": True,
+        },
+    ]
+    payload = {
+        "ok": False,
+        "expected_live_process_state": "running",
+        "checks": [
+            {
+                "name": "absolute_live_unit_price_band",
+                "ok": True,
+                "restart_blocking": True,
+            },
+            *blockers,
+        ],
+        "blockers": blockers,
+    }
+
+    monkeypatch.setattr(
+        dl.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, json.dumps(payload), ""
+        ),
+    )
+
+    ok, detail = dl._run_restart_preflight_if_needed(
+        [dl.LIVE_TRADING_LABEL],
+        expected_live_process_state="running",
+        defer_running_monitor_cadence=True,
+    )
+
+    assert ok is False
+    assert "preflight failed" in detail
+
+
 def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     dl = _load("deploy_live_restart_recovery", "deploy_live.py")
     dl.LIVE_REPO = str(tmp_path)
@@ -2475,10 +2662,16 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "restart recovery passed" in detail
     assert calls
     assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
-    assert "applied['world'] = apply_migrations(" in calls[0][2]
+    assert "RESTART_WORLD_MIGRATION_TARGETS" in calls[0][2]
+    assert "RESTART_TRADE_MIGRATION_TARGETS" in calls[0][2]
+    assert "for result_key, target in RESTART_WORLD_MIGRATION_TARGETS" in calls[0][2]
+    assert "for result_key, target in RESTART_TRADE_MIGRATION_TARGETS" in calls[0][2]
     assert "world_ghost_cleanup" not in calls[0][2]
-    assert "target='202608_edli_active_redecision_projection'" in calls[0][2]
-    assert "target='202608_edli_active_redecision_projection_receipt_notnull'" in calls[0][2]
+    assert [target for _key, target in dl.RESTART_WORLD_MIGRATION_TARGETS] == [
+        "202607_drop_world_collateral_unsettled_ghost",
+        "202608_edli_active_redecision_projection",
+        "202608_edli_active_redecision_projection_receipt_notnull",
+    ]
     assert "get_world_connection_read_only" in calls[0][2]
     assert "PRAGMA table_info(opportunity_event_processing_type_backfill)" in calls[0][2]
     assert "assert_active_projection_ready" in calls[0][2]
@@ -2488,33 +2681,36 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
     assert "_assert_restart_trade_schema_ready(trade_conn)" in calls[0][2]
     assert "init_schema_trade_only" not in calls[0][2]
-    assert calls[0][2].count("target='202607_cas_reservation_ledger'") == 1
+    assert dl.RESTART_TRADE_MIGRATION_TARGETS == (
+        ("trade", "202607_cas_reservation_ledger"),
+    )
     assert calls[0][2].count("_assert_restart_trade_schema_ready(trade_conn)") == 1
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
-    assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+    assert "append_rest_filled_orphan_trade_facts_to_edli" not in calls[0][2]
+    assert "append_prepared_trade_fact_bridge_evidence" in calls[0][2]
     assert "_edli_trade_fact_bridge_candidates_read_only" in calls[0][2]
-    assert "candidates=confirmed_candidates" in calls[0][2]
-    assert "candidates=rest_orphan_candidates" in calls[0][2]
+    assert "for evidence in confirmed_candidates:" in calls[0][2]
+    assert "for evidence in rest_orphan_candidates:" in calls[0][2]
+    assert "append_prepared_trade_fact_bridge_evidence(" in calls[0][2]
+    assert "candidates=()" in calls[0][2]
     assert "absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids" in calls[0][2]
     assert "recovery_deadline_monotonic = time.monotonic() + 60.0" in calls[0][2]
     assert "deadline_monotonic=recovery_deadline_monotonic" in calls[0][2]
     assert "bridge_deadline_monotonic = time.monotonic() + 15.0" in calls[0][2]
     assert "summary['edli_trade_fact_bridge_deferred'] = True" in calls[0][2]
     recovery_script = calls[0][2]
-    assert recovery_script.index("target='202608_edli_active_redecision_projection'") < (
-        recovery_script.index(
-            "target='202608_edli_active_redecision_projection_receipt_notnull'"
-        )
+    assert recovery_script.index(
+        "for result_key, target in RESTART_WORLD_MIGRATION_TARGETS"
     ) < recovery_script.index("world_conn.commit()") < recovery_script.index(
         "PRAGMA table_info(opportunity_event_processing_type_backfill)"
     )
     assert recovery_script.index(
-        "target='202607_cas_reservation_ledger'"
-    ) < recovery_script.index("_assert_restart_trade_schema_ready(trade_conn)") < recovery_script.index(
-        "reconcile_unresolved_commands"
-    )
+        "for result_key, target in RESTART_TRADE_MIGRATION_TARGETS"
+    ) < recovery_script.index(
+        "_assert_restart_trade_schema_ready(trade_conn)"
+    ) < recovery_script.index("reconcile_unresolved_commands")
     import inspect
 
     assert "init_schema_trade_only" not in inspect.getsource(
@@ -2783,6 +2979,44 @@ def test_deploy_live_prerequisite_code_identity_rejects_stale_sha(monkeypatch, t
 
     assert ok is False
     assert "did not verify" in detail
+
+
+def test_deploy_live_reuses_only_loaded_fresh_exact_sha_prerequisites(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_prerequisite_identity_reuse", "deploy_live.py")
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "d" * 40
+    price = dl.DAEMONS["price-channel-ingest"]
+    forecast = dl.DAEMONS["forecast-live"]
+    (state / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected[:9],
+                "alive_at": (now - timedelta(seconds=30)).isoformat(),
+            }
+        )
+    )
+    (state / "forecast-live-heartbeat.json").write_text(
+        json.dumps(
+            {
+                "git_head": "e" * 40,
+                "written_at": now.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: label == price)
+
+    reusable = dl._current_prerequisite_code_identity_labels(
+        [price, forecast],
+        expected_sha=expected,
+        now=now,
+    )
+
+    assert reusable == {price}
 
 
 def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
@@ -4193,6 +4427,1126 @@ def test_deploy_live_loaded_restart_allows_paused_current_monitor_handoff(
     assert "probability_degraded_positions=1" in detail
 
 
+def _stuck_monitor_handoff(position_ids, **overrides):
+    handoff = {
+        "green": False,
+        "open_position_count": len(position_ids),
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_position_ids": (),
+        "quote_only_stale_shape_valid": True,
+        "quote_only_stale_shape_error": None,
+        "reauction_handoff_position_count": 0,
+        "probability_degraded_position_count": 1,
+        "probability_degraded_position_ids": (position_ids[0],),
+        "restart_blocking_position_count": len(position_ids) - 1,
+        "restart_blocking_position_ids": tuple(position_ids[1:]),
+        "settlement_recoverable_position_count": 0,
+        "settlement_recoverable_position_ids": (),
+        "stale_classified_position_ids": tuple(position_ids),
+        "missing_monitor_timestamp_position_ids": (),
+        "invalid_monitor_timestamp_position_ids": (),
+    }
+    handoff.update(overrides)
+    return handoff
+
+
+def test_deploy_live_stuck_monitor_admits_stale_settlement_recoverable_position(
+    monkeypatch, tmp_path
+):
+    """Closed-market dust stays classified without becoming a global restart veto."""
+    dl = _load("deploy_live_restart_stale_settlement_recoverable", "deploy_live.py")
+    position_ids = ("pos-probability", "pos-monitor", "pos-settlement")
+    handoff = _stuck_monitor_handoff(
+        position_ids,
+        restart_blocking_position_count=1,
+        restart_blocking_position_ids=("pos-monitor",),
+        settlement_recoverable_position_count=1,
+        settlement_recoverable_position_ids=("pos-settlement",),
+        stale_classified_position_ids=position_ids,
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": len(position_ids),
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert ok is True
+    assert "settlement_recoverable_positions=1" in detail
+
+
+def _fresh_failed_monitor_handoff(position_ids, **overrides):
+    handoff = {
+        "green": False,
+        "open_position_count": len(position_ids),
+        "fresh_position_count": 0,
+        "probability_degraded_position_count": 0,
+        "probability_degraded_position_ids": (),
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_shape_valid": True,
+        "reauction_handoff_position_count": 0,
+        "fresh_failed_monitor_no_action_position_count": len(position_ids),
+        "fresh_failed_monitor_no_action_position_ids": tuple(position_ids),
+        "fresh_failed_monitor_duplicate_position_ids": (),
+        "fresh_failed_monitor_other_classified_position_ids": (),
+        "fresh_failed_monitor_timestamp_stale_position_ids": (),
+        "missing_monitor_timestamp_position_ids": (),
+        "invalid_monitor_timestamp_position_ids": (),
+    }
+    handoff.update(overrides)
+    return handoff
+
+
+def test_deploy_live_loaded_restart_admits_fresh_failed_monitor_repair_handoff(
+    monkeypatch, tmp_path
+):
+    """A current all-no-action monitor partition may restart into pending repair only."""
+    dl = _load("deploy_live_restart_fresh_failed_monitor_admit", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-a", "pos-b")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: _fresh_failed_monitor_handoff(position_ids),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "restart_permission_only=true" in detail
+
+
+def test_deploy_live_loaded_restart_admits_mixed_fresh_repair_handoff(
+    monkeypatch, tmp_path
+):
+    """Fresh actions plus typed no-actions may cover the whole paused portfolio."""
+    dl = _load("deploy_live_restart_mixed_fresh_failed_monitor_admit", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-fresh", "pos-repair")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        fresh_position_count=1,
+        fresh_failed_monitor_no_action_position_count=1,
+        fresh_failed_monitor_no_action_position_ids=("pos-repair",),
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_pre_stop_monitor_handoff_evidence", lambda _db: handoff)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "fresh_actionable_positions=1" in detail
+
+
+def test_deploy_live_loaded_restart_admits_fresh_probability_and_no_action_mix(
+    monkeypatch, tmp_path
+):
+    """Every current mixed monitor class may hand off to the pending repair."""
+    dl = _load("deploy_live_restart_mixed_probability_repair", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-fresh", "pos-probability", "pos-repair")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        fresh_position_count=1,
+        probability_degraded_position_count=1,
+        probability_degraded_position_ids=("pos-probability",),
+        fresh_failed_monitor_no_action_position_count=1,
+        fresh_failed_monitor_no_action_position_ids=("pos-repair",),
+        fresh_failed_monitor_other_classified_position_ids=("pos-probability",),
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_pre_stop_monitor_handoff_evidence", lambda _db: handoff)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": True, "loaded_sha": "old", "current_head": "new"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "fresh_actionable_positions=1" in detail
+    assert "probability_degraded_positions=1" in detail
+
+
+def test_deploy_live_quote_only_repair_handoff_requires_exact_current_held_book(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_quote_only_repair", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        INSERT INTO position_current VALUES (
+            'pos-quote', 'condition-quote', 'buy_no', 'yes-token', 'no-token'
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 1, 0, 1, ?, ?, ?)",
+        (
+            "condition-quote",
+            "no-token",
+            "0.70",
+            now.isoformat(),
+            (now + timedelta(minutes=3)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    position_ids = ("pos-fresh", "pos-quote")
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        monitored_position_ids=position_ids,
+        fresh_position_count=1,
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+        fresh_failed_monitor_no_action_position_count=0,
+        fresh_failed_monitor_no_action_position_ids=(),
+        fresh_failed_monitor_other_classified_position_ids=("pos-quote",),
+        restart_blocking_position_count=0,
+        restart_blocking_position_ids=(),
+        settlement_recoverable_position_count=0,
+        settlement_recoverable_position_ids=(),
+        stale_classified_position_ids=(),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._quote_only_monitor_repair_handoff_admission(
+        trade_db=trade_db,
+        obligations={
+            "open_position_count": 2,
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is True
+    assert "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    assert "exact_held_books=current" in detail
+
+
+def test_deploy_live_quote_only_repair_handoff_rejects_expired_held_book(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_quote_only_expired", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        INSERT INTO position_current VALUES (
+            'pos-quote', 'condition-quote', 'buy_yes', 'yes-token', 'no-token'
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 1, 0, 1, ?, ?, ?)",
+        (
+            "condition-quote",
+            "yes-token",
+            "0.60",
+            (now - timedelta(minutes=4)).isoformat(),
+            (now - timedelta(minutes=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    position_ids = ("pos-fresh", "pos-quote")
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        monitored_position_ids=position_ids,
+        fresh_position_count=1,
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+        fresh_failed_monitor_no_action_position_count=0,
+        fresh_failed_monitor_no_action_position_ids=(),
+        fresh_failed_monitor_other_classified_position_ids=("pos-quote",),
+        restart_blocking_position_count=0,
+        restart_blocking_position_ids=(),
+        settlement_recoverable_position_count=0,
+        settlement_recoverable_position_ids=(),
+        stale_classified_position_ids=(),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: pytest.fail("expired exact book must refuse before sidecar proof"),
+    )
+
+    ok, detail = dl._quote_only_monitor_repair_handoff_admission(
+        trade_db=trade_db,
+        obligations={
+            "open_position_count": 2,
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is False
+    assert detail.endswith("exact_held_book_not_current")
+
+
+def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(
+    monkeypatch, tmp_path
+):
+    """Current probability+CLOB failures are a complete restart-only partition."""
+    dl = _load("deploy_live_restart_fresh_failed_monitor_evidence", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    position_ids = ("pos-a", "pos-b")
+    evidence = {
+        "open_position_count": 2,
+        "monitored_position_ids": list(position_ids),
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 2,
+        "stale_or_missing_positions": [
+            {
+                "position_id": position_id,
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+            for position_id in position_ids
+        ],
+        "blocking_stale_position_count": 2,
+        "blocking_stale_positions": [
+            {
+                "position_id": position_id,
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+            for position_id in position_ids
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 0,
+        "settlement_recoverable_positions": [],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is False
+    assert handoff["fresh_position_count"] == 0
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == position_ids
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+
+
+def test_deploy_live_pre_stop_handoff_classifies_current_closed_market_no_action(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_fresh_failed_closed_market", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-closed"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 0,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-closed",
+                "last_monitor_refreshed_at": occurred_at,
+                "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is True
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-closed",)
+    assert handoff["settlement_recoverable_position_ids"] == ("pos-closed",)
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+
+
+@pytest.mark.parametrize(
+    "cadence_source",
+    ("PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED", "EXIT_ORDER_REJECTED"),
+)
+def test_deploy_live_pre_stop_handoff_classifies_terminal_subprecision_dust(
+    monkeypatch, tmp_path, cadence_source
+):
+    dl = _load("deploy_live_restart_terminal_subprecision_dust", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-dust"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 0,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-dust",
+                "cadence_source": cadence_source,
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["fresh_failed_monitor_no_action_position_ids"] == ("pos-dust",)
+    assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
+    assert handoff["missing_monitor_timestamp_position_ids"] == ()
+
+
+def test_deploy_live_fresh_failed_handoff_rejects_closed_market_restart_duplicate(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_fresh_failed_duplicate", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-duplicate"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {
+                "position_id": "pos-duplicate",
+                "issue": "monitor_probability_and_clob_stale",
+                "last_monitor_refreshed_at": occurred_at,
+            }
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "settlement_recoverable_position_count": 1,
+        "settlement_recoverable_positions": [
+            {
+                "position_id": "pos-duplicate",
+                "last_monitor_refreshed_at": occurred_at,
+                "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
+            }
+        ],
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: evidence
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl, "_held_quote_sidecar_current_evidence", lambda: {"current": True}
+    )
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-duplicate",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert handoff["fresh_failed_monitor_duplicate_position_ids"] == ("pos-duplicate",)
+    assert ok is False
+    assert detail == "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:no_action_partition_duplicate"
+
+
+@pytest.mark.parametrize(
+    ("loaded_sha", "current_sha", "expected_pending"),
+    (
+        ("a" * 40, "a" * 40, False),
+        ("a" * 7, "a" * 40, False),
+        ("b" * 7, "a" * 40, True),
+    ),
+)
+def test_deploy_live_fresh_failed_repair_requires_loaded_sha_to_predate_head(
+    monkeypatch, tmp_path, loaded_sha, current_sha, expected_pending
+):
+    dl = _load("deploy_live_restart_fresh_failed_repair_sha", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "loaded_sha.json").write_text(
+        json.dumps(
+            {
+                "loaded_sha": loaded_sha,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: current_sha)
+
+    result = dl._loaded_live_runtime_repair_pending()
+
+    assert result["pending"] is expected_pending
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "bool_count",
+        "negative_count",
+        "nonsequence_ids",
+        "nonstring_id",
+        "nonmapping_handoff",
+    ),
+)
+def test_deploy_live_fresh_failed_handoff_rejects_malformed_internal_evidence(
+    monkeypatch, mutation
+):
+    dl = _load(f"deploy_live_restart_fresh_failed_shape_{mutation}", "deploy_live.py")
+    position_ids = ("pos-a", "pos-b")
+    obligations = {
+        "open_position_count": 2,
+        "all_open_position_ids": position_ids,
+        "nonterminal_command_count": 0,
+    }
+    handoff = _fresh_failed_monitor_handoff(position_ids)
+    if mutation == "bool_count":
+        handoff["fresh_position_count"] = False
+    elif mutation == "negative_count":
+        handoff["fresh_position_count"] = -1
+    elif mutation == "nonsequence_ids":
+        handoff["fresh_failed_monitor_no_action_position_ids"] = "pos-a"
+    elif mutation == "nonstring_id":
+        handoff["fresh_failed_monitor_no_action_position_ids"] = ("pos-a", 7)
+    elif mutation == "nonmapping_handoff":
+        handoff = []
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: pytest.fail("malformed evidence must refuse before sidecar read"),
+    )
+
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations=obligations,
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is False
+    assert detail == "FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:handoff_evidence_invalid"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        ("partition_overflow", "open_no_action_partition_incomplete"),
+        ("nonterminal_command", "nonterminal_commands"),
+        ("unpaused", "durable_entries_pause_false"),
+        ("missing_id", "open_no_action_partition_incomplete"),
+        ("future_monitor", "future_monitor_evidence"),
+        ("stale_timestamp", "monitor_timestamp_stale"),
+        ("sidecar_stale", "held_quote_sidecar_stale"),
+        ("partial_mix", "no_action_partition_not_disjoint"),
+        ("repair_not_pending", "repair_code_not_pending"),
+    ),
+)
+def test_deploy_live_fresh_failed_monitor_repair_handoff_refuses_boundaries(
+    monkeypatch, mutation, expected_reason
+):
+    dl = _load(f"deploy_live_restart_fresh_failed_monitor_refuse_{mutation}", "deploy_live.py")
+    position_ids = ("pos-a", "pos-b")
+    obligations = {
+        "open_position_count": 2,
+        "all_open_position_ids": position_ids,
+        "nonterminal_command_count": 0,
+    }
+    pause_state = {"entries_paused": True}
+    handoff = _fresh_failed_monitor_handoff(position_ids)
+    repair_pending = {"pending": True}
+    quote_sidecar = {"current": True, "age_seconds": 1.0}
+    if mutation == "partition_overflow":
+        handoff["fresh_position_count"] = 1
+    elif mutation == "nonterminal_command":
+        obligations["nonterminal_command_count"] = 1
+    elif mutation == "unpaused":
+        pause_state["entries_paused"] = False
+    elif mutation == "missing_id":
+        handoff["fresh_failed_monitor_no_action_position_count"] = 1
+        handoff["fresh_failed_monitor_no_action_position_ids"] = (position_ids[0],)
+    elif mutation == "future_monitor":
+        handoff["future_monitor_event_count"] = 1
+    elif mutation == "stale_timestamp":
+        handoff["fresh_failed_monitor_timestamp_stale_position_ids"] = (
+            position_ids[0],
+        )
+    elif mutation == "sidecar_stale":
+        quote_sidecar = {"current": False, "reason": "held_quote_sidecar_stale"}
+    elif mutation == "partial_mix":
+        handoff["fresh_failed_monitor_other_classified_position_ids"] = (
+            position_ids[1],
+        )
+    elif mutation == "repair_not_pending":
+        repair_pending = {"pending": False}
+    monkeypatch.setattr(dl, "_held_quote_sidecar_current_evidence", lambda: quote_sidecar)
+
+    ok, detail = dl._fresh_failed_monitor_repair_handoff_admission(
+        obligations=obligations,
+        pause_state=pause_state,
+        handoff=handoff,
+        repair_pending=repair_pending,
+    )
+
+    assert ok is False
+    assert detail == f"FRESH_FAILED_MONITOR_REPAIR_HANDOFF_REFUSED:{expected_reason}"
+
+
+def test_deploy_live_loaded_restart_admits_exact_stuck_monitor_recovery(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_stuck_monitor_admit", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    position_ids = ("pos-a", "pos-b")
+    for position_id in position_ids:
+        trade.execute(
+            "INSERT INTO position_current VALUES (?, 'day0_window', 7, 7, 'synced')",
+            (position_id,),
+        )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: _stuck_monitor_handoff(position_ids),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
+    assert "fresh_positions=0" in detail
+
+
+def test_deploy_live_loaded_restart_admits_exact_total_stall_with_quote_only_partition(
+    monkeypatch,
+):
+    dl = _load("deploy_live_restart_stuck_monitor_quote_only_admit", "deploy_live.py")
+    position_ids = ("pos-probability", "pos-restart", "pos-quote")
+    handoff = _stuck_monitor_handoff(
+        position_ids,
+        probability_degraded_position_count=1,
+        probability_degraded_position_ids=("pos-probability",),
+        restart_blocking_position_count=1,
+        restart_blocking_position_ids=("pos-restart",),
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=("pos-quote",),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": len(position_ids),
+            "all_open_position_ids": position_ids,
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert ok is True
+    assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
+    assert "quote_only_stale_positions=1" in detail
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        ("quote_sidecar_stale", "held_quote_sidecar_stale"),
+        ("nonterminal_command", "nonterminal_commands"),
+        ("open_unclassified", "open_classification_incomplete"),
+        ("future_monitor", "future_monitor_evidence"),
+        ("partial_fresh", "partial_or_fresh_handoff"),
+        ("quote_identity_overlap", "open_classification_incomplete"),
+    ),
+)
+def test_deploy_live_stuck_monitor_recovery_refuses_each_non_total_stall_boundary(
+    monkeypatch, mutation, expected_reason
+):
+    dl = _load(f"deploy_live_restart_stuck_monitor_refuse_{mutation}", "deploy_live.py")
+    position_ids = ("pos-a", "pos-b")
+    obligations = {
+        "open_position_count": 2,
+        "all_open_position_ids": position_ids,
+        "nonterminal_command_count": 0,
+    }
+    handoff = _stuck_monitor_handoff(position_ids)
+    quote_sidecar = {"current": True, "age_seconds": 1.0}
+    if mutation == "quote_sidecar_stale":
+        quote_sidecar = {"current": False, "reason": "held_quote_sidecar_stale"}
+    elif mutation == "nonterminal_command":
+        obligations["nonterminal_command_count"] = 1
+    elif mutation == "open_unclassified":
+        handoff["restart_blocking_position_count"] = 0
+        handoff["restart_blocking_position_ids"] = ()
+    elif mutation == "future_monitor":
+        handoff["future_monitor_event_count"] = 1
+    elif mutation == "partial_fresh":
+        handoff["fresh_position_count"] = 1
+    elif mutation == "quote_identity_overlap":
+        handoff["quote_only_stale_position_count"] = 1
+        handoff["quote_only_stale_position_ids"] = (position_ids[0],)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: quote_sidecar,
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations=obligations,
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert ok is False
+    assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "field", "expected_reason"),
+    (
+        (None, "missing_monitor_timestamp_position_ids", "monitor_timestamp_missing"),
+        ("not-a-time", "invalid_monitor_timestamp_position_ids", "monitor_timestamp_invalid"),
+        ("2026-08-28T12:00:00", "invalid_monitor_timestamp_position_ids", "monitor_timestamp_invalid"),
+    ),
+)
+def test_deploy_live_stuck_monitor_recovery_rejects_missing_invalid_or_naive_timestamp(
+    monkeypatch, tmp_path, timestamp, field, expected_reason
+):
+    dl = _load(f"deploy_live_restart_timestamp_{expected_reason}", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-open"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    groups = {
+        "probability_only_stale_position_count": 1,
+        "probability_only_stale_positions": [
+            {
+                "position_id": "pos-open",
+                "issue": "monitor_probability_stale",
+                "last_monitor_refreshed_at": timestamp,
+            }
+        ],
+        "restart_blocking_stale_position_count": 0,
+        "restart_blocking_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_a, **_k: evidence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _e: groups)
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-open",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert handoff["stale_classified_position_ids"] == ()
+    assert handoff[field] == ("pos-open",)
+    assert ok is False
+    assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_ok", "expected_reason"),
+    (
+        (None, False, "monitor_timestamp_missing"),
+        ("not-a-time", False, "monitor_timestamp_invalid"),
+        ("stale", True, None),
+        (
+            "2026-08-28T12:00:00+00:00",
+            False,
+            "monitor_evidence_not_stale",
+        ),
+    ),
+)
+def test_deploy_live_stuck_monitor_quote_only_partition_requires_stale_parseable_timestamp(
+    monkeypatch, tmp_path, timestamp, expected_ok, expected_reason
+):
+    dl = _load("deploy_live_restart_quote_only_timestamp", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    now = datetime.now(timezone.utc)
+    if timestamp == "stale":
+        timestamp = (
+            now
+            - timedelta(seconds=dl.LIVE_STUCK_MONITOR_RECOVERY_STALE_SECONDS + 1)
+        ).isoformat()
+    elif timestamp == "2026-08-28T12:00:00+00:00":
+        timestamp = now.isoformat()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-quote"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    groups = {
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "restart_blocking_stale_position_count": 0,
+        "restart_blocking_stale_positions": [],
+        "quote_only_stale_position_count": 1,
+        "quote_only_stale_positions": [
+            {
+                "position_id": "pos-quote",
+                "issue": "monitor_clob_stale",
+                "last_monitor_refreshed_at": timestamp,
+            }
+        ],
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_a, **_k: evidence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _e: groups)
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-quote",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert handoff["quote_only_stale_position_ids"] == ("pos-quote",)
+    assert ok is expected_ok
+    if expected_ok:
+        assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
+    else:
+        assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("count", "records"),
+    (
+        (
+            0,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                }
+            ],
+        ),
+        (
+            2,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                },
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_clob_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                },
+            ],
+        ),
+        (
+            1,
+            [
+                {
+                    "position_id": "pos-quote",
+                    "issue": "monitor_probability_stale",
+                    "last_monitor_refreshed_at": "2026-08-28T11:00:00+00:00",
+                }
+            ],
+        ),
+        (1, ["not-a-record"]),
+    ),
+)
+def test_deploy_live_stuck_monitor_quote_only_records_require_exact_shape(
+    monkeypatch, tmp_path, count, records
+):
+    dl = _load("deploy_live_restart_quote_only_shape", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-quote"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    groups = {
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "restart_blocking_stale_position_count": 0,
+        "restart_blocking_stale_positions": [],
+        "quote_only_stale_position_count": count,
+        "quote_only_stale_positions": records,
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_a, **_k: evidence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _e: groups)
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": True, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._stuck_monitor_recovery_admission(
+        obligations={
+            "open_position_count": 1,
+            "all_open_position_ids": ("pos-quote",),
+            "nonterminal_command_count": 0,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+    )
+
+    assert handoff["quote_only_stale_shape_valid"] is False
+    assert ok is False
+    assert detail == "STUCK_MONITOR_RECOVERY_REFUSED:quote_only_shape_invalid"
+
+
+def test_deploy_live_normal_green_handoff_does_not_use_stuck_monitor_recovery(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_normal_handoff_unchanged", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-open', 'day0_window', 7, 7, 'synced')"
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: {
+            "green": True,
+            "open_position_count": 1,
+            "probability_degraded_position_count": 0,
+            "reauction_handoff_position_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: pytest.fail("normal green handoff must not enter stuck recovery"),
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "repair handoff verified" in detail
+
+
 def test_deploy_live_waits_for_post_sidecar_handoff_recovery(monkeypatch):
     dl = _load("deploy_live_restart_handoff_wait", "deploy_live.py")
     outcomes = iter(
@@ -4640,21 +5994,27 @@ def test_deploy_live_absent_daemon_bootstrap_restores_monitoring_with_exposure(
     assert "absent-daemon recovery" in detail
 
 
-def test_deploy_live_command_refuses_before_entry_pause_when_capital_is_open(
+def test_deploy_live_command_arms_entry_pause_before_capital_handoff_gate(
     monkeypatch, capsys
 ):
     dl = _load("deploy_live_restart_refusal_order", "deploy_live.py")
+    calls = []
     monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
     monkeypatch.setattr(
         dl,
         "_loaded_live_restart_obligation_gate",
-        lambda *_args, **_kwargs: (False, "open_positions=1"),
+        lambda *_args, **_kwargs: (
+            calls.append("handoff") or (False, "open_positions=1")
+        ),
     )
     monkeypatch.setattr(
         dl,
-        "_pause_entries_with_stuck_live_recovery",
-        lambda *_args, **_kwargs: pytest.fail("pause must not run before refusal"),
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **kwargs: (
+            calls.append(("pause", kwargs["expected_sha"])) or (True, "pause armed")
+        ),
     )
 
     rc = dl._cmd_restart_locked(
@@ -4666,7 +6026,45 @@ def test_deploy_live_command_refuses_before_entry_pause_when_capital_is_open(
     )
 
     assert rc == 1
+    assert calls == [("pause", "a" * 40), "handoff"]
     assert "continuous monitoring" in capsys.readouterr().out
+
+
+def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
+    monkeypatch, capsys
+):
+    dl = _load("deploy_live_restart_pause_failure_order", "deploy_live.py")
+    monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "b" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (False, "database is locked"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: pytest.fail("handoff must follow a durable pause"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda *_args, **_kwargs: pytest.fail("pause failure must not stop live main"),
+    )
+
+    rc = dl._cmd_restart_locked(
+        types.SimpleNamespace(
+            daemon="live-trading",
+            allow_dirty=False,
+            allow_unpushed=False,
+        )
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "entry pause guard is not armed" in output
+    assert "database is locked" in output
 
 
 def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(
@@ -5052,6 +6450,16 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
 
     monkeypatch.setattr(dl, "head_sha", _head_sha)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
 
     def _stop(label):
         calls.append(("stop", label))
@@ -5153,6 +6561,226 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
+def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
+    dl = _load("deploy_live_continuous_monitor_cutover", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "continuous handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (True, "pause armed"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (True, "migrations current"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **_kwargs: (
+            calls.append(("prerequisite", tuple(labels))) or (True, "ready")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_loaded_live_restart_handoff",
+        lambda labels: (calls.append(("handoff", tuple(labels))) or (True, "fresh")),
+    )
+
+    def preflight(labels, **kwargs):
+        calls.append(
+            (
+                "preflight",
+                kwargs.get("expected_live_process_state", "absent"),
+                kwargs.get("process_state_only", False),
+                kwargs.get("defer_running_monitor_cadence", False),
+            )
+        )
+        return True, "preflight passed"
+
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", preflight)
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_recovery_with_quiesced_prerequisites",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current migration fast path must skip quiesced recovery")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, "launched")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, "stopped")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **_kwargs: (calls.append(("runtime",)) or (True, "fresh")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (calls.append(("monitor",)) or (True, "monitor")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_edli_queue_progress",
+        lambda **_kwargs: (calls.append(("queue",)) or (True, "queue")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_resume_entries_after_verified_live_restart_if_needed",
+        lambda _labels: (calls.append(("resume",)) or (True, "resumed")),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 0
+
+    warm = calls.index(("preflight", "running", False, True))
+    handoff = next(i for i, call in enumerate(calls) if call[0] == "handoff")
+    one_main = calls.index(("preflight", "running", True, False))
+    stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
+    zero_main = calls.index(("preflight", "absent", True, False))
+    launch_main = calls.index(("launch", dl.LIVE_TRADING_LABEL))
+    assert warm < handoff < one_main < stop_main < zero_main < launch_main
+
+
+def test_deploy_live_failed_zero_main_witness_never_bootstraps_second_main(
+    monkeypatch,
+):
+    dl = _load("deploy_live_zero_main_fail_closed", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda *_args, **_kwargs: (True, "pause armed"),
+    )
+    monkeypatch.setattr(dl, "_restart_migration_targets_current", lambda: (True, "current"))
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda *_args, **_kwargs: (True, "ready"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_loaded_live_restart_handoff",
+        lambda *_args, **_kwargs: (True, "fresh"),
+    )
+
+    def preflight(_labels, **kwargs):
+        state = kwargs.get("expected_live_process_state", "absent")
+        calls.append(("preflight", state))
+        return (state == "running", "witness")
+
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", preflight)
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, "launched")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, "stopped")),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
+    assert ("preflight", "absent") in calls[stop_main + 1 :]
+    assert ("launch", dl.LIVE_TRADING_LABEL) not in calls
+
+
+def test_restart_migration_ledger_uses_primary_root_not_checkout_state(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_migration_primary_root", "deploy_live.py")
+    live_repo = tmp_path / "checkout"
+    primary_root = tmp_path / "runtime"
+    (live_repo / "state").mkdir(parents=True)
+    (primary_root / "state").mkdir(parents=True)
+    monkeypatch.setattr(dl, "LIVE_REPO", str(live_repo))
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {"ZEUS_PRIMARY_ROOT": str(primary_root)},
+    )
+
+    for filename, targets in (
+        ("zeus-world.db", dl.RESTART_WORLD_MIGRATION_TARGETS),
+        ("zeus_trades.db", dl.RESTART_TRADE_MIGRATION_TARGETS),
+    ):
+        conn = sqlite3.connect(primary_root / "state" / filename)
+        conn.execute(
+            "CREATE TABLE _migrations_applied (name TEXT PRIMARY KEY, applied_at TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO _migrations_applied VALUES (?, 'now')",
+            [(target,) for _key, target in targets],
+        )
+        conn.commit()
+        conn.close()
+
+    ok, detail = dl._restart_migration_targets_current()
+
+    assert ok is True
+    assert str(primary_root / "state") in detail
+
+
+def test_restart_runtime_relative_overrides_resolve_from_live_repo(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_relative_runtime_paths", "deploy_live.py")
+    live_repo = tmp_path / "checkout"
+    live_repo.mkdir()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(live_repo))
+
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {"ZEUS_STATE_DIR": "runtime-state"},
+    )
+    assert dl._restart_runtime_db_paths() == (
+        (live_repo / "runtime-state" / "zeus-world.db").resolve(),
+        (live_repo / "runtime-state" / "zeus_trades.db").resolve(),
+    )
+
+    monkeypatch.setattr(
+        dl,
+        "_live_trading_subprocess_env",
+        lambda: {
+            "ZEUS_WORLD_DB": "db/world.sqlite",
+            "ZEUS_TRADE_DB": "db/trade.sqlite",
+        },
+    )
+    assert dl._restart_runtime_db_paths() == (
+        (live_repo / "db" / "world.sqlite").resolve(),
+        (live_repo / "db" / "trade.sqlite").resolve(),
+    )
+
+
 def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
     monkeypatch,
 ):
@@ -5163,6 +6791,16 @@ def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
@@ -5229,6 +6867,16 @@ def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
     )
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
@@ -5552,6 +7200,16 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
+    monkeypatch.setattr(
+        dl,
         "_pause_entries_for_live_restart_if_needed",
         lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
@@ -5659,6 +7317,16 @@ def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (False, "migration recovery required"),
+    )
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",

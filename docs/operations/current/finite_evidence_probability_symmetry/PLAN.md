@@ -4,6 +4,70 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-29 — RiskGuard总level必须打印真实host/storage driver
+
+- **实时反例：** canonical `risk_state`以`host_power_level=ORANGE`记录Battery Power 17%、
+  runway 21分钟，且其余Brier/settlement/execution/probability/storage组件均GREEN；全局
+  entry因此正确reduce-only。但daemon日志的component map漏掉`host_power`和
+  `storage_capacity`，错误打印`overall=ORANGE driven_by=none`，使正EV proof-only BUY与
+  live CASH之间的真实gate不可见。
+- **修复：** 将`overall_level()`已经消费的`probability_semantics`、`storage_capacity`和
+  `host_power`全部纳入`RISK_COMPONENT_ORDER`、per-tick level map及detail。风险阈值、
+  entry/exit行为、q、price、Kelly和venue path不变。
+- **SCOPE / DRAIN / RESET：** scope仅为RiskGuard每60秒的解释性log；drain是下一次tick；
+  reset是AC power或runway恢复后现有host-power law自动回GREEN，日志同步显示真实driver。
+- **验收：** structural antibody要求breakdown集合与`overall_level()`输入完全一致，并单独
+  证明host-power ORANGE打印`driven_by=host_power`；targeted tests、compile、diff与
+  planning-lock通过，部署后以当前risk row和下一次daemon tick复核。
+
+## 2026-08-29 — held monitor不得跨CLOB/venue I/O占用canonical writer
+
+- **实时反例：** `exit_monitor`在固定五分钟边界持续运行时，collateral writer与
+  harvester反复出现`WriteLeaseTimeout`/`database is locked`；下一30秒tick又恢复，
+  证明是周期性writer contention。source trace显示`refresh_position`先写quote evidence，
+  stale-q toxicity或retry quote随后再次访问CLOB；`MONITOR_REFRESHED`写完后也可直接进入
+  `execute_exit`，三处都可能把未提交TRADE transaction带入外部I/O。
+- **修复：** stale-q adjacent-book读取完成后才写quote evidence；retry quote前提交refresh
+  写入；canonical monitor event后、任何completion publish或venue exit前再次提交。
+  commit失败先rollback；只有transaction仍未释放时才局部推迟该持仓外部动作，下一
+  monitor cycle重建current q/book，绝不以stale truth补位。
+- **SCOPE / DRAIN / RESET：** scope仅为当前position本轮retry quote/completion/exit，
+  不改变q、BUY/SELL/HOLD/CASH经济比较或其他family。drain是两个显式writer boundary及
+  现有per-position finally；reset是下一轮从最新probability与book重新决策。
+- **验收：** behavioral antibodies要求stale-q adjacent CLOB先于quote evidence写入，且
+  refresh与canonical emit各自打开transaction后，retry CLOB与`execute_exit`均观察到
+  `in_transaction=False`；targeted monitor/exit suites、compile、planning-lock与diff通过。
+  live restart后跨至少两个固定五分钟边界不得再出现collateral writer timeout，同时
+  held coverage、decision receipts与venue事实继续推进。
+
+### 2026-08-29 live follow-up — quote writer不得覆盖read-only edge/CI计算
+
+- **实时反例：** 首次修复部署后，`writer-lock`仍连续占用，price-channel在已取得协调gate
+  后报SQLite `database is locked`；SIGUSR1栈同时显示单个held monitor在
+  `_causal_market_velocity_1h`等read-only阶段持续运行。source order证明
+  `refresh_position`在这些read-only计算之前已执行`_persist_monitor_quote`，而caller只在
+  整个函数返回后commit，因此TRADE write transaction仍覆盖后续edge/CI工作。
+- **修复：** 把quote persistence移动到所有CLOB、probability、velocity和CI计算完成之后；
+  caller现有return-boundary立即commit，再进入retry quote或venue I/O。q、price、exit law与
+  canonical payload不变。
+- **SCOPE / DRAIN / RESET：** scope是单一held position的一次quote evidence transaction；
+  drain是函数末端write及caller的显式commit；reset是下一monitor cycle的fresh q/book。
+- **验收：** antibody要求adjacent CLOB和velocity read观察`in_transaction=False`，quote
+  write最后才开启transaction；targeted monitor tests、compile、planning-lock通过，live
+  restart后writer backlog、held coverage与collateral cadence恢复。
+
+### 2026-08-29 live follow-up — collateral wait与hold budget分离
+
+- **实时反例：** quote-writer缩短后backlog明显下降，但21个held monitor的短写tranche仍可让
+  `collateral_snapshot_persist`在250ms acquisition deadline内错过writer；它的一行DML尚未
+  开始就失败，current wealth truth因此每30秒出现空洞。
+- **修复：** acquisition deadline提高到2秒以跨越相邻monitor tranches；获得lease后的
+  max-hold继续严格保持250ms。网络capture仍在lease之前，q、price、Kelly与订单法不变。
+- **SCOPE / DRAIN / RESET：** scope仅为一条collateral snapshot写入；drain是现有30秒
+  cadence及2秒bounded wait；reset是成功的一行commit，raw incumbent超过2秒仍fail closed。
+- **验收：** raw `BEGIN IMMEDIATE` incumbent抗体证明等待落在1.5–2.8秒且仍超时，不把
+  max-hold放宽；targeted collateral test、compile、planning-lock与live cadence通过。
+
 ## 2026-08-24 — screen cancel obligation dispatch lease
 
 - **Design:** screen persists only a versioned exact command/order obligation; recovery selects only that marker, claims it with `CANCEL_DISPATCH_STARTED` in one `BEGIN IMMEDIATE` transaction, and performs no DB I/O across venue I/O. The claim carries obligation id, owner boot UUID/pid, generation, attempt id, and expiry. A stale claimant cannot finalize; expired claims require a fresh point-order witness before reclaim. Post-venue ACK/unknown uses a separate bounded reserve.
@@ -5015,6 +5079,49 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-29 Held hard-fact preclassification reads each causal family once
+
+Loaded production receipts showed the same 21-position held book completing in
+3.5 seconds when every local full-depth book was available, but taking 20--29
+seconds and deferring 6--11 positions when the auxiliary tranche expired before
+the local-book batch. The preceding hard-fact preclassification evaluated every
+sibling bin independently, so positions sharing the same city, target day,
+metric, source contract, and decision clock repeated the same durable
+observation read before applying different pure bin verdicts.
+
+One monitor cut now owns one cycle-local evidence cache keyed by that complete
+causal family identity. The source/anomaly/finality gates remain unchanged, and
+each position still receives its own direction/bin verdict; only the identical
+durable evidence read is reused. Missing evidence is also a valid cached result
+for the same cut. A new monitor cut creates a new cache and rereads current
+truth.
+
+SCOPE is one admitted held-monitor cut and sibling positions with identical
+source/date/metric/decision-time identity. DRAIN is completion of that cut; the
+cache is not persisted or shared across cycles. RESET is the next monitor cut,
+whose new decision clock forces a new durable source read. No quote,
+probability, settlement, exit, command, freshness, or full-depth authority is
+relaxed.
+
+Allowed files are `src/engine/cycle_runtime.py`,
+`src/execution/day0_hard_fact_exit.py`, `tests/test_live_safety_invariants.py`,
+and this plan. Acceptance requires the same-family read antibody, existing
+hard-fact and monitor deadline suites, compilation, planning lock, diff checks,
+and forward production receipts showing fewer family reads than classified
+sibling positions without any loss of canonical full-book coverage.
+
+The same incident also exposed an all-or-nothing local-book amplification. The
+bounded snapshot query used `fetchall()`, so an SQLite progress-handler
+interrupt discarded current full-depth rows already produced before the
+deadline and turned one slow lookup into network fallback for the entire held
+book. The reader now validates and retains rows incrementally. An interrupt
+still stops the query at the same one-second deadline; only already-completed,
+identity-exact, fresh rows survive, while every missing token remains explicit
+network/degraded debt. SCOPE is one local full-depth batch read. DRAIN is the
+existing bounded network or per-position retry for only the missing suffix.
+RESET is the next monitor cut and its new current snapshot read; partial books
+are cycle-local and never stale-reused.
 
 ## 2026-08-17 Restore the evidenced 1/8 sizing law after an unproved rollback
 

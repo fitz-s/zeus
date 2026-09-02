@@ -61,6 +61,19 @@ logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
 OPENMETEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPENMETEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+
+# The extrema product can be structurally non-identifiable when a 3-hour
+# ECMWF bucket straddles a city's local midnight (UTC+8 LOW is the common
+# case).  The conditional Day0 operator needs the unresolved-hour ENS shape,
+# not a mislabeled full-day extrema row.  Persist the exact-run IFS025 member
+# paths in the existing hourly-vector table so selection and submit can bind
+# the same possession proof without adding a parallel truth store.
+DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL = "ecmwf_ifs025"
+DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT = 51
+DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX = (
+    f"{DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL}_member"
+)
 
 #: High-res intraday models for the day0 remaining-day distribution
 #: (operator charge #2: icon_d2 ~2km, arome HD, UKMO UKV 2km, NCEP NBM CONUS).
@@ -79,7 +92,11 @@ GLOBAL_DAY0_HOURLY_MODELS: tuple[str, ...] = (
 )
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
-DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
+# Provider-run HWM wakes bypass this blind fallback interval. Current
+# observations recondition persisted trajectories without another HTTP fetch,
+# so polling the same immutable run twice per hour spends quota without adding
+# decision-time information.
+DEFAULT_REFRESH_INTERVAL_S = 3600.0
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
@@ -134,6 +151,69 @@ def day0_hourly_target_dates_for_refresh(
     )
 
 
+def day0_source_clock_ensemble_target_dates(
+    *,
+    city: Any,
+    decision_time: datetime,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str, ...]:
+    """Return current-day LOW scopes whose newest extrema ENS is ambiguous.
+
+    This is a data-product routing decision, not a probability waiver.  Only a
+    newest possessed canonical row with true boundary ambiguity can request the
+    hourly ensemble carrier; a missing table/row simply leaves ENTRY blocked.
+    """
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    city_name = str(getattr(city, "name", "") or "").strip()
+    timezone_name = str(getattr(city, "timezone", "") or "").strip()
+    if not city_name or not timezone_name:
+        return ()
+    target_date = decision_time.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+    own_conn = conn is None
+    if own_conn:
+        from src.state.db import get_forecasts_connection_read_only
+
+        try:
+            conn = get_forecasts_connection_read_only()
+        except sqlite3.Error:
+            return ()
+    try:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ensemble_snapshots'"
+        ).fetchone()
+        if table is None:
+            return ()
+        row = conn.execute(
+            """
+            SELECT boundary_ambiguous, causality_status,
+                   contributes_to_target_extrema
+              FROM ensemble_snapshots
+             WHERE city = ? AND target_date = ?
+               AND temperature_metric = 'low'
+               AND available_at <= ?
+             ORDER BY datetime(available_at) DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (city_name, target_date, decision_time.astimezone(UTC).isoformat()),
+        ).fetchone()
+        if row is None:
+            return ()
+        return (
+            (target_date,)
+            if int(row[0] or 0) == 1
+            and str(row[1] or "").strip() == "REJECTED_BOUNDARY_AMBIGUOUS"
+            and int(row[2] or 0) == 0
+            else ()
+        )
+    except sqlite3.Error:
+        return ()
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+
+
 @dataclass(frozen=True)
 class Day0HourlyVector:
     model: str
@@ -149,6 +229,218 @@ class Day0HourlyVector:
     # separate fetch-start/fetch-complete possession clocks and source-run
     # identity; rows without it cannot sponsor held probability authority.
     source_run_meta_json: str | None = None
+
+
+@dataclass(frozen=True)
+class Day0CausalBundleValidation:
+    """Comparison result for one immutable Day0 vector/posterior bundle."""
+
+    ok: bool
+    reason: str | None
+    expected_bundle_identity: str
+    actual_bundle_identity: str
+    expected_carrier_vector_identity: str
+    actual_carrier_vector_identity: str
+    expected_carrier_vector_hash: str
+    actual_carrier_vector_hash: str
+
+    def receipt(self) -> dict[str, object]:
+        """Return the exact mismatch evidence suitable for a decision receipt."""
+
+        return {
+            "reason": self.reason,
+            "expected_bundle_identity": self.expected_bundle_identity,
+            "actual_bundle_identity": self.actual_bundle_identity,
+            "expected_carrier_vector_identity": self.expected_carrier_vector_identity,
+            "actual_carrier_vector_identity": self.actual_carrier_vector_identity,
+            "expected_carrier_vector_hash": self.expected_carrier_vector_hash,
+            "actual_carrier_vector_hash": self.actual_carrier_vector_hash,
+        }
+
+
+def _day0_canonical_json(value: object) -> object:
+    """Normalize only deterministic JSON values used in causal identity keys."""
+
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _day0_canonical_json(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_day0_canonical_json(item) for item in value]
+    raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+
+
+def _day0_json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _day0_canonical_json(value), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def build_day0_causal_evidence_bundle(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    observation_context: Mapping[str, object],
+    cutoff_utc: str,
+    vector_witness: Mapping[str, object],
+) -> dict[str, object]:
+    """Build one immutable Day0 causal bundle for a posterior and its vectors.
+
+    The vector identity names the exact per-model persisted rows; the vector
+    hash binds their complete provenance.  The bundle identity additionally
+    commits to the Day0 observation context and causal cutoff.  Consumers must
+    compare two bundles rather than rebind a posterior to a newer vector row.
+    """
+
+    normalized_city = str(city or "").strip()
+    normalized_target_date = str(target_date or "").strip()
+    normalized_metric = str(metric or "").strip().lower()
+    normalized_cutoff = str(cutoff_utc or "").strip()
+    if (
+        not normalized_city
+        or not normalized_target_date
+        or normalized_metric not in {"high", "low"}
+        or not normalized_cutoff
+        or not isinstance(observation_context, Mapping)
+        or not observation_context
+        or not isinstance(vector_witness, Mapping)
+    ):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    try:
+        date.fromisoformat(normalized_target_date[:10])
+        parsed_cutoff = datetime.fromisoformat(
+            normalized_cutoff.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID") from exc
+    if parsed_cutoff.tzinfo is None or parsed_cutoff.utcoffset() is None:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    vector_ids = vector_witness.get("vector_ids_by_model")
+    if not isinstance(vector_ids, Mapping) or not vector_ids:
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    normalized_vector_ids = {
+        str(model).strip(): str(vector_id).strip()
+        for model, vector_id in vector_ids.items()
+    }
+    if any(
+        not model or not vector_id
+        for model, vector_id in normalized_vector_ids.items()
+    ):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID")
+    canonical_observation = _day0_canonical_json(observation_context)
+    canonical_witness = _day0_canonical_json(vector_witness)
+    vector_hash_fields = (
+        "vector_ids_by_model",
+        "capture_times_by_model_utc",
+        "request_hash_by_model",
+        "source_run_id_by_model",
+        "provider_run_id_by_model",
+        "provider_source_cycle_time_by_model_utc",
+        "provider_source_available_at_by_model_utc",
+        "provider_source_modified_at_by_model_utc",
+    )
+    canonical_vector_provenance = {
+        field: canonical_witness[field]
+        for field in vector_hash_fields
+        if field in canonical_witness
+    }
+    carrier_vector_identity = _day0_json_hash(
+        {"vector_ids_by_model": normalized_vector_ids}
+    )
+    carrier_vector_hash = _day0_json_hash(canonical_vector_provenance)
+    core = {
+        "schema": "day0_causal_evidence_bundle_v1",
+        "city": normalized_city,
+        "target_date": normalized_target_date,
+        "metric": normalized_metric,
+        "observation_context": canonical_observation,
+        "cutoff_utc": parsed_cutoff.astimezone(UTC).isoformat(),
+        "carrier_vector_identity": carrier_vector_identity,
+        "carrier_vector_hash": carrier_vector_hash,
+    }
+    return {
+        **core,
+        "carrier_vector_ids_by_model": normalized_vector_ids,
+        "carrier_vector_witness": canonical_witness,
+        "bundle_identity": _day0_json_hash(core),
+    }
+
+
+def validate_day0_causal_evidence_bundle(
+    *,
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+) -> Day0CausalBundleValidation:
+    """Compare immutable Day0 evidence bundles without authorizing a rebind."""
+
+    try:
+        fields = (
+            "city",
+            "target_date",
+            "metric",
+            "observation_context",
+            "cutoff_utc",
+        )
+        expected_core = {key: expected[key] for key in fields}
+        actual_core = {key: actual[key] for key in fields}
+        expected_rebuilt = build_day0_causal_evidence_bundle(
+            **expected_core,
+            vector_witness=expected["carrier_vector_witness"],
+        )
+        actual_rebuilt = build_day0_causal_evidence_bundle(
+            **actual_core,
+            vector_witness=actual["carrier_vector_witness"],
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_INPUT_INVALID") from None
+    # A persisted bundle carries a full vector hash while a consumer's actual
+    # bundle normally comes from the same full witness.  Require both supplied
+    # values to agree with their own reconstructed identities before comparison.
+    expected_identity = str(expected.get("bundle_identity") or "").strip()
+    actual_identity = str(actual.get("bundle_identity") or "").strip()
+    expected_vector_identity = str(expected.get("carrier_vector_identity") or "").strip()
+    actual_vector_identity = str(actual.get("carrier_vector_identity") or "").strip()
+    expected_vector_hash = str(expected.get("carrier_vector_hash") or "").strip()
+    actual_vector_hash = str(actual.get("carrier_vector_hash") or "").strip()
+    complete = all((
+        expected_identity, actual_identity, expected_vector_identity,
+        actual_vector_identity, expected_vector_hash, actual_vector_hash,
+    ))
+    self_consistent = (
+        expected_identity == expected_rebuilt["bundle_identity"]
+        and actual_identity == actual_rebuilt["bundle_identity"]
+        and expected_vector_identity == expected_rebuilt["carrier_vector_identity"]
+        and actual_vector_identity == actual_rebuilt["carrier_vector_identity"]
+        and expected_vector_hash == expected_rebuilt["carrier_vector_hash"]
+        and actual_vector_hash == actual_rebuilt["carrier_vector_hash"]
+    )
+    ok = bool(
+        complete
+        and self_consistent
+        and expected_identity == actual_identity
+        and expected_vector_identity == actual_vector_identity
+        and expected_vector_hash == actual_vector_hash
+    )
+    return Day0CausalBundleValidation(
+        ok=ok,
+        reason=None if ok else "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH",
+        expected_bundle_identity=expected_identity,
+        actual_bundle_identity=actual_identity,
+        expected_carrier_vector_identity=expected_vector_identity,
+        actual_carrier_vector_identity=actual_vector_identity,
+        expected_carrier_vector_hash=expected_vector_hash,
+        actual_carrier_vector_hash=actual_vector_hash,
+    )
 
 
 def day0_remaining_carrier_identity_inputs(
@@ -306,6 +598,20 @@ class Day0HourlyBundleUnavailable:
     reason: str
 
 
+@dataclass(frozen=True)
+class Day0ProviderRunHwm:
+    """Publicly usable provider-run scheduling witness.
+
+    Metadata may wake an exact vector fetch, but it is never probability
+    evidence. Persisted vector provenance must independently prove the same or
+    a newer provider run before the bundle can be consumed.
+    """
+
+    model: str
+    run_initialisation_time: datetime
+    run_availability_time: datetime
+
+
 def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_MODELS) -> list[str]:
     """Polygon-gated model list for a city (lead 0). Fail-soft to [] on gate errors."""
     try:
@@ -345,6 +651,190 @@ def day0_hourly_models_for_city(city: Any) -> list[str]:
         if normalized and normalized not in out:
             out.append(normalized)
     return out
+
+
+def day0_source_clock_ensemble_member_models() -> tuple[str, ...]:
+    """Canonical row identities for one 51-member IFS025 hourly capture."""
+
+    return tuple(
+        f"{DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX}{index:02d}"
+        for index in range(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT)
+    )
+
+
+def probe_day0_provider_run_hwm(
+    cities: Iterable[Any],
+    *,
+    decision_time: datetime,
+    timeout_s: float,
+) -> dict[str, Day0ProviderRunHwm]:
+    """Read one coalesced provider-run HWM for the candidate city set."""
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    models = tuple(
+        sorted(
+            {
+                model
+                for city in cities
+                for model in day0_hourly_models_for_city(city)
+                if str(model or "").strip()
+            }
+        )
+    )
+    if not models:
+        return {}
+    from src.data.openmeteo_model_updates import fetch_model_updates
+    from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
+
+    updates = fetch_model_updates(
+        models,
+        timeout_seconds=max(0.25, float(timeout_s)),
+        max_workers=max(1, min(len(models), 8)),
+        priority=True,
+    )
+    now = decision_time.astimezone(UTC)
+    out: dict[str, Day0ProviderRunHwm] = {}
+    for update in updates:
+        model = str(update.model or "").strip()
+        if model not in models:
+            continue
+        if now < source_publicly_usable_at(update.to_source_run_clock()):
+            continue
+        out[model] = Day0ProviderRunHwm(
+            model=model,
+            run_initialisation_time=update.last_run_initialisation_time.astimezone(UTC),
+            run_availability_time=update.last_run_availability_time.astimezone(UTC),
+        )
+    return out
+
+
+def _provider_run_identity_from_meta(
+    payload: object,
+    *,
+    expected_model: str,
+) -> tuple[datetime, datetime] | None:
+    """Parse exact Open-Meteo provenance without local-time coercion."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    if str(payload.get("model") or "").strip() != expected_model:
+        return None
+    if str(payload.get("provider") or "").strip() != "openmeteo":
+        return None
+    try:
+        run = datetime.fromisoformat(
+            str(payload["provider_source_cycle_time_utc"]).replace("Z", "+00:00")
+        )
+        available = datetime.fromisoformat(
+            str(payload["provider_source_available_at_utc"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        run.tzinfo is None
+        or run.utcoffset() is None
+        or available.tzinfo is None
+        or available.utcoffset() is None
+    ):
+        return None
+    return run.astimezone(UTC), available.astimezone(UTC)
+
+
+def day0_hourly_release_due_city_dates(
+    cities: Iterable[Any],
+    *,
+    decision_time: datetime,
+    provider_run_hwm: Mapping[str, Day0ProviderRunHwm],
+    conn: sqlite3.Connection | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Return city/date scopes whose persisted vectors trail a public run HWM."""
+
+    own_conn = conn is None
+    if own_conn:
+        from src.state.db import get_forecasts_connection_read_only
+
+        conn = get_forecasts_connection_read_only()
+    due: set[tuple[str, str]] = set()
+    try:
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            if not city_name:
+                continue
+            target_date = day0_hourly_target_dates_for_refresh(
+                city=city, decision_time=decision_time
+            )[0]
+            expected_models = day0_hourly_models_for_city(city)
+            required = {
+                model: provider_run_hwm[model]
+                for model in expected_models
+                if model in provider_run_hwm
+            }
+            if not required:
+                continue
+            rows = conn.execute(
+                """
+                SELECT model, source_run_meta_json
+                FROM day0_hourly_vectors
+                WHERE city = ? AND target_date = ?
+                ORDER BY captured_at DESC
+                """,
+                (city_name, target_date),
+            ).fetchall()
+            latest: dict[str, Mapping[str, object]] = {}
+            for row in rows:
+                model = str(row[0] or "").strip()
+                if model in latest or model not in required:
+                    continue
+                try:
+                    payload = json.loads(str(row[1] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = None
+                latest[model] = payload if isinstance(payload, Mapping) else {}
+            for model, hwm in required.items():
+                payload = latest.get(model)
+                actual = _provider_run_identity_from_meta(
+                    payload,
+                    expected_model=model,
+                )
+                if actual is None:
+                    due.add((city_name, target_date))
+                    break
+                if actual < (
+                    hwm.run_initialisation_time,
+                    hwm.run_availability_time,
+                ):
+                    due.add((city_name, target_date))
+                    break
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+    return frozenset(due)
+
+
+def _vectors_trailing_provider_hwm(
+    vectors: Iterable[Day0HourlyVector],
+    *,
+    required_hwm: Mapping[str, Day0ProviderRunHwm],
+) -> tuple[str, ...]:
+    """Identify exact payloads that do not prove their scheduling HWM."""
+
+    by_model = {str(vector.model): vector for vector in vectors}
+    trailing: list[str] = []
+    for model, hwm in required_hwm.items():
+        vector = by_model.get(model)
+        try:
+            payload = json.loads(str(vector.source_run_meta_json or ""))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            trailing.append(model)
+            continue
+        actual = _provider_run_identity_from_meta(payload, expected_model=model)
+        if actual is None:
+            trailing.append(model)
+            continue
+        if actual < (hwm.run_initialisation_time, hwm.run_availability_time):
+            trailing.append(model)
+    return tuple(trailing)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -628,6 +1118,195 @@ def fetch_day0_hourly_vectors(
         vectors,
         request_hash,
     )
+
+
+def _same_model_update(left: Any, right: Any) -> bool:
+    """Require the metadata bracket to name one immutable provider run."""
+
+    return bool(
+        left is not None
+        and right is not None
+        and left.last_run_initialisation_time == right.last_run_initialisation_time
+        and left.last_run_availability_time == right.last_run_availability_time
+        and left.last_run_modification_time == right.last_run_modification_time
+    )
+
+
+def parse_openmeteo_ensemble_hourly_payload(
+    payload: object,
+    *,
+    city: Any,
+    captured_at: str,
+    source_meta_by_member: Mapping[str, Mapping[str, object]],
+) -> list[Day0HourlyVector]:
+    """Parse one complete IFS025 control+50 perturbed-member response.
+
+    Open-Meteo names the control field ``temperature_2m`` and perturbed
+    members ``temperature_2m_member01`` ... ``member50``.  A partial response
+    is unusable: the current-evidence within-spread must retain all 51 members.
+    """
+
+    if not isinstance(payload, Mapping) or not isinstance(
+        payload.get("hourly"), Mapping
+    ):
+        return []
+    hourly = payload["hourly"]
+    times = hourly.get("time")
+    if not isinstance(times, (list, tuple)) or not times:
+        return []
+    expected = day0_source_clock_ensemble_member_models()
+    if set(source_meta_by_member) != set(expected):
+        return []
+    vectors: list[Day0HourlyVector] = []
+    for index, model in enumerate(expected):
+        key = "temperature_2m" if index == 0 else f"temperature_2m_member{index:02d}"
+        values = hourly.get(key)
+        if not isinstance(values, (list, tuple)) or len(values) != len(times):
+            return []
+        pairs: list[tuple[str, float]] = []
+        for timestamp, raw in zip(times, values, strict=True):
+            if raw is None or isinstance(raw, bool):
+                return []
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return []
+            if not math.isfinite(value):
+                return []
+            pairs.append((str(timestamp), value))
+        vectors.append(
+            Day0HourlyVector(
+                model=model,
+                city=str(getattr(city, "name", "") or ""),
+                target_date="",
+                timezone_name=str(getattr(city, "timezone")),
+                captured_at=captured_at,
+                times=tuple(timestamp for timestamp, _value in pairs),
+                temps_c=tuple(value for _timestamp, value in pairs),
+                source_run_meta_json=json.dumps(
+                    source_meta_by_member[model],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    return vectors
+
+
+def fetch_day0_source_clock_ensemble_vectors(
+    city: Any,
+    *,
+    now: Optional[datetime] = None,
+    timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+) -> tuple[list[Day0HourlyVector], str]:
+    """Fetch one possession-bracketed 51-member hourly ENS carrier.
+
+    The provider metadata is read before and after the response.  A run change
+    inside that bracket discards the payload, so a local fetch clock can never
+    masquerade as provider-cycle identity.  The standard Ensemble API response
+    is accepted only with that exact metadata bracket and is persisted through
+    the same replayable request hash as deterministic Day0 paths.
+    """
+
+    from src.data.openmeteo_client import fetch as fetch_openmeteo
+    from src.data.openmeteo_model_updates import fetch_model_updates
+    from src.strategy.live_inference.source_clock_vnext import (
+        source_publicly_usable_at,
+    )
+
+    decision_time = (now or datetime.now(UTC)).astimezone(UTC)
+    captured_at = decision_time.isoformat()
+    try:
+        before_rows = fetch_model_updates(
+            [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            timeout_seconds=max(0.25, float(timeout_s)),
+            max_workers=1,
+            priority=True,
+        )
+        if len(before_rows) != 1:
+            return [], ""
+        before = before_rows[0]
+        if (
+            before.last_run_modification_time is None
+            or before.last_run_initialisation_time > decision_time
+            or before.last_run_availability_time > decision_time
+            or decision_time < source_publicly_usable_at(before.to_source_run_clock())
+        ):
+            return [], ""
+        params = {
+            "latitude": float(getattr(city, "lat")),
+            "longitude": float(getattr(city, "lon")),
+            "hourly": "temperature_2m",
+            "models": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            "timezone": str(getattr(city, "timezone")),
+            "forecast_hours": DAY0_HOURLY_FORECAST_HOURS,
+            "temperature_unit": "celsius",
+            "cell_selection": "land",
+        }
+        fetch_started = datetime.now(UTC)
+        payload = fetch_openmeteo(
+            OPENMETEO_ENSEMBLE_URL,
+            params,
+            timeout=max(0.25, float(timeout_s)),
+            max_retries=1,
+            endpoint_label="day0_source_clock_ensemble",
+        )
+        fetch_finished = datetime.now(UTC)
+        after_rows = fetch_model_updates(
+            [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            timeout_seconds=max(0.25, float(timeout_s)),
+            max_workers=1,
+            priority=True,
+        )
+        after = after_rows[0] if len(after_rows) == 1 else None
+        if not _same_model_update(before, after):
+            return [], ""
+        request_hash = build_request_hash(
+            endpoint=OPENMETEO_ENSEMBLE_URL,
+            params={
+                **params,
+                "provider_run": before.last_run_initialisation_time.isoformat(),
+            },
+            models=[DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            captured_at=captured_at,
+            payload=payload,
+        )
+        member_meta: dict[str, Mapping[str, object]] = {}
+        for model in day0_source_clock_ensemble_member_models():
+            member_meta[model] = _day0_provider_run_meta(
+                model=model,
+                model_api_id=DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+                run=before.last_run_initialisation_time.astimezone(UTC),
+                available_at=before.last_run_availability_time.astimezone(UTC),
+                modified_at=before.last_run_modification_time.astimezone(UTC),
+                authority="provider_meta_declared",
+                endpoint_mode="ensemble_meta_stamped",
+                request_params={
+                    **params,
+                    "endpoint": OPENMETEO_ENSEMBLE_URL,
+                    "run": before.last_run_initialisation_time.isoformat(),
+                },
+                request_hash=request_hash,
+                fetch_started_at=fetch_started,
+                fetch_finished_at=fetch_finished,
+            )
+        vectors = parse_openmeteo_ensemble_hourly_payload(
+            payload,
+            city=city,
+            captured_at=captured_at,
+            source_meta_by_member=member_meta,
+        )
+        if len(vectors) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+            return [], ""
+        return vectors, request_hash
+    except Exception as exc:  # noqa: BLE001 - missing carrier leaves ENTRY fail-closed.
+        logger.warning(
+            "DAY0_SOURCE_CLOCK_ENSEMBLE_FETCH_FAILED city=%s exc=%s: %s",
+            getattr(city, "name", "?"),
+            type(exc).__name__,
+            exc,
+        )
+        return [], ""
 
 
 def parse_openmeteo_hourly_payload(
@@ -1334,6 +2013,7 @@ def _refresh_throttled_locked(
     *,
     now_monotonic: float,
     interval_s: float,
+    bypass_interval: bool = False,
 ) -> bool:
     """Return whether refresh is throttled while ``_REFRESH_LOCK`` is held."""
 
@@ -1342,6 +2022,8 @@ def _refresh_throttled_locked(
         if now_monotonic < retry_not_before:
             return True
         _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+    if bypass_interval:
+        return False
     last = _LAST_REFRESH_MONOTONIC.get(refresh_key)
     return last is not None and now_monotonic - last < float(interval_s)
 
@@ -1358,6 +2040,8 @@ def maybe_refresh_day0_hourly_vectors(
     quota_priority_cities: int = 0,
     allow_priority_recovery: bool = False,
     remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
+    provider_run_hwm: Mapping[str, Day0ProviderRunHwm] | None = None,
+    release_due_city_dates: Iterable[tuple[str, str]] = (),
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
 ) -> int | Day0HourlyRefreshStats:
@@ -1468,6 +2152,10 @@ def maybe_refresh_day0_hourly_vectors(
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
+    release_due_scopes = frozenset(
+        (str(city).strip(), str(target_date).strip())
+        for city, target_date in release_due_city_dates
+    )
     for city_index, city in enumerate(cities):
         if checked >= max(0, int(max_cities)):
             break
@@ -1490,6 +2178,14 @@ def maybe_refresh_day0_hourly_vectors(
             models = day0_hourly_models_for_city(city)
             if not models:
                 continue
+            required_hwm = {
+                model: provider_run_hwm[model]
+                for model in models
+                if provider_run_hwm is not None and model in provider_run_hwm
+            }
+            release_due = (
+                (name, target_dates[0]) in release_due_scopes and bool(required_hwm)
+            )
             critical_city_count = max(0, int(quota_critical_cities))
             priority_city_count = max(0, int(quota_priority_cities))
             if city_index < critical_city_count:
@@ -1519,6 +2215,16 @@ def maybe_refresh_day0_hourly_vectors(
                 quota_lane = "maintenance"
                 quota_context = nullcontext()
                 transport_quota_context = nullcontext()
+            ensemble_target_dates = (
+                day0_source_clock_ensemble_target_dates(
+                    city=city,
+                    decision_time=decision_time,
+                )
+                if quota_lane in {"priority", "recovery"}
+                else ()
+            )
+            ensemble_vectors: list[Day0HourlyVector] = []
+            ensemble_request_hash = ""
             with _REFRESH_LOCK:
                 retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(
                     refresh_key
@@ -1533,6 +2239,7 @@ def maybe_refresh_day0_hourly_vectors(
                     refresh_key,
                     now_monotonic=now_monotonic,
                     interval_s=interval_s,
+                    bypass_interval=release_due,
                 ):
                     skipped_throttle += 1
                     continue
@@ -1559,6 +2266,7 @@ def maybe_refresh_day0_hourly_vectors(
                         refresh_key,
                         now_monotonic=now_monotonic,
                         interval_s=interval_s,
+                        bypass_interval=release_due,
                     ):
                         skipped_throttle += 1
                         continue
@@ -1573,6 +2281,14 @@ def maybe_refresh_day0_hourly_vectors(
                         raise
                     vectors, request_hash = fetch_day0_hourly_vectors(
                         city, models=models, now=decision_time
+                    )
+                if ensemble_target_dates:
+                    ensemble_vectors, ensemble_request_hash = (
+                        fetch_day0_source_clock_ensemble_vectors(
+                            city,
+                            now=decision_time,
+                            timeout_s=timeout_s,
+                        )
                     )
             expected_models = tuple(dict.fromkeys(str(model) for model in models))
             vector_models = tuple(dict.fromkeys(str(vector.model) for vector in vectors))
@@ -1615,6 +2331,23 @@ def maybe_refresh_day0_hourly_vectors(
                     reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
                 )
                 continue
+            trailing_hwm_models = (
+                _vectors_trailing_provider_hwm(vectors, required_hwm=required_hwm)
+                if release_due
+                else ()
+            )
+            if trailing_hwm_models:
+                mark_incomplete(
+                    refresh_key=refresh_key,
+                    quota_lane=quota_lane,
+                    name=name,
+                    target_dates=target_dates,
+                    expected_models=expected_models,
+                    available_models=vector_models,
+                    missing_models=trailing_hwm_models,
+                    reason="DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED",
+                )
+                continue
 
             strict_bundles: dict[str, tuple[datetime, list[Day0HourlyVector]]] = {}
             for target_date in target_dates:
@@ -1654,6 +2387,46 @@ def maybe_refresh_day0_hourly_vectors(
                     request_hash=request_hash,
                     lock_blocking=persist_lock_blocking,
                 )
+            if ensemble_target_dates:
+                ensemble_expected = day0_source_clock_ensemble_member_models()
+                for target_date in ensemble_target_dates:
+                    window_start = strict_window_start(city, target_date)
+                    selected_ensemble = (
+                        select_ready_day0_hourly_vectors(
+                            ensemble_vectors,
+                            target_date=target_date,
+                            now=decision_time,
+                            expected_models=ensemble_expected,
+                            require_expected=True,
+                            max_bundle_skew_minutes=(
+                                DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
+                            ),
+                            remaining_window_start=window_start,
+                            require_complete_remaining_window=True,
+                        )
+                        if window_start is not None
+                        and ensemble_request_hash
+                        and len(ensemble_vectors)
+                        == DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT
+                        else []
+                    )
+                    if not selected_ensemble:
+                        logger.warning(
+                            "DAY0_SOURCE_CLOCK_ENSEMBLE_BUNDLE_UNAVAILABLE "
+                            "city=%s target_date=%s available=%d expected=%d",
+                            name,
+                            target_date,
+                            len(ensemble_vectors),
+                            DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+                        )
+                        continue
+                    persisted += persist_day0_hourly_vectors(
+                        selected_ensemble,
+                        target_date=target_date,
+                        request_hash=ensemble_request_hash,
+                        endpoint=OPENMETEO_ENSEMBLE_URL,
+                        lock_blocking=persist_lock_blocking,
+                    )
             drained = all(
                 read_freshest_day0_hourly_vectors(
                     city=name,

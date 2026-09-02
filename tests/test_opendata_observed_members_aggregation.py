@@ -1,5 +1,5 @@
 # Created: 2026-05-30
-# Last reused/audited: 2026-05-30
+# Last reused/audited: 2026-08-29
 # Authority basis: Live shadow seamhunt 2026-05-30 — source_run.observed_members
 #   was min()-poisoned to 0 by boundary-ambiguous all-null snapshot rows, which
 #   set source_run_completeness_status=PARTIAL and vetoed every positive-edge
@@ -354,8 +354,8 @@ def test_minority_boundary_quarantine_coverage_not_blocked_on_missing_members(fo
     assert coverage_row["readiness_status"] == "LIVE_ELIGIBLE"
 
 
-def test_majority_boundary_quarantine_coverage_still_blocked(forecasts_conn):
-    """Majority-ambiguous (boundary_ambiguous=1) rows keep the full 51 expectation."""
+def test_majority_boundary_quarantine_coverage_is_typed_structural(forecasts_conn):
+    """Raw-complete boundary ambiguity is not mislabeled as missing data."""
     conn = forecasts_conn
     source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-30T00Z:majority"
     quarantined = 30
@@ -400,7 +400,8 @@ def test_majority_boundary_quarantine_coverage_still_blocked(forecasts_conn):
 
     coverage_row = conn.execute(
         """
-        SELECT expected_members, observed_members, completeness_status, readiness_status
+        SELECT expected_members, observed_members, completeness_status,
+               readiness_status, reason_code
         FROM source_run_coverage
         WHERE source_run_id = ? AND city = ?
         """,
@@ -411,3 +412,4 @@ def test_majority_boundary_quarantine_coverage_still_blocked(forecasts_conn):
     assert int(coverage_row["observed_members"]) == 21
     assert coverage_row["completeness_status"] != "COMPLETE"
     assert coverage_row["readiness_status"] == "BLOCKED"
+    assert coverage_row["reason_code"] == "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"

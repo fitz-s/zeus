@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 _SNAPSHOT_KEEP_DAYS = 30
 _SNAPSHOT_INLINE_EXPIRE_LIMIT = 50
 _SNAPSHOT_INLINE_EXPIRE_THROTTLE = 500
+_SNAPSHOT_CUTOFF_INDEX_NAME = "idx_executable_market_snapshots_captured_at_only"
 _SNAPSHOT_DELETE_TRIGGER_NAME = "no_delete_executable_market_snapshots"
 _SNAPSHOT_ANCHOR_EXCEPT_CLAUSE = """
       AND snapshot_id NOT IN (
@@ -94,6 +95,24 @@ def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None
     try:
         rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         if rowid is None or int(rowid) % _SNAPSHOT_INLINE_EXPIRE_THROTTLE != 0:
+            return
+
+        # Candidate discovery must remain index-bounded while the caller owns
+        # the live snapshot write lease.  The one-time retention migration
+        # creates this index before deleting backlog; a live DB that has not
+        # completed that prerequisite must skip inline expiry instead of
+        # scanning the append table under SQLite's single-writer transaction.
+        # On a large canonical DB that scan can retain the writer for minutes,
+        # starving held-position decisions and collateral refreshes.
+        cutoff_index_columns = conn.execute(
+            f"PRAGMA index_info({_SNAPSHOT_CUTOFF_INDEX_NAME!r})"
+        ).fetchall()
+        if not cutoff_index_columns or str(cutoff_index_columns[0][2]) != "captured_at":
+            logger.warning(
+                "_inline_expire_executable_market_snapshots: required cutoff "
+                "index %s is unavailable; skipping unbounded live-writer scan",
+                _SNAPSHOT_CUTOFF_INDEX_NAME,
+            )
             return
 
         # The row just inserted by this same call (rowid = last_insert_rowid())

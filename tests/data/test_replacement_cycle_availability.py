@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-08-31
 # Authority basis: operator directive 2026-06-11 ~03:40Z (automatic download, ahead of
 #   need, NO guessed numbers) and 2026-06-18 live/experiment separation. Relationship
 #   tests for probe-resolved anchor cycle selection and fetch decision.
@@ -209,6 +209,28 @@ class TestProbeResolvedSelection:
         assert probe(cycle) is True
         assert single_runs_calls == []
 
+    def test_free_meta_frontier_avoids_repeated_metered_prepublication_400(
+        self, monkeypatch
+    ):
+        import src.data.replacement_cycle_availability as rca
+
+        current = _dt("2026-06-11T12:00:00")
+        wanted = _dt("2026-06-11T18:00:00")
+        single_runs_calls: list[None] = []
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+
+        probe = AnchorAvailabilityProbe(
+            urlopen=lambda *args, **kwargs: single_runs_calls.append(None),
+            meta_fetch=lambda: {
+                "run_initialisation_utc": current,
+                "run_availability_utc": current,
+                "run_modification_utc": current,
+            },
+        )
+
+        assert probe(wanted) is False
+        assert single_runs_calls == []
+
     def test_metered_single_runs_probe_is_last_rung(self, monkeypatch):
         # When neither free signal confirms, the metered probe still decides.
         import src.data.replacement_cycle_availability as rca
@@ -221,9 +243,28 @@ class TestProbeResolvedSelection:
                 "__exit__": lambda self, *exc: None,
             })(),
             meta_fetch=lambda: {},
+            allow_metered_fallback=True,
         )
 
         assert probe(_dt("2026-06-11T18:00:00")) is True
+
+    def test_production_probe_does_not_meter_when_free_probes_are_unavailable(
+        self, monkeypatch
+    ):
+        import src.data.replacement_cycle_availability as rca
+
+        metered_calls: list[datetime] = []
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: metered_calls.append(cycle) or True,
+        )
+
+        probe = AnchorAvailabilityProbe(meta_fetch=lambda: {})
+
+        assert probe(_dt("2026-06-11T18:00:00")) is False
+        assert metered_calls == []
 
     def test_production_single_run_probe_uses_shared_priority_quota(self, monkeypatch):
         import src.data.replacement_cycle_availability as rca
@@ -263,7 +304,16 @@ class TestProbeResolvedSelection:
 class TestPollFetchDecision:
     """The production poll layer: anchor high-water vs probed publication."""
 
-    def _run_poll(self, monkeypatch, tmp_path, *, anchor_pub, anchor_have, anchor_gaps=0):
+    def _run_poll(
+        self,
+        monkeypatch,
+        tmp_path,
+        *,
+        anchor_pub,
+        anchor_have,
+        anchor_gaps=0,
+        recovery_batches=(),
+    ):
         import scripts.download_replacement_forecast_current_targets as dl
         import src.data.replacement_cycle_availability as rca
         import src.data.replacement_forecast_production as prod
@@ -287,6 +337,25 @@ class TestPollFetchDecision:
             prod,
             "_current_target_anchor_gap_count",
             lambda db, cycle: anchor_gaps,
+        )
+        monkeypatch.setattr(
+            prod,
+            "_held_common_cycle_recovery_targets",
+            lambda db, *, decision_time: recovery_batches,
+        )
+        coverage_reads = 0
+
+        def _critical_after_download(_db, scopes, _cycle):
+            nonlocal coverage_reads
+            if not recovery_batches:
+                return ()
+            coverage_reads += 1
+            return tuple(scopes) if coverage_reads == 1 else ()
+
+        monkeypatch.setattr(
+            prod,
+            "_critical_scopes_missing_current_anchor",
+            _critical_after_download,
         )
 
         class _NoSourceClockChange:
@@ -371,6 +440,426 @@ class TestPollFetchDecision:
         assert fetched[0][1]["include_covered"] is False
         assert fetched[0][1]["missing_manifests_only"] is True
         assert fetched[0][1]["quota_priority"] is True
+
+    def test_held_scope_recovers_missing_newest_common_cycle(
+        self, monkeypatch, tmp_path
+    ):
+        ensemble_cycle = _dt("2026-06-10T06:00:00")
+        scope = ("Moscow", "2026-06-11", "high")
+
+        report, fetched = self._run_poll(
+            monkeypatch,
+            tmp_path,
+            anchor_pub=ensemble_cycle,
+            anchor_have=ensemble_cycle,
+            recovery_batches=((ensemble_cycle, (scope,)),),
+        )
+
+        assert len(fetched) == 1
+        recovered = fetched[0][1]
+        assert recovered["cycle"] == ensemble_cycle
+        assert recovered["required_scopes"] == (scope,)
+        assert recovered["limit"] is None
+        assert recovered["quota_critical"] is True
+        assert recovered.get("quota_priority") is not True
+        assert report["held_common_cycle_recovery_status"] == (
+            "HELD_COMMON_CYCLE_GAPS_FOUND"
+        )
+        assert report["held_common_cycle_recovery"] == [
+            {
+                "cycle": ensemble_cycle.isoformat(),
+                "scopes": [list(scope)],
+                "status": "OK",
+                "written_manifest_count": None,
+                "written_manifests": [],
+                "committed_families": [list(scope)],
+            }
+        ]
+
+
+def test_held_common_cycle_recovery_does_not_retry_rolled_past_run(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    common_cycle = _dt("2026-06-10T06:00:00")
+    anchor_hwm = _dt("2026-06-10T12:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *args, **kwargs: ((common_cycle, (scope,)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: anchor_hwm,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (scope,),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("rolled-past provider run must not be retried")
+        ),
+    )
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report == {
+        "status": "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST",
+        "decision_time": "2026-06-10T22:30:00+00:00",
+        "committed_families": (),
+        "recoveries": [
+            {
+                "cycle": common_cycle.isoformat(),
+                "scopes": [list(scope)],
+                "status": "PROVIDER_CYCLE_ROLLED_PAST",
+                "anchor_hwm": anchor_hwm.isoformat(),
+                "committed_families": [],
+            }
+        ],
+    }
+
+
+def test_held_common_cycle_recovery_reseeds_only_reproven_families(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    cycle = _dt("2026-06-10T12:00:00")
+    recovered = ("Moscow", "2026-06-11", "high")
+    still_missing = ("Tel Aviv", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *args, **kwargs: ((cycle, (recovered, still_missing)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: cycle,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (still_missing,),
+    )
+    manifest = tmp_path / "moscow-high.manifest.json"
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "written_manifest_count": 1,
+            "written_manifests": [str(manifest)],
+        },
+    )
+    reseeds: list[dict[str, object]] = []
+
+    def enqueue(_cfg, **kwargs):
+        reseeds.append(kwargs)
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", enqueue)
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+            "seed_dir": tmp_path / "seeds",
+            "raw_manifest_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report is not None
+    assert report["committed_families"] == (recovered,)
+    assert report["recoveries"][0]["committed_families"] == [list(recovered)]
+    assert reseeds == [
+        {
+            "scopes": (recovered,),
+            "manifest_snapshot": {"manifest_paths": (str(manifest),)},
+        }
+    ]
+    assert report["recoveries"][0]["reseed_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert report["recoveries"][0]["seeds_enqueued"] == 1
+
+
+def test_held_common_cycle_recovery_reseeds_preexisting_exact_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    cycle = _dt("2026-06-10T12:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *args, **kwargs: ((cycle, (scope,)),),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_per_leg_downloaded_cycle",
+        lambda *args, **kwargs: cycle,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("preexisting exact anchor must not be downloaded again")
+        ),
+    )
+    reseeds: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: reseeds.append(kwargs)
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+    )
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+    )
+
+    assert report is not None
+    assert report["committed_families"] == (scope,)
+    assert reseeds == [{"scopes": (scope,)}]
+    assert report["recoveries"] == [
+        {
+            "cycle": cycle.isoformat(),
+            "scopes": [list(scope)],
+            "status": "ANCHOR_ALREADY_CURRENT_RESEED_REQUIRED",
+            "written_manifest_count": 0,
+            "written_manifests": [],
+            "committed_families": [list(scope)],
+            "reseed_status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 1,
+        }
+    ]
+
+
+def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    import sqlite3
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_materialization_seed_builder as seed_builder
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.replacement_input_hwm as input_hwm
+    from src.data.replacement_forecast_current_target_plan import SOURCE_ID
+
+    ensemble_cycle = _dt("2026-06-10T06:00:00")
+    later_ensemble_cycle = _dt("2026-06-10T12:00:00")
+    baseline_available_at = _dt("2026-06-10T14:00:00")
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL
+        );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO forecast_posteriors(
+            source_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, runtime_layer
+        ) VALUES (?, ?, '2026-06-11', 'high', ?, ?, 'live')
+        """,
+        (
+            (
+                SOURCE_ID,
+                "Moscow",
+                "2026-06-10T00:00:00+00:00",
+                "2026-06-10T08:00:00+00:00",
+            ),
+            (
+                SOURCE_ID,
+                "Tel Aviv",
+                "2026-06-10T06:00:00+00:00",
+                "2026-06-10T14:00:00+00:00",
+            ),
+        ),
+    )
+    conn.commit()
+    conn.executemany(
+        """
+        INSERT INTO ensemble_snapshots(
+            city, target_date, temperature_metric,
+            source_cycle_time, source_available_at
+        ) VALUES (?, '2026-06-11', 'high', ?, ?)
+        """,
+        (
+            ("Moscow", ensemble_cycle.isoformat(), baseline_available_at.isoformat()),
+            ("Tel Aviv", ensemble_cycle.isoformat(), baseline_available_at.isoformat()),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    held = {
+        ("Moscow", "2026-06-11", "high"): 0,
+        ("Tel Aviv", "2026-06-11", "high"): 0,
+    }
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda: held)
+    monkeypatch.setattr(
+        input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: (
+            later_ensemble_cycle
+            if kwargs["decision_time"] > baseline_available_at
+            else ensemble_cycle
+        ),
+    )
+    monkeypatch.setattr(
+        seed_builder,
+        "latest_baseline_coverage_for_replacement_seed",
+        lambda *args, **kwargs: {
+            "source_cycle_time": ensemble_cycle.isoformat(),
+            "source_available_at": baseline_available_at.isoformat(),
+        },
+    )
+    checked: list[tuple[tuple[str, str, str], ...]] = []
+
+    def missing(_db, scopes, cycle):
+        assert cycle == ensemble_cycle
+        checked.append(tuple(scopes))
+        return tuple(scopes)
+
+    monkeypatch.setattr(prod, "_critical_scopes_missing_current_anchor", missing)
+
+    assert prod._held_common_cycle_anchor_gaps(
+        db,
+        decision_time=_dt("2026-06-10T22:30:00"),
+    ) == (
+        (ensemble_cycle, (("Moscow", "2026-06-11", "high"),)),
+    )
+    assert checked == [(('Moscow', '2026-06-11', 'high'),)]
+
+
+def test_common_cycle_recovery_reseeds_exact_scope_and_isolates_trigger_failure(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    scope = ("Moscow", "2026-08-31", "high")
+    recovery: dict[str, object] = {
+        "status": "HELD_COMMON_CYCLE_GAPS_FOUND",
+        "committed_families": (scope,),
+        "recoveries": [],
+    }
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_recover_held_common_cycle_anchors_if_needed",
+        lambda _cfg: recovery,
+    )
+    monkeypatch.setattr(prod, "_ingest_station_forecasts_if_due", lambda _cfg: None)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def _fusion(_cfg, **kwargs):
+        calls.append(("fusion", kwargs))
+        raise RuntimeError("isolated fusion failure")
+
+    def _cycle(_cfg, **kwargs):
+        calls.append(("cycle", kwargs))
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _cycle)
+
+    class _DegradedNoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": "test",
+            }
+
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _DegradedNoChange(),
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["status"] == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+    assert calls == [
+        (
+            "fusion",
+            {"scopes": (scope,), "changed_sources": ("ecmwf_ifs",)},
+        ),
+        ("cycle", {"scopes": (scope,)}),
+    ]
+    assert recovery["fusion_upgrade_status"] == "FUSION_UPGRADE_RESEED_FAILSOFT"
+    assert recovery["cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert recovery["cycle_advance_seeds_enqueued"] == 1
+    assert recovery["retryable"] is True
+    assert recovery["reseed_errors"] == (
+        "fusion_upgrade:RuntimeError: isolated fusion failure",
+    )
+
+
+def test_ingest_poll_calls_held_common_cycle_recovery() -> None:
+    import inspect
+
+    import src.ingest_main as ingest_main
+
+    source = inspect.getsource(ingest_main._replacement_availability_poll_tick)
+    assert "_recover_held_common_cycle_anchors_if_needed(cfg)" in source
+    assert source.index("_recover_held_common_cycle_anchors_if_needed(cfg)") < (
+        source.index("_ingest_station_forecasts_if_due(cfg)")
+    )
 
     def test_flag_off_is_inert(self, tmp_path):
         import src.data.replacement_forecast_production as prod

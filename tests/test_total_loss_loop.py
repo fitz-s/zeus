@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-25; last_reused=2026-08-25
+# Lifecycle: created=2026-08-22; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
 """Relationship antibodies for the event-time total-loss loop."""
@@ -321,9 +321,90 @@ def test_crossing_below_floor_creates_one_hard_incident(cfg: dict) -> None:
     assert second == []
 
 
+def _tracked_position(cfg: dict, position_id: str = "p1") -> dict:
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        return loop.tracked_positions(trades, history_days=365)[position_id]
+
+
+def test_historical_out_of_order_no_bid_does_not_amplify_newer_durable_state(
+    cfg: dict,
+) -> None:
+    _position(cfg)
+    position = _tracked_position(cfg)
+    with loop.memory(cfg) as mem:
+        loop._observe_quote(
+            mem,
+            position,
+            {
+                "evidence_id": "newer",
+                "quote_seen_at": "2026-08-22T09:00:10+00:00",
+                "best_bid_before": 0.20,
+            },
+            0.05,
+        )
+        for index in range(100):
+            assert loop._observe_quote(
+                mem,
+                position,
+                {
+                    "evidence_id": f"older-no-bid-{index}",
+                    "quote_seen_at": f"2026-08-22T08:59:{index % 60:02d}+00:00",
+                    "best_bid_before": None,
+                    "depth_before_json": json.dumps({"bids": [], "asks": []}),
+                },
+                0.05,
+                historical_backfill=True,
+            ) is None
+        mem.commit()
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE position_id='p1' AND crossing_kind='no_bid'"
+        ).fetchone()[0] == 0
+        state = mem.execute(
+            "SELECT evidence_id,quote_seen_at FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == ("newer", "2026-08-22T09:00:10+00:00")
+
+
+def test_historical_backfill_without_durable_state_discovers_and_advances_no_bid(
+    cfg: dict,
+) -> None:
+    _position(cfg)
+    position = _tracked_position(cfg)
+    quote = {
+        "evidence_id": "first-historical-no-bid",
+        "quote_seen_at": "2026-08-22T09:00:01+00:00",
+        "best_bid_before": None,
+        "depth_before_json": json.dumps({"bids": [], "asks": []}),
+    }
+    with loop.memory(cfg) as mem:
+        incident_id = loop._observe_quote(
+            mem, position, quote, 0.05, historical_backfill=True
+        )
+        repeated_id = loop._observe_quote(
+            mem, position, quote, 0.05, historical_backfill=True
+        )
+        mem.commit()
+        incident = mem.execute(
+            "SELECT crossing_evidence_id,crossing_kind FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        state = mem.execute(
+            "SELECT evidence_id,quote_seen_at,best_bid FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert incident_id
+    assert repeated_id == incident_id
+    assert tuple(incident) == ("first-historical-no-bid", "no_bid")
+    assert tuple(state) == (
+        "first-historical-no-bid",
+        "2026-08-22T09:00:01+00:00",
+        None,
+    )
+
+
 def test_settlement_full_loss_is_idempotent_and_keeps_floor_fields_null(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(loop, "now", lambda: datetime(2026, 8, 22, 12, 0, tzinfo=UTC))
     _settled_full_loss(cfg)
     monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
 
@@ -340,6 +421,380 @@ def test_settlement_full_loss_is_idempotent_and_keeps_floor_fields_null(
             "SELECT settled_at FROM settlement_facts"
         ).fetchall()
     assert settled == [("2026-08-22T10:00:00+00:00",)]
+
+
+def test_settlement_full_loss_retires_duplicate_quote_incident_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg)
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    with loop.memory(cfg) as mem:
+        for incident_id, crossing_kind, status in (
+            ("legacy-no-bid", "no_bid", "retry_pending"),
+            ("legacy-floor", "below_floor", "queued"),
+            ("active-no-bid", "no_bid", "running"),
+        ):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,t_floor,floor_price,observed_bid,"
+                "detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,'hard','p-settled',?,?,'yes-token','sell_yes',?,.05,?,"
+                "'2026-08-22T09:00:00+00:00',1,?,'blind','2026-08-22T09:00:00+00:00')",
+                (
+                    incident_id,
+                    f"evidence-{incident_id}",
+                    crossing_kind,
+                    None if crossing_kind == "no_bid" else "2026-08-22T09:00:00+00:00",
+                    None if crossing_kind == "no_bid" else 0.04,
+                    status,
+                ),
+            )
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,next_retry_at) "
+                "VALUES (?,'evidence_snapshot','retry_pending','legacy',?,?)",
+                (
+                    loop._evidence_debt_id(incident_id),
+                    "2026-08-22T09:00:00+00:00",
+                    "2026-08-22T09:05:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    position = _tracked_position(cfg, "p-settled")
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        candidate = loop._settlement_full_loss_candidate(trades, position)
+    assert candidate is not None
+    with loop.memory(cfg) as mem:
+        canonical_id = loop._insert_settlement_full_loss_incident(
+            mem, position, candidate, floor=0.05
+        )
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=16) == 1
+        mem.commit()
+    assert canonical_id
+
+    with loop.memory(cfg) as mem:
+        incidents = {
+            row["incident_id"]: row["status"]
+            for row in mem.execute(
+                "SELECT incident_id,status FROM incidents WHERE position_id='p-settled'"
+            )
+        }
+        debts = {
+            row["debt_id"]: (row["status"], row["next_retry_at"])
+            for row in mem.execute(
+                "SELECT debt_id,status,next_retry_at FROM controller_debt "
+                "WHERE debt_id LIKE 'evidence_snapshot:legacy-%' "
+                "OR debt_id='evidence_snapshot:active-no-bid'"
+            )
+        }
+        transitions = mem.execute(
+            "SELECT incident_id,reason FROM incident_transitions "
+            "WHERE reason LIKE 'superseded_by_settlement_full_loss:%' "
+            "ORDER BY incident_id"
+        ).fetchall()
+
+    assert incidents["legacy-no-bid"] == "observing"
+    assert incidents["legacy-floor"] == "queued"
+    assert incidents["active-no-bid"] == "running"
+    assert debts[loop._evidence_debt_id("legacy-no-bid")] == ("resolved", None)
+    assert debts[loop._evidence_debt_id("legacy-floor")] == (
+        "retry_pending",
+        "2026-08-22T09:05:00+00:00",
+    )
+    assert debts[loop._evidence_debt_id("active-no-bid")] == (
+        "retry_pending",
+        "2026-08-22T09:05:00+00:00",
+    )
+    assert [row["incident_id"] for row in transitions] == ["legacy-no-bid"]
+
+
+def test_settled_quote_incident_backlog_drain_is_bounded(cfg: dict) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'queued','blind',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        for index in range(3):
+            incident_id = f"legacy-{index}"
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,'hard','p1',?,'no_bid','yes-token',"
+                "'sell_yes',.05,?,1,'retry_pending','blind',?)",
+                (
+                    incident_id,
+                    f"evidence-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T10:00:00+00:00",
+                ),
+            )
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=2) == 2
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE crossing_kind='no_bid' "
+            "AND status='retry_pending'"
+        ).fetchone()[0] == 1
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=2) == 1
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=2) == 0
+
+
+def test_settled_quote_drain_cannot_overwrite_concurrent_claim(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'queued','blind',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('claimed','hard','p1','quote','no_bid','yes-token','sell_yes',.05,?,"
+            "1,'queued','blind',?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) "
+            "VALUES ('evidence_snapshot:claimed','evidence_snapshot','retry_pending','x',?)",
+            ("2026-08-22T09:00:00+00:00",),
+        )
+        original = loop._transition_if_status
+
+        def claim_first(conn, incident_id, to_stage, **kwargs):
+            conn.execute(
+                "UPDATE incidents SET status='running' WHERE incident_id=?",
+                (incident_id,),
+            )
+            return original(conn, incident_id, to_stage, **kwargs)
+
+        monkeypatch.setattr(loop, "_transition_if_status", claim_first)
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=1) == 0
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='claimed'"
+        ).fetchone()[0] == "running"
+        assert mem.execute(
+            "SELECT status FROM controller_debt "
+            "WHERE debt_id='evidence_snapshot:claimed'"
+        ).fetchone()[0] == "retry_pending"
+
+
+def test_corrected_settlement_does_not_suppress_later_no_bid(
+    cfg: dict,
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('corrected','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'observing','blind',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('later-no-bid','hard','p1','quote','no_bid','yes-token','sell_yes',.05,?,"
+            "1,'queued','blind',?)",
+            ("2026-08-22T11:00:00+00:00", "2026-08-22T11:00:00+00:00"),
+        )
+        assert loop._consolidate_settled_quote_incident_backlog(mem, limit=1) == 0
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='later-no-bid'"
+        ).fetchone()[0] == "queued"
+
+
+def test_settled_no_bid_backlog_index_contract_and_query_plan(cfg: dict) -> None:
+    with loop.memory(cfg) as mem:
+        assert loop._startup_partial_index_contract(mem) is True
+        plan = mem.execute(
+            "EXPLAIN QUERY PLAN SELECT incident_id,stage,status,position_id "
+            "FROM incidents INDEXED BY idx_settled_no_bid_backlog "
+            "WHERE crossing_kind='no_bid' "
+            "AND status IN ('queued','retry_pending') "
+            "ORDER BY detected_at,incident_id LIMIT ?",
+            (16,),
+        ).fetchall()
+    assert any(
+        "USING INDEX idx_settled_no_bid_backlog" in str(row[3]) for row in plan
+    )
+
+
+def test_blind_hard_revalidation_is_bounded_and_cursor_fair(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        for index in range(3):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,?,?,?,'no_bid','yes-token','sell_yes',"
+                ".05,?,1,'queued','blind',?)",
+                (
+                    f"hard-{index}",
+                    "hard",
+                    f"position-{index}",
+                    f"quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+        seen: list[str] = []
+        monkeypatch.setattr(
+            loop,
+            "_position_with_exposure",
+            lambda _trades, position_id: seen.append(position_id) or None,
+        )
+        plan = mem.execute(
+            "EXPLAIN QUERY PLAN SELECT incident_id,position_id,crossing_evidence_id,"
+            "crossing_kind,floor_price FROM incidents "
+            "INDEXED BY idx_hard_revalidation_queue "
+            "WHERE kind='hard' AND stage='blind' "
+            "AND status IN ('queued','retry_pending') AND incident_id>? "
+            "ORDER BY incident_id LIMIT ?",
+            ("", 2),
+        ).fetchall()
+        assert any(
+            "USING INDEX idx_hard_revalidation_queue (incident_id>?)" in str(row[3])
+            for row in plan
+        )
+        assert not any("TEMP B-TREE" in str(row[3]) for row in plan)
+        with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen == ["position-0", "position-1"]
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen == ["position-0", "position-1", "position-2"]
+            assert loop.revalidate_blind_hard_incidents(mem, trades, limit=2) == 0
+            assert seen[-2:] == ["position-0", "position-1"]
+
+
+def test_settled_no_bid_drain_commits_before_later_maintenance_timeout(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('stale-no-bid','hard','p1','quote','no_bid','yes-token','sell_yes',.05,?,"
+            "1,'retry_pending','blind',?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("interrupted: maintenance budget")
+        ),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="maintenance budget"):
+        loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='stale-no-bid'"
+        ).fetchone()[0] == "observing"
+
+
+def test_saturated_settled_no_bid_drain_defers_heavier_maintenance(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["legacy_incident_consolidation_batch_size"] = 1
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        for index in range(2):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,'hard','p1',?,'no_bid','yes-token',"
+                "'sell_yes',.05,?,1,'retry_pending','blind',?)",
+                (
+                    f"stale-{index}",
+                    f"quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: pytest.fail("heavier maintenance must defer"),
+    )
+    outcome = loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert outcome.postcommit_deferred is True
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE crossing_kind='no_bid' "
+            "AND status='retry_pending'"
+        ).fetchone()[0] == 1
+
+
+def test_saturated_drain_fairness_preserves_terminal_detection_progress(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["legacy_incident_consolidation_batch_size"] = 1
+    cfg["loop"]["legacy_consolidation_fairness_interval"] = 2
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+            "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+            "status,stage,updated_at) VALUES "
+            "('settled','hard','p1','settlement','settlement_full_loss','yes-token',"
+            "'sell_yes',.05,?,1,'completed','production',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        for index in range(2):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,"
+                "crossing_kind,held_token_id,held_direction,floor_price,detected_at,priority,"
+                "status,stage,updated_at) VALUES (?,'hard','p1',?,'no_bid','yes-token',"
+                "'sell_yes',.05,?,1,'retry_pending','blind',?)",
+                (
+                    f"fair-{index}",
+                    f"fair-quote-{index}",
+                    f"2026-08-22T09:00:0{index}+00:00",
+                    "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+    first = loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert first.postcommit_deferred is True
+    reached: list[bool] = []
+    monkeypatch.setattr(
+        loop,
+        "revalidate_blind_hard_incidents",
+        lambda *_args, **_kwargs: reached.append(True) or (_ for _ in ()).throw(
+            sqlite3.OperationalError("interrupted: fairness witness")
+        ),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="fairness witness"):
+        loop._detect_maintenance(cfg, loop.time.monotonic() + 1)
+    assert reached == [True]
 
 
 def test_settlement_identity_survives_projection_and_payload_enrichment(
@@ -510,6 +965,7 @@ def test_repeated_chain_mirror_settled_events_are_exactly_once(
 def test_stable_settlement_consolidates_legacy_duplicates_without_collateral(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(loop, "now", lambda: datetime(2026, 8, 22, 12, tzinfo=UTC))
     _settled_full_loss(cfg, payload={"outcome": 0})
     monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
     assert len(loop.detect(cfg)) == 1
@@ -823,6 +1279,7 @@ def test_new_position_event_changes_data_fingerprint_and_retries_capacity_debt(
 def test_real_large_snapshot_hits_tiny_capacity_once_then_next_incident_advances(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(loop, "now", lambda: datetime(2026, 8, 22, 12, 0, tzinfo=UTC))
     cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=15000, evidence_max_bytes=1024 * 1024)
     _position(cfg, position_id="real-large-a")
     _position(cfg, position_id="real-large-b")
@@ -908,6 +1365,31 @@ def test_daemon_publishes_fresh_status_before_slow_evidence_maintenance(
 
     assert loop.daemon(cfg) == 0
     assert observed and observed[0]["pid"] == os.getpid()
+
+
+def test_controller_status_health_rejects_stale_dead_and_wrong_command(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixed = datetime(2026, 8, 28, 14, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    fresh = {"alive": True, "pid": 123, "at": fixed.isoformat()}
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: "/repo/total_loss_loop.py daemon")
+    assert loop.controller_status_health(cfg, fresh, observed_at=fixed)["healthy"] is True
+
+    stale = dict(fresh, at=(fixed - timedelta(seconds=6)).isoformat())
+    assert loop.controller_status_health(cfg, stale, observed_at=fixed)["reason"] == "controller_status_stale"
+
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: False)
+    assert loop.controller_status_health(cfg, fresh, observed_at=fixed)["reason"] == "controller_pid_dead"
+
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: "/usr/bin/python unrelated.py daemon")
+    assert loop.controller_status_health(cfg, fresh, observed_at=fixed)["reason"] == "controller_command_mismatch"
+
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: "/repo/total_loss_loop.py daemon")
+    loop.atomic_json(Path(cfg["paths"]["runtime"]) / "status.json", fresh)
+    assert loop.status(cfg)["controller"]["healthy"] is True
 
 
 def test_daemon_startup_status_precedes_bounded_large_run_reconcile(
@@ -1813,7 +2295,9 @@ def test_early_memory_guard_interrupt_recovers_candidates_without_raise(cfg: dic
     assert incident_id in result["deferred"]
 
 
-def test_capture_summary_exposes_triple_degradation(cfg: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_expired_capture_classifies_new_candidate_before_receipt_failure(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
     incident_id = "summary-triple-degradation"
     with loop.memory(cfg) as mem:
         mem.execute(
@@ -1823,8 +2307,9 @@ def test_capture_summary_exposes_triple_degradation(cfg: dict, monkeypatch: pyte
         mem.commit()
     monkeypatch.setattr(loop, "atomic_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("persistence full")))
     result = loop._capture_hard_evidence(cfg, [], scan_all=True, budget={"deadline": loop.time.monotonic() - 1.0, "remaining": 1, "max_bytes": 1024})
+    assert result["deferred"] == [incident_id]
     assert result["controller_degraded"]["status"] == "controller_degraded"
-    assert "EVIDENCE_CONTROLLER_DEGRADED" in capsys.readouterr().err
+    assert result["controller_degraded"]["reason_code"] == "EVIDENCE_EMERGENCY_DEBT_PERSISTENCE_FAILED"
 
 
 def test_reaper_capacity_interrupt_defers_current_and_remaining_ids(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2808,75 +3293,6 @@ def test_absent_bid_is_hard_no_book_incident_without_fabricated_floor_time(cfg: 
     assert row["t_floor"] is None
 
 
-def test_velocity_uses_token_time_index_for_latest_three_quotes(cfg: dict) -> None:
-    for evidence_id, at, bid in (
-        ("velocity-1", "2026-08-22T09:00:01+00:00", 0.80),
-        ("velocity-2", "2026-08-22T09:00:02+00:00", 0.70),
-        ("velocity-3", "2026-08-22T09:00:03+00:00", 0.60),
-        ("velocity-4", "2026-08-22T09:00:04+00:00", 0.50),
-    ):
-        _quote(cfg, evidence_id, at, bid, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        plan = conn.execute(
-            "EXPLAIN QUERY PLAN "
-            "SELECT quote_seen_at,best_bid_before "
-            "FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction=? "
-            "AND best_bid_before IS NOT NULL "
-            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token", "buy_yes"),
-        ).fetchall()
-        newest = conn.execute(
-            "SELECT quote_seen_at FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction=? "
-            "AND best_bid_before IS NOT NULL "
-            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token", "buy_yes"),
-        ).fetchall()
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    plan_text = " ".join(str(column) for row in plan for column in row).upper()
-    assert "USING INDEX IDX_EXECUTION_FEASIBILITY_EVIDENCE_TOKEN_TIME" in plan_text
-    assert "SCAN EXECUTION_FEASIBILITY_EVIDENCE" not in plan_text
-    assert "TEMP B-TREE" not in plan_text
-    assert [row[0] for row in newest] == [
-        "2026-08-22T09:00:04+00:00",
-        "2026-08-22T09:00:03+00:00",
-        "2026-08-22T09:00:02+00:00",
-    ]
-    assert velocity == pytest.approx(-0.10)
-    assert acceleration == pytest.approx(0.0)
-
-
-@pytest.mark.parametrize("invalid_bid", ["not-a-price", "NaN", "+Infinity", "-Infinity"])
-def test_velocity_drops_invalid_sqlite_quote_values(cfg: dict, invalid_bid: str) -> None:
-    _quote(cfg, "velocity-finite-left", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
-    _quote(cfg, "velocity-invalid", "2026-08-22T09:00:02+00:00", invalid_bid, latest=False)
-    _quote(cfg, "velocity-finite-right", "2026-08-22T09:00:03+00:00", 0.60, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    assert velocity == pytest.approx(-0.10)
-    assert acceleration == pytest.approx(0.0)
-
-
-def test_velocity_returns_zero_with_fewer_than_two_finite_recent_quotes(cfg: dict) -> None:
-    _quote(cfg, "velocity-finite-old", "2026-08-22T09:00:01+00:00", 0.80, latest=False)
-    for evidence_id, at, bid in (
-        ("velocity-nan", "2026-08-22T09:00:02+00:00", "NaN"),
-        ("velocity-positive-infinity", "2026-08-22T09:00:03+00:00", "+Infinity"),
-        ("velocity-negative-infinity", "2026-08-22T09:00:04+00:00", "-Infinity"),
-    ):
-        _quote(cfg, evidence_id, at, bid, latest=False)
-
-    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
-        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
-
-    assert (velocity, acceleration) == (0.0, 0.0)
-
-
 def test_depth_top_bid_overrides_conflicting_zero_scalar(cfg: dict) -> None:
     _position(cfg)
     _quote(
@@ -2971,6 +3387,113 @@ def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg
     hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
     assert len(hard) == 1
     assert hard[0]["crossing_evidence_id"] == "q-hard"
+
+
+@pytest.mark.parametrize("current_bid", (0.0, None))
+def test_incomplete_latest_cannot_hide_corroborated_no_bid_catchup(
+    cfg: dict,
+    current_bid: float | None,
+) -> None:
+    """Restart catch-up preserves a complete no-bid book under a newer scalar zero."""
+    _position(cfg, direction="buy_no")
+    _quote(
+        cfg,
+        "buy-no-bid",
+        "2026-08-22T09:00:01+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-zero",
+        "2026-08-22T09:00:02+00:00",
+        current_bid,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-zero'"
+        )
+
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_kind"] == "no_bid"
+    assert hard[0]["crossing_evidence_id"] == "buy-no-bid"
+    assert hard[0]["t_floor"] is None
+
+
+def test_corroborated_no_bid_stays_one_episode_behind_newer_incomplete_latest(
+    cfg: dict,
+) -> None:
+    _position(cfg, direction="buy_no")
+    _quote(
+        cfg,
+        "buy-no-bid-1",
+        "2026-08-22T09:00:01+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-1",
+        "2026-08-22T09:00:02+00:00",
+        0.0,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-1'"
+        )
+
+    loop.detect(cfg)
+    with loop.memory(cfg) as conn:
+        conn.execute(
+            "UPDATE incidents SET status='blocked',stage='evidence' "
+            "WHERE crossing_kind='no_bid'"
+        )
+        conn.commit()
+
+    _quote(
+        cfg,
+        "buy-no-bid-2",
+        "2026-08-22T09:00:03+00:00",
+        None,
+        token="no-token",
+        direction="buy_no",
+    )
+    _quote(
+        cfg,
+        "sell-incomplete-2",
+        "2026-08-22T09:00:04+00:00",
+        0.0,
+        token="no-token",
+        direction="sell_no",
+    )
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete-2'"
+        )
+
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["crossing_kind"] == "no_bid"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_evidence_id"] == "buy-no-bid-2"
+    with loop.memory(cfg) as conn:
+        state = conn.execute(
+            "SELECT quote_seen_at,quote_status,no_bid_episode_open "
+            "FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == ("2026-08-22T09:00:04+00:00", "no_bid", 1)
 
 
 def test_precursor_uses_buy_no_carrier_when_sell_no_latest_is_incomplete(cfg: dict) -> None:
@@ -3678,15 +4201,31 @@ def test_monitor_dynamics_detect_market_moving_before_probability(cfg: dict) -> 
             "last_monitor_market_price_is_fresh": True,
         },
     )
+    _event(
+        cfg, "monitor-3", "p1", 3, "MONITOR_REFRESHED",
+        "2026-08-22T09:00:20+00:00",
+        phase_before="active", phase_after="active",
+        payload={
+            "last_monitor_prob": 0.30,
+            "last_monitor_market_price": 0.05,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price_is_fresh": True,
+        },
+    )
 
     with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
-        probability_velocity, market_velocity, probability, fresh, _ = loop._monitor_dynamics(
-            trades,
-            "p1",
-        )
+        (
+            probability_velocity,
+            market_velocity,
+            market_acceleration,
+            probability,
+            fresh,
+            _,
+        ) = loop._monitor_dynamics(trades, "p1")
 
     assert probability_velocity == pytest.approx(0.0)
-    assert market_velocity == pytest.approx(-0.01)
+    assert market_velocity == pytest.approx(-0.015)
+    assert market_acceleration == pytest.approx(-0.005)
     assert probability == pytest.approx(0.30)
     assert fresh is True
 
@@ -5122,6 +5661,55 @@ def test_expired_budget_retry_backoff_is_stable_until_identity_changes(
     assert after_change[1] != before[3]
 
 
+def test_expired_due_gate_is_memory_only_and_repeated_path_does_not_grow_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exhausted build budget cannot turn a future debt into a retry storm."""
+    _queue_evidence_retry_incident(cfg, "expired-memory-only", "expired-memory-position")
+    fixed = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    opened: list[Path] = []
+
+    def fail_canonical_open(path: Path, **_kwargs: object) -> None:
+        opened.append(Path(path))
+        raise AssertionError("expired due gate must not open canonical databases")
+
+    monkeypatch.setattr(loop, "open_ro", fail_canonical_open)
+    expired = {"deadline": loop.time.monotonic() - 1.0, "remaining": 1, "max_bytes": 1024}
+    first = loop._capture_hard_evidence(cfg, ["expired-memory-only"], budget=expired)
+    assert first["deferred"] == ["expired-memory-only"]
+    with loop.memory(cfg) as mem:
+        before = tuple(mem.execute(
+            "SELECT attempts,updated_at,next_retry_at,retry_identity FROM controller_debt "
+            "WHERE debt_id=?",
+            ("evidence_snapshot:expired-memory-only",),
+        ).fetchone())
+        before_queue = tuple(mem.execute(
+            "SELECT key,value,updated_at FROM meta WHERE key IN (?,?) ORDER BY key",
+            ("evidence_queue", "evidence_queue_cursor"),
+        ).fetchall())
+
+    second = loop._capture_hard_evidence(
+        cfg,
+        ["expired-memory-only"],
+        budget={"deadline": loop.time.monotonic() - 1.0, "remaining": 1, "max_bytes": 1024},
+    )
+    assert second["deferred"] == ["expired-memory-only"]
+    with loop.memory(cfg) as mem:
+        after = tuple(mem.execute(
+            "SELECT attempts,updated_at,next_retry_at,retry_identity FROM controller_debt "
+            "WHERE debt_id=?",
+            ("evidence_snapshot:expired-memory-only",),
+        ).fetchone())
+        after_queue = tuple(mem.execute(
+            "SELECT key,value,updated_at FROM meta WHERE key IN (?,?) ORDER BY key",
+            ("evidence_queue", "evidence_queue_cursor"),
+        ).fetchall())
+    assert after == before
+    assert after_queue == before_queue
+    assert opened == []
+
+
 def test_large_not_due_debt_slice_skips_pair_and_heavy_queries(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5410,3 +5998,152 @@ def test_memory_gate_ignores_raw_trade_revision_while_not_due(
     result = loop._capture_hard_evidence(cfg, [incident_id])
     assert result["deferred"] == [incident_id]
     assert opens == []
+
+
+def test_recovery_indexes_cover_exact_ordering_and_bound_large_debt(cfg: dict) -> None:
+    cfg["loop"]["evidence_queue_batch_size"] = 3
+    with loop.memory(cfg) as mem:
+        for index in range(80):
+            incident_id = f"recovery-hard-{index:03d}"
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, "hard", f"p-{index}", f"e-{index}", "below_floor", "yes-token", "sell_yes", .05,
+                 f"2026-08-22T12:{index % 60:02d}:00+00:00", float(index), "queued", "evidence", "2026-08-22T12:00:00+00:00"),
+            )
+            mem.execute(
+                "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,next_retry_at) VALUES (?,?,?,?,?,?)",
+                (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "bounded", "2026-08-22T12:00:00+00:00",
+                 None if index % 2 == 0 else "2026-08-22T13:00:00+00:00"),
+            )
+        hard_plan = mem.execute(
+            "EXPLAIN QUERY PLAN SELECT incident_id FROM incidents WHERE kind='hard' "
+            "ORDER BY CASE WHEN status IN ('queued','running','retry_pending') THEN 0 ELSE 1 END, "
+            "priority DESC, detected_at DESC, incident_id LIMIT ?",
+            (3,),
+        ).fetchall()
+        debt_plan = mem.execute(
+            "EXPLAIN QUERY PLAN SELECT debt_id FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending' "
+            "ORDER BY next_retry_at IS NOT NULL, next_retry_at, debt_id LIMIT ?",
+            (3,),
+        ).fetchall()
+        mem.commit()
+    hard_text = " ".join(str(value) for row in hard_plan for value in row).upper()
+    debt_text = " ".join(str(value) for row in debt_plan for value in row).upper()
+    assert "IDX_EVIDENCE_RECOVERY_HARD" in hard_text
+    assert "IDX_EVIDENCE_RECOVERY_DEBT" in debt_text
+    assert "TEMP B-TREE" not in hard_text
+    assert "TEMP B-TREE" not in debt_text
+    assert "SCAN CONTROLLER_DEBT" not in debt_text
+    recovered, error = loop._recover_evidence_candidate_ids(cfg, limit=3)
+    assert error is None
+    assert len(recovered) == 3
+
+
+def test_due_gate_failure_preserves_known_candidate_without_creating_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["evidence_queue_batch_size"] = 2
+    incident_id = "known-hard"
+    recorded: list[tuple[str, str]] = []
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "e1", "below_floor", "yes-token", "sell_yes", 0.05,
+             "2026-08-22T12:00:00+00:00", 1.0, "queued", "blind", "2026-08-22T12:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,attempts,retry_identity,next_retry_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"evidence_snapshot:{incident_id}", "evidence_snapshot", "retry_pending", "existing",
+             "2026-08-22T12:00:00+00:00", 3, "memory:existing", "2099-01-01T00:00:00+00:00"),
+        )
+        mem.commit()
+    with loop.memory(cfg) as mem:
+        prior_debt = tuple(mem.execute(
+            "SELECT attempts,updated_at,retry_identity,next_retry_at FROM controller_debt "
+            "WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone())
+    monkeypatch.setattr(
+        loop,
+        "_memory_only_evidence_due_filter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(loop.EvidenceCapacityExceeded("time_budget")),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_recover_evidence_candidate_ids",
+        lambda *_args, **_kwargs: ([], "OperationalError:interrupted"),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_record_evidence_debt",
+        lambda _cfg, incident_id, reason, **_kwargs: recorded.append((incident_id, reason)),
+    )
+    result = loop._capture_hard_evidence(cfg, ["known-hard"])
+    assert result["deferred"] == ["known-hard"]
+    assert recorded == []
+    receipt = json.loads(
+        (Path(cfg["paths"]["runtime"]) / loop._EVIDENCE_RECOVERY_REMAINDER_RECEIPT).read_text()
+    )
+    assert receipt["incident_ids"] == ["known-hard"]
+    assert receipt["remainder_count"] == 1
+    with loop.memory(cfg) as mem:
+        assert tuple(mem.execute(
+            "SELECT attempts,updated_at,retry_identity,next_retry_at FROM controller_debt "
+            "WHERE debt_id=?",
+            (f"evidence_snapshot:{incident_id}",),
+        ).fetchone()) == prior_debt
+    assert result["controller_degraded"] == {
+        "status": "controller_degraded",
+        "reason_code": "EVIDENCE_DUE_FILTER_FAILED",
+        "error": "EvidenceCapacityExceeded:time_budget",
+    }
+
+
+def test_exhausted_recovery_bounds_due_gate_receipt_without_debt_writes(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"]["evidence_queue_batch_size"] = 2
+    caller_known = ["caller-0", "caller-1", "caller-2", "caller-3"]
+    recorded: list[str] = []
+    prior_context = {"deadline": loop.time.monotonic() + 60.0}
+    monkeypatch.setattr(
+        loop,
+        "_recover_evidence_candidate_ids",
+        lambda *_args, **_kwargs: (["recovered-0", "recovered-1"], "OperationalError:interrupted"),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_memory_only_evidence_due_filter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.EvidenceCapacityExceeded("time_budget")
+        ),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_record_evidence_debt",
+        lambda _cfg, incident_id, _reason, **_kwargs: recorded.append(incident_id),
+    )
+    loop._EVIDENCE_BUILD_CONTEXT = prior_context
+    try:
+        result = loop._capture_hard_evidence(
+            cfg,
+            caller_known,
+            budget={"deadline": loop.time.monotonic() - 1.0, "bytes": 0},
+        )
+    finally:
+        assert loop._EVIDENCE_BUILD_CONTEXT is prior_context
+        loop._EVIDENCE_BUILD_CONTEXT = None
+
+    receipt = json.loads(
+        (Path(cfg["paths"]["runtime"]) / loop._EVIDENCE_RECOVERY_REMAINDER_RECEIPT).read_text()
+    )
+    assert recorded == []
+    assert receipt["kind"] == "evidence_snapshot_recovery_remainder"
+    assert receipt["incident_ids"] == ["caller-0", "caller-1"]
+    assert receipt["remainder_count"] == cfg["loop"]["evidence_queue_batch_size"]
+    assert result["deferred"] == [*caller_known, "recovered-0", "recovered-1"]

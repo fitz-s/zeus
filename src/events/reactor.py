@@ -710,6 +710,15 @@ class EventSubmissionReceipt:
     # settlement shrink only lowers that raw bound. None on canonical/legacy/YES
     # receipts; the admission helper revalidates every scalar and identity hash.
     replacement_no_bound_certificate: dict[str, Any] | None = None
+    # Exact source-parent expectation already verified when the candidate proof
+    # was built. Keep it separate from ``decision_proof_bundle`` because live
+    # submission replaces that bundle with execution certificates before the
+    # reactor performs its redundant receipt-level admission check.
+    replacement_no_bound_expected: dict[str, Any] | None = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
     # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
     # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
@@ -4849,10 +4858,20 @@ def _receipt_money_path_blocker(
         # The buy_no stanza below STAYS — its same_bin_yes_posterior /
         # settlement_coverage_status come from a distinct receipt-provenance path.
         proof_bundle = receipt.decision_proof_bundle
-        replacement_expected = replacement_no_bound_expected_from_parents(
-            getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
-            getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
-        )
+        replacement_expected = receipt.replacement_no_bound_expected
+        if replacement_expected is None:
+            replacement_expected = replacement_no_bound_expected_from_parents(
+                getattr(
+                    getattr(proof_bundle, "forecast_authority", None),
+                    "payload",
+                    None,
+                ),
+                getattr(
+                    getattr(proof_bundle, "candidate_evidence", None),
+                    "payload",
+                    None,
+                ),
+            )
         global_actuation = receipt.global_actuation
         global_candidate = getattr(
             getattr(global_actuation, "decision", None),
@@ -5024,6 +5043,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # The V2 adapter proved the order POST boundary was not crossed, but an SDK
+    # metadata/auth transport read failed before local signing completed. Re-run
+    # the full current q/book/wealth decision; never replay the old envelope.
+    "V2_PRE_SUBMIT_TRANSPORT_EXCEPTION",
     # Synchronous Polymarket 400 submit rejection with no venue order id. The
     # submit crossed the HTTP boundary but the venue rejected before creating an
     # order. This is a stale maker-price/mode race; release the command/cap and
@@ -5343,6 +5366,7 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
             "entries_paused",
             "live_health_entry_authority",
             "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE",
+            "CURRENT_WEALTH_COLLATERAL_EXPIRED",
             "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
         }
         for seg in segments
@@ -5352,9 +5376,14 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
 def _is_current_wealth_retry_reason(reason: str | None) -> bool:
     if not reason:
         return False
-    return "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS" in {
-        seg.strip() for seg in str(reason).split(":")
-    }
+    segments = {seg.strip() for seg in str(reason).split(":")}
+    return bool(
+        {
+            "CURRENT_WEALTH_COLLATERAL_EXPIRED",
+            "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+        }
+        & segments
+    )
 
 
 def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
@@ -6156,7 +6185,11 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     _log = _logging.getLogger("zeus.events.reactor")
     try:
         from src.config import runtime_cities as _rc
-        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+        from src.data.day0_hourly_vectors import (
+            day0_hourly_release_due_city_dates,
+            maybe_refresh_day0_hourly_vectors,
+            probe_day0_provider_run_hwm,
+        )
 
         decision_time = datetime.now(timezone.utc)
         refresh_budget_seconds = _day0_hourly_refresh_budget_seconds()
@@ -6168,6 +6201,51 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             decision_time=decision_time,
             deadline_monotonic=refresh_deadline_monotonic,
         )
+        provider_run_hwm = {}
+        release_due_city_dates = frozenset()
+        try:
+            held_city_names = {str(family[0]).strip() for family in held_families}
+            held_cities = [
+                city
+                for city in cities
+                if str(getattr(city, "name", "") or "").strip() in held_city_names
+            ]
+            hwm_budget_seconds = min(
+                1.0,
+                max(0.0, refresh_deadline_monotonic - time.monotonic()),
+            )
+            if held_cities and hwm_budget_seconds >= 0.25:
+                provider_run_hwm = probe_day0_provider_run_hwm(
+                    held_cities,
+                    decision_time=decision_time,
+                    timeout_s=hwm_budget_seconds,
+                )
+                release_due_city_dates = day0_hourly_release_due_city_dates(
+                    held_cities,
+                    decision_time=decision_time,
+                    provider_run_hwm=provider_run_hwm,
+                )
+                release_due_families = {
+                    family
+                    for family in held_families
+                    if (str(family[0]).strip(), str(family[1]).strip())
+                    in release_due_city_dates
+                }
+                if release_due_families:
+                    priority_probe = _Day0HourlyPriorityProbe(
+                        refresh_due_families=frozenset(
+                            set(priority_probe.refresh_due_families)
+                            | release_due_families
+                        ),
+                        window_starts=priority_probe.window_starts,
+                        proved=priority_probe.proved,
+                    )
+        except Exception as exc:  # noqa: BLE001 -- metadata is scheduling evidence only.
+            provider_run_hwm = {}
+            release_due_city_dates = frozenset()
+            _log.warning(
+                "edli_day0_hourly_refresh: provider-run HWM probe failed: %s", exc
+            )
         try:
             priority_families = _edli_day0_hourly_priority_families(
                 held_families=held_families,
@@ -6301,6 +6379,8 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 (city_name, target_date): window_start
                 for city_name, target_date, window_start in priority_probe.window_starts
             },
+            provider_run_hwm=provider_run_hwm,
+            release_due_city_dates=release_due_city_dates,
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -7914,21 +7994,21 @@ def _global_auction_monitor_cancellation_probe(
         ):
             cancelled_this_cycle = True
             return True
-        if completion_starts_without_monitor_debt:
-            # SCOPE: this already-reserved generic economic cut, admitted only
-            # while canonical monitor debt is absent at cut start. DRAIN: one
-            # bounded current BUY/SELL/HOLD/CASH comparison completes while a
-            # later ordinary periodic successor waits; exact SELL, Day0, fill,
-            # and submit-time q/book gates remain independent vetoes. RESET:
-            # the terminal cut clears completion debt, while any deferred cut
-            # retains it and the next generation re-samples monitor debt.
-            return False
         debt_pending = False
         if monitor_debt_pending is not None:
             try:
                 debt_pending = bool(monitor_debt_pending())
             except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
                 debt_pending = False
+        if completion_starts_without_monitor_debt and not debt_pending:
+            # SCOPE: this already-reserved generic economic cut, admitted only
+            # while durable monitor debt remains absent. DRAIN: one bounded
+            # current BUY/SELL/HOLD/CASH comparison completes while a merely
+            # claimed periodic successor waits. A handoff timeout upgrades that
+            # wait to durable debt and preempts this replayable cut at its next
+            # checkpoint. RESET: the monitor handoff clears debt; the retained
+            # completion token then owns the next current global cut.
+            return False
         if exact_executable_held_completion:
             # The exact request owns one bounded rebind turn.  Its historical
             # witness never reaches the venue: the adapter still requires a
@@ -8317,6 +8397,17 @@ def _persist_exact_held_sell_completion_receipts(
     return receipts, persisted, bool(requests_completed(requests))
 
 
+def _disable_reactor_wal_autocheckpoint(conn: sqlite3.Connection) -> None:
+    """Keep reactor commits out of SQLite's implicit checkpoint path.
+
+    The main daemon owns recurring PASSIVE checkpoints on short-lived dedicated
+    connections.  This long-lived, writable reactor connection must therefore
+    not checkpoint while it owns a decision-cycle commit.
+    """
+
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+
+
 def run_edli_event_reactor_cycle(
     *,
     active_lock,
@@ -8490,25 +8581,17 @@ def run_edli_event_reactor_cycle(
         exact_executable_held_completion = True
         durable_exact_held_completion_requests = ()
 
-    # SCOPE: an exact V4 completion may pass monitor admission; generic fairness
-    # debt cannot. DRAIN: the currently active cut reaches an existing safe
-    # checkpoint, then the monitor gets one bounded successor turn before this
-    # generic wake can reacquire the sole reactor lock. RESET: the monitor clears
-    # its own fairness debt; exact debt remains durable and independently scoped.
-    if (
-        not exact_executable_held_completion
-        and _defer_for_held_position_monitor("edli_event_reactor")
-    ):
+    # An exact held SELL is not permission to retain the broad reactor lane.
+    # It may only suppress monitor preemption during the final process_pending
+    # actuation window below; setup, snapshots, and global construction yield.
+    if _defer_for_held_position_monitor("edli_event_reactor"):
         return False
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
     if not producer_fast_path and _urgent_wake_pending():
         return False
-    if (
-        not exact_executable_held_completion
-        and _defer_for_held_position_monitor("edli_event_reactor")
-    ):
+    if _defer_for_held_position_monitor("edli_event_reactor"):
         return False
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
@@ -8519,6 +8602,7 @@ def run_edli_event_reactor_cycle(
         or exact_executable_held_completion
     )
     paused_forecast_held_auction = False
+    exact_final_actuation_window = False
 
     def _yield_for_held_position_monitor(stage: str) -> bool:
         unresolved_monitor_handoff = _held_position_monitor_preemption_pending(
@@ -8536,7 +8620,7 @@ def run_edli_event_reactor_cycle(
                 paused_forecast_held_auction
                 or committed_day0_wake
                 or (
-                    held_sell_completion_cycle
+                    (held_sell_completion_cycle and not exact_executable_held_completion)
                     or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
                 )
             )
@@ -8550,10 +8634,9 @@ def run_edli_event_reactor_cycle(
             # RESET: fresh canonical monitor evidence clears the debt and the
             # durable completion token/request still owns the next auction.
             return False
-        if exact_executable_held_completion:
-            # The monitor's ordinary handoff cannot consume this exact SELL
-            # turn.  The turn remains reduce-only and still rebinds q/book
-            # before it can reach the global selection or venue boundary.
+        if exact_final_actuation_window:
+            # SCOPE: only the final bounded reduce-only process_pending call.
+            # All discovery and snapshot construction above remain preemptible.
             return False
         if not monitor_pressure:
             return False
@@ -8584,7 +8667,7 @@ def run_edli_event_reactor_cycle(
         return (
             _urgent_wake_pending()
             or (
-                not exact_executable_held_completion
+                not exact_final_actuation_window
                 and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
             )
             or _held_position_monitor_preemption_pending(
@@ -8599,14 +8682,15 @@ def run_edli_event_reactor_cycle(
                 ),
                 (
                     None
-                    if exact_executable_held_completion
+                    if exact_final_actuation_window
                     else held_position_monitor_debt_pending
                 ),
             )
         )
 
     completion_recovery_cycle = bool(
-        held_sell_completion_cycle
+        completion_wake
+        or held_sell_completion_cycle
         or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     )
     paused_forecast_carrier = (
@@ -8679,10 +8763,7 @@ def run_edli_event_reactor_cycle(
         if not producer_fast_path and _urgent_wake_pending():
             active_lock.release()
             return False
-        if (
-            not exact_executable_held_completion
-            and _defer_for_held_position_monitor("edli_event_reactor")
-        ):
+        if _defer_for_held_position_monitor("edli_event_reactor"):
             active_lock.release()
             return False
         if _yield_for_held_position_monitor("runtime_db_setup"):
@@ -8693,6 +8774,7 @@ def run_edli_event_reactor_cycle(
         raise
     try:
         conn = get_world_connection()
+        _disable_reactor_wal_autocheckpoint(conn)
     except Exception:
         active_lock.release()
         raise
@@ -9168,9 +9250,7 @@ def run_edli_event_reactor_cycle(
                 monitor_debt_pending=held_position_monitor_debt_pending,
                 completion_due=False,
                 exact_held_completion=held_sell_completion_cycle,
-                exact_executable_held_completion=(
-                    exact_executable_held_completion
-                ),
+                exact_executable_held_completion=exact_final_actuation_window,
             )
         )
         construct_context = WorkContext(
@@ -9179,7 +9259,7 @@ def run_edli_event_reactor_cycle(
                 _urgent_wake_pending()
                 or _construct_monitor_cancelled()
                 or (
-                    not exact_executable_held_completion
+                    not exact_final_actuation_window
                     and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
                 )
             ),
@@ -9338,6 +9418,9 @@ def run_edli_event_reactor_cycle(
             vector_revision_reseeder=(
                 _edli_day0_hourly_vector_revision_reseeder()
             ),
+            vector_successor_checker=(
+                _edli_day0_hourly_vector_successor_checker()
+            ),
         )
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
@@ -9431,6 +9514,24 @@ def run_edli_event_reactor_cycle(
             )
             return not completion_wake
         _construct_checkpoint("before_adapter")
+        from src.events.candidate_binding import weather_family_id
+
+        required_held_family_keys = (
+            frozenset(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric.lower(),
+                )
+                for city, target_date, metric in forecast_wake_families
+            )
+            if (
+                completion_wake
+                and forecast_wake_families
+                and not held_sell_completion_cut_requests
+            )
+            else frozenset()
+        )
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -9480,6 +9581,7 @@ def run_edli_event_reactor_cycle(
                 else frozenset()
             ),
             held_sell_reauction_requests=held_sell_completion_cut_requests,
+            required_held_family_keys=required_held_family_keys,
             held_family_provider=held_family_provider,
             construction_work_context=construct_context,
         )
@@ -9549,12 +9651,14 @@ def run_edli_event_reactor_cycle(
         targeted_only_fast_path = producer_fast_path and (
             forecast_posterior_wake or bool(targeted_event_ids)
         )
-        _rr = reactor.process_pending(
-            decision_time=process_pending_decision_time,
-            limit=proof_limit,
-            targeted_event_ids=frozenset(targeted_event_ids),
-            targeted_only=targeted_only_fast_path,
-            bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
+        exact_final_actuation_window = exact_executable_held_completion
+        try:
+            _rr = reactor.process_pending(
+                decision_time=process_pending_decision_time,
+                limit=proof_limit,
+                targeted_event_ids=frozenset(targeted_event_ids),
+                targeted_only=targeted_only_fast_path,
+                bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
             # Generic monitor fairness is owed one *global* current cut, even
             # when no opportunity event is pending.  The adapter still owns the
             # full q/book/wealth comparison and can only produce HOLD/CASH here.
@@ -9562,18 +9666,18 @@ def run_edli_event_reactor_cycle(
                 _monitor_completion_mode.fairness_reserved
                 and not held_sell_completion_cut_requests
             ),
-            cancelled=_process_pending_cancelled(
-                committed_day0_wake=committed_day0_wake,
-                producer_fast_path=producer_fast_path,
-                urgent_wake_pending=_urgent_wake_pending,
-                urgent_day0_pending=urgent_day0_pending,
-                held_position_monitor_debt_pending=held_position_monitor_debt_pending,
-                exact_held_completion=active_held_sell_completion_cycle,
-                exact_executable_held_completion=(
-                    exact_executable_held_completion
+                cancelled=_process_pending_cancelled(
+                    committed_day0_wake=committed_day0_wake,
+                    producer_fast_path=producer_fast_path,
+                    urgent_wake_pending=_urgent_wake_pending,
+                    urgent_day0_pending=urgent_day0_pending,
+                    held_position_monitor_debt_pending=held_position_monitor_debt_pending,
+                    exact_held_completion=active_held_sell_completion_cycle,
+                    exact_executable_held_completion=exact_final_actuation_window,
                 ),
-            ),
-        )
+            )
+        finally:
+            exact_final_actuation_window = False
         terminal_no_book_completion = False
         exact_completion_terminal = False
         if held_sell_completion_cut_requests:
@@ -10728,14 +10832,21 @@ def _edli_prune_pending_working_set(
         _restore_busy_timeout()
 
 def _reactor_day0_hourly_refresh_interval_seconds() -> float:
+    from src.data.day0_hourly_vectors import DEFAULT_REFRESH_INTERVAL_S
+
     raw = os.environ.get(
         "ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS",
-        "300.0",
+        # Current observations recondition the already-persisted trajectories
+        # without another provider request.  The source-clock HWM lane also
+        # bypasses its interval when a new model run is published, so a
+        # five-minute blind refetch of the same run only burns the finite API
+        # budget needed by held capital later in the local day.
+        str(DEFAULT_REFRESH_INTERVAL_S),
     )
     try:
         return max(1.0, float(raw))
     except (TypeError, ValueError):
-        return 300.0
+        return DEFAULT_REFRESH_INTERVAL_S
 
 def _reactor_day0_hourly_refresh_budget_seconds() -> float:
     raw = os.environ.get(
@@ -11618,8 +11729,50 @@ def _edli_day0_hourly_vector_revision_reseeder():
     return _enqueue
 
 
+def _edli_day0_hourly_vector_successor_checker():
+    """Return an exact-family confirmation predicate for vector successors.
+
+    A reseed request is not a posterior.  This predicate remains false until
+    the materializer has committed a posterior that consumes the latest vector
+    revision, so callers can record a pending state without treating fresh raw
+    vectors as a consumer-authority switch.
+    """
+
+    def _confirmed(*, city: str, target_date: str, metric: str) -> bool:
+        try:
+            from src.data.replacement_fusion_upgrade_trigger import (
+                _DAY0_HOURLY_VECTOR_SOURCE,
+                scope_capture_offers_larger_provider_set,
+            )
+            from src.state.db import get_forecasts_connection_read_only
+
+            conn = get_forecasts_connection_read_only()
+            try:
+                verdict = scope_capture_offers_larger_provider_set(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    changed_sources=(_DAY0_HOURLY_VECTOR_SOURCE,),
+                    decision_time=datetime.now(timezone.utc),
+                )
+            finally:
+                conn.close()
+            return bool(
+                verdict.get("source_cycle_time")
+                and not verdict.get("input_revision_changed")
+            )
+        except Exception:  # noqa: BLE001 -- confirmation failure is fail-closed.
+            return False
+
+    return _confirmed
+
+
 def _edli_reactor_day0_hourly_refresher(
-    *, held_family_provider=None, vector_revision_reseeder=None
+    *,
+    held_family_provider=None,
+    vector_revision_reseeder=None,
+    vector_successor_checker=None,
 ):
     """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
     import logging as _logging
@@ -11696,10 +11849,20 @@ def _edli_reactor_day0_hourly_refresher(
             revisions_pending = int(
                 (revision_report or {}).get("already_enqueued", 0) or 0
             )
+            successor_confirmed = (
+                bool(
+                    vector_successor_checker(
+                        city=family[0], target_date=family[1], metric=family[2]
+                    )
+                )
+                if vector_successor_checker is not None
+                else False
+            )
             _log.info(
                 "reactor day0-hourly refresh attempted for %s/%s/%s: vectors_written=%d "
                 "cities_attempted=%d incomplete_expected_bundles=%d "
-                "vector_revision_seeds_enqueued=%d vector_revision_seeds_pending=%d",
+                "vector_revision_seeds_enqueued=%d vector_revision_seeds_pending=%d "
+                "successor_posterior_confirmed=%s",
                 family[0],
                 family[1],
                 family[2],
@@ -11708,6 +11871,7 @@ def _edli_reactor_day0_hourly_refresher(
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
                 revisions_enqueued,
                 revisions_pending,
+                successor_confirmed,
             )
             return bool(
                 vectors_written or revisions_enqueued or revisions_pending
@@ -14050,7 +14214,11 @@ def _edli_redecision_family_keys_from_entity_keys(
     return out
 
 
-def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
+def run_edli_continuous_redecision_screen_cycle(
+    *,
+    screen_lock,
+    monitor_preempt_requested: Callable[[], bool] | None = None,
+) -> None:
     """P2 cheap-screen job (continuous re-decision resurrection 2026-06-12).
 
     Reads cached beliefs (world, RO) × freshest executable prices (trade, RO), runs the cheap edge
@@ -14097,6 +14265,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     _log = _logging.getLogger("zeus.events.reactor")
     # The continuous re-decision consumer is part of the one live topology.
     edli_cfg = _settings_section("edli", {})
+    if monitor_preempt_requested is not None and monitor_preempt_requested():
+        _log.info("edli_redecision_screen deferred: held-position monitor priority")
+        return
     if _defer_for_held_position_monitor("edli_redecision_screen"):
         return
     if not screen_lock.acquire(blocking=False):
@@ -14106,6 +14277,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     screen_stack: contextlib.ExitStack | None = None
     screen_fence = None
     try:
+        if monitor_preempt_requested is not None and monitor_preempt_requested():
+            _log.info("edli_redecision_screen deferred after claim: held-position monitor priority")
+            return
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
@@ -14133,6 +14307,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 screen_started + _edli_redecision_screen_budget_seconds(edli_cfg)
             ),
             generation=_next_edli_redecision_screen_generation(),
+            cancel_requested=monitor_preempt_requested,
         )
         screen_stack = contextlib.ExitStack()
 

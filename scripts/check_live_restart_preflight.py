@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-08-30
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -54,6 +54,7 @@ LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.l
 CLOB_SIGNATURE_TYPE_SIDECAR_LABELS = (
     "price-channel-ingest",
     "post-trade-capital",
+    "riskguard-live",
     "venue-heartbeat",
 )
 
@@ -282,16 +283,25 @@ def _live_restart_in_progress() -> bool:
     }
 
 
-def _live_trading_process_absent_check() -> CheckResult:
+def _live_trading_process_state_check(expected_state: str) -> CheckResult:
+    if expected_state not in {"absent", "running"}:
+        raise ValueError(f"unsupported live process state: {expected_state}")
     processes = _live_main_processes()
     restart_in_progress = _live_restart_in_progress()
-    ok = not processes
-    if not processes:
-        detail = "no src.main process running"
+    if expected_state == "absent":
+        ok = not processes
+        detail = "no src.main process running" if ok else "src.main is still running"
+        name = "live_trading_process_absent"
     else:
-        detail = "src.main is still running"
+        ok = len(processes) == 1
+        detail = (
+            "exactly one src.main process running"
+            if ok
+            else f"expected exactly one src.main process, found {len(processes)}"
+        )
+        name = "live_trading_process_running"
     return CheckResult(
-        "live_trading_process_absent",
+        name,
         ok,
         detail,
         {
@@ -300,6 +310,10 @@ def _live_trading_process_absent_check() -> CheckResult:
             "restart_recovery_obligation": None,
         },
     )
+
+
+def _live_trading_process_absent_check() -> CheckResult:
+    return _live_trading_process_state_check("absent")
 
 
 def _live_trading_launchagent_installed_check() -> CheckResult:
@@ -3123,7 +3137,11 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
             """,
             tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
         ).fetchall()
-        entry_projection_recoverable = _resting_entry_projection_recoverable_commands(conn)
+        entry_projection_recoverable = (
+            _resting_entry_projection_recoverable_commands(conn)
+            if _resting_entry_projection_repair_needed(rows)
+            else {}
+        )
     if entry_projection_recoverable:
         evidence["entry_projection_recoverable_count"] = len(entry_projection_recoverable)
     risky: list[dict[str, Any]] = []
@@ -3632,6 +3650,17 @@ def _terminal_positive_entry_fact_boot_recoverable(item: dict[str, Any]) -> bool
     if _positive_float(item.get("chain_shares")) is None:
         return False
     return True
+
+
+def _resting_entry_projection_repair_needed(rows: list[sqlite3.Row]) -> bool:
+    """Avoid the historical fill scan unless an open entry projection needs it."""
+
+    return any(
+        str(row["intent_kind"] or "").upper() == "ENTRY"
+        and str(row["position_phase"] or "")
+        not in {"pending_entry", "active", "day0_window"}
+        for row in rows
+    )
 
 
 def _resting_entry_projection_recoverable_commands(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
@@ -6177,28 +6206,36 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
             return {}
         rows = conn.execute(
             """
-            WITH latest_exit AS (
+            WITH pending_exit AS (
+                SELECT position_id,
+                       exit_retry_count,
+                       next_exit_retry_at
+                  FROM position_current
+                 WHERE phase = 'pending_exit'
+                   AND COALESCE(next_exit_retry_at, '') != ''
+            ),
+            latest_exit AS (
                 SELECT cmd.*,
                        ROW_NUMBER() OVER (
                            PARTITION BY cmd.position_id
                            ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
                        ) AS rn
                   FROM venue_commands cmd
+                  JOIN pending_exit pending
+                    ON pending.position_id = cmd.position_id
                  WHERE cmd.intent_kind = 'EXIT'
             )
-            SELECT pc.position_id,
-                   pc.exit_retry_count,
-                   pc.next_exit_retry_at,
+            SELECT pending.position_id,
+                   pending.exit_retry_count,
+                   pending.next_exit_retry_at,
                    latest_exit.command_id,
                    latest_exit.state AS command_state,
                    latest_exit.venue_order_id,
                    latest_exit.updated_at AS command_updated_at
-              FROM position_current pc
+              FROM pending_exit pending
               JOIN latest_exit
-                ON latest_exit.position_id = pc.position_id
+                ON latest_exit.position_id = pending.position_id
                AND latest_exit.rn = 1
-             WHERE pc.phase = 'pending_exit'
-               AND COALESCE(pc.next_exit_retry_at, '') != ''
             """
         ).fetchall()
     resumable: dict[str, dict[str, Any]] = {}
@@ -6227,13 +6264,22 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
             return resumable
         rows = conn.execute(
             """
-            WITH latest_exit AS (
+            WITH pending_exit AS (
+                SELECT position_id,
+                       exit_retry_count,
+                       next_exit_retry_at
+                  FROM position_current
+                 WHERE phase = 'pending_exit'
+            ),
+            latest_exit AS (
                 SELECT cmd.*,
                        ROW_NUMBER() OVER (
                            PARTITION BY cmd.position_id
                            ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
                        ) AS rn
                   FROM venue_commands cmd
+                  JOIN pending_exit pending
+                    ON pending.position_id = cmd.position_id
                  WHERE cmd.intent_kind = 'EXIT'
             ),
             latest_event AS (
@@ -6243,31 +6289,32 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
                            ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
                        ) AS rn
                   FROM position_events pe
+                  JOIN pending_exit pending
+                    ON pending.position_id = pe.position_id
                  WHERE pe.event_type IN ('EXIT_ORDER_REJECTED', 'EXIT_INTENT', 'EXIT_ORDER_POSTED')
             )
-            SELECT pc.position_id,
-                   pc.exit_retry_count,
-                   pc.next_exit_retry_at,
+            SELECT pending.position_id,
+                   pending.exit_retry_count,
+                   pending.next_exit_retry_at,
                    latest_event.event_id,
                    latest_event.event_type,
                    latest_event.venue_status,
                    latest_event.occurred_at
-              FROM position_current pc
+              FROM pending_exit pending
               LEFT JOIN latest_exit
-                ON latest_exit.position_id = pc.position_id
+                ON latest_exit.position_id = pending.position_id
                AND latest_exit.rn = 1
               JOIN latest_event
-                ON latest_event.position_id = pc.position_id
+                ON latest_event.position_id = pending.position_id
                AND latest_event.rn = 1
-             WHERE pc.phase = 'pending_exit'
-               AND latest_exit.command_id IS NULL
+             WHERE latest_exit.command_id IS NULL
                AND latest_event.event_type = 'EXIT_ORDER_REJECTED'
                AND LOWER(COALESCE(latest_event.venue_status, '')) IN (
                    'retry_pending',
                    'backoff_exhausted'
                )
                AND (
-                   COALESCE(pc.next_exit_retry_at, '') != ''
+                   COALESCE(pending.next_exit_retry_at, '') != ''
                    OR LOWER(COALESCE(latest_event.venue_status, '')) = 'backoff_exhausted'
                )
             """
@@ -7054,7 +7101,24 @@ def _absolute_live_unit_price_band_check(cfg: dict[str, Any]) -> CheckResult:
     )
 
 
-def evaluate() -> dict[str, Any]:
+def evaluate(
+    *,
+    expected_live_process_state: str = "absent",
+    process_state_only: bool = False,
+) -> dict[str, Any]:
+    process_check = _live_trading_process_state_check(expected_live_process_state)
+    if process_state_only:
+        checks = [process_check]
+        blockers, entry_blockers = _failed_check_groups(checks)
+        return {
+            "ok": not blockers,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "git_head": _git_head(),
+            "expected_live_process_state": expected_live_process_state,
+            "checks": [asdict(check) for check in checks],
+            "blockers": blockers,
+            "entry_blockers": entry_blockers,
+        }
     cfg = _settings()
     rows = _open_positions()
     projection_rows = _open_positions(positive_chain_only=False)
@@ -7075,7 +7139,7 @@ def evaluate() -> dict[str, Any]:
     checks = [
         _live_trading_launchagent_installed_check(),
         _live_trading_launchagent_bootstrapable_check(),
-        _live_trading_process_absent_check(),
+        process_check,
         _absolute_live_unit_price_band_check(cfg),
         CheckResult(
             "single_live_submit_semantics",
@@ -7122,6 +7186,7 @@ def evaluate() -> dict[str, Any]:
         "runtime_open_projection_count": len(projection_rows),
         "open_positions_requiring_executable_quote_count": len(quote_rows),
         "submit_authority": "structural_live",
+        "expected_live_process_state": expected_live_process_state,
         "checks": [asdict(check) for check in checks],
         "blockers": blockers,
         "entry_blockers": entry_blockers,
@@ -7131,8 +7196,17 @@ def evaluate() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument(
+        "--expected-live-process-state",
+        choices=("absent", "running"),
+        default="absent",
+    )
+    parser.add_argument("--process-state-only", action="store_true")
     args = parser.parse_args(argv)
-    result = evaluate()
+    result = evaluate(
+        expected_live_process_state=args.expected_live_process_state,
+        process_state_only=args.process_state_only,
+    )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

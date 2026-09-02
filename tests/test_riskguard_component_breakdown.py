@@ -74,6 +74,9 @@ def test_breakdown_enumerates_every_overall_level_component():
         "collateral_identity",
         "portfolio_consistency",
         "unresolved_exposure",
+        "probability_semantics",
+        "storage_capacity",
+        "host_power",
     }
 
 
@@ -81,3 +84,13 @@ def test_multiple_components_at_overall_level_all_named():
     levels = _levels(collateral_identity=RiskLevel.RED, settlement_quality=RiskLevel.RED)
     driven_by, _ = _component_breakdown(RiskLevel.RED, levels, _details())
     assert driven_by == "collateral_identity,settlement_quality"  # sorted, comma-joined
+
+
+def test_host_power_orange_is_named_as_the_driver():
+    levels = _levels(host_power=RiskLevel.ORANGE)
+    driven_by, breakdown = _component_breakdown(
+        RiskLevel.ORANGE, levels, _details()
+    )
+
+    assert driven_by == "host_power"
+    assert "host_power=ORANGE[detail-host_power]" in breakdown

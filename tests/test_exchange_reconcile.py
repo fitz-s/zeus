@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-08-28
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Authority basis: first-principles command-scoped entry/exit fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -2553,6 +2553,161 @@ def test_authenticated_terminal_full_fill_converts_all_collateral_atomically(con
     assert Decimal(str(projection["shares"])) == Decimal("10")
 
 
+def test_terminal_partial_later_confirmed_remainder_reprojects_cumulative_fill(conn):
+    """Late facts after terminal partial restore the full capital atomically."""
+    from src.execution.command_recovery import reconcile_authenticated_entry_trade_facts
+    from src.execution.exchange_reconcile import (
+        persisted_terminal_late_entry_fill_command_ids,
+        reconcile_persisted_terminal_late_entry_fills,
+    )
+    from src.state.venue_command_repo import append_event, append_order_fact, append_trade_fact
+
+    seed_command(conn, size=10, price=0.50)
+    seed_position_baseline(conn)
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro, pusd_allowance_micro,
+            usdc_e_legacy_balance_micro, ctf_token_balances_json,
+            ctf_token_allowances_json, captured_at, authority_tier
+        ) VALUES (100000000, 100000000, 0, '{}', '{}', ?, 'CHAIN')
+        """,
+        (NOW.isoformat(),),
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, amount, created_at,
+            released_at, release_reason, converted_amount
+        ) VALUES ('cmd-m5', 'PUSD_BUY', 5000000, ?, NULL, NULL, 0)
+        """,
+        (NOW.isoformat(),),
+    )
+    first_fill_at = NOW + timedelta(minutes=1)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="PARTIALLY_MATCHED",
+        remaining_size="8",
+        matched_size="2",
+        source="WS_USER",
+        observed_at=first_fill_at,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-prefix-order").hexdigest(),
+        raw_payload_json={"proof": "authenticated_prefix"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-terminal-partial-prefix",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="2",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=first_fill_at,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-prefix-trade").hexdigest(),
+        raw_payload_json={"proof": "authenticated_prefix"},
+    )
+    assert reconcile_authenticated_entry_trade_facts(
+        conn, command_id="cmd-m5"
+    ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    terminal_at = first_fill_at + timedelta(minutes=1)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size="2",
+        source="REST",
+        observed_at=terminal_at,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-terminal-order").hexdigest(),
+        raw_payload_json={"proof": "terminal_partial_remainder"},
+    )
+    append_event(
+        conn,
+        command_id="cmd-m5",
+        event_type="EXPIRED",
+        occurred_at=terminal_at.isoformat(),
+        payload={
+            "reason": "partial_remainder_absent_from_exchange_open_orders",
+            "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
+            "command_id": "cmd-m5",
+            "venue_order_id": "ord-m5",
+            "positive_fill_size": "2",
+        },
+    )
+    conn.execute(
+        """
+        UPDATE collateral_reservations
+           SET converted_amount = 1000000,
+               release_reason = 'CONVERTED_ON_FILL'
+         WHERE command_id = 'cmd-m5'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE collateral_unsettled_proceeds
+           SET settled_at = ?, settle_reason = 'BALANCE_REFRESH_OBSERVED'
+         WHERE command_id = 'cmd-m5'
+        """,
+        (terminal_at.isoformat(),),
+    )
+    assert persisted_terminal_late_entry_fill_command_ids(conn) == []
+
+    late_fill_at = terminal_at + timedelta(minutes=1)
+    append_trade_fact(
+        conn,
+        trade_id="trade-terminal-partial-remainder",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="7.9995",
+        fill_price="0.50",
+        source="WS_USER",
+        observed_at=late_fill_at,
+        raw_payload_hash=hashlib.sha256(b"terminal-partial-remainder-trade").hexdigest(),
+        raw_payload_json={"proof": "authenticated_late_remainder"},
+    )
+
+    assert persisted_terminal_late_entry_fill_command_ids(conn) == ["cmd-m5"]
+    summary = reconcile_persisted_terminal_late_entry_fills(
+        conn,
+        command_id="cmd-m5",
+        observed_at=late_fill_at + timedelta(seconds=1),
+    )
+
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'"
+    ).fetchone()["state"] == "FILLED"
+    position = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert Decimal(str(position["shares"])) == Decimal("9.9995")
+    assert Decimal(str(position["cost_basis_usd"])) == Decimal("4.99975")
+    execution = conn.execute(
+        "SELECT shares, fill_price FROM execution_fact "
+        "WHERE command_id = 'cmd-m5' AND order_role = 'entry'"
+    ).fetchone()
+    assert Decimal(str(execution["shares"])) == Decimal("9.9995")
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.5")
+    reservation = conn.execute(
+        "SELECT amount, converted_amount, released_at FROM collateral_reservations "
+        "WHERE command_id = 'cmd-m5'"
+    ).fetchone()
+    assert reservation["amount"] == 5000000
+    assert reservation["converted_amount"] == 4999750
+    assert reservation["released_at"] is not None
+    unsettled = conn.execute(
+        "SELECT amount_micro, settled_at FROM collateral_unsettled_proceeds "
+        "WHERE command_id = 'cmd-m5'"
+    ).fetchone()
+    assert dict(unsettled) == {"amount_micro": 4999750, "settled_at": None}
+
+
 def test_resolved_obligation_still_drains_persisted_terminal_late_fill(conn):
     from src.execution.command_recovery import (
         reconcile_terminal_entry_exposure_obligations,
@@ -3377,7 +3532,8 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(
         """
         SELECT phase, city, target_date, temperature_metric, direction,
                shares, entry_price, cost_basis_usd, order_status,
-               token_id, no_token_id, condition_id, entry_method
+               token_id, no_token_id, condition_id, entry_method,
+               fill_authority
           FROM position_current
          WHERE position_id = 'pos-missing-projection'
         """
@@ -3396,6 +3552,7 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(
     assert projection["no_token_id"] == no_token
     assert projection["condition_id"] == "condition-m5"
     assert projection["entry_method"] == "qkernel_spine"
+    assert projection["fill_authority"] == "venue_confirmed_partial"
     assert [
         row["event_type"]
         for row in conn.execute(

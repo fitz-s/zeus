@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,13 +38,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.state.chain_mirror_reconciler import (  # noqa: E402
+    _finding_requires_canonical_write,
+    apply_reconcile_position,
     load_chain_positions_by_asset,
+    load_settlement_lookup,
     reconcile,
 )
-from src.state.db import (  # noqa: E402
-    get_trade_connection,
-    get_trade_connection_read_only,
-)
+from src.state.db import get_trade_connection_read_only  # noqa: E402
 
 
 def run(*, apply: bool) -> dict:
@@ -55,9 +56,9 @@ def run(*, apply: bool) -> dict:
     raw_positions = PolymarketClient().get_positions_from_api() or []
     chain_by_asset = load_chain_positions_by_asset(raw_positions)
 
-    conn_trades = (
-        get_trade_connection(write_class="live") if apply else get_trade_connection_read_only()
-    )
+    # Classification is always a read-only full-book pass.  --apply only
+    # promotes exact findings afterward, one bounded coordinator quantum each.
+    conn_trades = get_trade_connection_read_only()
     conn_trades.row_factory = sqlite3.Row
     conn_forecasts = None
     try:
@@ -70,14 +71,44 @@ def run(*, apply: bool) -> dict:
         conn_forecasts = None
 
     try:
+        now = datetime.now(timezone.utc)
+        settlement_by_key = (
+            load_settlement_lookup(conn_forecasts)
+            if conn_forecasts is not None
+            else {}
+        )
         report = reconcile(
             conn_trades,
-            conn_forecasts,
+            None,
             chain_by_asset,
-            apply=apply,
+            apply=False,
+            now=now,
+            settlement_by_key=settlement_by_key,
         )
         if apply:
-            conn_trades.commit()
+            report.dry_run = False
+            position_ids = tuple(
+                dict.fromkeys(
+                    finding.position_id
+                    for finding in report.findings
+                    if finding.position_id
+                    and _finding_requires_canonical_write(finding)
+                )
+            )
+            for position_id in position_ids:
+                try:
+                    applied = apply_reconcile_position(
+                        position_id,
+                        chain_by_asset=chain_by_asset,
+                        settlement_by_key=settlement_by_key,
+                        now=now,
+                        owner="chain_mirror_operator_apply_position",
+                    )
+                except Exception as exc:  # exact debt retries on the next operator run
+                    report.errors.append({"position_id": position_id, "error": str(exc)})
+                    continue
+                report.applied += applied.applied
+                report.errors.extend(applied.errors)
         return report.to_json_dict()
     finally:
         conn_trades.close()

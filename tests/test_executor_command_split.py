@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-04-26; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-09-01
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -3397,12 +3397,14 @@ class TestLiveOrderCommandSplit:
             assert retry_result.venue_ack_time == submit_acked["occurred_at"]
             assert len(command_ids_seen) == 1
 
-    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn, monkeypatch):
+    def test_matched_submit_retries_projection_lock_and_records_fill_truth(
+        self, mem_conn, monkeypatch
+    ):
         """A matched FOK submit response is a fill boundary, not a resting ACK.
 
         The fill must also become visible to position/redecision immediately;
-        the periodic recovery loop is only a crash backstop, not the first
-        consumer of a known matched submit.
+        transient writer contention is retried locally, while the periodic
+        recovery loop remains only a crash backstop.
         """
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
@@ -3445,6 +3447,8 @@ class TestLiveOrderCommandSplit:
             assert _conn.in_transaction is False
             projection_calls.append(command_id)
             assert client is mock_inst
+            if len(projection_calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
             command = _conn.execute(
                 "SELECT position_id, venue_order_id FROM venue_commands WHERE command_id = ?",
                 (command_id,),
@@ -3539,7 +3543,7 @@ class TestLiveOrderCommandSplit:
         assert result.shares == pytest.approx(5.0)
         assert len(command_ids_seen) == 1
         command_id = command_ids_seen[0]
-        assert projection_calls == [command_id]
+        assert projection_calls == [command_id, command_id]
         assert release_calls == [command_id]
         obligation = mem_conn.execute(
             "SELECT status, resolved_at FROM entry_exposure_obligations WHERE command_id = ?",

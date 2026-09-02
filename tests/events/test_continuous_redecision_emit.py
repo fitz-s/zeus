@@ -1,11 +1,11 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-08-28
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
 #   the reactor re-decides every cycle (fix for EDLI-mode "hours per order"). default source/None →
 #   one-shot behavior unchanged; already_pending_keys skips queued families.
-"""Relationship tests for the per-cycle re-emission seam (src.events.triggers.forecast_snapshot_ready)."""
+"""Relationship tests for re-emission and monitor-priority interruption seams."""
 from __future__ import annotations
 
 import dataclasses
@@ -153,6 +153,89 @@ def test_sqlite_deadline_rejects_expired_short_select() -> None:
         with sqlite_deadline_bound(conn, fence):
             conn.execute("SELECT 1").fetchone()
     conn.close()
+
+
+def test_monitor_priority_skips_redecision_before_any_connection_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-existing canonical monitor debt must not start a belief read."""
+
+    import src.state.db as db
+
+    monkeypatch.setattr(
+        db,
+        "get_world_connection_read_only",
+        lambda: pytest.fail("monitor debt must preempt before world snapshot opens"),
+    )
+    lock = threading.Lock()
+
+    reactor.run_edli_continuous_redecision_screen_cycle(
+        screen_lock=lock,
+        monitor_preempt_requested=lambda: True,
+    )
+
+    assert lock.locked() is False
+
+
+def test_monitor_priority_interrupts_long_belief_scan_and_closes_snapshots(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-flight monitor debt interrupts the real ORDER BY via its SQLite fence."""
+
+    import src.state.db as db
+
+    world_path = _deadline_screen_world(tmp_path)
+    monitor_priority = threading.Event()
+    opened: list[sqlite3.Connection] = []
+    receipts: list[dict[str, object]] = []
+    original_receipt = reactor._edli_redecision_stage_receipt
+
+    def _world_connection() -> sqlite3.Connection:
+        conn = sqlite3.connect(world_path)
+        conn.row_factory = sqlite3.Row
+        # SQLite invokes this just before it begins the expensive MATERIALIZED
+        # ORDER BY. The fence's progress handler then observes the same monitor
+        # callback and interrupts the in-flight read rather than waiting 60s.
+        conn.set_trace_callback(
+            lambda statement: monitor_priority.set()
+            if "WITH latest_trace AS MATERIALIZED" in statement
+            else None
+        )
+        opened.append(conn)
+        return conn
+
+    def _trade_connection(*_args, **_kwargs) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda _name, _default: {"continuous_redecision_screen_budget_seconds": 10.0},
+    )
+    monkeypatch.setattr(db, "get_world_connection_read_only", _world_connection)
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", _trade_connection)
+    monkeypatch.setattr(
+        reactor,
+        "_edli_redecision_stage_receipt",
+        lambda **kwargs: receipts.append(original_receipt(**kwargs)) or receipts[-1],
+    )
+    lock = threading.Lock()
+
+    reactor.run_edli_continuous_redecision_screen_cycle(
+        screen_lock=lock,
+        monitor_preempt_requested=monitor_priority.is_set,
+    )
+
+    assert monitor_priority.is_set()
+    assert lock.locked() is False
+    assert receipts[-1]["stage"] == "belief_scan"
+    assert receipts[-1]["status"] == "deferred"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
 
 
 def test_expired_screen_fence_suppresses_helper_open_marker_and_cancel(

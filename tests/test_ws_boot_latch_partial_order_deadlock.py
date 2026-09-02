@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-28
 # Authority basis: 2026-06-09 ws-boot-latch deadlock incident. Three requirements formed
 #   a cycle that latched submits FOREVER after any daemon restart with a resting order:
 #   (1) the pong clean-boot transition (not_configured -> AUTHED) demanded an EMPTY local
@@ -69,6 +69,52 @@ def _ingestor(c) -> PolymarketUserChannelIngestor:
         auth=WSAuth("key", "secret", "pass"),
         conn_factory=lambda: c,
         own_connection=False,
+    )
+
+
+def _write_current_sidecar_authority(
+    tmp_path,
+    *,
+    now: datetime,
+    m5_status: str = "OK",
+    m5_success_at: datetime | None = None,
+    heartbeat_at: datetime | None = None,
+    heartbeat_generation: str = "price-channel-generation",
+    m5_generation: str | None = None,
+    canonical_held_identity_debt: str | None = None,
+) -> None:
+    """Write one coherent P3 heartbeat/M5 receipt pair for clean-boot tests."""
+
+    pid = 123
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "status": "READY",
+                "ready": True,
+                "alive_at": (heartbeat_at or now).isoformat(),
+                "pid": pid,
+                "generation": heartbeat_generation,
+            }
+        )
+    )
+    business_liveness = {
+        "daemon_pid": pid,
+        "heartbeat_generation": m5_generation or heartbeat_generation,
+        "heartbeat_receipt": "m5-receipt",
+    }
+    if canonical_held_identity_debt:
+        business_liveness["canonical_held_identity_debt"] = (
+            canonical_held_identity_debt
+        )
+    reconcile = {
+        "status": m5_status,
+        "business_liveness": business_liveness,
+    }
+    if m5_success_at is not None:
+        reconcile["last_success_at"] = m5_success_at.isoformat()
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps({"edli_user_channel_reconcile": reconcile})
     )
 
 
@@ -215,29 +261,18 @@ def test_empty_surface_pong_still_full_clears(conn) -> None:
     assert status.to_summary(now=NOW)["entry"]["allow_submit"] is True
 
 
-def test_order_daemon_clean_boot_latch_uses_fresh_price_channel_sidecar_evidence(
+def test_order_daemon_accepts_m5_success_despite_canonical_held_identity_debt(
     conn, tmp_path, monkeypatch
 ) -> None:
     import src.config as config
 
     live_now = datetime.now(timezone.utc)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
-        json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
-    )
-    (tmp_path / "scheduler_jobs_health.json").write_text(
-        json.dumps(
-            {
-                "edli_market_channel_ingestor": {
-                    "status": "OK",
-                    "last_success_at": live_now.isoformat(),
-                },
-                "edli_user_channel_reconcile": {
-                    "status": "OK",
-                    "last_success_at": live_now.isoformat(),
-                },
-            }
-        )
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    _write_current_sidecar_authority(
+        tmp_path,
+        now=live_now,
+        m5_success_at=live_now,
+        canonical_held_identity_debt="canonical_held_identity_coverage_missing",
     )
 
     summary = ws_gap_guard.summary(now=live_now + timedelta(seconds=5))
@@ -254,24 +289,9 @@ def test_user_ws_latch_ignores_market_quote_refresh_failure_when_reconcile_fresh
     import src.config as config
 
     live_now = datetime.now(timezone.utc)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
-        json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
-    )
-    (tmp_path / "scheduler_jobs_health.json").write_text(
-        json.dumps(
-            {
-                "edli_market_channel_ingestor": {
-                    "status": "FAILED",
-                    "last_failure_at": live_now.isoformat(),
-                    "last_failure_reason": "DB write lease timed out for candidate quote refresh",
-                },
-                "edli_user_channel_reconcile": {
-                    "status": "OK",
-                    "last_success_at": live_now.isoformat(),
-                },
-            }
-        )
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    _write_current_sidecar_authority(
+        tmp_path, now=live_now, m5_success_at=live_now
     )
 
     summary = ws_gap_guard.summary(now=live_now + timedelta(seconds=5))
@@ -280,7 +300,7 @@ def test_user_ws_latch_ignores_market_quote_refresh_failure_when_reconcile_fresh
     ws_gap_guard.assert_ws_allows_submit("condition-ws")
 
 
-@pytest.mark.parametrize("current_status", ["RUNNING", "SKIPPED", "FAILED"])
+@pytest.mark.parametrize("current_status", ["RUNNING", "SKIPPED"])
 def test_order_daemon_keeps_fresh_reconcile_success_during_next_attempt(
     conn, tmp_path, monkeypatch, current_status
 ) -> None:
@@ -289,31 +309,51 @@ def test_order_daemon_keeps_fresh_reconcile_success_during_next_attempt(
     import src.config as config
 
     live_now = datetime.now(timezone.utc)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
-        json.dumps(
-            {
-                "daemon": "price-channel-ingest",
-                "alive_at": live_now.isoformat(),
-                "pid": 123,
-            }
-        )
-    )
-    (tmp_path / "scheduler_jobs_health.json").write_text(
-        json.dumps(
-            {
-                "edli_user_channel_reconcile": {
-                    "status": current_status,
-                    "last_success_at": (live_now - timedelta(seconds=30)).isoformat(),
-                    "last_started_at": live_now.isoformat(),
-                }
-            }
-        )
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    _write_current_sidecar_authority(
+        tmp_path,
+        now=live_now,
+        m5_status=current_status,
+        m5_success_at=live_now - timedelta(seconds=30),
     )
 
     summary = ws_gap_guard.summary(now=live_now)
     assert summary["entry"]["allow_submit"] is True
     assert summary["gap_reason"] == "sidecar_durable_evidence"
+
+
+def test_order_daemon_rejects_failed_m5_even_with_recent_prior_success(
+    conn, tmp_path, monkeypatch
+) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    _write_current_sidecar_authority(
+        tmp_path,
+        now=live_now,
+        m5_status="FAILED",
+        m5_success_at=live_now - timedelta(seconds=30),
+    )
+
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+
+
+def test_order_daemon_rejects_generation_mismatched_m5_receipt(
+    conn, tmp_path, monkeypatch
+) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    _write_current_sidecar_authority(
+        tmp_path,
+        now=live_now,
+        m5_success_at=live_now,
+        m5_generation="prior-price-channel-generation",
+    )
+
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
 
 
 def test_order_daemon_does_not_trust_running_reconcile_without_success(
@@ -322,7 +362,7 @@ def test_order_daemon_does_not_trust_running_reconcile_without_success(
     import src.config as config
 
     live_now = datetime.now(timezone.utc)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
     (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
         json.dumps(
             {
@@ -353,7 +393,7 @@ def test_order_daemon_clean_boot_latch_stays_closed_when_sidecar_evidence_stale(
 
     live_now = datetime.now(timezone.utc)
     old = live_now - timedelta(seconds=ws_gap_guard.DURABLE_SIDECAR_STALE_AFTER_SECONDS + 1)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
     (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
         json.dumps({"daemon": "price-channel-ingest", "alive_at": old.isoformat(), "pid": 123})
     )
@@ -375,7 +415,7 @@ def test_real_midrun_ws_gap_is_not_cleared_by_sidecar_evidence(conn, tmp_path, m
     import src.config as config
 
     live_now = datetime.now(timezone.utc)
-    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
     (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
         json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
     )
