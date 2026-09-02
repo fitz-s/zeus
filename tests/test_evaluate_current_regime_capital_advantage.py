@@ -1628,7 +1628,8 @@ def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():
         "CREATE TABLE collateral_ledger_snapshots (id INTEGER,"
         "pusd_balance_micro INTEGER,reserved_pusd_for_buys_micro INTEGER,"
         "captured_at TEXT,authority_tier TEXT);"
-        "CREATE TABLE collateral_reservations (amount INTEGER,released_at TEXT);"
+        "CREATE TABLE collateral_reservations (reservation_type TEXT,amount INTEGER,"
+        "released_at TEXT);"
         "CREATE TABLE collateral_unsettled_proceeds (amount_micro INTEGER,"
         "settled_at TEXT);"
         "CREATE TABLE position_current (position_id TEXT,phase TEXT,city TEXT,"
@@ -1643,7 +1644,13 @@ def test_total_portfolio_uses_chain_cash_and_selected_token_full_depth():
         "INSERT INTO collateral_ledger_snapshots VALUES (1,100000000,10000000,?,?)",
         ("2026-09-01T00:00:00+00:00", "CHAIN"),
     )
-    conn.execute("INSERT INTO collateral_reservations VALUES (10000000,NULL)")
+    conn.executemany(
+        "INSERT INTO collateral_reservations VALUES (?,?,NULL)",
+        [
+            ("PUSD_BUY", 10000000),
+            ("CTF_SELL", 7250000),
+        ],
+    )
     conn.execute(
         "INSERT INTO collateral_unsettled_proceeds VALUES (2000000,NULL)"
     )

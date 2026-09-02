@@ -1533,7 +1533,7 @@ def _current_total_portfolio_capital(
         return {"ready": False, "reason": "CHAIN_COLLATERAL_SNAPSHOT_INVALID"}
     reservation_row = conn.execute(
         "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
-        "WHERE released_at IS NULL"
+        "WHERE released_at IS NULL AND reservation_type='PUSD_BUY'"
     ).fetchone()
     unsettled_row = conn.execute(
         "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
