@@ -137,6 +137,15 @@ class TestCrossCheckComparator:
         b = {"hourly": {"time": ["t9"], "temperature_2m": [20.0]}}
         assert compare_hourly_series(a, b)["verdict"] == "NO_OVERLAP"
 
+    @pytest.mark.parametrize(
+        ("verdict", "terminal"),
+        (("VERIFIED", True), ("MISMATCH", True), ("NO_OVERLAP", False)),
+    )
+    def test_immutable_cross_check_terminality(self, verdict, terminal):
+        from src.data.anchor_cross_check import _cross_check_receipt_is_terminal
+
+        assert _cross_check_receipt_is_terminal({"verdict": verdict}) is terminal
+
 
 class TestTransportLadderRejectionClass:
     """Only HTTP 400 (run not served) may degrade single-runs → meta-stamped."""

@@ -50,6 +50,16 @@ TEMP_TOLERANCE_C = 0.05
 # 2026-06-11 — docs/evidence/anchor_channels/2026-06-11_bucket_vs_api_grid_validation.md).
 # 0.1C cleanly separates the two with a wide margin.
 BUCKET_VS_API_TOLERANCE_C = 0.1
+TERMINAL_CROSS_CHECK_VERDICTS = frozenset({"VERIFIED", "MISMATCH"})
+
+
+def _cross_check_receipt_is_terminal(receipt: object) -> bool:
+    """Return whether an immutable stored-vs-pinned comparison is complete."""
+
+    return (
+        isinstance(receipt, Mapping)
+        and receipt.get("verdict") in TERMINAL_CROSS_CHECK_VERDICTS
+    )
 
 
 def _load_receipts(path: Path = RECEIPT_PATH) -> dict[str, Any]:
@@ -136,7 +146,7 @@ def run_anchor_cross_check_cycle(forecast_db: Path) -> dict[str, Any]:
     for row in rows:
         by_cycle.setdefault(str(row["source_cycle_time"]), row)
     for cycle_iso, row in by_cycle.items():
-        if receipts.get(cycle_iso, {}).get("verdict") == "VERIFIED":
+        if _cross_check_receipt_is_terminal(receipts.get(cycle_iso)):
             continue
         try:
             meta = json.loads(row["artifact_metadata_json"] or "{}")
@@ -232,7 +242,7 @@ def run_bucket_anchor_cross_check_cycle(forecast_db: Path) -> dict[str, Any]:
         by_cycle_city.setdefault((str(row["source_cycle_time"]), city), row)
     for (cycle_iso, city), row in by_cycle_city.items():
         receipt_key = f"{cycle_iso}::bucket::{city}" if city else f"{cycle_iso}::bucket"
-        if receipts.get(receipt_key, {}).get("verdict") == "VERIFIED":
+        if _cross_check_receipt_is_terminal(receipts.get(receipt_key)):
             continue
         try:
             meta = json.loads(row["artifact_metadata_json"] or "{}")
@@ -338,7 +348,7 @@ def run_bucket_downscaled_anchor_cross_check_cycle(forecast_db: Path) -> dict[st
         receipt_key = (
             f"{cycle_iso}::bucket_downscaled::{city}" if city else f"{cycle_iso}::bucket_downscaled"
         )
-        if receipts.get(receipt_key, {}).get("verdict") == "VERIFIED":
+        if _cross_check_receipt_is_terminal(receipts.get(receipt_key)):
             continue
         try:
             meta = json.loads(row["artifact_metadata_json"] or "{}")
