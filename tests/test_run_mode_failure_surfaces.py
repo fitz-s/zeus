@@ -8209,7 +8209,11 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 13)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 13)
     monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8251,7 +8255,11 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
     monkeypatch.setattr(main_module, "_held_position_monitor_canonical_debt", monitor_debt)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8268,8 +8276,8 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     assert calls == []
 
 
-def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
-    """An isolated market may not starve global held-capital truth."""
+def test_scoped_capital_recovery_runs_during_held_monitor(monkeypatch) -> None:
+    """An isolated unknown side effect must not starve behind monitor debt."""
     import threading
 
     import src.execution.command_recovery as command_recovery
@@ -8294,7 +8302,11 @@ def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
     )
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",
@@ -8319,7 +8331,7 @@ def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
 
     main_module._edli_command_recovery_cycle.__wrapped__()
 
-    assert calls == []
+    assert calls == ["live_tick"]
 
 
 def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
@@ -8348,7 +8360,11 @@ def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatc
     )
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
     monkeypatch.setattr(
         command_recovery,
         "capital_blocking_command_count",

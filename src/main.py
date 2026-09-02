@@ -7752,33 +7752,36 @@ def _edli_command_recovery_cycle() -> None:
                 "retaining global reactor handoff: %r",
                 exc,
             )
-    # SCOPE: only non-systemic recovery without an exact persisted screen-cancel
-    # obligation may yield to monitor bootstrap/handoff. A live resting order
-    # already marked CANCEL_PENDING is current capital at risk: the bounded
-    # screen dispatcher must run even when its blocker is scoped to one market.
-    # DRAIN: live_tick dispatches that exact obligation before general recovery.
-    # RESET: CANCEL_ACKED/terminal venue truth removes the obligation; other
-    # scoped recovery resumes yielding to current held-capital monitoring.
+    # SCOPE: only maintenance with no capital-blocking command and no exact
+    # persisted screen-cancel obligation may yield to monitor bootstrap/handoff.
+    # A scoped unknown side effect is current capital at risk just like a
+    # systemic one; live_tick uses short DB connections and can reconcile that
+    # exact command without taking the global reactor handoff. DRAIN: live_tick
+    # applies current venue truth before general recovery. RESET: terminal venue
+    # truth removes the blocker; blocker-free maintenance yields again.
     if (
         not global_capital_handoff
+        and capital_blockers == 0
         and not screen_cancel_due
         and _defer_for_held_position_monitor(
             "edli_command_recovery"
         )
     ):
         return
-    if not global_capital_handoff and not screen_cancel_due and (
+    if (
+        not global_capital_handoff
+        and capital_blockers == 0
+        and not screen_cancel_due
+        and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
+        )
     ):
-        # SCOPE: a recovery tick with no systemic or unscopeable capital
-        # ambiguity. Exact single-market debt is already isolated from every
-        # other family and may wait for current held-capital truth.
-        # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
-        # and writes current MONITOR_REFRESHED evidence. RESET: its completion
-        # clears the active claim and canonical fresh coverage clears the debt;
-        # the next 60-second recovery tick resumes. Systemic, unscopeable, or
-        # incomplete confirmed-fill projection debt retains recovery priority.
+        # SCOPE: blocker-free historical maintenance only. DRAIN: the active or
+        # overdue held monitor gets uncontended trade-DB I/O and writes current
+        # MONITOR_REFRESHED evidence. RESET: its completion clears the active
+        # claim and canonical fresh coverage clears the debt; the next cadence
+        # resumes maintenance.
         logger.info(
             "edli_command_recovery deferred: held-position monitor owns "
             "current-capital I/O priority"
