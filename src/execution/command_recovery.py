@@ -135,6 +135,10 @@ _CAPITAL_RECOVERY_LOCK_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40)
 _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
+_IDENTITY_BOUND_INFLIGHT_STATES = (
+    CommandState.SUBMITTING.value,
+    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+)
 _FULL_SWEEP_BUDGET_SECONDS = 45.0
 # A priority unknown-submit quantum owns account truth plus one exact order
 # lookup.  Fifteen seconds proved sufficient for account pagination but left no
@@ -28991,9 +28995,11 @@ def _identity_bound_submitting_candidates(
     already names a venue order can obtain positive truth from that exact point
     read; a missing or failed point read is not absence proof and stays out of
     this lane.  The full account snapshot remains the sole authority for
-    account-wide negative/absence conclusions.  Rotation derives from the
-    wall-clock tick rather than process memory, so a restart cannot reset the
-    cursor and permanently starve rows beyond the first batch.
+    account-wide negative/absence conclusions.  Both a submit awaiting its
+    first ACK and a submit whose ACK side effect became ambiguous retain this
+    positive point-read authority.  Rotation derives from the wall-clock tick
+    rather than process memory, so a restart cannot reset the cursor and
+    permanently starve rows beyond the first batch.
     """
     if not _table_exists(conn, "venue_commands"):
         return [], 0
@@ -29003,11 +29009,11 @@ def _identity_bound_submitting_candidates(
             """
             SELECT COUNT(*)
               FROM venue_commands
-             WHERE state = ?
+             WHERE state IN (?, ?)
                AND intent_kind IN ('ENTRY', 'EXIT')
                AND COALESCE(venue_order_id, '') != ''
             """,
-            (CommandState.SUBMITTING.value,),
+            _IDENTITY_BOUND_INFLIGHT_STATES,
         ).fetchone()[0]
         or 0
     )
@@ -29027,11 +29033,11 @@ def _identity_bound_submitting_candidates(
                 """
                 SELECT COUNT(*)
                   FROM venue_commands
-                 WHERE state = ?
+                 WHERE state IN (?, ?)
                    AND intent_kind = ?
                    AND COALESCE(venue_order_id, '') != ''
                 """,
-                (CommandState.SUBMITTING.value, intent_kind),
+                (*_IDENTITY_BOUND_INFLIGHT_STATES, intent_kind),
             ).fetchone()[0]
             or 0
         )
@@ -29042,14 +29048,14 @@ def _identity_bound_submitting_candidates(
             """
             SELECT *
               FROM venue_commands
-             WHERE state = ?
+             WHERE state IN (?, ?)
                AND intent_kind = ?
                AND COALESCE(venue_order_id, '') != ''
              ORDER BY updated_at, command_id
              LIMIT ? OFFSET ?
             """,
             (
-                CommandState.SUBMITTING.value,
+                *_IDENTITY_BOUND_INFLIGHT_STATES,
                 intent_kind,
                 slice_limit,
                 offset,
@@ -29061,14 +29067,14 @@ def _identity_bound_submitting_candidates(
                 """
                 SELECT *
                   FROM venue_commands
-                 WHERE state = ?
+                 WHERE state IN (?, ?)
                    AND intent_kind = ?
                    AND COALESCE(venue_order_id, '') != ''
                  ORDER BY updated_at, command_id
                  LIMIT ?
                 """,
                 (
-                    CommandState.SUBMITTING.value,
+                    *_IDENTITY_BOUND_INFLIGHT_STATES,
                     intent_kind,
                     min(slice_limit, intent_total) - len(selected),
                 ),
@@ -29099,11 +29105,11 @@ def _identity_bound_current_commands(
         SELECT *
           FROM venue_commands
          WHERE command_id IN ({placeholders})
-           AND state = ?
+           AND state IN (?, ?)
            AND intent_kind IN ('ENTRY', 'EXIT')
            AND COALESCE(venue_order_id, '') != ''
         """,
-        (*ordered_ids, CommandState.SUBMITTING.value),
+        (*ordered_ids, *_IDENTITY_BOUND_INFLIGHT_STATES),
     ).fetchall()
     return {
         str(row.get("command_id") or ""): row
@@ -29136,6 +29142,7 @@ def _reconcile_identity_bound_submitting_commands(
     current = _identity_bound_current_commands(conn, command_ids)
     point_client = SimpleNamespace(
         get_order=lambda venue_order_id: point_orders.get(str(venue_order_id)),
+        authenticated_point_reads_are_complete=True,
     )
     for command_id in sorted(command_ids):
         row = current.get(command_id)

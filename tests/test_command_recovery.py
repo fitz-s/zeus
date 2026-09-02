@@ -36608,6 +36608,62 @@ def test_identity_bound_submit_candidates_are_bounded_with_durable_remainder(con
     }
 
 
+def test_identity_bound_candidates_keep_unknown_side_effect_on_positive_point_lane(conn):
+    from src.execution.command_recovery import (
+        _identity_bound_submitting_candidates,
+        _reconcile_identity_bound_submitting_commands,
+    )
+
+    _insert(
+        conn,
+        command_id="cmd-unknown-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        size=10.0,
+        price=0.28,
+    )
+    _advance_to_unknown_side_effect(
+        conn,
+        command_id="cmd-unknown-exit",
+        venue_order_id="ord-unknown-exit",
+    )
+
+    candidates, deferred = _identity_bound_submitting_candidates(
+        conn,
+        rotation_slot=0,
+    )
+
+    assert deferred == 0
+    assert [(row["command_id"], row["state"]) for row in candidates] == [
+        ("cmd-unknown-exit", "SUBMIT_UNKNOWN_SIDE_EFFECT")
+    ]
+
+    summary = _reconcile_identity_bound_submitting_commands(
+        conn,
+        command_ids={"cmd-unknown-exit"},
+        point_orders={
+            "ord-unknown-exit": {
+                "orderID": "ord-unknown-exit",
+                "status": "LIVE",
+                "price": "0.28",
+                "original_size": "10",
+                "size_matched": "0",
+            }
+        },
+    )
+
+    assert summary == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-unknown-exit") == "ACKED"
+    assert [
+        event["event_type"] for event in _get_events(conn, "cmd-unknown-exit")
+    ] == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_TIMEOUT_UNKNOWN", "SUBMIT_ACKED"]
+
+
 def test_identity_bound_rotation_reserves_exit_priority(conn):
     from src.execution.command_recovery import _identity_bound_submitting_candidates
 
