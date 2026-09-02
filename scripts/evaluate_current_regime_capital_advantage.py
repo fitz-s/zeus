@@ -2307,21 +2307,21 @@ def _held_to_binary_settlement_quality(
 def _build_counterfactual_admission_verdict(
     *,
     receipt: dict[str, object],
-    shadows: dict[str, dict[str, object]],
+    counterfactuals: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
     failures: list[str] = []
     if receipt.get("ready") is not True:
         failures.append("CURRENT_GLOBAL_SELECTION_RECEIPT_UNPROVEN")
     independent = sum(
         int(row.get("independent_target_date_count") or 0)
-        for row in shadows.values()
+        for row in counterfactuals.values()
         if row.get("global_selection_revision_bound") is True
     )
     if independent < MIN_INDEPENDENT_TARGET_DATES:
         failures.append("INSUFFICIENT_CURRENT_REGIME_SETTLED_TARGET_DATES")
     lcbs = [
         row.get("delta_log_wealth_lcb95")
-        for row in shadows.values()
+        for row in counterfactuals.values()
         if row.get("global_selection_revision_bound") is True
     ]
     if not lcbs or any(
@@ -2335,12 +2335,12 @@ def _build_counterfactual_admission_verdict(
 def _build_verdict(
     *,
     receipt: dict[str, object],
-    shadows: dict[str, dict[str, object]],
+    counterfactuals: dict[str, dict[str, object]],
     live_curves: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
     _, failures = _build_counterfactual_admission_verdict(
         receipt=receipt,
-        shadows=shadows,
+        counterfactuals=counterfactuals,
     )
     exact_live = [
         row for row in live_curves.values()
@@ -2421,7 +2421,7 @@ def evaluate(
 
     try:
         receipt = _latest_proof_receipt_coverage(trades)
-        shadows = {
+        counterfactuals = {
             "combined_current_global_selection": (
                 _settled_global_counterfactual_evidence(
                     trades,
@@ -2482,13 +2482,13 @@ def evaluate(
         trades.close()
     verdict, failures = _build_verdict(
         receipt=receipt,
-        shadows=shadows,
+        counterfactuals=counterfactuals,
         live_curves=live_curves,
     )
     admission_verdict, admission_failures = (
         _build_counterfactual_admission_verdict(
             receipt=receipt,
-            shadows=shadows,
+            counterfactuals=counterfactuals,
         )
     )
     order_ledger_failures = _order_ledger_proof_failures(order_capital_ledger)
@@ -2536,7 +2536,7 @@ def evaluate(
             "trades": str(trades_path.resolve()),
         },
         "latest_global_receipt": receipt,
-        "settled_counterfactuals": shadows,
+        "settled_counterfactuals": counterfactuals,
         "live_realized_capital": live_curves,
         "globally_selected_exit_quality": selected_exit_quality,
         "globally_compared_hold_settlement_quality": held_settlement_quality,

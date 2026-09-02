@@ -5690,7 +5690,7 @@ def _capital_proof_counterfactual_receipt(
         _canonical_json_bytes(evaluations)
     ).hexdigest()
 
-    def confidence_cost_diagnostic(
+    def confidence_cost_evidence(
         *,
         family_key: str,
         bin_id: str,
@@ -5699,8 +5699,8 @@ def _capital_proof_counterfactual_receipt(
         shares: Decimal,
         cost: Decimal,
     ) -> dict[str, object]:
-        diagnostic: dict[str, object] = {
-            "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+        evidence: dict[str, object] = {
+            "role": "OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
             "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
         }
         witness = probability_witnesses.get(family_key)
@@ -5723,18 +5723,18 @@ def _capital_proof_counterfactual_receipt(
             else None
         )
         if q_mean is None or q_lcb is None or shares <= 0 or cost < 0:
-            diagnostic.update(
+            evidence.update(
                 {
-                    "readiness": "BLOCKED_DIAGNOSTIC_UNAVAILABLE",
+                    "readiness": "BLOCKED_EVIDENCE_UNAVAILABLE",
                     "confidence_cost_margin_positive": None,
                 }
             )
-            return diagnostic
+            return evidence
         unit_cost = float(cost / shares)
         mean_margin = float(q_mean) - unit_cost
         confidence_margin = float(q_lcb) - unit_cost
         confidence_positive = confidence_margin > 0.0
-        diagnostic.update(
+        evidence.update(
             {
                 "readiness": (
                     "CONFIDENCE_COST_POSITIVE_REQUIRES_FULL_ADMISSION"
@@ -5755,7 +5755,7 @@ def _capital_proof_counterfactual_receipt(
                 ),
             }
         )
-        return diagnostic
+        return evidence
 
     rejected_buy_frontiers: list[tuple[tuple[object, ...], dict[str, object]]] = []
     for evaluation in evaluations:
@@ -5835,8 +5835,8 @@ def _capital_proof_counterfactual_receipt(
             ),
             "probe_expected_ev_usd": expected_ev,
             "probe_expected_capital_efficiency": capital_efficiency,
-            "confidence_cost_amplification_diagnostic": (
-                confidence_cost_diagnostic(
+            "confidence_cost_amplification_evidence": (
+                confidence_cost_evidence(
                     family_key=evaluation_family_key,
                     bin_id=bin_id,
                     side=side,
@@ -5881,8 +5881,8 @@ def _capital_proof_counterfactual_receipt(
             )
         action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
         if action == "SELL":
-            amplification_diagnostic = {
-                "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+            amplification_evidence = {
+                "role": "OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
                 "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
                 "readiness": "NOT_APPLICABLE_CAPITAL_RELEASE",
                 "confidence_cost_margin_positive": None,
@@ -5893,7 +5893,7 @@ def _capital_proof_counterfactual_receipt(
             token_id = str(getattr(candidate, "token_id", "") or "")
             shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
             cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
-            amplification_diagnostic = confidence_cost_diagnostic(
+            amplification_evidence = confidence_cost_evidence(
                 family_key=winner_family_key,
                 bin_id=bin_id,
                 side=side,
@@ -5933,8 +5933,8 @@ def _capital_proof_counterfactual_receipt(
                 if getattr(decision, "cash_proceeds_usd", None) is not None
                 else None
             ),
-            "confidence_cost_amplification_diagnostic": (
-                amplification_diagnostic
+            "confidence_cost_amplification_evidence": (
+                amplification_evidence
             ),
             "evaluation": winner_evaluation,
         }

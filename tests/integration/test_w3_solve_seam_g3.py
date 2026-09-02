@@ -1489,14 +1489,14 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
         venue_submit_count_after=3,
     )
 
-    diagnostic = receipt["winner"][
-        "confidence_cost_amplification_diagnostic"
+    evidence = receipt["winner"][
+        "confidence_cost_amplification_evidence"
     ]
     assert receipt["winner"]["candidate_id"] == "proof-buy"
     assert receipt["winner"]["family_key"] == "family-buy"
     assert receipt["winner"]["city"] == "Taipei"
-    assert diagnostic == {
-        "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+    assert evidence == {
+            "role": "OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
         "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
         "readiness": "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE",
         "selected_side_q_mean": pytest.approx(0.30),
@@ -1647,10 +1647,10 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
         "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
     assert frontier["probe_expected_delta_log_wealth"] == pytest.approx(-0.002)
-    diagnostic = frontier["confidence_cost_amplification_diagnostic"]
-    assert diagnostic["mean_cost_margin_per_share"] == pytest.approx(-0.01)
-    assert diagnostic["confidence_cost_margin_per_share"] == pytest.approx(-0.23)
-    assert diagnostic["confidence_cost_margin_positive"] is False
+    evidence = frontier["confidence_cost_amplification_evidence"]
+    assert evidence["mean_cost_margin_per_share"] == pytest.approx(-0.01)
+    assert evidence["confidence_cost_margin_per_share"] == pytest.approx(-0.23)
+    assert evidence["confidence_cost_margin_positive"] is False
     assert receipt["venue_submit_count_before"] == 5
     assert receipt["venue_submit_count_after"] == 5
 

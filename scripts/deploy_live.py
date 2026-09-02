@@ -3272,8 +3272,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         return False, f"live restart recovery could not run: {exc}"
     stdout = (res.stdout or "").strip()
     stderr = (res.stderr or "").strip()
-    diagnostic = "\n".join(part for part in (stderr, stdout) if part)
-    tail = "\n".join(diagnostic.splitlines()[-80:]) if diagnostic else "<no output>"
+    recovery_output = "\n".join(part for part in (stderr, stdout) if part)
+    tail = (
+        "\n".join(recovery_output.splitlines()[-80:])
+        if recovery_output
+        else "<no output>"
+    )
     if res.returncode != 0:
         return False, f"live restart recovery failed rc={res.returncode}:\n{tail}"
     try:
