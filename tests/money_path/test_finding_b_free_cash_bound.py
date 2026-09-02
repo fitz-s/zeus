@@ -58,6 +58,12 @@ def _isolate_edli_settings(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.engine import qkernel_spine_bridge
 
+    monkeypatch.setattr(
+        adapter,
+        "_replacement_live_input_lag_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
     def _qkernel_proofs(*, family, snapshot_rows, **_kwargs):
         candidate = family.candidates[0]
         row = dict(snapshot_rows[0])

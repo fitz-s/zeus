@@ -1928,7 +1928,11 @@ def test_day0_wake_waits_for_active_held_position_monitor(monkeypatch):
         def is_set(self) -> bool:
             return True
 
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda **_kwargs: wake,
+    )
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
     monkeypatch.setattr(

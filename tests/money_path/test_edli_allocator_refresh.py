@@ -332,9 +332,10 @@ def test_main_edli_cycle_wires_live_path_allocator_refresh_source():
     # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     source = Path("src/events/reactor.py").read_text()
 
-    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator(")
+    refresh_call = source.index("_alloc_refresh = _construct_sql(")
     adapter_build = source.index("submit_adapter = event_bound_live_adapter_from_trade_conn(")
     assert refresh_call < adapter_build
+    assert "_edli_refresh_global_allocator(" in source[refresh_call:adapter_build]
     assert 'if not _alloc_refresh.get("configured")' in source[refresh_call:adapter_build]
 
 

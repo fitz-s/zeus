@@ -2184,7 +2184,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_day0_hourly_refresher",
-        lambda: (lambda *_args, **_kwargs: None),
+        lambda **_factory_kwargs: (lambda *_args, **_kwargs: None),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -2352,7 +2352,9 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+    ).fetchone() == (
+        ("pending", 0) if carrier_branch == "day0" else ("processed", 1)
+    )
     check.close()
     assert not resumed_queue_file.exists()
 
