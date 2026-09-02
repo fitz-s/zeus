@@ -974,10 +974,9 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
             }
             if not required.issubset(columns):
                 return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
-            row = conn.execute(
+            latest_row = conn.execute(
                 """
-                SELECT seed_file, day0_conditioning_identity_json,
-                       target_cycle_time
+                SELECT seed_file
                 FROM cycle_advance_enqueues
                 WHERE city = ?
                   AND target_date = ?
@@ -989,6 +988,49 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                     str(seed.get("city") or ""),
                     str(seed.get("target_date") or ""),
                     str(seed.get("temperature_metric") or ""),
+                ),
+            ).fetchone()
+            owner_row = conn.execute(
+                """
+                SELECT seed_file, day0_conditioning_identity_json,
+                       target_cycle_time
+                FROM cycle_advance_enqueues
+                WHERE city = ?
+                  AND target_date = ?
+                  AND metric = ?
+                  AND seed_file = ?
+                LIMIT 1
+                """,
+                (
+                    str(seed.get("city") or ""),
+                    str(seed.get("target_date") or ""),
+                    str(seed.get("temperature_metric") or ""),
+                    str(seed_file),
+                ),
+            ).fetchone()
+            if owner_row is None:
+                return _Day0EnqueueOwnershipCheck(
+                    _Day0EnqueueOwnership.STALE
+                    if latest_row is not None
+                    else _Day0EnqueueOwnership.INDETERMINATE
+                )
+            row = conn.execute(
+                """
+                SELECT seed_file, day0_conditioning_identity_json,
+                       target_cycle_time
+                FROM cycle_advance_enqueues
+                WHERE city = ?
+                  AND target_date = ?
+                  AND metric = ?
+                  AND target_cycle_time = ?
+                ORDER BY enqueue_id DESC
+                LIMIT 1
+                """,
+                (
+                    str(seed.get("city") or ""),
+                    str(seed.get("target_date") or ""),
+                    str(seed.get("temperature_metric") or ""),
+                    str(owner_row["target_cycle_time"] or ""),
                 ),
             ).fetchone()
             if row is None:

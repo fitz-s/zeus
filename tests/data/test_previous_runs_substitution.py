@@ -912,6 +912,88 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     assert not (request_dir / nonheld_seed.name).exists()
 
 
+def test_day0_enqueue_owner_isolated_by_target_cycle(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    from src.data.replacement_cycle_advance_trigger import _day0_conditioning_identity
+
+    forecast_db = tmp_path / "forecasts.db"
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    cycle_18_seed = seed_dir / "Jinan.2026-09-02.high.18z.json"
+    cycle_12_seed = seed_dir / "Jinan.2026-09-02.high.12z-day0.json"
+    observation = {
+        "source": "wu_icao_history",
+        "observation_time": "2026-09-02T01:00:00+00:00",
+        "observed_extreme_c": 22.0,
+        "unit": "C",
+    }
+    conditioning_identity = _day0_conditioning_identity(**observation)
+    assert conditioning_identity is not None
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            day0_conditioning_identity_json TEXT
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO cycle_advance_enqueues (
+            city, target_date, metric, target_cycle_time, seed_file,
+            day0_conditioning_identity_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "Jinan",
+                "2026-09-02",
+                "high",
+                "2026-09-01T18:00:00+00:00",
+                str(cycle_18_seed),
+                conditioning_identity,
+            ),
+            (
+                "Jinan",
+                "2026-09-02",
+                "high",
+                "2026-09-01T12:00:00+00:00",
+                str(cycle_12_seed),
+                conditioning_identity,
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    seed = {
+        "city": "Jinan",
+        "target_date": "2026-09-02",
+        "temperature_metric": "high",
+        "cycle_advance_enqueue_owner": True,
+        "day0_observed_extreme_source": observation["source"],
+        "day0_observed_extreme_observation_time": observation["observation_time"],
+        "day0_observed_extreme_c": observation["observed_extreme_c"],
+        "day0_observed_extreme_unit": observation["unit"],
+    }
+
+    ownership = queue_mod._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=forecast_db,
+        seed_file=cycle_18_seed,
+        seed=seed,
+    )
+
+    assert ownership.ownership is queue_mod._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is not None
+    assert ownership.witness["target_cycle_time"] == "2026-09-01T18:00:00+00:00"
+
+
 def test_cycle_priority_reads_only_queued_forecast_scopes(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
