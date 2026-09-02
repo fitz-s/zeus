@@ -1,5 +1,5 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-31; last_reused=2026-08-31
+# Lifecycle: created=2026-03-31; last_reviewed=2026-09-01; last_reused=2026-09-01
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
 # Last reused/audited: 2026-08-31
@@ -25422,7 +25422,7 @@ def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path)
         observed_at="2026-08-10T12:00:00+00:00",
     )
 
-    assert velocity == pytest.approx(-0.60)
+    assert velocity == pytest.approx(-0.75)
 
 
 def test_market_velocity_without_trade_db_is_non_authoritative():
@@ -25433,7 +25433,7 @@ def test_market_velocity_without_trade_db_is_non_authoritative():
         token_id="held-token",
         current_price=0.20,
         observed_at="2026-08-10T12:00:00+00:00",
-    ) == 0.0
+    ) is None
 
 
 def test_market_velocity_without_executable_quote_time_is_non_authoritative(tmp_path):
@@ -25448,7 +25448,7 @@ def test_market_velocity_without_executable_quote_time_is_non_authoritative(tmp_
         token_id="closed-held-token",
         current_price=float("nan"),
         observed_at=None,
-    ) == 0.0
+    ) is None
 
 
 def _red_real_schema_fixture(trade_id="red-real-schema"):

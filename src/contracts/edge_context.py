@@ -25,7 +25,7 @@ class EdgeContext:
     n_edges_after_fdr: int
     
     # Phase 3 Hard-Trigger Metrics
-    market_velocity_1h: float = 0.0
+    market_velocity_1h: float | None = None
     divergence_score: float = 0.0
     
     @property

@@ -1,5 +1,5 @@
 # Created: 2026-06-02
-# Last reused/audited: 2026-08-29 (persistent catastrophe live-law restoration)
+# Last reused/audited: 2026-09-01 (scale-free causal drawdown restoration)
 # Authority basis: BUG#127 (守護 SEV1, GOAL#36 "a short price change is NOT edge reversal");
 #   src/state/portfolio.py flash_crash_should_fire + Position.evaluate_exit (single live site)
 # Purpose: Lock the evidence gate on FLASH_CRASH_PANIC so a bare single-cycle quote wiggle
@@ -355,7 +355,28 @@ def test_causal_market_velocity_refuses_ancient_baseline_bridge():
         observed_at="2026-08-29T01:00:00+00:00",
     )
 
-    assert velocity == 0.0
+    assert velocity is None
+
+
+def test_causal_market_velocity_uses_recent_high_for_new_low_price_holding():
+    conn = _price_log_connection()
+    conn.executemany(
+        """INSERT INTO token_price_log(token_id, price, source_timestamp, timestamp)
+           VALUES ('held', ?, ?, ?)""",
+        [
+            (0.10, "2026-09-01T05:03:00+00:00", "2026-09-01T05:03:00+00:00"),
+            (0.07, "2026-09-01T05:20:00+00:00", "2026-09-01T05:20:00+00:00"),
+        ],
+    )
+
+    velocity = _causal_market_velocity_1h(
+        conn,
+        token_id="held",
+        current_price=0.06,
+        observed_at="2026-09-01T05:22:00+00:00",
+    )
+
+    assert velocity == pytest.approx(-0.40)
 
 
 def test_causal_catastrophe_confirmation_refuses_quote_gap():

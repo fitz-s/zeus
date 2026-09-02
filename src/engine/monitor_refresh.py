@@ -1167,10 +1167,17 @@ def _causal_market_velocity_1h(
     token_id: str,
     current_price: float,
     observed_at: str | None,
-) -> float:
-    """Return change from a causal one-hour baseline with bounded staleness."""
+) -> float | None:
+    """Return causal fractional drawdown from a bounded recent reference.
+
+    Prefer the latest quote from one-to-two hours ago so established positions
+    retain a stable one-hour comparison.  A newly held token has no such row;
+    in that case use the causal trailing-hour high instead of converting absent
+    history to a false zero move.  The result is scale-free: ``0.10 -> 0.06``
+    and ``0.50 -> 0.30`` are the same ``-0.40`` market-path observation.
+    """
     if conn is None or not observed_at:
-        return 0.0
+        return None
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
         if as_of.tzinfo is None:
@@ -1201,14 +1208,35 @@ def _causal_market_velocity_1h(
             (str(token_id), oldest_baseline, cutoff),
         ).fetchone()
         if row is None:
-            return 0.0
+            row = conn.execute(
+                """
+                SELECT MAX(price) AS price
+                  FROM token_price_log
+                 WHERE token_id = ?
+                   AND COALESCE(
+                           julianday(NULLIF(source_timestamp, '')),
+                           julianday(timestamp)
+                       ) > julianday(?)
+                   AND COALESCE(
+                           julianday(NULLIF(source_timestamp, '')),
+                           julianday(timestamp)
+                       ) < julianday(?)
+                """,
+                (str(token_id), cutoff, as_of.isoformat()),
+            ).fetchone()
+            if row is None or row["price"] is None:
+                return None
         old_price = float(row["price"])
         now_price = float(current_price)
-        if not (np.isfinite(old_price) and np.isfinite(now_price)):
-            return 0.0
-        return now_price - old_price
+        if (
+            not (np.isfinite(old_price) and np.isfinite(now_price))
+            or old_price <= 0.0
+            or now_price < 0.0
+        ):
+            return None
+        return (now_price / old_price) - 1.0
     except (TypeError, ValueError, sqlite3.Error):
-        return 0.0
+        return None
 
 
 def _causal_deep_market_catastrophe_confirmations(
@@ -1290,7 +1318,7 @@ def _causal_deep_market_catastrophe_confirmations(
                 current_price=price,
                 observed_at=sample_at,
             )
-            if velocity > threshold:
+            if velocity is None or velocity > threshold:
                 break
             count += 1
         return count

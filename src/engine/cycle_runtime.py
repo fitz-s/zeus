@@ -6189,7 +6189,9 @@ def _build_exit_context(
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
-        market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+        market_velocity_1h=_finite_float_or_none(
+            getattr(edge_ctx, "market_velocity_1h", None)
+        ),
         probability_receipt=getattr(pos, "_monitor_probability_receipt", None),
         portfolio_positions=portfolio_positions,
         bankroll=bankroll,

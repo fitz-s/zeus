@@ -262,7 +262,7 @@ class ExitContext:
     whale_toxicity: Optional[bool] = None
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
-    market_velocity_1h: float = 0.0
+    market_velocity_1h: Optional[float] = None
     probability_receipt: Optional[Mapping[str, object]] = None
 
     # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
@@ -3598,8 +3598,9 @@ def flash_crash_should_fire(
       (b) PERSISTENT CATASTROPHE — the adverse velocity has persisted for at least
           ``flash_crash_confirmations()`` consecutive causal quote samples AND its
           magnitude exceeds the deep catastrophe bound
-          ``flash_crash_catastrophe_velocity()`` (a genuine sustained crash that we
-          must escape even when the probability refresh is degraded).
+          ``flash_crash_catastrophe_velocity()`` (a genuine sustained fractional
+          drawdown that we must escape even when the probability refresh is
+          degraded).
 
     A single-cycle quote wiggle on a thin book / single seller / data gap, with the
     belief unchanged, satisfies neither path and therefore does NOT exit.
