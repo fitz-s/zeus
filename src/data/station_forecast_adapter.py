@@ -673,20 +673,27 @@ def ingest_enabled_station_sources_live(
     *,
     root: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    source_ids: Sequence[str] | None = None,
 ) -> dict[str, int]:
-    """Ingest every ENABLED station-forecast source from config, routed by ``adapter_kind``.
+    """Ingest selected ENABLED station forecasts, routed by ``adapter_kind``.
 
     Returns ``{source_id: rows_written}`` for each source that dispatched without error. Per-source
     fail-soft: a source whose ingest raises (or whose ``adapter_kind`` is unknown) is logged and
     omitted, so one provider outage never starves the cycle. NETWORK happens inside the dispatched
-    ingest functions only.
+    ingest functions only. ``source_ids=None`` preserves the all-enabled bootstrap behavior; an
+    explicit sequence lets the scheduler honor each provider's own source clock.
     """
     import logging  # noqa: PLC0415 - keep module import surface lean; called ~2x/cycle
 
     log = logging.getLogger(__name__)
     out: dict[str, int] = {}
     sources = load_station_forecast_config(root=root)
+    selected = None if source_ids is None else {
+        str(source_id).strip() for source_id in source_ids if str(source_id).strip()
+    }
     for source_id, spec in sources.items():
+        if selected is not None and str(source_id) not in selected:
+            continue
         if not isinstance(spec, Mapping) or not spec.get("enabled"):
             continue
         adapter_kind = str(spec.get("adapter_kind") or "")

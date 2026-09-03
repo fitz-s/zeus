@@ -233,9 +233,8 @@ _EXPLICIT_ROWS: tuple[SourceContract, ...] = (
     ),
     # Station forecast adapters — the notepad-law antibody rows: own_clock, never gated behind
     # the gridded ceiling above, per src/data/station_forecast_adapter.py + the
-    # _ingest_station_forecasts_live docstring ("Runs on the download lane [...] refreshes at
-    # the same ~2x/day cadence as the gridded raw inputs [...]" -- own cron, not gated on
-    # anchor cycle availability).
+    # source-local availability cadence configured by each adapter row -- never gated on the
+    # anchor cycle, and never collapsed into one shared station-source interval.
     SourceContract(
         source_id="hko_fnd",
         clock_law="own_clock",

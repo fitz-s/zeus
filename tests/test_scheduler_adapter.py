@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-03; last_reused=2026-09-03
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-08-23
+# Last reused or audited: 2026-09-03
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -73,6 +73,10 @@ def test_executor_class_assignments_by_role() -> None:
     assert by_id["ingest_k2_forecasts_daily"].executor_class == "forecast_archive_db"
     assert by_id["ingest_opendata_daily_mx2t6"].executor_class == "forecast_source_db"
     assert by_id["ingest_replacement_availability_poll"].executor_class == "forecast_clock_db"
+    assert (
+        by_id["ingest_station_forecast_source_clock"].executor_class
+        == "station_forecast_clock_db"
+    )
     assert by_id["ingest_replacement_maintenance"].executor_class == "derived_db"
     assert by_id["ingest_day0_oracle_anomaly"].executor_class == "oracle_guard_db"
     assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
@@ -2681,6 +2685,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
             "hko_source_clock_db",
             "hko_final_source_clock_db",
             "forecast_clock_db",
+            "station_forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
             "forecast_source_db",
@@ -2731,6 +2736,10 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         == "hko_final_source_clock_db"
     )
     assert by_id["ingest_replacement_availability_poll"]["executor"] == "forecast_clock_db"
+    assert (
+        by_id["ingest_station_forecast_source_clock"]["executor"]
+        == "station_forecast_clock_db"
+    )
     assert by_id["ingest_replacement_maintenance"]["executor"] == "derived_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "oracle_guard_db"

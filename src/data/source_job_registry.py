@@ -192,6 +192,12 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "IMMEDIATE at boot (next_run_time=now), then on the fast source-clock cadence "
                         "(default 15s; ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS override); "
                         "unchanged-source maintenance is isolated on ingest_replacement_maintenance."),
+    SourceJobSpec("ingest_station_forecast_source_clock", "ingest_main", "live", "default", True,
+                  source_ids=("hko_fnd", "cwa_township"),
+                  callable_ref="_station_forecast_source_clock_tick", family="forecast",
+                  misfire_grace_time=30,
+                  notes="independent station forecast source-clock poll; HKO fast cadence and CWA "
+                        "quota cadence are source-local config, never blocked behind gridded downloads"),
     SourceJobSpec("ingest_replacement_maintenance", "ingest_main", "derived", "default", True,
                   callable_ref="_replacement_maintenance_tick", family="forecast",
                   misfire_grace_time=120,

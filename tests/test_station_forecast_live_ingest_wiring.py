@@ -1,8 +1,8 @@
 # Created: 2026-06-29
-# Lifecycle: created=2026-06-29; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-06-29; last_reviewed=2026-09-03; last_reused=2026-09-03
 # Purpose: Lock config-driven station forecast ingest, dual-metric HKO capture, and reseed wiring.
 # Reuse: Run for station forecast source, dispatcher, cadence, or replacement reseed changes.
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-09-03
 # Authority basis: operator directive "加数据" (add CWA/HKO station-forecast data to the
 #   live forecast cycle); src/data/station_forecast_adapter.py single_runs persist contract;
 #   config/station_forecast_sources.json adapter_kind dispatch seam.
@@ -97,6 +97,33 @@ def test_dispatch_passes_both_hko_metrics_from_spec(monkeypatch, tmp_path):
 
     assert seen["city"] == "Hong Kong"
     assert seen["metrics"] == ("high", "low")
+
+
+def test_dispatch_can_poll_only_one_due_source(monkeypatch, tmp_path):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        adapter,
+        "ingest_cwa_township_live",
+        lambda conn, **kw: (calls.append("cwa"), 7)[1],
+    )
+    monkeypatch.setattr(
+        adapter,
+        "ingest_hko_fnd_live",
+        lambda conn, **kw: (calls.append("hko"), 9)[1],
+    )
+    _write_config(
+        tmp_path,
+        {"cwa_township": dict(_CWA_SPEC), "hko_fnd": dict(_HKO_SPEC)},
+    )
+
+    result = adapter.ingest_enabled_station_sources_live(
+        _CONN,
+        root=tmp_path,
+        source_ids=("hko_fnd",),
+    )
+
+    assert result == {"hko_fnd": 9}
+    assert calls == ["hko"]
 
 
 def test_hko_multi_metric_ingest_fetches_once_and_persists_both(monkeypatch):
@@ -294,38 +321,83 @@ def test_resolve_cwa_key_accepts_uppercase_file_key(tmp_path):
 # Re-home guard (2026-07-20): the 2026-06-11 download-lane migration orphaned the station ingest
 # call (it lived only in the descheduled forecast-live _replacement_forecast_download_cycle, so
 # cwa_township/hko_fnd went dark 2026-07-17). It is now re-homed onto ingest_main's availability
-# poll via the due-gated wrapper _ingest_station_forecasts_if_due. These guard both.
+# poll via the independent due-gated station source-clock job. These guard both.
 # ---------------------------------------------------------------------------
 
 
-def test_due_gate_fetches_then_skips_within_interval_then_fetches_again(monkeypatch):
+def test_due_gate_honors_each_station_source_clock(monkeypatch):
     from src.data import replacement_forecast_production as prod
 
-    calls = {"n": 0}
-    monkeypatch.setattr(prod, "_ingest_station_forecasts_live", lambda cfg: (calls.__setitem__("n", calls["n"] + 1), {"cwa_township": 7})[1])
-    monkeypatch.setattr(prod, "_last_station_ingest_monotonic", None)
+    calls: list[tuple[str, ...] | None] = []
 
-    first = prod._ingest_station_forecasts_if_due({})       # due (never run) -> fetch
-    gated = prod._ingest_station_forecasts_if_due({})        # within interval -> skip
-    # rewind the stored monotonic stamp past the interval to simulate elapsed time
-    prod._last_station_ingest_monotonic -= (prod._STATION_INGEST_MIN_INTERVAL_S + 1)
-    again = prod._ingest_station_forecasts_if_due({})        # interval elapsed -> fetch
+    def ingest(_cfg, *, source_ids=None):
+        calls.append(source_ids)
+        return {source_id: 1 for source_id in source_ids or ()}
 
-    assert first == {"cwa_township": 7}
+    monkeypatch.setattr(prod, "_ingest_station_forecasts_live", ingest)
+    monkeypatch.setattr(
+        prod,
+        "_station_forecast_poll_intervals",
+        lambda: {"cwa_township": 10800.0, "hko_fnd": 15.0},
+    )
+    monkeypatch.setattr(prod, "_last_station_ingest_monotonic_by_source", {})
+
+    first = prod._ingest_station_forecasts_if_due({})
+    gated = prod._ingest_station_forecasts_if_due({})
+    prod._last_station_ingest_monotonic_by_source["hko_fnd"] -= 16.0
+    hko_again = prod._ingest_station_forecasts_if_due({})
+
+    assert first == {"cwa_township": 1, "hko_fnd": 1}
     assert gated is None
-    assert again == {"cwa_township": 7}
-    assert calls["n"] == 2  # provider hit exactly twice, never on the gated tick
+    assert hko_again == {"hko_fnd": 1}
+    assert calls == [("cwa_township", "hko_fnd"), ("hko_fnd",)]
 
 
-def test_availability_poll_is_wired_to_station_ingest():
-    """Regression guard: the live availability-poll lane must call the station ingest wrapper so the
-    2026-07-17 orphaning cannot recur silently."""
+def test_due_gate_does_not_reseed_unchanged_fast_poll(monkeypatch):
+    from src.data import replacement_forecast_production as prod
+
+    monkeypatch.setattr(
+        prod,
+        "_station_forecast_poll_intervals",
+        lambda: {"hko_fnd": 15.0},
+    )
+    monkeypatch.setattr(prod, "_last_station_ingest_monotonic_by_source", {})
+    monkeypatch.setattr(
+        prod,
+        "_ingest_station_forecasts_live",
+        lambda _cfg, *, source_ids=None: {"hko_fnd": 0},
+    )
+
+    assert prod._ingest_station_forecasts_if_due({}) == {"hko_fnd": 0}
+    prod._last_station_ingest_monotonic_by_source["hko_fnd"] -= 16.0
+    assert prod._ingest_station_forecasts_if_due({}) is None
+
+
+def test_independent_station_source_clock_is_wired():
+    """Station fetch must not wait behind the heavier gridded availability job."""
     import inspect
 
     from src import ingest_main
 
-    src = inspect.getsource(ingest_main._replacement_availability_poll_tick)
-    assert "_ingest_station_forecasts_if_due" in src
+    station_src = inspect.getsource(ingest_main._station_forecast_source_clock_tick)
+    gridded_src = inspect.getsource(ingest_main._replacement_availability_poll_tick)
+    assert "_ingest_station_forecasts_if_due" in station_src
+    assert "_ingest_station_forecasts_if_due" not in gridded_src
+
+
+def test_station_scheduler_cadence_is_independent_of_gridded_override(monkeypatch):
+    from src import ingest_main
+    from src.data import replacement_forecast_production as prod
+
+    monkeypatch.setenv("ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS", "300")
+    monkeypatch.setattr(
+        prod,
+        "_station_forecast_poll_intervals",
+        lambda: {"hko_fnd": 15.0, "cwa_township": 10800.0},
+    )
+
+    assert ingest_main._replacement_availability_poll_seconds() == 300
+    assert ingest_main._station_forecast_source_clock_poll_seconds() == 15
 
 
 @pytest.mark.parametrize(
@@ -348,34 +420,15 @@ def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
     expected_changed_sources,
 ):
     from src import ingest_main
-    from src.data import bayes_precision_fusion_download as fusion_download
     from src.data import replacement_forecast_production as prod
-    from src.data import source_clock_update_probe as source_probe
 
     reseeds = {"count": 0}
     changed_sources: list[tuple[str, ...] | None] = []
-
-    class _CurrentClock:
-        updated_sources = ()
-
-        @staticmethod
-        def as_dict():
-            return {
-                "status": "CURRENT",
-                "updated_sources": [],
-                "affected_cities": [],
-                "error": None,
-            }
 
     monkeypatch.setattr(
         prod,
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
-    )
-    monkeypatch.setattr(
-        fusion_download,
-        "bayes_precision_fusion_quota_cooldown_seconds",
-        lambda: 0.0,
     )
     monkeypatch.setattr(
         prod,
@@ -391,20 +444,14 @@ def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
             {"status": "ENQUEUED", "seeds_enqueued": 1},
         )[2],
     )
-    monkeypatch.setattr(
-        source_probe,
-        "probe_openmeteo_source_clock_updates",
-        lambda **_kwargs: _CurrentClock(),
-    )
-
-    report = ingest_main._replacement_availability_poll_tick()
+    report = ingest_main._station_forecast_source_clock_tick()
 
     assert reseeds["count"] == expected_reseeds
     if expected_reseeds:
         assert changed_sources == [expected_changed_sources]
-        assert report["station_forecast_reseed"]["fusion_upgrade_status"] == "ENQUEUED"
+        assert report["fusion_upgrade_status"] == "ENQUEUED"
     else:
-        assert "station_forecast_reseed" not in report
+        assert report["status"] == "STATION_FORECAST_SOURCE_CURRENT"
 
 
 def test_diagnostic_download_cycle_does_not_duplicate_station_ingest():

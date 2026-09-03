@@ -13,6 +13,7 @@ DB-heavy jobs starve heartbeats:
     hko_source_clock_db — HKO conditional HTTP + short live write, isolated from METAR
     hko_final_source_clock_db — finalized HKO Daily Extract, isolated from realtime polling
     forecast_clock_db   — replacement forecast publication clock + scoped capture
+    station_forecast_clock_db — official station forecast publication clocks
     oracle_guard_db     — Day0 source disagreement guard
     observation_db      — supplemental observation ingest
     forecast_source_db  — current forecast downloads/materialization
@@ -47,6 +48,7 @@ ExecutorClass = Literal[
     "hko_source_clock_db",
     "hko_final_source_clock_db",
     "forecast_clock_db",
+    "station_forecast_clock_db",
     "oracle_guard_db",
     "observation_db",
     "forecast_source_db",
@@ -71,6 +73,8 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     if spec.role == "live" or spec.role == "settlement":
         if spec.job_id == "ingest_replacement_availability_poll":
             return "forecast_clock_db"
+        if spec.job_id == "ingest_station_forecast_source_clock":
+            return "station_forecast_clock_db"
         if spec.job_id in {
             "ingest_day0_metar_source_clock",
             "ingest_day0_metar_commit_retry",
@@ -279,6 +283,7 @@ def registry_executor_pools() -> dict[str, object]:
         "hko_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "hko_final_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
+        "station_forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "oracle_guard_db": ThreadPoolExecutor(max_workers=1),
         "observation_db": ThreadPoolExecutor(max_workers=1),
         "forecast_source_db": ThreadPoolExecutor(max_workers=1),

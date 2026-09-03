@@ -1,5 +1,5 @@
 {
-  "_doc": "Station-calibrated official-forecast sources. ENABLED sources are ingested live by the forecast-download lane (replacement_forecast_production._ingest_station_forecasts_live -> station_forecast_adapter.ingest_enabled_station_sources_live), routed by adapter_kind, on the same ~2x/day cadence as the gridded raw inputs. Each source reaches its city's served center ONLY via the per-city source-clock scheme weight (DATA PRECISION, never a de-bias). Set enabled=false to drop a source from live ingest.",
+  "_doc": "Station-calibrated official-forecast sources. ENABLED sources are ingested live by the forecast availability lane (replacement_forecast_production._ingest_station_forecasts_live -> station_forecast_adapter.ingest_enabled_station_sources_live), routed by adapter_kind on each source's own poll_interval_seconds. Each source reaches its city's served center ONLY via the per-city source-clock scheme weight (DATA PRECISION, never a de-bias). Set enabled=false to drop a source from live ingest.",
   "sources": {
     "cwa_township": {
       "enabled": true,
@@ -12,6 +12,7 @@
       "value_unit": "C",
       "endpoint": "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-063",
       "adapter_kind": "cwa_township_json",
+      "poll_interval_seconds": 10800,
       "location_name": "松山區",
       "element_name": "最高溫度",
       "max_lead_days": 7,
@@ -35,6 +36,7 @@
       "value_unit": "C",
       "endpoint": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en",
       "adapter_kind": "hko_fnd_json",
+      "poll_interval_seconds": 15,
       "max_lead_days": 9,
       "settlement_aligned": true,
       "settlement_source_type": "hko",
