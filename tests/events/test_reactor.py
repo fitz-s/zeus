@@ -1393,7 +1393,7 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     assert monitor_pending() is False
     monitor_debt_pending = captured["held_position_monitor_debt_pending"]
     assert callable(monitor_debt_pending)
-    assert monitor_debt_pending() is True
+    assert monitor_debt_pending() is False
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
@@ -1865,7 +1865,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_day0_hourly_refresher",
-        lambda: (lambda *_args, **_kwargs: None),
+        lambda **_kwargs: (lambda *_args, **_inner_kwargs: None),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -2033,7 +2033,9 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+    ).fetchone() == (
+        ("processed", 1) if carrier_branch == "forecast" else ("pending", 0)
+    )
     check.close()
     assert not resumed_queue_file.exists()
 

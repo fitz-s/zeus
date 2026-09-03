@@ -207,7 +207,9 @@ def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatc
         authority_tier="CHAIN",
     )
     emitted = []
-    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    trade_db = tmp_path / "trades.db"
+    CollateralLedger(db_path=trade_db, initialize_schema=True).close()
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: trade_db)
     monkeypatch.setattr(
         "src.runtime.timeout_guard.run_with_timeout",
         lambda *_args, **_kwargs: ({}, None, ""),
@@ -653,6 +655,7 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
 
     trade_db = tmp_path / "trades.db"
     wake_path = tmp_path / "edli-reactor-wake.json"
+    CollateralLedger(db_path=trade_db, initialize_schema=True).close()
     payload = {
         "pusd_balance_micro": 17_000_000,
         "pusd_allowance_micro": 17_000_000,
@@ -808,6 +811,7 @@ trade_db = Path(sys.argv[1])
 wake_path = Path(sys.argv[2])
 authority_tier = sys.argv[3]
 stale_seconds = float(sys.argv[4])
+CollateralLedger(db_path=trade_db, initialize_schema=True).close()
 payload = {
     "pusd_balance_micro": 23_000_000,
     "pusd_allowance_micro": 23_000_000,
