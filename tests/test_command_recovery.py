@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-28; last_reused=2026-08-28
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-08-28
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -5481,25 +5481,27 @@ class TestAuthenticatedEntryTradeFactProjection:
         ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
-    def test_price_improved_fak_overfill_bootstraps_missing_position(
-        self, conn, monkeypatch
+    @pytest.mark.parametrize("order_type", ["FAK", "FOK"])
+    def test_price_improved_taker_overfill_bootstraps_missing_position(
+        self, conn, monkeypatch, order_type
     ):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
         )
 
-        command_id = "cmd-authenticated-fak-price-improvement"
-        position_id = "pos-authenticated-fak-price-improvement"
-        order_id = "ord-authenticated-fak-price-improvement"
-        token_id = "tok-authenticated-fak-price-improvement"
+        suffix = order_type.lower()
+        command_id = f"cmd-authenticated-{suffix}-price-improvement"
+        position_id = f"pos-authenticated-{suffix}-price-improvement"
+        order_id = f"ord-authenticated-{suffix}-price-improvement"
+        token_id = f"tok-authenticated-{suffix}-price-improvement"
         _insert(
             conn,
             command_id=command_id,
             position_id=position_id,
-            decision_id="dec-authenticated-fak-price-improvement",
+            decision_id=f"dec-authenticated-{suffix}-price-improvement",
             token_id=token_id,
             event_slug="highest-temperature-in-singapore-on-july-24-2026-30c",
-            order_type="FAK",
+            order_type=order_type,
             size=173.0,
             price=0.09,
         )
@@ -5572,13 +5574,31 @@ class TestAuthenticatedEntryTradeFactProjection:
             "src.state.db.get_forecasts_connection_read_only",
             forecasts_connection,
         )
-        _append_confirmed_trade_fact(
+        trade_id = f"trade-authenticated-{suffix}-price-improvement"
+        _append_trade_fact(
             conn,
             command_id=command_id,
             order_id=order_id,
-            trade_id="trade-authenticated-fak-price-improvement",
+            trade_id=trade_id,
+            state="CONFIRMED" if order_type == "FAK" else "MATCHED",
+            source="REST" if order_type == "FAK" else "WS_USER",
             filled_size="189.77",
             fill_price="0.08",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": (
+                    "partial_remainder_point_order_filled_without_full_trade_fact"
+                ),
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+            },
         )
 
         summary = reconcile_authenticated_entry_trade_facts(
@@ -5588,6 +5608,15 @@ class TestAuthenticatedEntryTradeFactProjection:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "FILLED"
+        fill_payload = json.loads(_get_events(conn, command_id)[-1]["payload_json"])
+        assert fill_payload["fill_bound_semantics"] == (
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+        )
+        assert fill_payload["proof_class"] == (
+            "authenticated_trade_fact_full_fill"
+            if order_type == "FAK"
+            else "authenticated_trade_fact_terminal_fill"
+        )
         position = conn.execute(
             """
             SELECT phase, city, target_date, temperature_metric, unit, bin_label, token_id,
@@ -5791,6 +5820,7 @@ class TestAuthenticatedEntryTradeFactProjection:
         ("order_type", "filled_size", "fill_price"),
         [
             ("FAK", "200", "0.08"),
+            ("FOK", "200", "0.08"),
             ("GTC", "189.77", "0.08"),
         ],
     )
@@ -15719,7 +15749,8 @@ class TestRecoveryResolutionTable:
         current = conn.execute(
             """
             SELECT phase, condition_id, token_id, no_token_id, shares, cost_basis_usd,
-                   entry_price, order_id, order_status, strategy_key, temperature_metric
+                   entry_price, order_id, order_status, strategy_key,
+                   temperature_metric, fill_authority
               FROM position_current
              WHERE position_id = 'pos-001'
             """
@@ -15736,6 +15767,7 @@ class TestRecoveryResolutionTable:
             "order_status": "filled",
             "strategy_key": "opening_inertia",
             "temperature_metric": "high",
+            "fill_authority": "venue_confirmed_full",
         }
         events = conn.execute(
             """
@@ -15786,6 +15818,29 @@ class TestRecoveryResolutionTable:
             "venue_status": "MATCHED",
             "terminal_exec_status": "filled",
         }
+        conn.execute(
+            "UPDATE position_current SET fill_authority = NULL "
+            "WHERE position_id = 'pos-001'"
+        )
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        authority_repair = reconcile_filled_entry_projection_repairs(
+            conn,
+            mock_client,
+        )
+        assert authority_repair == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT fill_authority FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()["fill_authority"] == "venue_confirmed_full"
+
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_projection_repair"] == {
             "scanned": 0,
@@ -34556,6 +34611,155 @@ def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
     try:
         assert _get_state(verified, "cmd-release") == "EXPIRED"
         assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+    finally:
+        verified.close()
+
+
+def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
+    tmp_path,
+    monkeypatch,
+):
+    """A zero-fill cancelled top-up cannot reserve cash behind an active lot."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "cancelled-increment-capital-release.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(
+        seed,
+        command_id="cmd-cancelled-increment",
+        position_id="pos-active",
+        size=9.25,
+        price=0.52,
+    )
+    _open_test_entry_obligation(seed, "cmd-cancelled-increment")
+    _advance_to_acked(
+        seed,
+        command_id="cmd-cancelled-increment",
+        venue_order_id="ord-cancelled-increment",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-active",
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               shares = 6.0,
+               cost_basis_usd = 3.18,
+               size_usd = 3.18,
+               entry_price = 0.53
+         WHERE position_id = 'pos-active'
+        """
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-cancelled-increment",
+        order_id="ord-cancelled-increment",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="9.25",
+        source="REST",
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-08-28T12:12:00Z",
+        payload={"venue_order_id": "ord-cancelled-increment"},
+    )
+    append_event(
+        seed,
+        command_id="cmd-cancelled-increment",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-08-28T12:13:00Z",
+        payload={
+            "venue_order_id": "ord-cancelled-increment",
+            "venue_status": "CANCELED",
+        },
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _conn_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "durable cancel proof must release capital before venue I/O"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["cancel_ack_terminal_no_fill_facts_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["terminal_entry_exposure_obligations_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        obligation = verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """,
+            ("cmd-cancelled-increment",),
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "remaining_size": "9.25",
+        }
+        position = verified.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-active'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 6.0,
+            "cost_basis_usd": 3.18,
+        }
     finally:
         verified.close()
 
