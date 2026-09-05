@@ -297,3 +297,24 @@ Operator reframed the objective to slice-time convergence (decide ahead of the m
 - **NWP-release drift trade (all leads), scratchpad `nwpdrift/REPORT.md`:** 46,189 capture events, 3,968 with a causal book; taker entry +3m → −4.5¢ @+60m [−7.2, −2.8]; 0/18 cells LCB > 0; direction capture 42.6% (< coin); bigger innovations lose more; κ(+60m) = 2.15¢ per unit Δq vs median |Δq| 0.082 ⇒ 0.18¢ expected response vs 2.0¢ spread (30× short); regional models κ 2.8× global, still negative; hold-to-catch-up never turns positive. Only condition that changes the arithmetic: a family whose spread compresses below ~0.3¢.
 - **Conclusion so far:** our lead exists in belief space (we move first on prints and on captures) and is worthless as a taker because the executable response is an order of magnitude smaller than the spread. Remaining untested monetisation: MAKER posting on the innovation side (earn the spread instead of paying it); fill-rate and post-fill markout measurement in flight (`makerlead`). If that also fails, the honest statement is that Zeus's information sources do not beat this market's price at any lead, and the profit lever is not in the decision chain.
 - **Operations tonight:** a second session (zeus-53) cherry-picked 3d761227b and daf63b3d5 with a mesh restart each; each restart arms the entries pause guard, which cannot prove green while every open position is on a closed/dead market, so entries stayed paused until CAS-resumed (twice). A pause-guard watcher now CAS-resumes any restart-guard pause older than 3 min when runtime is green and all blocking positions are closed-market (operator's no-idle order). Guard design gap queued: closed-market positions must count as settlement-recoverable regardless of payload shape.
+
+### Item 36 addendum 6 (2026-09-05 01:20Z): the hunt is complete — every mechanism measured; where the money is and is not
+
+Measured today on 47-60 days of Zeus's own data, all leads, cluster-bootstrapped by target date, post-fill executable markout as the only promotion statistic:
+
+| mechanism | result | report |
+|---|---|---|
+| NWP-cycle posterior vs price (day1/2) | market leads at every horizon; Brier(q)−Brier(p) +0.044 | convergence/REPORT_V2 |
+| Observation reaction as ENTRY (day0), naive and nowcast-pmf | negative in every cell, CIs exclude 0 | ledger §PMF |
+| NWP-release drift, taker (all leads) | −4.5¢ @+60m, 0/18 cells LCB>0; κ·‖Δq‖ ≈ 0.2¢ vs 2¢ spread | nwpdrift/REPORT |
+| NWP-release drift, maker-posted | −4.4¢ net, 0/12 cells | makerlead/REPORT §4-5 |
+| Settlement calibrator variants (intent population, lead×side) | none beats the market price; dedup weight only | intentcal/REPORT |
+| Exit continuation law (π_fill, μ(h)) | worse than immediate exit; no exit-time observable predicts keeps | exitlaw/REPORT |
+| Latency (any hop) | not a constraint (+1 min = +3 min) | latency/REPORT |
+| Resting longer instead of cancel-and-cross | execution saving +3.7¢/share real; but the counterfactual fills mark −3…−10¢ (negative book) | makerlead §3, ledger §REST |
+
+Standing conclusion: Zeus's information sources do not beat this venue's price at any lead; every lever found today reduces loss (α sign, exit execution, latch, veto, exit consistency) rather than creating gain. The engine's own riskguard e-value gate independently closed `forecast_qkernel_entry` on the same evidence. The live book is the day0 lane behind the diurnal-residual veto (replay: kept set +0.029/unit, CI not established).
+
+What would change this: a spread compression below ~0.3¢ on any family (drift becomes tradeable), or an information source the market does not have (a station/obs feed or model the price demonstrably lags by more than the spread). Neither exists in the current data.
+
+Landed today on the daemon line (mine): d2df69d05, a6aaa648b/214326fa0/5707034b6, 97ca7531d, d3a49f9f6/52867f2af, 3211616de/c5a4d9933. Foreign (zeus-53, no coordination): 3d761227b, daf63b3d5, 967938219, ffa4f4b7a — each with a restart that re-armed the pause guard; a watcher now CAS-resumes stale restart-guard pauses when runtime is green and every open position is closed-market.
