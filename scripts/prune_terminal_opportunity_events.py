@@ -142,12 +142,39 @@ def _prune(
                 time.sleep(backoff)
                 backoff = min(backoff * 1.7, 30.0)
 
+    wal_path = db_path.with_name(db_path.name + "-wal")
+
+    def _wait_for_wal_drain() -> bool:
+        """Block while the WAL is above the ceiling; False once max-seconds runs out.
+
+        Deleted pages become WAL frames that no checkpoint can reclaim while a
+        live reader pins an older snapshot, so a polite batch loop still
+        inflates the WAL without bound (2026-09-07: 6.95 GB in 10 min, and the
+        riskguard tick stalled 19 min behind it, fail-closed RED). WAL size is
+        the only signal that tracks reader pressure; batch size and lease
+        politeness do not.
+        """
+        while True:
+            try:
+                wal_bytes = wal_path.stat().st_size
+            except FileNotFoundError:
+                wal_bytes = 0
+            if wal_bytes <= args.max_wal_bytes:
+                return True
+            if time.monotonic() - start > args.max_seconds:
+                print(f"max-seconds reached while WAL at {wal_bytes} bytes, stopping", flush=True)
+                return False
+            print(f"WAL {wal_bytes} bytes > {args.max_wal_bytes}; waiting for checkpoint", flush=True)
+            time.sleep(args.wal_poll_seconds)
+
     def _batched_delete(table: str, batch: int, where_extra: str = "") -> int:
         total = 0
         rounds = 0
         while True:
             if time.monotonic() - start > args.max_seconds:
                 print(f"[{table}] max-seconds reached, stopping at {total} deleted", flush=True)
+                break
+            if not _wait_for_wal_drain():
                 break
             n = _delete_one_batch(table, batch, where_extra)
             total += n
@@ -194,10 +221,13 @@ def main() -> int:
     ap.add_argument("--db", default=DEFAULT_DB)
     ap.add_argument("--keep-hours", type=float, default=3.0,
                     help="also keep opportunity_events created within this many hours")
-    ap.add_argument("--proc-batch", type=int, default=20000)
+    ap.add_argument("--proc-batch", type=int, default=5000)
     ap.add_argument("--event-batch", type=int, default=5000)
     ap.add_argument("--busy-timeout-ms", type=int, default=60000)
-    ap.add_argument("--sleep", type=float, default=0.05, help="seconds between batches")
+    ap.add_argument("--sleep", type=float, default=1.0, help="seconds between batches")
+    ap.add_argument("--max-wal-bytes", type=int, default=1 << 30,
+                    help="pause deleting while <db>-wal is larger than this")
+    ap.add_argument("--wal-poll-seconds", type=float, default=5.0)
     ap.add_argument("--max-seconds", type=float, default=3600.0)
     ap.add_argument("--keep-out", default="/tmp/prune_keep_event_ids_2026-06-16.txt")
     ap.add_argument("--vacuum", action="store_true")
