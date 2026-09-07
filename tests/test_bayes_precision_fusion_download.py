@@ -3251,3 +3251,99 @@ def test_previous_runs_beyond_model_horizon_is_not_requested_legacy(
     assert seen_models == ["ecmwf_ifs"]
     assert "icon_d2:previous_runs_beyond_horizon" in report["dropped"]
     assert _count(db, model="icon_d2", endpoint="previous_runs") == 0
+
+
+def _fresh_single_runs_cache_process(dl) -> None:
+    """Drop every in-memory cache structure so only the persisted file survives."""
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+    dl._load_persisted_single_runs_payload_cache(force=True)
+
+
+def test_single_location_120h_payload_donates_to_cross_process_72h_request(
+    monkeypatch, tmp_path,
+) -> None:
+    """The BPF per-(city, target_date) path (_default_live_fetch_batched) stores the
+    120-h payloads; until it persisted the request identity none of them could serve a
+    day0 (72,1) request in another process (2026-09-07: 4 of the last 6 day0 fetches had
+    a series-identical 120-h payload already on disk from this path)."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    cache_path = tmp_path / "single_runs_payload_cache.json"
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
+    _fresh_single_runs_cache_process(dl)
+
+    calls: list[dict] = []
+
+    def _fetch(_url, params, **kwargs):
+        calls.append(dict(params))
+        return _CHENGDU_120H_PAYLOAD
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+
+    dl._default_live_fetch_batched(
+        models=["ecmwf_ifs"],
+        latitude=_CHENGDU_REQUEST_LATITUDE,
+        longitude=_CHENGDU_REQUEST_LONGITUDE,
+        timezone_name=_CHENGDU_TIMEZONE,
+        run=_CHENGDU_RUN,
+        target_local_date=date(2026, 9, 7),
+        forecast_hours=120,
+    )
+    assert len(calls) == 1
+
+    _fresh_single_runs_cache_process(dl)
+    (sliced,) = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[_CHENGDU_LOCATION], run=_CHENGDU_RUN,
+        forecast_hours=72, past_hours=1,
+    )
+    assert len(calls) == 1, "the (72,1) request must be served from the single-location 120-h donor"
+    assert sliced["hourly"]["time"] == _CHENGDU_72H_PAYLOAD["hourly"]["time"]
+    assert sliced["hourly"]["temperature_2m"] == _CHENGDU_72H_PAYLOAD["hourly"]["temperature_2m"]
+
+
+def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
+    monkeypatch, tmp_path,
+) -> None:
+    """The reverse direction: a 120-h donor persisted by the locations-batched path
+    serves a smaller single-location request, and the parsed local-day values equal a
+    native 72-h fetch's."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    cache_path = tmp_path / "single_runs_payload_cache.json"
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
+    _fresh_single_runs_cache_process(dl)
+
+    calls: list[dict] = []
+
+    def _fetch(_url, params, **kwargs):
+        calls.append(dict(params))
+        return _CHENGDU_120H_PAYLOAD
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+
+    dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[_CHENGDU_LOCATION], run=_CHENGDU_RUN, forecast_hours=120,
+    )
+    assert len(calls) == 1
+
+    _fresh_single_runs_cache_process(dl)
+    served = dl._default_live_fetch_batched(
+        models=["ecmwf_ifs"],
+        latitude=_CHENGDU_REQUEST_LATITUDE,
+        longitude=_CHENGDU_REQUEST_LONGITUDE,
+        timezone_name=_CHENGDU_TIMEZONE,
+        run=_CHENGDU_RUN,
+        target_local_date=date(2026, 9, 7),
+        forecast_hours=72,
+    )
+    assert len(calls) == 1, "the single-location 72-h request must be served from the 120-h donor"
+    native = dl._parse_batched_single_runs_payload(
+        _CHENGDU_72H_PAYLOAD, ["ecmwf_ifs"], date(2026, 9, 7), _CHENGDU_TIMEZONE,
+    )
+    assert served == native

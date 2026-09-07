@@ -1513,7 +1513,29 @@ def _default_live_fetch_batched(
             forecast_hours=forecast_hours,
             past_hours=0,
         )
+        # Same identity/superset contract as _fetch_single_runs_hourly_payloads_batched:
+        # this site stores the 120-h BPF payloads, and until it persisted the request
+        # identity none of them could donate to a day0 72-h request for the same run and
+        # location (2026-09-07: 4 of the last 6 day0 fetches had a series-identical 120-h
+        # payload already on disk, stored here without identity).
+        identity_key = _single_runs_payload_identity_key(
+            run_iso=run_iso,
+            latitude=latitude,
+            longitude=longitude,
+            timezone_name=timezone_name,
+        )
         cached_payload = _SINGLE_RUNS_PAYLOAD_CACHE.get(cache_key)
+        if cached_payload is None:
+            cached_payload = _lookup_single_runs_superset_payload(
+                om_ids=tuple(om_ids),
+                run_iso=run_iso,
+                latitude=latitude,
+                longitude=longitude,
+                timezone_name=timezone_name,
+                forecast_hours=int(forecast_hours),
+                past_hours=0,
+                identity_key=identity_key,
+            )
         if cached_payload is not None:
             payload = copy.deepcopy(cached_payload)
         else:
@@ -1526,7 +1548,13 @@ def _default_live_fetch_batched(
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
             if isinstance(payload, Mapping):
-                _store_single_runs_payload_cache(cache_key, payload)
+                _store_single_runs_payload_cache(
+                    cache_key,
+                    payload,
+                    identity_key=identity_key,
+                    forecast_hours=int(forecast_hours),
+                    past_hours=0,
+                )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
         batched_error_text = str(exc)
