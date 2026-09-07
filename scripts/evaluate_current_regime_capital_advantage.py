@@ -1812,12 +1812,47 @@ def _portfolio_observation_curve(
     }
 
 
+def _verified_prior_exit_scan_frontier(
+    conn: sqlite3.Connection,
+    prior: Mapping[str, object] | None,
+) -> tuple[str, int] | None:
+    """Return the prior run's (as_of, max_rowid) path-scan frontier, or None.
+
+    The frontier is trusted only when the evidence row it names still sits at
+    that rowid: execution_feasibility_evidence is append-only with a TEXT
+    primary key, so its rowids are insertion-ordered but a VACUUM could
+    renumber them, and a renumbered table must fall back to a full walk.
+    """
+
+    if not isinstance(prior, Mapping):
+        return None
+    frontier = prior.get("post_exit_path_scan_frontier")
+    if not isinstance(frontier, Mapping):
+        return None
+    try:
+        as_of = _parse_aware(frontier.get("as_of")).isoformat()
+        max_rowid = int(frontier["max_rowid"])
+        evidence_id = str(frontier["max_rowid_evidence_id"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if max_rowid <= 0 or not evidence_id:
+        return None
+    row = conn.execute(
+        "SELECT evidence_id FROM execution_feasibility_evidence WHERE rowid=?",
+        (max_rowid,),
+    ).fetchone()
+    if row is None or str(row[0]) != evidence_id:
+        return None
+    return as_of, max_rowid
+
+
 def _globally_selected_exit_quality(
     conn: sqlite3.Connection,
     forecasts: sqlite3.Connection,
     curves: Mapping[str, Mapping[str, object]],
     *,
     as_of: datetime,
+    prior: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Grade exact schema-22 EXITs against HOLD and later executable bids.
 
@@ -1826,7 +1861,32 @@ def _globally_selected_exit_quality(
     Post-exit bid observations are size-executable lower bounds on the attainable
     peak; they are never promoted to complete peak proof without a continuity
     contract.
+
+    ``prior`` is this evaluator's own previous output.  The post-exit path of a
+    position only grows (evidence rows are appended, never rewritten), so a
+    position whose exit fill facts are unchanged resumes from its prior peak
+    and observation count and walks only the rows the prior run could not have
+    seen: rowid above the prior scan frontier, or quoted after the prior
+    as_of.  Anything else -- no prior, a renumbered frontier, a changed fill --
+    walks the full path.  The frontier is read before any path query so every
+    row at or below it was visible to every path query of this run.
     """
+
+    frontier_row = conn.execute(
+        "SELECT rowid,evidence_id FROM execution_feasibility_evidence "
+        "ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    scan_frontier = {
+        "as_of": as_of.isoformat(),
+        "max_rowid": int(frontier_row[0]) if frontier_row else 0,
+        "max_rowid_evidence_id": str(frontier_row[1]) if frontier_row else "",
+    }
+    prior_frontier = _verified_prior_exit_scan_frontier(conn, prior)
+    prior_paths: dict[str, Mapping[str, object]] = {}
+    if prior_frontier is not None:
+        for raw in tuple((prior or {}).get("curve") or ()):
+            if isinstance(raw, Mapping) and raw.get("position_id"):
+                prior_paths[str(raw["position_id"])] = raw
 
     candidates: dict[str, dict[str, object]] = {}
     for strategy, curve in curves.items():
@@ -1968,14 +2028,44 @@ def _globally_selected_exit_quality(
         # string comparison/ordering matches datetime() while letting
         # SQLite use idx_execution_feasibility_evidence_token_time
         # (token_id, quote_seen_at) instead of scanning every row.
-        path_rows = conn.execute(
-            "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND quote_seen_at>? "
-            "AND quote_seen_at<=? "
-            "AND depth_before_json IS NOT NULL AND depth_before_json!='' "
-            "ORDER BY quote_seen_at,rowid",
-            (str(command[2]), fill_at.isoformat(), as_of.isoformat()),
-        ).fetchall()
+        prior_row = prior_paths.get(position_id)
+        prior_count = 0
+        prior_peak: float | None = None
+        if (
+            prior_frontier is not None
+            and prior_row is not None
+            and prior_row.get("command_id") == command_id
+            and prior_row.get("filled_at") == fill_at.isoformat()
+            and prior_row.get("filled_shares") == fill_shares
+            and isinstance(prior_row.get("post_exit_executable_depth_observations"), int)
+        ):
+            prior_count = int(prior_row["post_exit_executable_depth_observations"])
+            raw_peak = prior_row.get("observed_post_exit_peak_executable_bid_vwap")
+            prior_peak = float(raw_peak) if raw_peak is not None else None
+            path_rows = conn.execute(
+                "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_evidence "
+                "WHERE token_id=? AND quote_seen_at>? "
+                "AND quote_seen_at<=? "
+                "AND (rowid>? OR quote_seen_at>?) "
+                "AND depth_before_json IS NOT NULL AND depth_before_json!='' "
+                "ORDER BY quote_seen_at,rowid",
+                (
+                    str(command[2]),
+                    fill_at.isoformat(),
+                    as_of.isoformat(),
+                    prior_frontier[1],
+                    prior_frontier[0],
+                ),
+            ).fetchall()
+        else:
+            path_rows = conn.execute(
+                "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_evidence "
+                "WHERE token_id=? AND quote_seen_at>? "
+                "AND quote_seen_at<=? "
+                "AND depth_before_json IS NOT NULL AND depth_before_json!='' "
+                "ORDER BY quote_seen_at,rowid",
+                (str(command[2]), fill_at.isoformat(), as_of.isoformat()),
+            ).fetchall()
         # Consecutive quotes very often carry the identical order-book
         # snapshot (the book didn't change between polls). _executable_bid_vwap
         # is a pure function of (depth_before_json, fill_shares), so memoise
@@ -1991,9 +2081,13 @@ def _globally_selected_exit_quality(
             vwap = vwap_cache[depth_json]
             if vwap is not None:
                 executable_path.append((str(path[0]), vwap))
-        observed_peak = (
-            max(vwap for _, vwap in executable_path) if executable_path else None
-        )
+        observation_count = prior_count + len(executable_path)
+        peaks = [
+            peak
+            for peak in (prior_peak, *(vwap for _, vwap in executable_path))
+            if peak is not None
+        ]
+        observed_peak = max(peaks) if peaks else None
         entry_price = float(position[5]) if position[5] is not None else None
         cost_basis = float(position[7]) if position[7] is not None else None
         accounting_pnl = (
@@ -2034,7 +2128,7 @@ def _globally_selected_exit_quality(
                     if exit_vs_hold_usd is not None
                     else None
                 ),
-                "post_exit_executable_depth_observations": len(executable_path),
+                "post_exit_executable_depth_observations": observation_count,
                 "observed_post_exit_peak_executable_bid_vwap": observed_peak,
                 "observed_peak_miss_usd_lower_bound": (
                     round(max(0.0, observed_peak - fill_price) * fill_shares, 6)
@@ -2043,7 +2137,7 @@ def _globally_selected_exit_quality(
                 ),
                 "peak_proof_status": (
                     "OBSERVED_PATH_LOWER_BOUND_NOT_COMPLETE_PEAK_PROOF"
-                    if executable_path
+                    if observation_count
                     else "UNPROVEN_NO_POST_EXIT_EXECUTABLE_DEPTH"
                 ),
                 "global_auction_decision_log_id": receipt.decision_log_id,
@@ -2083,6 +2177,7 @@ def _globally_selected_exit_quality(
             "VERIFIED_BINARY_HOLD_PAYOFF; OBSERVED_BIDS_ARE_ONLY_A_PEAK_LOWER_BOUND"
         ),
         "rejection_counts": dict(sorted(rejection_counts.items())),
+        "post_exit_path_scan_frontier": scan_frontier,
         "curve": exact_rows,
     }
 
@@ -2365,6 +2460,7 @@ def evaluate(
     prior_portfolio_observations: Sequence[Mapping[str, object]] = (),
     prior_realized_proof_samples: Mapping[int, Mapping[str, object]] | None = None,
     scan_floor_decision_log_id: int = 0,
+    prior_exit_quality: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     trades = _read_only(
         trades_path,
@@ -2443,6 +2539,7 @@ def evaluate(
             forecasts,
             raw_live_curves,
             as_of=as_of,
+            prior=prior_exit_quality,
         )
         held_settlement_quality = _held_to_binary_settlement_quality(
             trades,
@@ -2601,6 +2698,17 @@ def _prior_scan_floor(path: Path) -> int:
     return floor if floor > 0 else 0
 
 
+def _prior_exit_quality(path: Path) -> Mapping[str, object] | None:
+    """Load the prior artifact's exit-quality block; None means a full path walk."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        prior = payload["globally_selected_exit_quality"]
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return prior if isinstance(prior, Mapping) else None
+
+
 def _prior_realized_proof_samples(path: Path) -> dict[int, Mapping[str, object]]:
     """Load prior samples for the compatible public artifact API.
 
@@ -2658,6 +2766,7 @@ def main() -> int:
     prior_portfolio_observations = _prior_portfolio_observations(args.artifact)
     prior_realized_proof_samples = _prior_realized_proof_samples(args.artifact)
     scan_floor_decision_log_id = _prior_scan_floor(args.artifact)
+    prior_exit_quality = _prior_exit_quality(args.artifact)
     try:
         artifact = evaluate(
             world_path=world,
@@ -2668,6 +2777,7 @@ def main() -> int:
             prior_portfolio_observations=prior_portfolio_observations,
             prior_realized_proof_samples=prior_realized_proof_samples,
             scan_floor_decision_log_id=scan_floor_decision_log_id,
+            prior_exit_quality=prior_exit_quality,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         artifact = {

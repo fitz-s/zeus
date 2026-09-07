@@ -1341,7 +1341,7 @@ def test_live_curve_binds_every_increment_across_selection_epochs():
     } == {"venue-cmd-1", "venue-cmd-2"}
 
 
-def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold():
+def _exit_quality_fixture():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
@@ -1359,8 +1359,8 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
         "fee_details_json TEXT,outcome_label TEXT);"
         "CREATE TABLE execution_fact (command_id TEXT,order_role TEXT,fill_price REAL,"
         "shares REAL,filled_at TEXT,terminal_exec_status TEXT);"
-        "CREATE TABLE execution_feasibility_evidence (token_id TEXT,quote_seen_at TEXT,"
-        "depth_before_json TEXT);"
+        "CREATE TABLE execution_feasibility_evidence (evidence_id TEXT PRIMARY KEY,"
+        "token_id TEXT,quote_seen_at TEXT,depth_before_json TEXT);"
     )
     forecasts = sqlite3.connect(":memory:")
     forecasts.row_factory = sqlite3.Row
@@ -1488,8 +1488,9 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
         ),
     )
     conn.execute(
-        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?)",
+        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?)",
         (
+            "evidence-1",
             "token-yes",
             "2026-08-13T00:01:00+00:00",
             json.dumps({"bids": [["0.50", "5"]], "asks": []}),
@@ -1509,6 +1510,11 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
             ]
         }
     }
+    return conn, forecasts, curves
+
+
+def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold():
+    conn, forecasts, curves = _exit_quality_fixture()
     evidence = evaluator._globally_selected_exit_quality(
         conn,
         forecasts,
@@ -1550,6 +1556,87 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
     assert graded["settlement_graded_exit_count"] == 1
     assert graded["curve"][0]["hold_to_binary_payoff_usd"] == 5.0
     assert graded["curve"][0]["exit_vs_hold_incremental_usd"] == -3.0
+
+
+def test_exit_path_scan_resumes_only_from_a_verified_frontier():
+    conn, forecasts, curves = _exit_quality_fixture()
+    first_as_of = datetime(2026, 8, 13, 1, tzinfo=timezone.utc)
+    first = evaluator._globally_selected_exit_quality(
+        conn, forecasts, curves, as_of=first_as_of
+    )
+    assert first["curve"][0]["post_exit_executable_depth_observations"] == 1
+    assert first["curve"][0]["observed_post_exit_peak_executable_bid_vwap"] == 0.5
+    assert first["post_exit_path_scan_frontier"] == {
+        "as_of": first_as_of.isoformat(),
+        "max_rowid": 1,
+        "max_rowid_evidence_id": "evidence-1",
+    }
+
+    # A late insert (quoted before the prior as_of, appended after its scan)
+    # and a normal later quote: both are new to the prior run.
+    conn.executemany(
+        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?)",
+        [
+            (
+                "evidence-late",
+                "token-yes",
+                "2026-08-13T00:00:30+00:00",
+                json.dumps({"bids": [["0.45", "5"]], "asks": []}),
+            ),
+            (
+                "evidence-2",
+                "token-yes",
+                "2026-08-13T00:02:00+00:00",
+                json.dumps({"bids": [["0.60", "5"]], "asks": []}),
+            ),
+        ],
+    )
+    later_as_of = datetime(2026, 8, 13, 2, tzinfo=timezone.utc)
+    resumed = evaluator._globally_selected_exit_quality(
+        conn, forecasts, curves, as_of=later_as_of, prior=first
+    )
+    assert resumed["curve"][0]["post_exit_executable_depth_observations"] == 3
+    assert resumed["curve"][0]["observed_post_exit_peak_executable_bid_vwap"] == 0.6
+    assert resumed["curve"][0]["observed_peak_miss_usd_lower_bound"] == 1.0
+    assert resumed["post_exit_path_scan_frontier"]["max_rowid"] == 3
+
+    # Reuse is what the prior artifact says it is -- once its frontier verifies.
+    inflated = json.loads(json.dumps(first))
+    inflated["curve"][0]["post_exit_executable_depth_observations"] = 100
+    reused = evaluator._globally_selected_exit_quality(
+        conn, forecasts, curves, as_of=later_as_of, prior=inflated
+    )
+    assert reused["curve"][0]["post_exit_executable_depth_observations"] == 102
+
+    # A frontier whose evidence row no longer sits at that rowid is not trusted:
+    # full walk, prior numbers ignored.
+    renumbered = json.loads(json.dumps(inflated))
+    renumbered["post_exit_path_scan_frontier"]["max_rowid_evidence_id"] = "other"
+    walked = evaluator._globally_selected_exit_quality(
+        conn, forecasts, curves, as_of=later_as_of, prior=renumbered
+    )
+    assert walked["curve"][0]["post_exit_executable_depth_observations"] == 3
+
+    # Changed fill facts on the same position: full walk too.
+    refilled = json.loads(json.dumps(inflated))
+    refilled["curve"][0]["filled_shares"] = 6.0
+    walked = evaluator._globally_selected_exit_quality(
+        conn, forecasts, curves, as_of=later_as_of, prior=refilled
+    )
+    assert walked["curve"][0]["post_exit_executable_depth_observations"] == 3
+
+
+def test_prior_exit_quality_missing_or_invalid_artifact_means_full_walk(tmp_path):
+    assert evaluator._prior_exit_quality(tmp_path / "missing.json") is None
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{\"globally_selected_exit_quality\": []}", encoding="utf-8")
+    assert evaluator._prior_exit_quality(invalid) is None
+    artifact = tmp_path / "capital.json"
+    artifact.write_text(
+        json.dumps({"globally_selected_exit_quality": {"curve": []}}),
+        encoding="utf-8",
+    )
+    assert evaluator._prior_exit_quality(artifact) == {"curve": []}
 
 
 def test_executable_bid_vwap_requires_full_size_depth():
