@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-02
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Last reused/audited: 2026-09-08
+# Lifecycle: created=2026-07-03; last_reviewed=2026-09-08; last_reused=2026-09-08
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -6146,6 +6146,12 @@ def test_global_buy_sizes_on_the_corrected_probability_not_the_raw_q():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.34"), size=Decimal("100")),
+        ),
+    )
     correction = _correction_for(candidate, raw_q=0.90, corrected_q=0.52)
 
     # A cap large enough that Kelly, not the capital limit, sizes the order —
@@ -6186,6 +6192,12 @@ def test_corrected_decision_ev_stays_coherent_with_the_sealed_cut_probability():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.34"), size=Decimal("100")),
+        ),
+    )
     correction = _correction_for(candidate, raw_q=0.90, corrected_q=0.55)
 
     decision = _global_select(
@@ -6220,8 +6232,13 @@ def test_no_correction_resolver_is_byte_identical_to_the_pre_calibrator_path():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(BookLevel(price=Decimal("0.34"), size=Decimal("100")),),
+    )
 
     baseline = _global_select((candidate,))
+    assert baseline.candidate is not None
     absent = _global_select((candidate,), payoff_q_correction_resolver=None)
     returns_none = _global_select(
         (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: None
@@ -6240,11 +6257,16 @@ def test_a_raising_correction_resolver_keeps_the_raw_q():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(BookLevel(price=Decimal("0.34"), size=Decimal("100")),),
+    )
 
     def explode(candidate, raw_q, p0, at):
         raise RuntimeError("fit unavailable")
 
     baseline = _global_select((candidate,))
+    assert baseline.candidate is not None
     decision = _global_select((candidate,), payoff_q_correction_resolver=explode)
 
     assert decision == baseline
@@ -6260,12 +6282,17 @@ def test_correction_sealed_against_a_different_leg_is_refused():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(BookLevel(price=Decimal("0.34"), size=Decimal("100")),),
+    )
     foreign = replace(
         _correction_for(candidate, raw_q=0.90, corrected_q=0.52),
         token_id="token-somewhere-else",
     )
 
     baseline = _global_select((candidate,))
+    assert baseline.candidate is not None
     decision = _global_select(
         (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: foreign
     )
@@ -6283,9 +6310,14 @@ def test_correction_naming_a_superseded_raw_q_is_refused():
         q=0.90,
         levels=(("0.35", "100"),),
     )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(BookLevel(price=Decimal("0.34"), size=Decimal("100")),),
+    )
     stale = _correction_for(candidate, raw_q=0.61, corrected_q=0.52)
 
     baseline = _global_select((candidate,))
+    assert baseline.candidate is not None
     decision = _global_select(
         (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: stale
     )
@@ -6293,8 +6325,8 @@ def test_correction_naming_a_superseded_raw_q_is_refused():
     assert decision == baseline
 
 
-def test_correction_resolver_receives_the_raw_q_and_the_all_in_market_price():
-    """p0 is the fee-inclusive unit cost of this token, in the same space as q."""
+def test_correction_resolver_receives_the_raw_q_and_native_market_price():
+    """p0 is the fee-exclusive native unit price for this token."""
 
     seen = []
     candidate = _global_candidate(
@@ -6304,6 +6336,12 @@ def test_correction_resolver_receives_the_raw_q_and_the_all_in_market_price():
         q=0.90,
         levels=(("0.35", "100"),),
         fee="0.02",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.34"), size=Decimal("100")),
+        ),
     )
 
     def record(candidate, raw_q, p0, at):
@@ -6317,7 +6355,158 @@ def test_correction_resolver_receives_the_raw_q_and_the_all_in_market_price():
     assert raw_q == pytest.approx(0.90)
     curve = candidate.economic_cost_curve
     assert p0 == pytest.approx(
-        float(curve.fee_model.all_in_price(curve.levels[0].price))
+        float(curve.levels[0].price)
     )
-    assert p0 > 0.35  # fee-inclusive, strictly above the raw level price
+    assert p0 == pytest.approx(0.35)
     assert at == _DECISION_AT
+
+
+def test_correction_anchor_is_unchanged_when_only_fee_changes():
+    seen = []
+    candidates = []
+    for fee in ("0", "0.02"):
+        candidate = _global_candidate(
+            candidate_id=f"fee-anchor-{fee}",
+            family=f"fee-anchor-family-{fee}",
+            side="YES",
+            q=0.90,
+            levels=(("0.35", "100"),),
+            fee=fee,
+        )
+        candidates.append(
+            replace(
+                candidate,
+                native_bid_levels=(
+                    BookLevel(price=Decimal("0.34"), size=Decimal("100")),
+                ),
+            )
+        )
+
+    def record(candidate, raw_q, p0, at):
+        seen.append((candidate.candidate_id, raw_q, p0, at))
+        return None
+
+    for candidate in candidates:
+        _global_select((candidate,), payoff_q_correction_resolver=record)
+
+    assert [entry[2] for entry in seen] == [pytest.approx(0.35), pytest.approx(0.35)]
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_fee_only_changes_net_ev_and_uncapped_kelly_not_calibration_q(side):
+    from src.calibration.market_anchored_residual import (
+        ResidualCalibratorArtifact,
+        apply_artifact,
+    )
+
+    artifact = ResidualCalibratorArtifact(
+        alpha={"day0": 0.0, "day1": 0.0, "day2": 0.0},
+        beta=0.9,
+        lambda_=1.0,
+        clip_d=3.0,
+        p_clip=(0.005, 0.995),
+        lead_buckets=("day0", "day1", "day2"),
+        training_cutoff="2026-07-09T00:00:00Z",
+        n_train=543,
+        n_excluded=0,
+        excluded_reasons={},
+        param_hash="fee-anchor-artifact",
+    )
+    outcomes = []
+    for fee in ("0", "0.02"):
+        candidate = _global_candidate(
+            candidate_id=f"fee-economics-{side}-{fee}",
+            family=f"fee-economics-family-{side}-{fee}",
+            side=side,
+            q=0.90,
+            levels=(("0.35", "1000"),),
+            fee=fee,
+        )
+        candidate = replace(
+            candidate,
+            native_bid_levels=(
+                BookLevel(price=Decimal("0.34"), size=Decimal("1000")),
+            ),
+        )
+        def correct(c, raw_q, p0, at):
+            in_bin = apply_artifact(
+                artifact,
+                p0=p0 if side == "YES" else 1.0 - p0,
+                q_raw=raw_q if side == "YES" else 1.0 - raw_q,
+                lead_bucket="day1",
+            )
+            assert in_bin is not None
+            return _correction_for(
+                c, raw_q=raw_q,
+                corrected_q=in_bin if side == "YES" else 1.0 - in_bin,
+                p0=p0,
+            )
+
+        decision = _global_select(
+            (candidate,),
+            cap="1000",
+            payoff_q_correction_resolver=correct,
+        )
+        assert decision.candidate is not None
+        correction = decision.payoff_q_correction
+        assert correction is not None
+        fixed_size = Decimal("100")
+        fixed_cost = S._single_order_cost(candidate.economic_cost_curve, fixed_size)
+        fixed_ev = Decimal(str(correction.corrected_q)) * fixed_size - fixed_cost
+        outcomes.append((decision, fixed_ev, correction.corrected_q, fixed_cost))
+
+    fee_free, fee_paid = outcomes
+    assert fee_free[2] == fee_paid[2]
+    assert fee_free[0].shares > fee_paid[0].shares
+    assert fee_free[1] - fee_paid[1] == fee_paid[3] - fee_free[3]
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_maker_correction_anchor_uses_native_proposal_price(side):
+    candidate = _global_candidate(
+        candidate_id="maker-correction-anchor",
+        family="maker-correction-anchor-family",
+        side=side,
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    native_bid = (BookLevel(price=Decimal("0.40"), size=Decimal("100")),)
+    candidate = replace(candidate, native_bid_levels=native_bid)
+    proposal = S.passive_buy_proposal_curve(
+        candidate.economic_cost_curve,
+        native_bid_levels=native_bid,
+    )
+    assert proposal is not None
+    provisional = replace(
+        candidate,
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=0.90,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-correction-anchor-epoch",
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch="maker-correction-anchor-epoch",
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.90"), Decimal("1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.10"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+    seen = []
+
+    def record(candidate, raw_q, p0, at):
+        seen.append((raw_q, p0, at))
+        return None
+
+    _global_select((maker,), cap="20", payoff_q_correction_resolver=record)
+    assert seen
+    assert seen[0][1] == pytest.approx(0.401)

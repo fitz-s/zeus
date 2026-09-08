@@ -22233,9 +22233,10 @@ def _day0_in_final_localday_noentry_window(
 def _day0_held_token_decision_price(
     actionable_payload: Mapping[str, object],
 ) -> float | None:
-    """p0 — the decision-time all-in unit cost of the token this candidate would HOLD.
+    """p0 — the decision-time held-token price before fees.
 
-    Same anchor the market-anchored correction shrinks toward, read from the sealed
+    Same fee-exclusive anchor the market-anchored correction shrinks toward,
+    read from the sealed
     per-candidate record when one exists and from the global solve's expected fill price
     otherwise. Both live in the qkernel economics cert, so this never re-prices anything.
     """

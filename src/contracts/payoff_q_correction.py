@@ -9,8 +9,9 @@
 """Sealed per-candidate acting-probability correction.
 
 The market-anchored calibrator is fitted and applied ONCE per candidate, at
-solve time, where the market price p0 and the raw payoff probability q_raw are
-both in scope. The result travels with the decision as this frozen record.
+solve time, where the fee-exclusive native market price p0 and the raw payoff
+probability q_raw are both in scope. The result travels with the decision as
+this frozen record.
 
 Why a carried record rather than re-deriving at certificate time: the
 certificate seam re-projects the family witness to re-prove the candidate's
@@ -39,8 +40,10 @@ class PayoffQCorrection:
     ``raw_q`` and ``corrected_q`` are both in the HELD-TOKEN space — the
     probability that the candidate's own token pays — which is the space the
     solver sizes in and the certificate asserts on. ``p0`` is the decision-time
-    all-in market unit cost of that same token, i.e. the market's implied
-    probability it pays, and is the anchor the correction shrinks toward.
+    fee-exclusive native market unit price of that same token, i.e. the market's
+    implied probability it pays, and is the anchor the correction shrinks
+    toward. It matches the calibrator's training predictor; fees remain in
+    execution economics.
 
     The remaining fields are provenance for settlement attribution to later
     grade corrected-versus-raw decisions; nothing downstream computes from them.
