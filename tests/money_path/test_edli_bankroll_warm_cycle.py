@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-09-08
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -207,7 +207,9 @@ def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatc
         authority_tier="CHAIN",
     )
     emitted = []
-    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    trade_db = tmp_path / "trades.db"
+    CollateralLedger(db_path=trade_db).close()
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: trade_db)
     monkeypatch.setattr(
         "src.runtime.timeout_guard.run_with_timeout",
         lambda *_args, **_kwargs: ({}, None, ""),
@@ -652,6 +654,7 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
     from src.runtime import reactor_wake
 
     trade_db = tmp_path / "trades.db"
+    CollateralLedger(db_path=trade_db).close()
     wake_path = tmp_path / "edli-reactor-wake.json"
     payload = {
         "pusd_balance_micro": 17_000_000,
@@ -805,6 +808,7 @@ from src.runtime.reactor_wake import read_reactor_wake
 from src.state.collateral_ledger import CollateralLedger
 
 trade_db = Path(sys.argv[1])
+CollateralLedger(db_path=trade_db).close()
 wake_path = Path(sys.argv[2])
 authority_tier = sys.argv[3]
 stale_seconds = float(sys.argv[4])
