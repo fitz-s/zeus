@@ -248,9 +248,10 @@ class MarketAnchoredFitProvider:
     ``connect`` LENDS a connection: the provider reads through it and never
     closes it, because on the live path it is the batch's own world connection,
     shared with the rest of the decision and outliving this fit by a wide
-    margin. It is called at most once per TTL, so the hot path never touches
-    sqlite, and a failed fit is cached as None for that same TTL — an
-    unreachable database is not re-dialed once per candidate.
+    margin. During forward time it is called at most once per TTL, so the hot
+    path normally never touches sqlite. A failed fit is cached as None for
+    that same TTL, so an unreachable database is not re-dialed once per
+    candidate.
     """
 
     def __init__(
@@ -285,11 +286,14 @@ class MarketAnchoredFitProvider:
             return None
         now_utc = now.astimezone(timezone.utc)
         with self._lock:
-            if (
-                self._fitted_at is not None
-                and now_utc - self._fitted_at < self._ttl
-            ):
-                return self._artifact
+            if self._fitted_at is not None:
+                age = now_utc - self._fitted_at
+                if age < timedelta(0):
+                    # A backward request is independently fit at its causal
+                    # cutoff, without downgrading the newest cached result.
+                    return self._fit(now_utc)
+                if age < self._ttl:
+                    return self._artifact
             self._artifact = self._fit(now_utc)
             self._fitted_at = now_utc
             return self._artifact
@@ -419,6 +423,10 @@ def corrected_probability(
             decision_at, city, snapshot
         )
         if decision_date is None:
+            return None
+        training_cutoff = _parse_ts(getattr(artifact, "training_cutoff", None))
+        decision_at_utc = decision_at.astimezone(timezone.utc)
+        if training_cutoff is None or training_cutoff > decision_at_utc:
             return None
     else:
         return None

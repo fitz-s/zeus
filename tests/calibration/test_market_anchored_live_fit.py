@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -192,6 +193,54 @@ def test_artifact_is_reused_within_ttl_then_refitted():
     assert refit.training_cutoff != first.training_cutoff
 
 
+def test_backward_time_does_not_reuse_a_future_cached_artifact_then_recovers():
+    """A clock moving backward must not serve a fit made in the future."""
+
+    conn = _memory_db(_settled_rows(40, settled_at=NOW - timedelta(minutes=30)))
+    fits: list[int] = []
+
+    def connect():
+        fits.append(1)
+        return conn
+
+    provider = MarketAnchoredFitProvider(
+        connect, min_train_rows=20, ttl=timedelta(hours=6), city_timezones=_TEST_CITY_TIMEZONES
+    )
+
+    current = provider.artifact(now=NOW)
+    assert current is not None
+    assert provider.artifact(now=NOW - timedelta(hours=1)) is None
+    recovered = provider.artifact(now=NOW)
+
+    assert recovered is not None
+    assert len(fits) == 2
+    assert recovered is current
+
+
+def test_earlier_causal_cutoff_refits_when_it_still_has_enough_evidence():
+    conn = _memory_db(_settled_rows(40, settled_at=NOW - timedelta(days=3)))
+    fits: list[int] = []
+
+    def connect():
+        fits.append(1)
+        return conn
+
+    provider = MarketAnchoredFitProvider(
+        connect, min_train_rows=20, ttl=timedelta(hours=6), city_timezones=_TEST_CITY_TIMEZONES
+    )
+
+    current = provider.artifact(now=NOW)
+    earlier = provider.artifact(now=NOW - timedelta(days=1))
+    recovered = provider.artifact(now=NOW)
+
+    assert current is not None
+    assert earlier is not None
+    assert earlier.training_cutoff == "2026-08-26T12:00:00Z"
+    assert earlier.training_cutoff != current.training_cutoff
+    assert recovered is current
+    assert len(fits) == 2
+
+
 def test_failed_fit_is_cached_so_a_dead_db_is_not_redialled_per_candidate():
     attempts: list[int] = []
 
@@ -257,8 +306,8 @@ def test_corrected_probability_shrinks_an_overconfident_q_toward_the_market():
         artifact,
         p0=0.35,
         q_raw=0.9,
-        city="city-0", decision_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
-        target_date=date(2026, 8, 27),
+        city="city-0", decision_at=NOW,
+        target_date=date(2026, 8, 28),
         side="YES",
     )
 
@@ -277,8 +326,8 @@ def test_corrected_probability_fails_closed_without_an_artifact():
             None,
             p0=0.35,
             q_raw=0.9,
-            city="city-0", decision_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
-            target_date=date(2026, 8, 27),
+            city="city-0", decision_at=NOW,
+            target_date=date(2026, 8, 28),
             side="YES",
         )
         is None
@@ -290,18 +339,12 @@ def test_corrected_probability_fails_closed_on_unmodeled_lead():
     artifact = MarketAnchoredFitProvider(
         lambda: conn, min_train_rows=20, city_timezones=_TEST_CITY_TIMEZONES
     ).artifact(now=NOW)
-
-    assert (
-        corrected_probability(
-            artifact,
-            p0=0.35,
-            q_raw=0.9,
-            city="city-0", decision_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
-            target_date=date(2026, 8, 27),
-            side="YES",
-        )
-        is None
+    kwargs = dict(
+        artifact=artifact, p0=0.35, q_raw=0.9, city="city-0",
+        decision_at=NOW, target_date=date(2026, 8, 28), side="YES",
     )
+    assert corrected_probability(**kwargs) is not None
+    assert corrected_probability(**{**kwargs, "target_date": date(2026, 9, 3)}) is None
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
@@ -310,18 +353,12 @@ def test_corrected_probability_fails_closed_on_non_finite_inputs(bad):
     artifact = MarketAnchoredFitProvider(
         lambda: conn, min_train_rows=20, city_timezones=_TEST_CITY_TIMEZONES
     ).artifact(now=NOW)
-
-    assert (
-        corrected_probability(
-            artifact,
-            p0=bad,
-            q_raw=0.9,
-            city="city-0", decision_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
-            target_date=date(2026, 8, 27),
-            side="YES",
-        )
-        is None
+    kwargs = dict(
+        artifact=artifact, p0=0.35, q_raw=0.9, city="city-0",
+        decision_at=NOW, target_date=date(2026, 8, 28), side="YES",
     )
+    assert corrected_probability(**kwargs) is not None
+    assert corrected_probability(**{**kwargs, "p0": bad}) is None
 
 
 def _synthetic_artifact(*, alpha_day1: float, beta: float) -> ResidualCalibratorArtifact:
@@ -333,7 +370,7 @@ def _synthetic_artifact(*, alpha_day1: float, beta: float) -> ResidualCalibrator
         clip_d=CLIP_D,
         p_clip=(P_CLIP_LO, P_CLIP_HI),
         lead_buckets=LEAD_BUCKETS,
-        training_cutoff="2026-08-27T00:00:00Z",
+        training_cutoff="2026-08-25T00:00:00Z",
         n_train=100,
         n_excluded=0,
         excluded_reasons={},
@@ -429,6 +466,83 @@ def test_corrected_probability_rejects_an_unrecognized_side():
             target_date=date(2026, 8, 27),
             side="sell_no",
         )
+
+
+@pytest.mark.parametrize(
+    ("training_cutoff", "side"),
+    [
+        ("2026-08-28T00:00:00Z", "YES"),
+        ("not-a-timestamp", "NO"),
+        ("2026-08-26T00:00:00", "YES"),
+        ("2026-08-28T00:00:00Z", "NO"),
+        ("not-a-timestamp", "YES"),
+        ("2026-08-26T00:00:00", "NO"),
+    ],
+)
+def test_corrected_probability_rejects_future_malformed_or_naive_training_cutoff(
+    training_cutoff, side
+):
+    artifact = _synthetic_artifact(alpha_day1=0.41, beta=0.08)
+    assert corrected_probability(
+        artifact, p0=0.3, q_raw=0.6, city="city-0",
+        decision_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        target_date=date(2026, 8, 28), side=side,
+    ) is not None
+    artifact = ResidualCalibratorArtifact(
+        **{**artifact.__dict__, "training_cutoff": training_cutoff}
+    )
+
+    assert corrected_probability(
+        artifact,
+        p0=0.3,
+        q_raw=0.6,
+        city="city-0",
+        decision_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        target_date=date(2026, 8, 28),
+        side=side,
+    ) is None
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_corrected_probability_accepts_equal_cutoff_and_equivalent_timezones(side):
+    artifact = _synthetic_artifact(alpha_day1=0.41, beta=0.08)
+    utc = corrected_probability(
+        artifact,
+        p0=0.3,
+        q_raw=0.6,
+        city="city-0",
+        decision_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        target_date=date(2026, 8, 26),
+        side=side,
+    )
+    chicago = corrected_probability(
+        artifact,
+        p0=0.3,
+        q_raw=0.6,
+        city="city-0",
+        decision_at=datetime(2026, 8, 24, 19, tzinfo=timezone(timedelta(hours=-5))),
+        target_date=date(2026, 8, 26),
+        side=side,
+    )
+
+    assert utc is not None
+    assert chicago == utc
+
+
+def test_corrected_probability_rejects_an_old_artifact_without_cutoff_metadata():
+    artifact = _synthetic_artifact(alpha_day1=0.41, beta=0.08)
+    legacy = SimpleNamespace(**artifact.__dict__)
+    del legacy.training_cutoff
+
+    assert corrected_probability(
+        legacy,
+        p0=0.3,
+        q_raw=0.6,
+        city="city-0",
+        decision_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        target_date=date(2026, 8, 28),
+        side="YES",
+    ) is None
 
 
 # ---------------------------------------------------------------------------
