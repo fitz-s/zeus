@@ -2165,7 +2165,6 @@ def reconcile_recorded_maker_fill_economics(
             cmd.state AS cmd_state,
             cmd.created_at AS cmd_created_at,
             cmd.updated_at AS cmd_updated_at,
-            pc.phase AS cmd_position_phase,
             envelope.yes_token_id AS envelope_yes_token_id,
             envelope.no_token_id AS envelope_no_token_id,
             envelope.selected_outcome_token_id AS envelope_selected_token_id
@@ -2174,8 +2173,6 @@ def reconcile_recorded_maker_fill_economics(
             ON cmd.command_id = tf.command_id
           JOIN venue_submission_envelopes envelope
             ON envelope.envelope_id = cmd.envelope_id
-          LEFT JOIN position_current pc
-            ON pc.position_id = cmd.position_id
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
          ORDER BY tf.observed_at, tf.trade_fact_id
@@ -2191,21 +2188,16 @@ def reconcile_recorded_maker_fill_economics(
             raw = _trade_payload_for_maker_economics(raw_payload)
             order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
             selected_maker = _selected_maker_order(raw, order_id)
-            phase = str(fact.get("cmd_position_phase") or "").strip()
-            taker_buy_economics = (
-                _taker_buy_trade_economics(
-                    raw,
-                    venue_order_id=order_id,
-                    selected_token_id=str(
-                        fact.get("envelope_selected_token_id")
-                        or command.get("token_id")
-                        or ""
-                    ),
-                    yes_token_id=str(fact.get("envelope_yes_token_id") or ""),
-                    no_token_id=str(fact.get("envelope_no_token_id") or ""),
-                )
-                if not phase or phase in _ENTRY_FILL_PROJECTION_PHASES
-                else None
+            taker_buy_economics = _taker_buy_trade_economics(
+                raw,
+                venue_order_id=order_id,
+                selected_token_id=str(
+                    fact.get("envelope_selected_token_id")
+                    or command.get("token_id")
+                    or ""
+                ),
+                yes_token_id=str(fact.get("envelope_yes_token_id") or ""),
+                no_token_id=str(fact.get("envelope_no_token_id") or ""),
             )
             taker_sell_economics = _taker_sell_trade_economics(
                 raw,

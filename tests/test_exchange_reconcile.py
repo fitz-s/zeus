@@ -4958,6 +4958,214 @@ def test_live_tick_maker_fill_repair_skips_downstream_entry_positions(conn):
     assert full_sweep["corrected"] == 1
 
 
+@pytest.mark.parametrize(
+    "phase", ["settled", "economically_closed", "admin_closed", "voided"]
+)
+def test_full_sweep_repairs_terminal_taker_buy_without_reprojecting(
+    conn, phase
+):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    command_id = f"cmd-terminal-taker-{phase}"
+    order_id = f"ord-terminal-taker-{phase}"
+    position_id = f"pos-terminal-taker-{phase}"
+    trade_id = f"trade-terminal-taker-{phase}"
+    no_token = f"{YES_TOKEN}-no"
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=YES_TOKEN,
+        size=11.6,
+        price=0.09,
+        state="FILLED",
+        snapshot_token_id=YES_TOKEN,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=YES_TOKEN,
+        snapshot_outcome_label="YES",
+        envelope_yes_token_id=YES_TOKEN,
+        envelope_no_token_id=no_token,
+        order_type="FAK",
+        post_only=False,
+    )
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    conn.execute(
+        "UPDATE position_current SET phase = ? WHERE position_id = ?",
+        (phase, position_id),
+    )
+    before_position = dict(
+        conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, realized_pnl_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+    )
+    before_events = [
+        tuple(row)
+        for row in conn.execute(
+            """
+            SELECT event_id, event_type, phase_before, phase_after, order_id, command_id
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no
+            """,
+            (position_id,),
+        ).fetchall()
+    ]
+    before_execution = [
+        tuple(row)
+        for row in conn.execute(
+            """
+            SELECT intent_id, fill_price, shares, terminal_exec_status, command_id
+              FROM execution_fact
+             WHERE intent_id LIKE ?
+             ORDER BY intent_id
+            """,
+            (f"{position_id}%",),
+        ).fetchall()
+    ]
+    before_order_facts = [
+        tuple(row)
+        for row in conn.execute(
+            """
+            SELECT fact_id, venue_order_id, command_id, state, remaining_size,
+                   matched_size, source, observed_at, venue_timestamp,
+                   local_sequence, raw_payload_hash, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = ? AND venue_order_id = ?
+             ORDER BY local_sequence, fact_id
+            """,
+            (command_id, order_id),
+        ).fetchall()
+    ]
+    raw = {
+        "id": trade_id,
+        "status": "CONFIRMED",
+        "market": "condition-m5",
+        "trader_side": "TAKER",
+        "side": "BUY",
+        "asset_id": YES_TOKEN,
+        "taker_order_id": order_id,
+        "size": "11.6",
+        "price": "0.09",
+        "transaction_hash": "0xterminal-taker",
+        "maker_orders": [
+            {
+                "asset_id": no_token,
+                "side": "BUY",
+                "matched_amount": "8",
+                "price": "0.91",
+            },
+            {
+                "asset_id": no_token,
+                "side": "BUY",
+                "matched_amount": "3.6",
+                "price": "0.90",
+            },
+        ],
+    }
+    append(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="11.6",
+        fill_price="0.09",
+        source="REST",
+        observed_at=NOW,
+        fee_paid_micro=None,
+        tx_hash="0xterminal-taker",
+        block_number=123456,
+        raw_payload_hash=hashlib.sha256(
+            json.dumps(raw, sort_keys=True).encode()
+        ).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    live_tick = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=1), live_tick_scope=True
+    )
+    assert live_tick["scanned"] == 0
+    assert live_tick["corrected"] == 0
+
+    full_sweep = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=2)
+    )
+    assert full_sweep["scanned"] == 1
+    assert full_sweep["corrected"] == 1
+    exact_price = Decimal("1.08") / Decimal("11.6")
+    facts = conn.execute(
+        """
+        SELECT trade_fact_id, filled_size, fill_price, fee_paid_micro,
+               tx_hash, block_number, raw_payload_json
+          FROM venue_trade_facts
+         WHERE trade_id = ?
+         ORDER BY local_sequence
+        """,
+        (trade_id,),
+    ).fetchall()
+    assert len(facts) == 2
+    assert facts[0]["filled_size"] == "11.6"
+    assert Decimal(facts[0]["fill_price"]) == Decimal("0.09")
+    assert facts[0]["fee_paid_micro"] is None
+    assert facts[0]["tx_hash"] == "0xterminal-taker"
+    assert facts[0]["block_number"] == 123456
+    assert Decimal(facts[1]["filled_size"]) == Decimal("11.6")
+    assert Decimal(facts[1]["fill_price"]) == exact_price
+    assert facts[1]["fee_paid_micro"] is None
+    assert facts[1]["tx_hash"] == "0xterminal-taker"
+    assert facts[1]["block_number"] == 123456
+    repair = json.loads(facts[1]["raw_payload_json"])["zeus_repair"]
+    assert repair["source_trade_fact_id"] == facts[0]["trade_fact_id"]
+    assert repair["reason"] == "taker_maker_legs_selected_token_quote_cost"
+
+    assert dict(
+        conn.execute(
+            "SELECT phase, shares, cost_basis_usd, realized_pnl_usd FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    ) == before_position
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT event_id, event_type, phase_before, phase_after, order_id, command_id FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+            (position_id,),
+        ).fetchall()
+    ] == before_events
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT intent_id, fill_price, shares, terminal_exec_status, command_id FROM execution_fact WHERE intent_id LIKE ? ORDER BY intent_id",
+            (f"{position_id}%",),
+        ).fetchall()
+    ] == before_execution
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            """
+            SELECT fact_id, venue_order_id, command_id, state, remaining_size,
+                   matched_size, source, observed_at, venue_timestamp,
+                   local_sequence, raw_payload_hash, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = ? AND venue_order_id = ?
+             ORDER BY local_sequence, fact_id
+            """,
+            (command_id, order_id),
+        ).fetchall()
+    ] == before_order_facts
+
+    repeat = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=3)
+    )
+    assert repeat["corrected"] == 0
+
+
 def test_maker_fill_projection_uses_canonical_position_when_old_command_position_voided(conn):
     """A repaired maker fill must not reopen an old voided command position.
 
