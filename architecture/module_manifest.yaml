@@ -52,6 +52,8 @@ modules:
       - src/state/readiness_repo.py
       - src/state/market_topology_repo.py
     public_entry_files:
+      - src/state/post_fill_book_repo.py
+      - src/state/schema/post_fill_book_observations_schema.py
       - src/state/db.py
       - src/state/write_coordinator.py
       - src/state/schema/execution_feasibility_evidence_schema.py
@@ -72,6 +74,7 @@ modules:
     current_fact_dependencies:
       - docs/operations/current_data_state.md
     required_tests:
+      - tests/state/test_post_fill_book_repo.py
       - tests/test_db.py
       - tests/test_dt1_commit_ordering.py
       - tests/test_dt1_savepoint_integration.py
@@ -443,6 +446,7 @@ modules:
     public_entry_files:
       - src/ingest/forecast_live_daemon.py
       - src/ingest/polymarket_user_channel.py
+      - src/ingest/post_fill_book_observer.py
     law_dependencies:
       - architecture/invariants.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
@@ -455,6 +459,8 @@ modules:
       - tests/test_user_channel_ingest.py
       - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
       - tests/test_ingest_source_contract_scheduler.py
+      - tests/ingest/test_post_fill_book_observer.py
+      - tests/state/test_post_fill_book_repo.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
   signal:

@@ -44,6 +44,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `src/strategy/` | Strategy, benchmark, FDR/Kelly, and candidate-stub boundary | `src/strategy/AGENTS.md`, `docs/reference/modules/strategy.md` |
 | `src/risk_allocator/` | R3 A2 capital allocation, cap policy, governor state, and kill-switch enforcement | `src/risk_allocator/AGENTS.md`, `docs/reference/modules/riskguard.md` |
 | `src/ingest/` | Runtime event-stream ingest and forecast-live producer boundary | `src/ingest/AGENTS.md`, `docs/reference/modules/ingest.md` |
+| `tests/ingest/` | Passive ingest observation and recovery tests | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `tests/` | Regression and law gates, including test-only fakes and integration antibodies | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
 | `docs/authority/` | Durable architecture + delivery law (incl. ARCHIVAL_RULES.md since 2026-05-17 PR #136 W3) | `docs/authority/AGENTS.md` |

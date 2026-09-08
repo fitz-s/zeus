@@ -3940,3 +3940,17 @@ test_metadata:
       multiple selection epochs for one realized position.
     created: 2026-08-12
     last_reused_or_audited: 2026-08-20
+  tests/state/test_post_fill_book_repo.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs: []
+    notes: Passive post-fill request/source-event cursor atomicity, immutable roots, terminal idempotency, and outer-transaction preservation.
+    created: 2026-09-08
+    last_reused_or_audited: 2026-09-08
+  tests/ingest/test_post_fill_book_observer.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs: []
+    notes: Passive public book identity, atomic source/cursor recovery, revision and partial-root preservation, real SQLite lease isolation, global window fairness, hard HTTP deadlines, and independent capture-writer rejection.
+    created: 2026-09-08
+    last_reused_or_audited: 2026-09-08

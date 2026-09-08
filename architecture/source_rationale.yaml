@@ -3403,3 +3403,15 @@ files:
     zone: K2_runtime
     authority_role: regret_decompositions_schema_owner
     why: DDL owner for the derived regret decomposition table; canonical trade and settlement facts remain upstream authority.
+  src/state/schema/post_fill_book_observations_schema.py:
+    zone: K1_truth
+    authority_role: passive_post_fill_observation_schema
+    why: Trade-DB-only immutable protocol/request/event/cursor schema for public raw-book observation lineage; no decision or economic authority.
+  src/state/post_fill_book_repo.py:
+    zone: K1_truth
+    authority_role: passive_post_fill_observation_writer
+    why: Sole short-transaction writer for post-fill source lineage, frozen first request roots, terminal capture idempotency, and cursor advance.
+  src/ingest/post_fill_book_observer.py:
+    zone: K2_runtime
+    authority_role: passive_public_book_observer
+    why: Bounded public /book collector for explicitly registered protocols. It releases every DB connection before HTTP and never submits, scores, or promotes book facts.

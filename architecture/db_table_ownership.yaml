@@ -3522,3 +3522,35 @@ tables:
     created_by: migration_script_202607_single_live_semantics_cutover
     pk_col: "[generation, stage]"
     notes: Transactional generation receipt used only to distinguish a committed migration stage from external DB replacement during resume.
+
+  - name: post_fill_book_protocols
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: "db.py:init_schema_trade_only + src.state.schema.post_fill_book_observations_schema.ensure_table"
+    pk_col: protocol_id
+    notes: Explicit passive raw-book capture protocol registration only; no admission, PnL, markout, or settlement authority.
+
+  - name: post_fill_book_requests
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: "src.state.post_fill_book_repo.observe_source_facts"
+    pk_col: request_id
+    notes: Frozen first complete economic source observation per protocol/command/trade; later revisions append lineage only.
+
+  - name: post_fill_book_observation_events
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: "src.state.post_fill_book_repo"
+    pk_col: event_id
+    notes: Append-only SOURCE_OBSERVED and raw public /book capture/error lineage; freshness_verified is permanently false.
+
+  - name: post_fill_book_cursors
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: none
+    created_by: "src.state.post_fill_book_repo.register_protocol"
+    pk_col: protocol_id
+    notes: Per-protocol durable venue_trade_facts outbox cursor, advanced atomically with source lineage/request creation.

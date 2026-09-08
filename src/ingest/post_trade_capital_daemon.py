@@ -72,6 +72,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import os
 import pathlib
 import signal
@@ -501,6 +502,23 @@ def _tier0_candidate_settlement_fold_cycle() -> dict[str, int]:
     return stats
 
 
+def _post_fill_book_observer_cycle() -> dict[str, int]:
+    """Passive raw-book collection for all explicitly registered protocols."""
+    from src.ingest.post_fill_book_observer import run_cycle
+    return run_cycle()
+
+
+def _post_fill_book_observer_interval_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_FILL_BOOK_OBSERVER_INTERVAL_SECONDS", "1")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("ZEUS_POST_FILL_BOOK_OBSERVER_INTERVAL_SECONDS must be finite positive") from exc
+    if not math.isfinite(value) or not value > 0.0:
+        raise ValueError("ZEUS_POST_FILL_BOOK_OBSERVER_INTERVAL_SECONDS must be finite positive")
+    return value
+
+
 def _realized_fee_evidence_refit_cycle() -> None:
     """Daily refit of state/fee_reconciliation.json (the taker-fee EV authority evidence).
 
@@ -715,6 +733,11 @@ def main() -> None:
     _scheduler.add_job(
         _scheduler_job("payout_observer")(_payout_observer_isolated),
         "interval", minutes=10, id="payout_observer",
+        max_instances=1, coalesce=True,
+    )
+    _scheduler.add_job(
+        _scheduler_job("post_fill_book_observer")(_post_fill_book_observer_cycle),
+        "interval", seconds=_post_fill_book_observer_interval_seconds(), id="post_fill_book_observer",
         max_instances=1, coalesce=True,
     )
     _scheduler.add_job(

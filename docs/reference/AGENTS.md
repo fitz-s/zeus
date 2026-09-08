@@ -46,6 +46,8 @@ machine manifests, tests, and executable source.
 - `modules/state.md`, `modules/engine.md`, `modules/data.md`,
   `modules/venue.md`/`modules/ingest.md`, `modules/execution.md`, and
   `modules/riskguard.md` when routed by the active phase/module manifest
+- Passive post-fill raw-book collection routes through the state/ingest entries
+  and paired tests in `architecture/module_manifest.yaml`.
 
 Current data/source facts live under operations current-fact surfaces, not in
 this directory. Dated analytical/support snapshots live under the reports
