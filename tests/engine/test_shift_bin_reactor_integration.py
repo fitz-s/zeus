@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-09-08
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -52,8 +52,12 @@ CREATE TABLE edli_live_cap_usage (
 """
 _LIVE_ORDER_EVENTS_DDL = """
 CREATE TABLE edli_live_order_events (
-    aggregate_id TEXT, event_type TEXT, payload_json TEXT
+    aggregate_id TEXT, event_sequence INTEGER, event_type TEXT, payload_json TEXT
 )
+"""
+_LIVE_ORDER_EVENTS_INDEX_DDL = """
+CREATE INDEX idx_edli_live_order_events_aggregate
+    ON edli_live_order_events(aggregate_id, event_sequence)
 """
 
 
@@ -63,6 +67,7 @@ def _conn() -> sqlite3.Connection:
     conn.execute(_POSITION_CURRENT_DDL)
     conn.execute(_LIVE_CAP_DDL)
     conn.execute(_LIVE_ORDER_EVENTS_DDL)
+    conn.execute(_LIVE_ORDER_EVENTS_INDEX_DDL)
     ensure_table(conn)
     return conn
 
