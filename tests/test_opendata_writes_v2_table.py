@@ -400,7 +400,7 @@ def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: 
     assert provenance["nearest_grid_lat"] is not None
     assert provenance["nearest_grid_lon"] is not None
     assert provenance["nearest_grid_distance_km"] is not None
-    assert provenance["nearest_grid_provenance_source"] == "canonical_settlement_coordinate_regular_ll_0p25"
+    assert provenance["nearest_grid_provenance_source"] == "payload_request_coordinate_regular_ll_0p25"
     coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
     assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
     assert coverage["reason_code"] is None
@@ -409,6 +409,36 @@ def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: 
     ).fetchone()
     assert producer["status"] == "LIVE_ELIGIBLE"
     assert json.loads(producer["reason_codes_json"]) == ["PRODUCER_COVERAGE_READY"]
+
+
+@pytest.mark.parametrize("track", ["mx2t3", "mn2t3"])
+def test_grid_recovery_never_relabels_city_centre_as_airport(track):
+    from scripts.ingest_grib_to_snapshots import _fill_opendata_grid_provenance
+
+    payload = {"city": "Tel Aviv", "data_version": f"ecmwf_opendata_{track}",
+               "lat": 32.0853, "lon": 34.7818,
+               "nearest_grid_lat": None, "nearest_grid_lon": None,
+               "nearest_grid_distance_km": None}
+    _fill_opendata_grid_provenance(payload)
+    assert (payload["nearest_grid_lat"], payload["nearest_grid_lon"]) == (32.0, 34.75)
+    assert payload["nearest_grid_distance_km"] > 0
+
+
+def test_grid_recovery_preserves_observed_node_and_unknown_request():
+    from scripts.ingest_grib_to_snapshots import _fill_opendata_grid_provenance
+
+    payload = {"city": "Tel Aviv", "data_version": "ecmwf_opendata_mx2t3",
+               "lat": 32.011398, "lon": 34.8867,
+               "nearest_grid_lat": 32.0, "nearest_grid_lon": 34.75,
+               "nearest_grid_provenance_source": "grib_observed",
+               "nearest_grid_distance_km": None}
+    _fill_opendata_grid_provenance(payload)
+    assert (payload["nearest_grid_lat"], payload["nearest_grid_lon"]) == (32.0, 34.75)
+    assert payload["nearest_grid_provenance_source"] == "grib_observed"
+    assert payload["nearest_grid_distance_km"] > 0
+    unknown = {"city": "Tel Aviv", "data_version": "ecmwf_opendata_mx2t3"}
+    _fill_opendata_grid_provenance(unknown)
+    assert "nearest_grid_lat" not in unknown
 
 
 def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_path: Path, monkeypatch):

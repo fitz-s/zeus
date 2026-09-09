@@ -14,8 +14,13 @@ intermediate files must not collide.  The filename pattern is:
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -269,15 +274,25 @@ def test_cross_track_per_step_filenames_are_distinct(tmp_path, monkeypatch):
     assert len(low_files)  == 3, f"Expected 3 low files, got {len(low_files)}: {low_files}"
 
 
-def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch):
-    """OpenData extract binds the manifest to the selected extractor assets."""
+@pytest.mark.parametrize("track", ["mx2t6_high", "mn2t6_low"])
+def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch, track):
+    """HIGH and LOW sample runtime stations, never an external city's old node."""
     from src.data import ecmwf_open_data
 
     fifty_one_root = tmp_path / "51 source data"
     manifest_path = fifty_one_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
     extract_script = fifty_one_root / "scripts" / "extract_open_ens_localday.py"
     manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text("{}")
+    manifest_path.write_text(json.dumps({"cities": [{
+        "city": "Tel Aviv", "lat": 32.0853, "lon": 34.7818,
+    }]}))
+    cities = {
+        "Tel Aviv": SimpleNamespace(lat=32.011398, lon=34.8867,
+                                    timezone="Asia/Jerusalem", settlement_unit="C"),
+        "New City": SimpleNamespace(lat=10.0, lon=-20.0,
+                                    timezone="UTC", settlement_unit="F"),
+    }
+    monkeypatch.setattr(ecmwf_open_data, "runtime_cities_by_name", lambda: cities)
     extract_script.parent.mkdir(parents=True)
     extract_script.write_text("# test extractor\n")
     paths = ecmwf_open_data.OpenDataPaths(
@@ -295,7 +310,7 @@ def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch):
         return {"label": label, "ok": False, "stderr_tail": "stop before ingest"}
 
     result = ecmwf_open_data.collect_open_ens_cycle(
-        track="mx2t6_high",
+        track=track,
         run_date=date(2026, 6, 6),
         run_hour=0,
         now_utc=datetime(2026, 6, 6, 9, 0, tzinfo=timezone.utc),
@@ -309,8 +324,36 @@ def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch):
     assert commands
     cmd = commands[0]
     assert "--manifest-path" in cmd
-    assert cmd[cmd.index("--manifest-path") + 1] == str(manifest_path)
+    actual = Path(cmd[cmd.index("--manifest-path") + 1])
+    assert actual != manifest_path
+    payload = json.loads(actual.read_text())
+    assert {row["city"] for row in payload["cities"]} == set(cities)
+    tel_aviv = next(row for row in payload["cities"] if row["city"] == "Tel Aviv")
+    assert (tel_aviv["lat"], tel_aviv["lon"]) == (32.011398, 34.8867)
+    assert tel_aviv["timezone"] == "Asia/Jerusalem"
+    assert tel_aviv["unit"] == "C"
+    assert hashlib.sha256(actual.read_bytes()).hexdigest() in actual.name
+    assert json.loads(manifest_path.read_text())["cities"][0]["lat"] == 32.0853
     assert ".openclaw/workspace-venus" not in " ".join(cmd)
+
+
+def test_runtime_coordinate_manifest_preserves_prior_snapshots(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data
+
+    city = SimpleNamespace(lat=32.011398, lon=34.8867,
+                           timezone="Asia/Jerusalem", settlement_unit="C")
+    monkeypatch.setattr(ecmwf_open_data, "runtime_cities_by_name", lambda: {"Tel Aviv": city})
+    first = ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path)
+    content = first.read_bytes()
+    assert ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path) == first
+    city.lon = 35.1
+    second = ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path)
+    assert second != first
+    assert first.read_bytes() == content
+    assert json.loads(second.read_text())["cities"][0]["lon"] == 35.1
+    city.lat = float("nan")
+    with pytest.raises(ValueError, match="invalid extraction coordinates"):
+        ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path)
 
 
 def test_extract_assets_fall_back_without_moving_raw_storage(tmp_path):

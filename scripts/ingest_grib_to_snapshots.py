@@ -1,5 +1,5 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-09-09
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
 #   2026-06-04: replaced inline ecmwf_opendata `_v1` strip with the shared
 #   ensemble_snapshot_provenance.normalize_opendata_data_version() helper so the
@@ -10,7 +10,7 @@
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
 #   the per-file loop). Observation; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
-# Lifecycle: created=2026-03-26; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-03-26; last_reviewed=2026-09-09; last_reused=2026-09-09
 # Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -514,14 +514,7 @@ def _nearest_regular_ll_grid(
 
 
 def _fill_opendata_grid_provenance(payload: dict) -> None:
-    """Backstop OpenData grid provenance from settlement coordinates.
-
-    The extractor normally emits nearest_grid_* from the GRIB grid itself.  Stale
-    raw OpenData JSONs can carry nulls, and WU-settled live rows must not enter the
-    reader without explicit station-grid provenance.  This producer-side backstop
-    fills only ECMWF OpenData payloads from the canonical city settlement
-    coordinates; the reader gate still blocks rows that remain incomplete.
-    """
+    """Recover the sampled grid from payload coordinates, never newer config."""
 
     data_version = str(payload.get("data_version") or "")
     if "ecmwf_opendata" not in data_version:
@@ -533,24 +526,31 @@ def _fill_opendata_grid_provenance(payload: dict) -> None:
     )
     if all(_is_finite_number(value) for value in required):
         return
-    city_name = str(payload.get("city") or "")
-    city = runtime_cities_by_name().get(city_name)
-    if city is None:
+    lat, lon = payload.get("lat"), payload.get("lon")
+    if (
+        not _is_finite_number(lat) or not _is_finite_number(lon)
+        or not -90.0 <= float(lat) <= 90.0
+        or not -180.0 <= float(lon) <= 180.0
+    ):
         return
-    lat = getattr(city, "lat", None)
-    lon = getattr(city, "lon", None)
-    if not _is_finite_number(lat) or not _is_finite_number(lon):
-        return
-    grid_lat, grid_lon, distance_km = _nearest_regular_ll_grid(
-        lat=float(lat),
-        lon=float(lon),
-        resolution_deg=0.25,
-    )
+    if all(_is_finite_number(value) for value in required[:2]):
+        grid_lat, grid_lon = map(float, required[:2])
+        if not (-90.0 <= grid_lat <= 90.0 and -180.0 <= grid_lon <= 180.0):
+            return
+        distance_km = _haversine_km(float(lat), float(lon), grid_lat, grid_lon)
+    else:
+        grid_lat, grid_lon, distance_km = _nearest_regular_ll_grid(
+            lat=float(lat), lon=float(lon), resolution_deg=0.25,
+        )
+        # A partial observed node cannot be replaced by a conflicting inference.
+        for observed, inferred in zip(required[:2], (grid_lat, grid_lon)):
+            if _is_finite_number(observed) and float(observed) != inferred:
+                return
+        payload["nearest_grid_provenance_source"] = "payload_request_coordinate_regular_ll_0p25"
+        payload["nearest_grid_resolution_deg"] = 0.25
     payload["nearest_grid_lat"] = grid_lat
     payload["nearest_grid_lon"] = grid_lon
     payload["nearest_grid_distance_km"] = distance_km
-    payload["nearest_grid_provenance_source"] = "canonical_settlement_coordinate_regular_ll_0p25"
-    payload["nearest_grid_resolution_deg"] = 0.25
 
 
 def _extract_boundary_fields(payload: dict) -> tuple[int, int]:

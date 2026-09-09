@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-09-09
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -20,7 +20,8 @@ Pipeline
    Refactored 2026-05-11 per PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md.
 2. Run ``51 source data/scripts/extract_open_ens_localday.py`` to produce
    per-(city, target_local_date, lead_day) JSON records that conform to the
-   TiggeSnapshotPayload contract.
+   TiggeSnapshotPayload contract, using a content-addressed runtime station
+   coordinate manifest instead of the external package's city coordinates.
 3. Reuse the zeus repo's ``scripts/ingest_grib_to_snapshots.ingest_track``
    ingester (importable) which validates against the canonical contract,
    asserts the dataset_id is allow-listed, and writes the row to
@@ -103,6 +104,45 @@ class OpenDataPaths:
     extract_script: Path
     manifest_path: Path
     origin: str
+
+
+def _write_runtime_coordinate_manifest(raw_root: Path) -> Path:
+    """Bind extraction to the same station locations as current provider forecasts."""
+    cities = []
+    for name, city in sorted(runtime_cities_by_name().items()):
+        lat, lon = float(city.lat), float(city.lon)
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            raise ValueError(f"invalid extraction coordinates: {name}")
+        if city.settlement_unit not in {"C", "F"} or not city.timezone:
+            raise ValueError(f"invalid extraction calendar/unit: {name}")
+        cities.append({
+            "city": name, "lat": lat, "lon": lon,
+            "timezone": city.timezone, "unit": city.settlement_unit,
+        })
+    if not cities:
+        raise ValueError("runtime extraction city universe is empty")
+    content = json.dumps(
+        {"coordinate_basis": "runtime_settlement_station", "cities": cities},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(content).hexdigest()
+    directory = raw_root / "docs"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"opendata_coordinates_{digest}.json"
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ValueError("runtime extraction manifest content hash mismatch")
+        return path
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return path
 
 
 def _has_extract_assets(root: Path) -> bool:
@@ -1898,6 +1938,7 @@ def collect_open_ens_cycle(
                 paths.raw_root,
                 paths.asset_root,
             )
+        coordinate_manifest = _write_runtime_coordinate_manifest(paths.raw_root)
 
     # download_observed_steps / _partial_cycle track which steps were actually
     # fetched so _write_source_authority_chain can set the authoritative
@@ -2146,11 +2187,12 @@ def collect_open_ens_cycle(
                 "--grib-path", str(output_path),
                 "--track", cfg["ingest_track"],
                 "--output-root", str(paths.raw_root / "raw"),
-                "--manifest-path", str(paths.manifest_path),
+                "--manifest-path", str(coordinate_manifest),
             ],
             label=f"extract_{track}",
             timeout=extract_timeout_seconds,
         )
+        extract["coordinate_manifest_path"] = str(coordinate_manifest)
         stages.append(extract)
         if not extract["ok"]:
             _write_stderr_dump(
