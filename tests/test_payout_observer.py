@@ -1362,3 +1362,17 @@ def test_learning_rotation_covers_every_condition_when_budget_only_allows_a_pref
         reached.add(selection["selected"][0]["condition_id"])
     assert reached == conditions
     forecast.close()
+
+
+def test_bad_learning_condition_does_not_abort_other_conditions(conn, monkeypatch):
+    forecast = _forecast_learning_fixture()
+    for condition in ("invalid-condition", _CONDITION_A):
+        _seed_forecast_family(forecast, condition, "Tel Aviv", "2026-09-08", "high")
+    rpc, _ = _build_stub_rpc(denominator=1, numerators={0: 1, 1: 0})
+    result = payout_observer._learning_sweep(conn, forecast,
+        rpc_url="https://rpc.test", rpc_call=rpc, now="2026-09-09T12:00:00+00:00")
+    assert result["processed"] == 2 and result["unknown"] == 1
+    rows = conn.execute("SELECT condition_id,state FROM payout_observations").fetchall()
+    assert {row[1] for row in rows if row[0] == "invalid-condition"} == {STATE_UNKNOWN}
+    assert {row[1] for row in rows if row[0] == _CONDITION_A} == {STATE_RESOLVED_ZERO, STATE_RESOLVED_NONZERO}
+    forecast.close()

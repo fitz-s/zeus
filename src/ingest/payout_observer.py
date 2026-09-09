@@ -853,10 +853,15 @@ def _learning_sweep(
             ]
         else:
             block_tag = hex(block_marker[0])
-            denominator_calls = [
-                _payout_call_data(item["condition_id"], block_tag=block_tag)
-                for item in chunk
-            ]
+            denominator_calls = []
+            call_index_by_condition = {}
+            for item in chunk:
+                try:
+                    call = _payout_call_data(item["condition_id"], block_tag=block_tag)
+                except ValueError:
+                    continue
+                call_index_by_condition[item["condition_id"]] = len(denominator_calls)
+                denominator_calls.append(call)
             try:
                 denominator_values = _learning_rpc_batch(
                     rpc_url,
@@ -871,8 +876,9 @@ def _learning_sweep(
             rows_by_condition: dict[str, list[dict[str, Any]]] = {}
             for index, item in enumerate(chunk):
                 try:
-                    denominator = _decode_uint_result(denominator_values[index])
-                except (IndexError, TypeError, ValueError, V2AdapterError):
+                    call_index = call_index_by_condition[item["condition_id"]]
+                    denominator = _decode_uint_result(denominator_values[call_index])
+                except (KeyError, IndexError, TypeError, ValueError, V2AdapterError):
                     denominator = None
                 if denominator is None:
                     rowset = [{"outcome_index": idx, "payout_numerator": None, "payout_denominator": None,
