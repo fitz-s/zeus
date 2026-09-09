@@ -28,9 +28,13 @@ into the decision path and never degrades an unfittable case into a guess.
 from __future__ import annotations
 
 import sqlite3
+import json
+from collections import Counter, defaultdict
+from dataclasses import dataclass, fields
 import threading
 import time
 import math
+from decimal import Decimal
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from contextvars import ContextVar, Token
@@ -322,6 +326,379 @@ def _parse_date(value: object) -> date | None:
         return date.fromisoformat(str(value)[:10])
     except (TypeError, ValueError):
         return None
+
+
+CANONICAL_CORPUS_REVISION = "sealed_raw_finalized_payout_event_weight_v1"
+
+
+@dataclass(frozen=True)
+class CanonicalFitCorpus:
+    """Filled-policy evidence; neither account returns nor admission authority."""
+
+    records: tuple[dict, ...]
+    unknown: Mapping[str, int]
+    command_count: int
+    training_cutoff: str
+    revision: str = CANONICAL_CORPUS_REVISION
+
+    def fit_rows(self, *, metric: str, execution_mode: str) -> list[FitRow]:
+        """Keep HIGH/LOW and execution policies separate; normalize each event."""
+        records = [r for r in self.records if r["metric"] == metric
+                   and r["execution_mode"] == execution_mode
+                   and r["lead_bucket"] is not None and r["payout"] in (0, 1)]
+        totals: dict[tuple, float] = defaultdict(float)
+        for record in records:
+            totals[record["event_key"]] += record["confirmed_shares"]
+        # The serving transform applies the artifact in YES-event space.
+        # Complement NO inputs AND label together, never just the prediction.
+        return [FitRow(
+            p0=r["p0"] if r["side"] == "YES" else 1 - r["p0"],
+            q_raw=r["q_raw"] if r["side"] == "YES" else 1 - r["q_raw"],
+            y=r["payout"] if r["side"] == "YES" else 1 - r["payout"],
+            lead_bucket=r["lead_bucket"],
+            w=r["confirmed_shares"] / totals[r["event_key"]],
+        ) for r in records]
+
+
+
+def _certificate_header_bound(record: dict, edge_rows: list[dict]) -> bool:
+    from src.decision_kernel.certificate import CertificateHeader, ParentEdge, certificate_hash_for
+
+    try:
+        values = {field.name: record[field.name] for field in fields(CertificateHeader)
+                  if field.name != "parent_edges"}
+        for name in ("decision_time", "source_available_at", "agent_received_at", "persisted_at",
+                     "max_parent_source_available_at", "max_parent_agent_received_at", "max_parent_persisted_at"):
+            values[name] = _parse_ts(values[name])
+        values["parent_edges"] = tuple(ParentEdge(
+            row["parent_role"], row["parent_certificate_hash"], row["parent_certificate_type"],
+            bool(row["required"]),
+        ) for row in edge_rows)
+        return certificate_hash_for(CertificateHeader(**values)) == record["certificate_hash"]
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
+def _maker_anchor_bound(payload, economics, witness, side, decision_at) -> bool:
+    from src.solve.solver import CurrentMakerFillWitness, MakerFillOutcome, maker_fill_candidate_binding_identity
+
+    try:
+        values = {field.name: witness[field.name] for field in fields(CurrentMakerFillWitness)}
+        values["limit_price"] = Decimal(values["limit_price"])
+        for name in ("training_cutoff_at_utc", "issued_at_utc", "valid_until_at_utc"):
+            values[name] = _parse_ts(values[name])
+        values["outcomes"] = tuple(MakerFillOutcome(**{
+            name: Decimal(row[name]) for name in ("probability", "fill_fraction", "proceeds_per_share_usd")
+        }) for row in values["outcomes"])
+        rebound = CurrentMakerFillWitness(**values)
+        rebound.assert_current_at(decision_at)
+        binding = maker_fill_candidate_binding_identity(
+            action="BUY", family_key=economics["global_family_key"],
+            bin_id=economics["global_bin_id"], condition_id=payload["condition_id"],
+            side=side, token_id=payload["token_id"], ledger_snapshot_id=witness["ledger_snapshot_id"],
+            position_id=None, held_shares=None, asset_epoch_identity=witness["asset_epoch_identity"],
+            proposal_identity=witness["proposal_identity"],
+        )
+        return (binding == rebound.candidate_binding_identity and witness["action"] == "BUY"
+                and economics["global_jit_book_snapshot_id"] == rebound.book_snapshot_id
+                and economics["global_candidate_id"] == payload["candidate_id"]
+                and economics["global_token_id"] == payload["token_id"])
+    except (AttributeError, ArithmeticError, KeyError, TypeError, ValueError):
+        return False
+
+
+def load_canonical_fit_corpus(
+    world_conn: sqlite3.Connection,
+    trade_conn: sqlite3.Connection,
+    *,
+    training_cutoff: datetime,
+    city_timezone_snapshot: tuple[tuple[str, str], ...],
+    world_schema: str = "main",
+    trade_schema: str = "main",
+) -> CanonicalFitCorpus:
+    """Read raw inputs, actual fills and labels from their canonical owners.
+
+    All ENTRY commands available before the cutoff remain in the denominator.
+    Audit attribution, current position VWAP and requested size are never read.
+    Both connections are borrowed; this function opens, writes and closes none.
+    Row availability is filtered BEFORE latest/proof ranking, including the
+    source rows used for economic-alias exclusion.
+    """
+    from src.decision_kernel.canonicalization import stable_hash
+    from src.ingest.payout_observer import _coherent_finalized_pair
+    from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
+
+    if world_schema not in ("main", "world") or trade_schema not in ("main", "trades"):
+        raise ValueError("unsupported canonical corpus schema")
+    if training_cutoff.tzinfo is None or not _snapshot_is_valid(city_timezone_snapshot):
+        raise ValueError("canonical corpus requires an aware cutoff and city clocks")
+    cutoff = training_cutoff.astimezone(timezone.utc)
+    cutoff_text = cutoff.isoformat()
+
+    def records(conn, sql, params=()):
+        cursor = conn.execute(sql, params)
+        names = [column[0] for column in cursor.description]
+        return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    def obj(value):
+        try:
+            value = json.loads(value) if isinstance(value, str) else value
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def probability(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            value = float(value)
+            return value if math.isfinite(value) and 0 <= value <= 1 else None
+        except (TypeError, ValueError):
+            return None
+
+    def equal(a, b):
+        a, b = probability(a), probability(b)
+        return a is not None and b is not None and abs(a - b) <= 1e-12
+
+    commands = records(trade_conn, f"""
+        SELECT c.command_id, c.token_id, c.created_at, c.venue_order_id, c.snapshot_id, c.side AS order_side,
+               s.condition_id, s.yes_token_id, s.no_token_id,
+               s.selected_outcome_token_id, s.orderbook_top_ask,
+               s.raw_orderbook_hash, s.captured_at, s.token_map_json
+        FROM {trade_schema}.venue_commands c
+        LEFT JOIN {trade_schema}.executable_market_snapshots s ON s.snapshot_id=c.snapshot_id
+        WHERE c.intent_kind='ENTRY' AND julianday(c.created_at)<julianday(?)
+        ORDER BY c.command_id
+    """, (cutoff_text,))
+    links: dict[str, set[str]] = defaultdict(set)
+    for row in records(trade_conn, f"""
+        SELECT command_id, decision_certificate_hash
+        FROM {trade_schema}.position_decision_attribution
+        WHERE intent_kind='ENTRY' AND julianday(created_at)<julianday(?)
+    """, (cutoff_text,)):
+        links[row["command_id"]].add(row["decision_certificate_hash"])
+    certificates = {}
+    edges = defaultdict(list)
+    hashes = sorted({h for command in commands for h in links[command["command_id"]] if h})
+    for start in range(0, len(hashes), 400):
+        keys = hashes[start:start + 400]
+        marks = ",".join("?" for _ in keys)
+        for row in records(world_conn, f"""
+            SELECT * FROM {world_schema}.decision_certificates
+            WHERE certificate_hash IN ({marks})
+        """, keys):
+            certificates[row["certificate_hash"]] = row
+        for row in records(world_conn, f"""
+            SELECT e.* FROM {world_schema}.decision_certificate_edges e
+            JOIN {world_schema}.decision_certificates c ON c.certificate_id=e.child_certificate_id
+            WHERE c.certificate_hash IN ({marks}) ORDER BY e.rowid
+        """, keys):
+            edges[row["child_certificate_id"]].append(row)
+
+    fact_scope = "WHERE julianday(fact.observed_at)<julianday(?) AND julianday(fact.ingested_at)<julianday(?)"
+    source_scope = "AND julianday(source_fact.observed_at)<julianday(?) AND julianday(source_fact.ingested_at)<julianday(?)"
+    canonical = canonical_trade_fact_cte(source_schema=trade_schema, source_clause_sql=fact_scope)
+    economic = economic_trade_fact_cte(source_schema=trade_schema, source_clause_sql=source_scope)
+    fills: dict[str, list[dict]] = defaultdict(list)
+    for row in records(trade_conn, f"""WITH {canonical}, {economic}
+        SELECT * FROM economic_trade_fact WHERE UPPER(state)='CONFIRMED'
+    """, (cutoff_text,) * 4):
+        fills[row["command_id"]].append(row)
+
+    payouts: dict[str, list[dict]] = defaultdict(list)
+    for row in records(trade_conn, f"""
+        WITH ranked AS (
+          SELECT *, ROW_NUMBER() OVER(PARTITION BY condition_id,outcome_index ORDER BY id DESC) AS rn
+          FROM {trade_schema}.payout_observations
+          WHERE julianday(observed_at)<julianday(?) AND outcome_index IN (0,1)
+        ) SELECT * FROM ranked WHERE rn=1
+    """, (cutoff_text,)):
+        payouts[row["condition_id"]].append(row)
+
+    unknown: Counter[str] = Counter()
+    accepted = []
+    for command in commands:
+        command_id = command["command_id"]
+        reasons = []
+        if command["order_side"] != "BUY":
+            unknown["ENTRY_NOT_BUY"] += 1
+            continue
+        hs = links[command_id]
+        certificate = certificates.get(next(iter(hs))) if len(hs) == 1 else None
+        if certificate is None:
+            unknown["CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS"] += 1
+            continue
+        payload = obj(certificate["payload_json"])
+        economics = obj(payload.get("qkernel_execution_economics"))
+        correction = obj(economics.get("market_anchored_correction"))
+        token = command["token_id"]
+        side = ("YES" if token == command["yes_token_id"] else "NO"
+                if token == command["no_token_id"] else None)
+        if (not side or command["yes_token_id"] == command["no_token_id"]
+                or payload.get("token_id") != token
+                or payload.get("direction") != ("buy_yes" if side == "YES" else "buy_no")
+                or command["selected_outcome_token_id"] != token
+                or payload.get("condition_id") != command["condition_id"]
+                or stable_hash(payload) != certificate["payload_hash"]
+                or certificate["certificate_type"] != "ActionableTradeCertificate"
+                or certificate["mode"] != "LIVE" or certificate["verifier_status"] != "VERIFIED"):
+            reasons.append("CERTIFICATE_IDENTITY_UNBOUND")
+        if not _certificate_header_bound(certificate, edges[certificate["certificate_id"]]):
+            reasons.append("CERTIFICATE_HEADER_HASH_UNBOUND")
+        token_map = obj(command["token_map_json"])
+        token_ids = token_map.get("clobTokenIds")
+        outcome_index = None
+        if (token_map.get("token_map_valid") is True and isinstance(token_ids, list)
+                and len(token_ids) == 2 and len(set(map(str, token_ids))) == 2
+                and {str(t) for t in token_ids} == {command["yes_token_id"], command["no_token_id"]}
+                and str(token) in token_ids):
+            outcome_index = token_ids.index(str(token))
+        elif (token_map.get("YES") == command["yes_token_id"]
+              and token_map.get("NO") == command["no_token_id"] and side is not None):
+            # The current snapshot writer seals typed YES/NO, not Gamma's raw
+            # array. Its slot convention is owned by the venue CTF adapter.
+            from src.venue.polymarket_v2_adapter import _zeus_index_set_to_ctf_bitmask
+            outcome_index = _zeus_index_set_to_ctf_bitmask(2 if side == "YES" else 1).bit_length() - 1
+        if outcome_index is None:
+            reasons.append("TOKEN_OUTCOME_INDEX_UNBOUND")
+        decision_at = _parse_ts(certificate["decision_time"])
+        persisted_at = _parse_ts(certificate["persisted_at"])
+        if not decision_at or not persisted_at or not decision_at <= persisted_at < cutoff:
+            reasons.append("CERTIFICATE_CLOCK_UNBOUND")
+        for field in ("source_available_at", "max_parent_source_available_at", "max_parent_persisted_at"):
+            stamp = _parse_ts(certificate[field])
+            if not stamp or not decision_at or stamp > decision_at:
+                reasons.append("CERTIFICATE_PARENT_CLOCK_UNBOUND")
+                break
+        if not equal(economics.get("payoff_q_point"), payload.get("q_live")):
+            reasons.append("ACTING_Q_UNBOUND")
+        raw = None
+        raw_source = None
+        if correction.get("applied") is True and equal(correction.get("q_corrected"), payload.get("q_live")):
+            raw = probability(correction.get("q_raw"))
+            raw_source = "SEALED_CORRECTION_INPUT"
+        elif correction.get("applied") is False:
+            raw = probability(economics.get("payoff_q_point"))
+            raw_source = "EXPLICIT_UNCORRECTED_INPUT"
+        if raw is None:
+            reasons.append("RAW_INPUT_UNBOUND")
+        mode = economics.get("global_execution_mode")
+        p0 = None
+        if mode == "MAKER_REST":
+            witness = obj(economics.get("global_maker_fill_witness"))
+            fields = ("witness_identity", "candidate_binding_identity", "asset_epoch_identity",
+                      "proposal_identity", "book_snapshot_id", "book_hash", "outcomes")
+            if (all(witness.get(field) for field in fields)
+                    and equal(witness.get("limit_price"), economics.get("global_limit_price"))
+                    and economics.get("global_jit_book_hash") == witness.get("book_hash")
+                    and _maker_anchor_bound(payload, economics, witness, side, decision_at)):
+                p0 = probability(witness.get("limit_price"))
+        elif mode == "TAKER_LIMIT":
+            if (economics.get("decision_p0_source")
+                    and economics.get("global_book_hash") == command["raw_orderbook_hash"]
+                    and equal(economics.get("decision_p0"), command["orderbook_top_ask"])
+                    and _parse_ts(command["captured_at"]) is not None
+                    and decision_at is not None and _parse_ts(command["captured_at"]) <= decision_at
+                    and economics.get("global_token_id") == token
+                    and economics.get("global_candidate_id") == payload.get("candidate_id")
+                    and economics.get("global_jit_execution_curve_identity")) :
+                p0 = probability(economics.get("decision_p0"))
+        capture = obj(economics.get("raw_calibration_input"))
+        if capture:
+            captured_identity = (
+                capture.get("schema_version") == 1
+                and capture.get("capture_basis") == "GLOBAL_CERTIFICATE_INPUT"
+                and capture.get("p0_basis") == "GROSS_NATIVE_TOKEN_PRICE"
+                and capture.get("condition_id") == command["condition_id"]
+                and capture.get("token_id") == token and capture.get("side") == side
+                and capture.get("candidate_id") == payload.get("candidate_id")
+                and capture.get("candidate_id") == economics.get("global_candidate_id")
+                and capture.get("family_key") == economics.get("global_family_key")
+                and capture.get("bin_id") == economics.get("global_bin_id")
+                and capture.get("probability_witness_identity") == economics.get("global_probability_witness_identity")
+                and bool(capture.get("probability_witness_identity"))
+                and capture.get("sample_hash") == economics.get("sample_hash")
+                and bool(capture.get("sample_hash"))
+                and bool(capture.get("economic_curve_identity"))
+                and capture.get("execution_mode") == mode
+                and capture.get("correction_applied") is correction.get("applied")
+                and equal(capture.get("raw_q_held"), raw)
+            )
+            if mode == "MAKER_REST":
+                captured_identity = (captured_identity and p0 is not None
+                    and capture.get("maker_fill_witness_identity") == witness.get("witness_identity")
+                    and capture.get("maker_proposal_identity") == witness.get("proposal_identity")
+                    and capture.get("economic_curve_identity") == witness.get("proposal_identity")
+                    and capture.get("book_snapshot_id") == witness.get("book_snapshot_id")
+                    and capture.get("book_hash") == witness.get("book_hash")
+                    and equal(capture.get("p0_held"), p0))
+            elif mode == "TAKER_LIMIT":
+                captured_identity = (captured_identity
+                    and capture.get("book_snapshot_id") == economics.get("decision_p0_source")
+                    and bool(capture.get("book_snapshot_id"))
+                    and capture.get("book_hash") == economics.get("global_book_hash")
+                    and bool(capture.get("book_hash"))
+                    and equal(capture.get("p0_held"), economics.get("decision_p0")))
+            else:
+                captured_identity = False
+            if captured_identity:
+                p0 = probability(capture.get("p0_held"))
+            else:
+                p0 = None
+        if p0 is None or (correction.get("applied") is True and not equal(correction.get("p0"), p0)):
+            reasons.append("DECISION_ANCHOR_UNBOUND")
+        pair = payouts[command["condition_id"]]
+        if not _coherent_finalized_pair(pair):
+            reasons.append("FINALIZED_PAYOUT_UNBOUND")
+        elif any(row["payout_numerator"] not in (0, row["payout_denominator"]) for row in pair):
+            reasons.append("FRACTIONAL_PAYOUT_UNSUPPORTED")
+        shares = 0.0
+        fill_available_at = None
+        for fill in fills[command_id]:
+            observed = _parse_ts(fill["observed_at"])
+            # ingested_at is SQLite datetime('now'), explicitly UTC in its owner schema.
+            ingested = _parse_ts(str(fill["ingested_at"]).replace(" ", "T") + "Z") if "+" not in str(fill["ingested_at"]) and not str(fill["ingested_at"]).endswith("Z") else _parse_ts(fill["ingested_at"])
+            executed = _parse_ts(fill["execution_ts"])
+            try:
+                size = float(fill["filled_size"])
+            except (TypeError, ValueError):
+                size = float("nan")
+            if (not math.isfinite(size) or size <= 0 or not observed or not ingested or not executed
+                    or not persisted_at or not persisted_at <= executed <= observed < cutoff
+                    or not executed <= ingested < cutoff
+                    or not fill["venue_order_id"] or fill["venue_order_id"] != command["venue_order_id"]):
+                reasons.append("CONFIRMED_FILL_CLOCK_OR_IDENTITY_UNBOUND")
+                break
+            shares += size
+            fill_available_at = max(filter(None, (fill_available_at, observed, ingested)))
+        if shares <= 0:
+            reasons.append("CONFIRMED_FILL_MISSING")
+        city, target = payload.get("city"), _parse_date(payload.get("target_date"))
+        metric = payload.get("temperature_metric", payload.get("metric"))
+        local_date = _city_local_target_date(decision_at, city, city_timezone_snapshot) if decision_at else None
+        if not city or target is None or local_date is None or metric not in ("high", "low"):
+            reasons.append("FAMILY_OR_LOCAL_CLOCK_UNBOUND")
+        elif lead_bucket_of(local_date, target) is None:
+            reasons.append("FIT_LEAD_UNSUPPORTED")
+        if reasons:
+            # One primary reason per command keeps the unknown denominator additive.
+            unknown[reasons[0]] += 1
+            continue
+        held = next(row for row in pair if row["outcome_index"] == outcome_index)
+        accepted.append(dict(
+            command_id=command_id, certificate_hash=certificate["certificate_hash"],
+            condition_id=command["condition_id"], token_id=token, side=side,
+            city=city, target_date=target.isoformat(), metric=metric,
+            event_key=(city, target.isoformat(), metric), execution_mode=mode,
+            decision_time=decision_at.isoformat(), lead_days=(target-local_date).days,
+            lead_bucket=lead_bucket_of(local_date, target), q_raw=raw, raw_source=raw_source,
+            acting_q=probability(payload.get("q_live")), p0=p0, confirmed_shares=shares,
+            fill_available_at=fill_available_at.isoformat(),
+            payout=held["payout_numerator"] / held["payout_denominator"],
+            payout_available_at=max(_parse_ts(row["observed_at"]) for row in pair).isoformat(),
+            fill_proof_tier="CLOB_CONFIRMED", payout_proof_tier="FINALIZED_CHAIN_PAIR",
+        ))
+    return CanonicalFitCorpus(tuple(accepted), dict(unknown), len(commands), cutoff_text)
 
 
 def load_fit_rows(

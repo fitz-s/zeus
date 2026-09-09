@@ -35,6 +35,9 @@ from src.ingest.payout_observer import (
     append_observation,
     classify_payout,
     conditions_to_observe,
+    forecast_conditions_to_observe,
+    _learning_sweep,
+    payout_observer_cycle,
     read_condition_payout,
     sweep_and_record,
 )
@@ -1076,6 +1079,240 @@ def test_condition_pair_append_failure_rolls_back_first_slot(conn):
     assert conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0] == 0
 
 
+def _forecast_learning_fixture() -> sqlite3.Connection:
+    forecast = sqlite3.connect(":memory:")
+    forecast.execute(
+        "CREATE TABLE market_events ("
+        "condition_id TEXT, city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+    forecast.execute(
+        "CREATE TABLE forecast_posteriors ("
+        "city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+    return forecast
+
+
+def _seed_forecast_family(forecast, condition, city, target_date, metric):
+    forecast.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?)",
+        (condition, city, target_date, metric),
+    )
+    forecast.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?)",
+        (city, target_date, metric),
+    )
+    forecast.commit()
+
+
+def test_forecast_universe_includes_untraded_past_high_low_and_excludes_coherent_pair(
+    conn,
+):
+    forecast = _forecast_learning_fixture()
+    _seed_forecast_family(forecast, _CONDITION_A, "Tel Aviv", "2026-09-08", "high")
+    _seed_forecast_family(forecast, _CONDITION_B, "Tel Aviv", "2026-09-08", "low")
+    condition_c = "0x" + "ef" * 32
+    _seed_forecast_family(forecast, condition_c, "Tel Aviv", "2026-09-08", "high")
+    _seed_forecast_family(forecast, "0x" + "12" * 32, "Tel Aviv", "2026-09-10", "high")
+    no_posterior_condition = "0x" + "34" * 32
+    forecast.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?)",
+        (no_posterior_condition, "Tel Aviv", "2026-09-07", "low"),
+    )
+    forecast.commit()
+    for index, numerator in ((0, 100), (1, 0)):
+        append_observation(
+            conn,
+            condition_id=condition_c,
+            outcome_index=index,
+            payout_numerator=numerator,
+            payout_denominator=100,
+            state=STATE_RESOLVED_NONZERO if numerator else STATE_RESOLVED_ZERO,
+            block_number=7,
+            block_hash="0x07",
+            observed_at="t0",
+        )
+
+    selected = forecast_conditions_to_observe(
+        conn,
+        forecast,
+        now="2026-09-09T12:00:00+00:00",
+    )
+    assert len(selected["universe"]) == 5
+    assert selected["forecast_missing"] == 1
+    assert no_posterior_condition in {
+        row["condition_id"] for row in selected["pending"]
+    }
+    assert {row["condition_id"] for row in selected["ended_universe"]} == {
+        _CONDITION_A,
+        _CONDITION_B,
+        condition_c,
+        no_posterior_condition,
+    }
+    assert {row["condition_id"] for row in selected["pending"]} == {
+        _CONDITION_A,
+        _CONDITION_B,
+        no_posterior_condition,
+    }
+
+
+def test_forecast_rotation_advances_with_same_block_and_actual_cap(conn, monkeypatch):
+    forecast = _forecast_learning_fixture()
+    condition_c = "0x" + "ef" * 32
+    _seed_forecast_family(forecast, _CONDITION_A, "Tel Aviv", "2026-09-08", "high")
+    _seed_forecast_family(forecast, _CONDITION_B, "Tel Aviv", "2026-09-08", "low")
+    _seed_forecast_family(forecast, condition_c, "Tel Aviv", "2026-09-08", "high")
+    monkeypatch.setenv("ZEUS_POST_TRADE_PAYOUT_LEARNING_CAP", "1")
+    first = forecast_conditions_to_observe(
+        conn, forecast, now="2026-09-09T12:00:00+00:00"
+    )
+    second = forecast_conditions_to_observe(
+        conn, forecast, now="2026-09-09T12:10:00+00:00"
+    )
+    assert len(first["selected"]) == len(second["selected"]) == 1
+    assert first["selected"][0]["condition_id"] != second["selected"][0]["condition_id"]
+
+
+def test_learning_two_phase_batch_keeps_partial_unknown_and_never_reads_unknown_numerator(
+    conn, monkeypatch
+):
+    forecast = _forecast_learning_fixture()
+    _seed_forecast_family(forecast, _CONDITION_A, "Tel Aviv", "2026-09-08", "high")
+    _seed_forecast_family(forecast, _CONDITION_B, "Tel Aviv", "2026-09-08", "low")
+    monkeypatch.setattr(
+        payout_observer,
+        "_learning_block_marker",
+        lambda *_args, **_kwargs: (77, "0x77"),
+    )
+    batches = []
+
+    def hard_batch(_url, calls, *, timeout_seconds):
+        assert not conn.in_transaction
+        batches.append(calls)
+        if len(batches) == 1:
+            return [_uint(100), _uint(0)]
+        # The second numerator is an empty response and must remain UNKNOWN.
+        return [_uint(100), "0x"]
+
+    monkeypatch.setattr(
+        payout_observer,
+        "_json_rpc_batch_call_hard_deadline",
+        hard_batch,
+    )
+    result = _learning_sweep(
+        conn,
+        forecast,
+        rpc_url="https://rpc.example",
+        rpc_call=payout_observer._json_rpc_call,
+        now="2026-09-09T12:00:00+00:00",
+    )
+    assert len(batches) == 2
+    assert len(batches[0]) == 2  # denominator stage, one per condition
+    assert len(batches[1]) == 2  # numerators only for resolved denominator
+    latest = conn.execute(
+        "SELECT condition_id, outcome_index, state FROM payout_observations "
+        "WHERE superseded_by IS NULL ORDER BY condition_id, outcome_index"
+    ).fetchall()
+    assert [tuple(row) for row in latest] == [
+        (_CONDITION_A, 0, STATE_RESOLVED_NONZERO),
+        (_CONDITION_A, 1, STATE_UNKNOWN),
+        (_CONDITION_B, 0, STATE_UNRESOLVED),
+        (_CONDITION_B, 1, STATE_UNRESOLVED),
+    ]
+    assert result["processed"] == 2
+    assert result["unknown"] == 1
+
+
+def test_learning_denominator_timeout_writes_unknown_without_numerator_batch(
+    conn, monkeypatch
+):
+    forecast = _forecast_learning_fixture()
+    _seed_forecast_family(forecast, _CONDITION_A, "Tel Aviv", "2026-09-08", "high")
+    _seed_forecast_family(forecast, _CONDITION_B, "Tel Aviv", "2026-09-08", "low")
+    monkeypatch.setattr(
+        payout_observer,
+        "_learning_block_marker",
+        lambda *_args, **_kwargs: (77, "0x77"),
+    )
+    batches = []
+
+    def timed_out_batch(_url, calls, *, timeout_seconds):
+        assert not conn.in_transaction
+        batches.append(calls)
+        raise TimeoutError("deadline")
+
+    monkeypatch.setattr(
+        payout_observer,
+        "_json_rpc_batch_call_hard_deadline",
+        timed_out_batch,
+    )
+    result = _learning_sweep(
+        conn,
+        forecast,
+        rpc_url="https://rpc.example",
+        rpc_call=payout_observer._json_rpc_call,
+        now="2026-09-09T12:00:00+00:00",
+    )
+    assert len(batches) == 1
+    assert result["processed"] == 2
+    assert result["unknown"] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM payout_observations WHERE state='UNKNOWN'"
+    ).fetchone()[0] == 4
+
+
+def test_primary_commit_survives_learning_failure(conn, monkeypatch):
+    forecast = _forecast_learning_fixture()
+
+    def primary(c, **_kwargs):
+        append_observation(
+            c,
+            condition_id=_CONDITION_A,
+            outcome_index=0,
+            payout_numerator=None,
+            payout_denominator=None,
+            state=STATE_UNKNOWN,
+            block_number=None,
+            block_hash=None,
+            observed_at="primary",
+        )
+        return {"conditions": 1, "appended": 1, "unchanged": 0}
+
+    monkeypatch.setattr(payout_observer, "sweep_and_record", primary)
+    monkeypatch.setattr(
+        payout_observer,
+        "_learning_sweep",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("learning failed")),
+    )
+    result = payout_observer_cycle(
+        conn=conn,
+        forecast_conn=forecast,
+        rpc_call=lambda *_args: None,
+        now="2026-09-09T12:00:00+00:00",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0] == 1
+    assert result["conditions"] == 1
+    assert "learning failed" in result["learning"]["error"]
+
+
+def test_injected_trade_conn_without_forecast_conn_skips_learning(monkeypatch, conn):
+    monkeypatch.setattr(
+        payout_observer,
+        "_learning_sweep",
+        lambda *_args, **_kwargs: pytest.fail("primary-only injection opened learning"),
+    )
+    monkeypatch.setattr(
+        payout_observer,
+        "sweep_and_record",
+        lambda *_args, **_kwargs: {"conditions": 0, "appended": 0, "unchanged": 0},
+    )
+    result = payout_observer_cycle(
+        conn=conn,
+        rpc_call=lambda *_args: None,
+        now="2026-09-09T12:00:00+00:00",
+    )
+    assert result["learning"]["status"] == "skipped_no_forecast_connection"
+
+
 def test_unknown_after_resolved_history_stays_in_bounded_retry_class(conn):
     for n in range(LEGACY_FINALITY_UPGRADE_BATCH_SIZE + 2):
         condition = f"0x{n+1:064x}"
@@ -1084,3 +1321,44 @@ def test_unknown_after_resolved_history_stays_in_bounded_retry_class(conn):
         _append_pair_slot(conn, 1, condition=condition)
         _append_pair_slot(conn, 1, block=101, state=STATE_UNKNOWN, condition=condition)
     assert len(conditions_to_observe(conn)) == LEGACY_FINALITY_UPGRADE_BATCH_SIZE
+
+
+@pytest.mark.parametrize("owned", [True, False])
+def test_primary_failure_closes_only_owned_connection(monkeypatch, owned):
+    import src.ingest.payout_observer as observer
+    import src.state.db as state_db
+
+    connection = sqlite3.connect(":memory:")
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **kwargs: connection)
+    def fail_primary(*args, **kwargs):
+        raise RuntimeError("primary unavailable")
+    monkeypatch.setattr(observer, "sweep_and_record", fail_primary)
+    try:
+        with pytest.raises(RuntimeError, match="primary unavailable"):
+            observer.payout_observer_cycle(**({} if owned else {"conn": connection}))
+        if owned:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+        else:
+            assert connection.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_learning_rotation_covers_every_condition_when_budget_only_allows_a_prefix(conn, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    forecast = _forecast_learning_fixture()
+    conditions = {f"0x{index+1:064x}" for index in range(16)}
+    for condition in conditions:
+        _seed_forecast_family(forecast, condition, "Tel Aviv", "2026-09-08", "high")
+    monkeypatch.setenv("ZEUS_POST_TRADE_PAYOUT_LEARNING_CAP", "4")
+    start = datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
+    reached = set()
+    for slot in range(len(conditions)):
+        selection = forecast_conditions_to_observe(conn, forecast, now=start+timedelta(minutes=10*slot))
+        # A slow endpoint repeatedly consumes the budget on the first condition.
+        # None resolves, so N remains stable; no new observation can advance it.
+        reached.add(selection["selected"][0]["condition_id"])
+    assert reached == conditions
+    forecast.close()

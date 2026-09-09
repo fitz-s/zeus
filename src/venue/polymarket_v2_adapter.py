@@ -3989,20 +3989,49 @@ def _json_rpc_batch_call(
     if not isinstance(decoded, list):
         raise V2AdapterError("polygon rpc batch returned non-list payload")
     by_id: dict[int, Any] = {}
+    method_by_id = {
+        index: method for index, (method, _params) in enumerate(calls, start=1)
+    }
     for item in decoded:
         if not isinstance(item, dict):
             raise V2AdapterError("polygon rpc batch returned non-object item")
         if item.get("jsonrpc") != "2.0":
             raise V2AdapterError("polygon rpc batch returned invalid jsonrpc version")
         response_id = item.get("id")
-        if type(response_id) is not int or response_id in by_id:
+        if type(response_id) is not int or response_id in by_id or response_id not in method_by_id:
             raise V2AdapterError("polygon rpc batch returned invalid or duplicate id")
         if "error" in item:
             raise V2AdapterError(f"polygon rpc batch error id={response_id}: {item['error']}")
         if "result" not in item:
             raise V2AdapterError(f"polygon rpc batch missing result id={response_id}")
         result = item["result"]
-        _hex_data_bytes(result, context=f"polygon rpc batch id={response_id}")
+        method = method_by_id[response_id]
+        if method == "eth_getBlockByNumber":
+            if not isinstance(result, dict):
+                raise V2AdapterError(
+                    f"polygon rpc batch id={response_id} block header is not an object"
+                )
+            number = result.get("number")
+            block_hash = result.get("hash")
+            if (
+                not isinstance(number, str)
+                or not number.startswith("0x")
+                or len(number) <= 2
+                or any(character not in "0123456789abcdefABCDEF" for character in number[2:])
+                or not isinstance(block_hash, str)
+                or len(block_hash) != 66
+                or not block_hash.startswith("0x")
+                or any(character not in "0123456789abcdefABCDEF" for character in block_hash[2:])
+            ):
+                raise V2AdapterError(
+                    f"polygon rpc batch id={response_id} invalid block header"
+                )
+        elif method == "eth_call":
+            _hex_data_bytes(result, context=f"polygon rpc batch id={response_id}")
+        else:
+            raise V2AdapterError(
+                f"polygon rpc batch unsupported method id={response_id}: {method}"
+            )
         by_id[response_id] = result
     expected_ids = set(range(1, len(calls) + 1))
     if set(by_id) != expected_ids:

@@ -301,12 +301,15 @@ def economic_trade_fact_cte(
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
     source_schema: str | None = None,
+    source_clause_sql: str = "",
 ) -> str:
     """Exclude every derived alias once its source economic fact exists.
 
     Tx-hash aggregate aliases are excluded when an exact child exists.  EDLI
     aliases are excluded when ``raw_fill_payload.source_trade_fact_id`` binds
     them to a positive source fact for the same command and venue order.
+    ``source_clause_sql`` is a trusted AND predicate on ``source_fact``; as-of
+    readers must constrain these alias sources as well as canonical revisions.
     """
 
     source_table = _venue_trade_facts_table(source_schema)
@@ -346,6 +349,7 @@ def economic_trade_fact_cte(
                           AND UPPER(COALESCE(source_fact.state, ''))
                               IN ('MATCHED', 'MINED', 'CONFIRMED')
                           AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
+                          {source_clause_sql}
                     )
         )
     """

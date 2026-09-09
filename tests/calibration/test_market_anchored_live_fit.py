@@ -1001,3 +1001,162 @@ def test_duplicated_claim_window_refused_though_row_count_meets_floor():
 
     provider = MarketAnchoredFitProvider(lambda: conn, min_train_rows=20, city_timezones=_TEST_CITY_TIMEZONES)
     assert provider.artifact(now=NOW) is None
+
+
+def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size=10.0):
+    """Real certificate hashing and canonical economic revisions in private DBs."""
+    import json
+    from src.decision_kernel.certificate import build_certificate, certificate_payload_json
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+
+    world = sqlite3.connect(":memory:")
+    trade = sqlite3.connect(":memory:")
+    decision = NOW - timedelta(days=3)
+    parent = build_certificate(
+        certificate_type="ProbabilityEvidenceCertificate", semantic_key="fixture-parent",
+        claim_type="fixture", mode="LIVE", decision_time=decision,
+        source_available_at=decision, agent_received_at=decision, persisted_at=decision,
+        payload={}, authority_id="fixture", authority_version="1", algorithm_id="fixture", algorithm_version="1",
+    )
+    token = "11" if side == "YES" else "12"
+    economics = {
+        "payoff_q_point": .52 if corrected else .70,
+        "market_anchored_correction": ({"applied": True, "q_raw": .70, "q_corrected": .52, "p0": .35}
+                                       if corrected else {"applied": False}),
+        "global_execution_mode": "TAKER_LIMIT", "decision_p0": .35,
+        "decision_p0_source": "snapshot", "global_book_hash": "book-hash",
+        "global_candidate_id": "candidate", "global_token_id": token,
+        "global_jit_execution_curve_identity": "curve-hash",
+    }
+    payload = {"candidate_id": "candidate", "condition_id": "condition", "token_id": token,
+               "q_live": .52 if corrected else .70, "direction": "buy_yes" if side == "YES" else "buy_no", "city": "Austin", "target_date": (decision.date()+timedelta(days=1)).isoformat(),
+               "temperature_metric": metric, "qkernel_execution_economics": economics}
+    certificate = build_certificate(
+        certificate_type="ActionableTradeCertificate", semantic_key="fixture-entry", claim_type="fixture",
+        mode="LIVE", decision_time=decision, source_available_at=decision, agent_received_at=decision,
+        persisted_at=decision, payload=payload, parent_certificates=(parent,),
+        authority_id="fixture", authority_version="1", algorithm_id="fixture", algorithm_version="1",
+    )
+    ledger = DecisionCertificateLedger(world)
+    # Fixture isolates corpus validation; execution verifier has its own suite.
+    ledger.insert_idempotent(parent, preverified=True)
+    ledger.insert_idempotent(certificate, preverified=True)
+    trade.executescript("""
+      CREATE TABLE venue_commands(command_id TEXT, token_id TEXT, created_at TEXT,
+        venue_order_id TEXT, snapshot_id TEXT, intent_kind TEXT, side TEXT);
+      CREATE TABLE executable_market_snapshots(snapshot_id TEXT, condition_id TEXT, yes_token_id TEXT,
+        no_token_id TEXT, selected_outcome_token_id TEXT, orderbook_top_ask REAL,
+        raw_orderbook_hash TEXT, captured_at TEXT, token_map_json TEXT);
+      CREATE TABLE position_decision_attribution(command_id TEXT, decision_certificate_hash TEXT,
+        intent_kind TEXT, created_at TEXT);
+      CREATE TABLE venue_trade_facts(trade_fact_id INTEGER PRIMARY KEY, command_id TEXT, trade_id TEXT,
+        venue_order_id TEXT, state TEXT, filled_size REAL, tx_hash TEXT, observed_at TEXT,
+        ingested_at TEXT, venue_timestamp TEXT, local_sequence INTEGER, raw_payload_json TEXT);
+      CREATE TABLE payout_observations(id INTEGER PRIMARY KEY, condition_id TEXT, outcome_index INTEGER,
+        payout_numerator INTEGER, payout_denominator INTEGER, state TEXT, source TEXT,
+        block_number INTEGER, block_hash TEXT, observed_at TEXT, superseded_by INTEGER);
+    """)
+    trade.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)", ("command", token, decision.isoformat(), "order", "snapshot", "ENTRY", "BUY"))
+    trade.execute("INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?)", (
+        "snapshot", "condition", "11", "12", token, .35, "book-hash", decision.isoformat(), json.dumps({"YES":"11","NO":"12"})))
+    trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?)", ("command",certificate.certificate_hash,"ENTRY",decision.isoformat()))
+    filled = decision+timedelta(seconds=2)
+    for fact_id, state, sequence in [(1,"MATCHED",1),(2,"MINED",2),(3,"CONFIRMED",3)]:
+        trade.execute("INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+            fact_id,"command","fill","order",state,size,"tx",filled.isoformat(),filled.strftime("%Y-%m-%d %H:%M:%S"),filled.isoformat(),sequence,"{}"))
+    for index in (0,1):
+        trade.execute("INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+            index+1,"condition",index,1-index,1,"RESOLVED_NONZERO" if index==0 else "RESOLVED_ZERO",
+            "chain_rpc_finalized_v1",100,"0x"+"aa"*32,(NOW-timedelta(days=1)).isoformat(),None))
+    world.commit()
+    trade.commit()
+    return world, trade, certificate_payload_json(certificate)
+
+
+def _read_canonical(world, trade, cutoff=NOW):
+    return live_fit.load_canonical_fit_corpus(world, trade, training_cutoff=cutoff,
+        city_timezone_snapshot=tuple(sorted(_TEST_CITY_TIMEZONES.items())))
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_canonical_fit_preserves_raw_and_yes_no_event_geometry(side, corrected):
+    world, trade, _ = _canonical_corpus_fixture(side=side, corrected=corrected)
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        row, = corpus.records
+        assert row["q_raw"] == .70
+        assert row["acting_q"] == (.52 if corrected else .70)
+        assert row["confirmed_shares"] == 10  # Not 30 across lifecycle revisions.
+        assert row["fill_proof_tier"] == "CLOB_CONFIRMED"
+        fit_row, = corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT")
+        assert fit_row.q_raw == pytest.approx(.70 if side=="YES" else .30)
+        assert fit_row.p0 == pytest.approx(.35 if side=="YES" else .65)
+        assert fit_row.y == 1 and fit_row.w == 1
+        assert corpus.fit_rows(metric="low", execution_mode="TAKER_LIMIT") == []
+        assert corpus.fit_rows(metric="high", execution_mode="MAKER_REST") == []
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_future_revisions_cannot_erase_asof_truth():
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        future = (NOW+timedelta(days=1)).isoformat()
+        trade.execute("UPDATE payout_observations SET superseded_by=99")
+        trade.execute("INSERT INTO payout_observations VALUES (99,'condition',0,NULL,NULL,'UNKNOWN','chain_rpc_finalized_v1',101,'hash',?,NULL)", (future,))
+        trade.execute("INSERT INTO venue_trade_facts SELECT 99,command_id,trade_id,venue_order_id,'CONFIRMED',999,tx_hash,?,?,venue_timestamp,99,'{}' FROM venue_trade_facts WHERE trade_fact_id=3", (future,future))
+        before = _read_canonical(world, trade)
+        assert before.records[0]["confirmed_shares"] == 10
+        assert before.records[0]["payout"] == 1
+        after = _read_canonical(world, trade, NOW+timedelta(days=2))
+        assert after.records == ()
+        assert after.unknown == {"FINALIZED_PAYOUT_UNBOUND":1}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_future_alias_source_cannot_remove_existing_fill():
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        import json
+        trade.execute("UPDATE venue_trade_facts SET raw_payload_json=?", (json.dumps({"raw_fill_payload":{"source_trade_fact_id":99}}),))
+        future = (NOW+timedelta(days=1)).isoformat()
+        trade.execute("INSERT INTO venue_trade_facts SELECT 99,command_id,'source-fill',venue_order_id,'CONFIRMED',10,tx_hash,?,?,venue_timestamp,1,'{}' FROM venue_trade_facts WHERE trade_fact_id=3", (future,future))
+        assert _read_canonical(world, trade).records[0]["confirmed_shares"] == 10
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("UPDATE venue_commands SET side='SELL'", "ENTRY_NOT_BUY"),
+    ("UPDATE payout_observations SET payout_denominator=100,payout_numerator=40+outcome_index*20,state='RESOLVED_NONZERO'", "FRACTIONAL_PAYOUT_UNSUPPORTED"),
+    ("UPDATE venue_trade_facts SET state='MINED'", "CONFIRMED_FILL_MISSING"),
+    ("UPDATE venue_trade_facts SET venue_order_id='other-order'", "CONFIRMED_FILL_CLOCK_OR_IDENTITY_UNBOUND"),
+    ("UPDATE executable_market_snapshots SET selected_outcome_token_id='12'", "CERTIFICATE_IDENTITY_UNBOUND"),
+    ("UPDATE decision_certificates SET payload_json='{}' WHERE certificate_type='ActionableTradeCertificate'", "CERTIFICATE_IDENTITY_UNBOUND"),
+    ("UPDATE decision_certificates SET algorithm_version='tampered' WHERE certificate_type='ActionableTradeCertificate'", "CERTIFICATE_HEADER_HASH_UNBOUND"),
+])
+def test_canonical_fit_rejects_unbound_evidence_and_keeps_denominator(mutation, reason):
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        (world if "decision_certificates" in mutation else trade).execute(mutation)
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == () and corpus.command_count == 1
+        assert corpus.unknown == {reason:1}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_event_weight_preserves_shares_without_inventing_sample_size():
+    records = tuple(dict(metric="high",execution_mode="MAKER_REST",event_key=("Austin","2026-08-01","high"),
+        lead_bucket="day1",side="YES",p0=.4,q_raw=.6,payout=1,confirmed_shares=shares) for shares in (10,30))
+    corpus = live_fit.CanonicalFitCorpus(records, {}, 2, NOW.isoformat())
+    rows = corpus.fit_rows(metric="high",execution_mode="MAKER_REST")
+    assert [row.w for row in rows] == [.25,.75]
+    assert sum(row.w for row in rows) == 1

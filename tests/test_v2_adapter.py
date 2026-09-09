@@ -1604,6 +1604,76 @@ def test_json_rpc_batch_rejects_partial_chain_truth(monkeypatch):
         )
 
 
+def test_json_rpc_batch_accepts_strict_finalized_header_with_eth_call(monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"number": "0x2a", "hash": "0x" + "ab" * 32},
+                },
+                {"jsonrpc": "2.0", "id": 2, "result": "0x" + "01" * 32},
+            ]).encode()
+
+    monkeypatch.setattr(
+        adapter_mod.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(),
+    )
+    result = adapter_mod._json_rpc_batch_call(
+        "https://rpc.test",
+        [
+            ("eth_getBlockByNumber", ["finalized", False]),
+            ("eth_call", [{"to": "0x1"}, "0x2a"]),
+        ],
+    )
+    assert result[0]["number"] == "0x2a"
+    assert result[0]["hash"] == "0x" + "ab" * 32
+    assert result[1] == "0x" + "01" * 32
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"number": "0x2a", "hash": "0x12"},
+        {"number": "0xwat", "hash": "0x" + "ab" * 32},
+        {"number": "0x2a", "hash": "0x" + "zz" * 32},
+    ],
+)
+def test_json_rpc_batch_rejects_invalid_finalized_header(monkeypatch, header):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([{"jsonrpc": "2.0", "id": 1, "result": header}]).encode()
+
+    monkeypatch.setattr(
+        adapter_mod.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(),
+    )
+    with pytest.raises(adapter_mod.V2AdapterError, match="invalid block header"):
+        adapter_mod._json_rpc_batch_call(
+            "https://rpc.test",
+            [("eth_getBlockByNumber", ["finalized", False])],
+        )
+
+
 @pytest.mark.parametrize(
     "item",
     [
