@@ -44252,17 +44252,25 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID")
         current_native = np.asarray(members, dtype=float)
         carrier_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+        persisted_c = np.sort(np.asarray(future_c, dtype=float))
         if carrier_unit == "F":
-            current_c = (current_native - 32.0) * 5.0 / 9.0
+            persisted_native = persisted_c * (9.0 / 5.0) + 32.0
+            # Compare in the consuming unit. C->F->C plus decimal rounding
+            # can straddle a rounding boundary for the very same vector.
+            # Bound only IEEE754 conversion residue, not forecast differences.
+            conversion_error = 8.0 * np.finfo(float).eps * np.maximum(
+                32.0, np.abs(persisted_native)
+            )
+            same_vector = (
+                current_native.shape == persisted_native.shape
+                and np.isfinite(persisted_native).all()
+                and np.all(np.abs(current_native - persisted_native) <= conversion_error)
+            )
         elif carrier_unit == "C":
-            current_c = current_native
+            same_vector = np.array_equal(current_native, persisted_c)
         else:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
-        persisted_c = np.sort(np.asarray(future_c, dtype=float))
-        if not np.array_equal(
-            np.round(np.sort(current_c), decimals=12),
-            np.round(persisted_c, decimals=12),
-        ):
+        if not same_vector:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH")
         try:
             persisted_q = tuple(float(value) for value in payload["_edli_day0_remaining_carrier_q"])

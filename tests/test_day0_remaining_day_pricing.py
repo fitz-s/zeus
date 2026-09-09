@@ -2464,13 +2464,17 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     assert replay.tolist() == pytest.approx(payload["_edli_day0_remaining_carrier_q"])
 
 
-def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("future_c", (
+    tuple(20.0 + (index % 5) * 0.25 for index in range(29)),
+    tuple(29.4414544595195 + (index % 3) for index in range(29)),
+))
+def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(metric, future_c):
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
 
     city = runtime_cities_by_name()["Atlanta"]
-    future_c = tuple(20.0 + (index % 5) * 0.25 for index in range(29))
     future_f = tuple(value * (9.0 / 5.0) + 32.0 for value in future_c)
     cutoff = "2026-08-24T09:30:00+00:00"
     decision_time = datetime(2026, 8, 24, 9, 30, tzinfo=UTC)
@@ -2484,8 +2488,8 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
         expected = build_day0_remaining_probability_carrier(
             future_extremes_c=future_f,
             boundary_scenarios=((80.0, 0.95), (None, 1.0 - 0.95)),
-            metric="high",
-            path_error_sigma_c=float(np.std(np.asarray(future_c), ddof=0)) * 9.0 / 5.0,
+            metric=metric,
+            path_error_sigma_c=float(np.std(np.asarray(future_c), ddof=0)) * (9.0 / 5.0),
             instrument_sigma_c=0.5,
             bin_bounds_c=[(None, 79), (80, 81), (82, 83), (84, None)],
             n_point=ensemble_n_mc(),
@@ -2500,7 +2504,7 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             settlement_semantics=_settlement_semantics("Atlanta"),
         )
         payload = {
-            "metric": "high",
+            "metric": metric,
             "rounded_value": 80.0,
             "settlement_source": "aviationweather_metar",
             "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
@@ -2528,7 +2532,7 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             },
         }
         replay = era._day0_remaining_p_raw_vector(
-            np.asarray(future_f),
+            np.asarray(future_c)[::-1] * 9.0 / 5.0 + 32.0,
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
             bins=[
@@ -2542,21 +2546,26 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
-        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH"):
-            era._day0_remaining_p_raw_vector(
-                np.asarray(future_f[:-1] + (future_f[-1] + 1.0,)),
-                city=city,
-                settlement_semantics=SettlementSemantics.for_city(city),
-                bins=[
-                    Bin(None, 79, "F", "79F or below"),
-                    Bin(80, 81, "F", "80-81F"),
-                    Bin(82, 83, "F", "82-83F"),
-                    Bin(84, None, "F", "84F or above"),
-                ],
-                payload=payload,
-                extra_member_sigma=0.0,
-                decision_time=decision_time,
-            )
+        for mutated in (
+            np.asarray(future_f[:-1] + (future_f[-1] + 1.0,)),
+            np.asarray(future_f[:-1] + (future_f[-1] + 1e-8,)),
+            np.asarray(future_f[:-1]),
+        ):
+            with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH"):
+                era._day0_remaining_p_raw_vector(
+                    mutated,
+                    city=city,
+                    settlement_semantics=SettlementSemantics.for_city(city),
+                    bins=[
+                        Bin(None, 79, "F", "79F or below"),
+                        Bin(80, 81, "F", "80-81F"),
+                        Bin(82, 83, "F", "82-83F"),
+                        Bin(84, None, "F", "84F or above"),
+                    ],
+                    payload=payload,
+                    extra_member_sigma=0.0,
+                    decision_time=decision_time,
+                )
         assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
     finally:
