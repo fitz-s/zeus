@@ -1457,3 +1457,31 @@ def test_learning_does_not_commit_or_rollback_caller_transaction(conn):
         payout_observer._append_learning_chunk(conn, [], observed_at="now")
     assert conn.in_transaction
     conn.rollback()
+
+
+def test_learning_interleaves_recent_unresolved_retries_with_full_universe(conn, monkeypatch):
+    forecast = _forecast_learning_fixture()
+    conditions = [f"0x{index:064x}" for index in range(1, 7)]
+    for index, condition in enumerate(conditions):
+        target = "2026-05-01" if index < 4 else ("2026-09-07" if index == 4 else "2026-09-08T00:00:00")
+        _seed_forecast_family(forecast, condition, "Tel Aviv", target, "high")
+    monkeypatch.setenv("ZEUS_POST_TRADE_PAYOUT_LEARNING_CAP", "4")
+    try:
+        selection = forecast_conditions_to_observe(conn, forecast, now="2026-09-09T12:00:00Z")
+        assert len(selection["universe"]) == len(selection["pending"]) == 6
+        assert [r["condition_id"] for r in selection["selected"]] == [
+            conditions[0], conditions[4], conditions[1], conditions[5],
+        ]
+        # An unresolved first read must remain in the recent retry lane until
+        # the oracle resolves, rather than waiting for the whole old backlog.
+        append_observation(conn, condition_id=conditions[5], outcome_index=0,
+            payout_numerator=None, payout_denominator=None, state=STATE_UNKNOWN,
+            block_number=None, block_hash=None, observed_at="2026-09-09T12:00:01Z")
+        conn.commit()
+        selection = forecast_conditions_to_observe(conn, forecast, now="2026-09-09T12:00:02Z")
+        assert len(selection["pending"]) == 6
+        assert selection["selected"][0]["condition_id"] == conditions[0]
+        assert selection["recent_pending"] == 2
+        assert {conditions[4], conditions[5]} <= {r["condition_id"] for r in selection["selected"]}
+    finally:
+        forecast.close()

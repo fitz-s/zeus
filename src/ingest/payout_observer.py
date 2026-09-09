@@ -50,7 +50,7 @@ import math
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -94,6 +94,7 @@ FINALIZED_SOURCE = "chain_rpc_finalized_v1"
 LEGACY_FINALITY_UPGRADE_BATCH_SIZE = 16
 PAYOUT_LEARNING_CAP = 256
 PAYOUT_LEARNING_CHUNK_SIZE = 128
+PAYOUT_LEARNING_RECENT_DAYS = 3
 PAYOUT_LEARNING_BUDGET_SECONDS = 60.0
 PAYOUT_LEARNING_RPC_TIMEOUT_SECONDS = 10.0
 PAYOUT_LEARNING_SLOT_SECONDS = 600
@@ -610,7 +611,9 @@ def forecast_conditions_to_observe(
     coverage is reported separately and never gates the chain label.  Its
     condition is removed only when the trade DB already contains one coherent
     finalized pair.  The selection cursor advances by a ten-minute UTC slot so a
-    repeatedly failing condition cannot freeze the same prefix.
+    repeatedly failing condition cannot freeze the same prefix.  Every other
+    slot prioritizes a separate recent-market rotation, including unresolved
+    retries, while the full-universe rotating head always remains first.
     """
     current = _learning_now(now)
     if deadline_monotonic is not None:
@@ -676,16 +679,38 @@ def forecast_conditions_to_observe(
     while count > 1 and math.gcd(stride, count) != 1:
         stride += 1
     offset = (slot * stride) % count if count else 0
-    selected = [
-        pending[(offset + index) % count]
-        for index in range(min(cap, count))
-    ] if count else []
+    rotating = iter(pending[(offset + index) % count] for index in range(count))
+    recent_days = _positive_int_env("ZEUS_POST_TRADE_PAYOUT_LEARNING_RECENT_DAYS", PAYOUT_LEARNING_RECENT_DAYS)
+    recent_cutoff = current.date() - timedelta(days=recent_days)
+    recent = [item for item in pending
+              if datetime.fromisoformat(item["target_date"]).date() >= recent_cutoff]
+    recent_count = len(recent)
+    recent_stride = max(1, cap // 2)
+    while recent_count > 1 and math.gcd(recent_stride, recent_count) != 1:
+        recent_stride += 1
+    recent_offset = (slot * recent_stride) % recent_count if recent_count else 0
+    recent_rotating = iter(recent[(recent_offset + index) % recent_count] for index in range(recent_count))
+    selected = []
+    selected_ids = set()
+    # Keep the coprime rotating head first even under a one-condition budget.
+    # Interleave recent outcomes, including not-yet-resolved retry candidates.
+    for index in range(min(cap, count)):
+        preferred = recent_rotating if index % 2 else rotating
+        item = next((item for item in preferred if item["condition_id"] not in selected_ids), None)
+        if item is None:
+            item = next((item for item in rotating if item["condition_id"] not in selected_ids), None)
+        if item is None:
+            break
+        selected.append(item)
+        selected_ids.add(item["condition_id"])
     return {
         "universe": universe,
         "forecasted": sum(1 for item in universe if item["has_forecast"]),
         "forecast_missing": sum(1 for item in universe if not item["has_forecast"]),
         "ended_universe": ended,
         "pending": pending,
+        "recent_pending": recent_count,
+        "recent_days": recent_days,
         "selected": selected,
         "slot": slot,
         "stride": stride,
