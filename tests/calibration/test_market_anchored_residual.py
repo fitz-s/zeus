@@ -1,5 +1,5 @@
 # Created: 2026-08-24
-# Last reused or audited: 2026-09-08
+# Last reused or audited: 2026-09-09
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 acceptance criteria (a)-(f).
 """Tests for src/calibration/market_anchored_residual.py.
@@ -455,3 +455,47 @@ class TestClaimWeighting:
     def test_w_defaults_to_one_and_matches_unweighted_call(self):
         rows = [FitRow(p0=0.3, q_raw=0.4, lead_bucket="day0", y=1)]
         assert rows[0].w == 1.0
+
+
+@pytest.mark.parametrize("true_beta,bound", [(-0.9, BETA_MIN), (0.9, BETA_MAX)])
+def test_bound_fit_satisfies_weighted_kkt_and_improves_clamp_only(true_beta, bound):
+    import numpy as np
+    from src.calibration.market_anchored_residual import _design_row, _fit_irls
+
+    rng = random.Random(901)
+    rows = []
+    for index in range(900):
+        lead = LEAD_BUCKETS[index % 3]
+        p0 = rng.uniform(0.12, 0.7)
+        q = rng.uniform(0.45, 0.95)
+        residual = max(-CLIP_D, min(CLIP_D, logit(q) - logit(p0)))
+        p = sigmoid(logit(p0) + (0.4, -0.2, 0.15)[index % 3] + true_beta * residual)
+        rows.append(FitRow(p0, q, lead, int(rng.random() < p), w=(0.3, 0.7, 1.0)[index % 3]))
+    design = [_design_row(row) for row in rows]
+    X = np.stack([x[0] for x in design])
+    offset = np.array([x[1] for x in design])
+    y = np.array([x[2] for x in design])
+    w = np.array([x[3] for x in design])
+    ridge = 2.0
+    old = _fit_irls(X, y, offset, ridge, w)
+    assert old[-1] < BETA_MIN if bound == BETA_MIN else old[-1] > BETA_MAX
+    old[-1] = bound
+    artifact = fit(rows, lambda_=ridge, training_cutoff="2026-09-09T00:00:00Z")
+    assert artifact.beta == bound
+    actual = np.array([*(artifact.alpha[lead] for lead in LEAD_BUCKETS), artifact.beta])
+
+    def objective(theta):
+        eta = offset + X @ theta
+        return float(np.sum(w * (np.logaddexp(0, eta) - y * eta)) + ridge / 2 * (theta @ theta))
+
+    assert objective(actual) < objective(old) - 0.01
+    mu = 1 / (1 + np.exp(-(offset + X @ actual)))
+    gradient = X.T @ (w * (mu - y)) + ridge * actual
+    assert np.max(np.abs(gradient[:-1])) < 1e-8
+    assert gradient[-1] > 0 if bound == BETA_MIN else gradient[-1] < 0
+    # A changed free intercept cannot improve a converged constrained fit.
+    for i in range(3):
+        for step in (-0.01, 0.01):
+            neighbor = actual.copy()
+            neighbor[i] += step
+            assert objective(neighbor) > objective(actual)

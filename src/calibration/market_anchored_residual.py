@@ -73,8 +73,8 @@ LAMBDA_GRID: tuple[float, ...] = (0.1, 1.0, 10.0)
 # excursing to -0.129 for ~3 weeks (sign inversion: q's disagreement with the
 # market applied backwards) and to 0.178 at other training cutoffs; the
 # current window sits at 0.080. Outside [0, 0.12] the residual term is noise
-# or inversion, never signal, so the bound is enforced post-solve regardless
-# of what any future refit returns.
+# or inversion, never signal, so the fit is constrained to this interval.
+# At an active bound the lead intercepts are re-optimized at that fixed beta.
 BETA_MIN = 0.0
 BETA_MAX = 0.12
 
@@ -328,10 +328,12 @@ def fit(
         y = np.array([r[2] for r in design_rows], dtype=np.float64)
         w = np.array([r[3] for r in design_rows], dtype=np.float64)
         coef = _fit_irls(X, y, offset, lambda_, w)
-        alpha = {bucket: float(coef[i]) for i, bucket in enumerate(lead_buckets)}
         raw_beta = float(coef[-1])
         beta = min(max(raw_beta, BETA_MIN), BETA_MAX)
         if beta != raw_beta:
+            # The intercepts must minimize the likelihood at the retained beta,
+            # not compensate for the unconstrained beta that was discarded.
+            coef[:-1] = _fit_irls(X[:, :-1], y, offset + beta * X[:, -1], lambda_, w)
             _LOG.warning(
                 "market-anchored fit beta clamped: raw=%.6f clamped=%.6f "
                 "training_cutoff=%s n_train=%d",
@@ -340,6 +342,7 @@ def fit(
                 training_cutoff,
                 len(design_rows),
             )
+        alpha = {bucket: float(coef[i]) for i, bucket in enumerate(lead_buckets)}
 
     p_clip = (P_CLIP_LO, P_CLIP_HI)
     param_hash = _param_hash(
