@@ -760,42 +760,46 @@ def _append_learning_chunk(
     observed_at: str,
 ) -> tuple[int, int, int]:
     appended = unchanged = unknown = 0
-    if not conn.in_transaction:
-        conn.execute("BEGIN")
-    for condition_id, results in rows:
-        incoming = [{**row, "source": FINALIZED_SOURCE} for row in results]
-        refresh_block = (
-            _coherent_finalized_pair(incoming)
-            and not _coherent_finalized_pair(_latest_pair(conn, condition_id))
-        )
-        conn.execute("SAVEPOINT payout_learning_condition")
-        try:
-            for result in results:
-                new_id = append_observation(
-                    conn,
-                    condition_id=condition_id,
-                    outcome_index=result["outcome_index"],
-                    payout_numerator=result["payout_numerator"],
-                    payout_denominator=result["payout_denominator"],
-                    state=result["state"],
-                    block_number=result["block_number"],
-                    block_hash=result["block_hash"],
-                    observed_at=observed_at,
-                    refresh_block=refresh_block,
-                )
-                if new_id is None:
-                    unchanged += 1
-                else:
-                    appended += 1
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT payout_learning_condition")
+    if conn.in_transaction:
+        raise ValueError("learning chunk requires an idle connection")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for condition_id, results in rows:
+            incoming = [{**row, "source": FINALIZED_SOURCE} for row in results]
+            refresh_block = (
+                _coherent_finalized_pair(incoming)
+                and not _coherent_finalized_pair(_latest_pair(conn, condition_id))
+            )
+            conn.execute("SAVEPOINT payout_learning_condition")
+            try:
+                for result in results:
+                    new_id = append_observation(
+                        conn,
+                        condition_id=condition_id,
+                        outcome_index=result["outcome_index"],
+                        payout_numerator=result["payout_numerator"],
+                        payout_denominator=result["payout_denominator"],
+                        state=result["state"],
+                        block_number=result["block_number"],
+                        block_hash=result["block_hash"],
+                        observed_at=observed_at,
+                        refresh_block=refresh_block,
+                    )
+                    if new_id is None:
+                        unchanged += 1
+                    else:
+                        appended += 1
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT payout_learning_condition")
+                conn.execute("RELEASE SAVEPOINT payout_learning_condition")
+                raise
             conn.execute("RELEASE SAVEPOINT payout_learning_condition")
-            conn.rollback()
-            raise
-        conn.execute("RELEASE SAVEPOINT payout_learning_condition")
-        if any(result["state"] == STATE_UNKNOWN for result in results):
-            unknown += 1
-    conn.commit()
+            if any(result["state"] == STATE_UNKNOWN for result in results):
+                unknown += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return appended, unchanged, unknown
 
 
@@ -994,7 +998,7 @@ def sweep_and_record(
     appended = 0
     unchanged = 0
     if not conn.in_transaction:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
     for condition_id, results in observations:
         incoming = [{**row, "source": FINALIZED_SOURCE} for row in results]
         refresh_block = (

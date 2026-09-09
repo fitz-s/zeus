@@ -1376,3 +1376,84 @@ def test_bad_learning_condition_does_not_abort_other_conditions(conn, monkeypatc
     assert {row[1] for row in rows if row[0] == "invalid-condition"} == {STATE_UNKNOWN}
     assert {row[1] for row in rows if row[0] == _CONDITION_A} == {STATE_RESOLVED_ZERO, STATE_RESOLVED_NONZERO}
     forecast.close()
+
+
+@pytest.mark.parametrize("lane", ["learning", "primary"])
+def test_payout_append_reserves_wal_writer_before_latest_read(tmp_path, monkeypatch, lane):
+    path = tmp_path / "payout.db"
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    ensure_table(conn)
+    conn.commit()
+    competitor = sqlite3.connect(path, timeout=0)
+    original = payout_observer._latest_pair
+    blocked = []
+
+    def latest(c, condition):
+        result = original(c, condition)
+        # This point already holds a read snapshot. A deferred BEGIN allows
+        # the other commit, then fails its own INSERT with BUSY_SNAPSHOT.
+        try:
+            competitor.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
+            blocked.append(True)
+        else:
+            competitor.execute("UPDATE payout_observations SET superseded_by=NULL")
+            competitor.commit()
+            blocked.append(False)
+        return result
+
+    monkeypatch.setattr(payout_observer, "_latest_pair", latest)
+    rpc = _build_stub_rpc(denominator=1, numerators={0: 1, 1: 0})[0]
+    try:
+        if lane == "learning":
+            results = read_condition_payout(_CONDITION_A, rpc_url="stub", rpc_call=rpc)
+            payout_observer._append_learning_chunk(
+                conn, [(_CONDITION_A, results)], observed_at="2026-09-09T20:00:00Z"
+            )
+        else:
+            monkeypatch.setattr(payout_observer, "conditions_to_observe", lambda c: [_CONDITION_A])
+            sweep_and_record(conn, rpc_url="stub", rpc_call=rpc)
+            conn.commit()
+        assert blocked == [True]
+        assert not conn.in_transaction
+        assert competitor.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0] == 2
+    finally:
+        competitor.close()
+        conn.close()
+
+
+def test_learning_busy_begin_and_failed_latest_leave_no_transaction(tmp_path, monkeypatch):
+    path = tmp_path / "payout.db"
+    conn = sqlite3.connect(path, timeout=0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    ensure_table(conn)
+    conn.commit()
+    competitor = sqlite3.connect(path)
+    results = [{"outcome_index": i, "payout_numerator": int(i == 0),
+                "payout_denominator": 1, "state": STATE_RESOLVED_NONZERO if i == 0 else STATE_RESOLVED_ZERO,
+                "block_number": 100, "block_hash": _BLOCK_HASH} for i in (0, 1)]
+    try:
+        competitor.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            payout_observer._append_learning_chunk(conn, [(_CONDITION_A, results)], observed_at="now")
+        assert not conn.in_transaction
+        competitor.rollback()
+        monkeypatch.setattr(payout_observer, "_latest_pair", lambda *_: (_ for _ in ()).throw(RuntimeError("read failed")))
+        with pytest.raises(RuntimeError, match="read failed"):
+            payout_observer._append_learning_chunk(conn, [(_CONDITION_A, results)], observed_at="now")
+        assert not conn.in_transaction
+        competitor.execute("BEGIN IMMEDIATE")
+        competitor.rollback()
+    finally:
+        competitor.close()
+        conn.close()
+
+
+def test_learning_does_not_commit_or_rollback_caller_transaction(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ValueError, match="idle connection"):
+        payout_observer._append_learning_chunk(conn, [], observed_at="now")
+    assert conn.in_transaction
+    conn.rollback()
