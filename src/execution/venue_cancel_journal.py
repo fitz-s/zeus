@@ -41,6 +41,7 @@ SCREEN_CANCEL_OBLIGATION_KIND = "screen_redecision_cancel_v1"
 SCREEN_CANCEL_OBLIGATION_OWNER = "command_recovery"
 SCREEN_CANCEL_OBLIGATION_SCHEMA_VERSION = 1
 SCREEN_CANCEL_WITNESS_MAX_AGE_SECONDS = 2.0
+SCREEN_CANCEL_POST_SIDE_EFFECT_JOURNAL_RESERVE_SECONDS = 0.5
 _SCREEN_CANCEL_LIVE_STATUSES = frozenset({"LIVE", "OPEN", "RESTING"})
 _SCREEN_CANCEL_TERMINAL_STATUSES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FILLED"}
@@ -972,6 +973,13 @@ def dispatch_screen_redecision_cancel_obligations(
         if time.monotonic() >= deadline_monotonic:
             stats["deferred"] += 1
             continue
+        side_effect_deadline = (
+            deadline_monotonic
+            - SCREEN_CANCEL_POST_SIDE_EFFECT_JOURNAL_RESERVE_SECONDS
+        )
+        if time.monotonic() >= side_effect_deadline:
+            stats["deferred"] += 1
+            continue
         command_id = str(entry.get("command_id") or "")
         order_id = str(entry.get("venue_order_id") or "")
         if not command_id or not order_id:
@@ -986,7 +994,7 @@ def dispatch_screen_redecision_cancel_obligations(
         witness = _screen_cancel_point_witness(
             clob,
             order_id,
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=side_effect_deadline,
         )
         if witness is None:
             stats["deferred"] += 1
@@ -1038,7 +1046,7 @@ def dispatch_screen_redecision_cancel_obligations(
         try:
             raw = clob.cancel_order(
                 order_id,
-                deadline_monotonic=deadline_monotonic,
+                deadline_monotonic=side_effect_deadline,
             )
             from src.execution.exit_safety import parse_cancel_response
 
@@ -1094,7 +1102,11 @@ def dispatch_screen_redecision_cancel_obligations(
             stats_key = "deferred"
         # Reserve a short, bounded post-side-effect journal window. If this
         # write fails, STARTED/CANCEL_PENDING remains recovery-visible.
-        reserve_deadline = min(deadline_monotonic, time.monotonic() + 0.5)
+        reserve_deadline = min(
+            deadline_monotonic,
+            time.monotonic()
+            + SCREEN_CANCEL_POST_SIDE_EFFECT_JOURNAL_RESERVE_SECONDS,
+        )
         if time.monotonic() >= deadline_monotonic:
             stats["journal_failed"] += 1
             continue

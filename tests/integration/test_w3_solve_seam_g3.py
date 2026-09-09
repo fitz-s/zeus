@@ -28529,6 +28529,20 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         "current_venue_auction_identity",
         lambda *_, **__: "venue",
     )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
 
     def select(prepared_by_event, *, current_scope, **_kwargs):
         assert current_scope.family_keys == (family_b,)
@@ -28705,6 +28719,109 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
     }
 
 
+def test_global_batch_preserves_ineligible_family_receipt_when_peer_has_no_positive_trade(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_b = scope.family_keys[1]
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    prepared_b = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=family_b,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-b",
+        )
+    )
+    ineligible_reason = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:IDENTITY_MISMATCH"
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        )
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda prepared_by_event, **_: (
+            selected
+            if tuple(prepared_by_event) == (event_b.event_id,)
+            else pytest.fail("the ineligible family must be excluded from selection")
+        ),
+    )
+
+    provenance = object()
+
+    def prepare(event, _at):
+        if event.event_id == event_a.event_id:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                q_live=0.42,
+                family_id="Alpha|2026-07-10|high",
+                decision_proof_bundle=provenance,
+                reason=ineligible_reason,
+            )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared_b,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("no-positive peer must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.economic_cut_completed is False
+    assert result.receipts[event_a.event_id].reason == (
+        f"GLOBAL_FAMILY_INELIGIBLE:{ineligible_reason}"
+    )
+    assert result.receipts[event_a.event_id].q_live == 0.42
+    assert result.receipts[event_a.event_id].family_id == (
+        "Alpha|2026-07-10|high"
+    )
+    assert result.receipts[event_a.event_id].decision_proof_bundle is provenance
+    assert result.receipts[event_b.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    )
+
+
 def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -28762,8 +28879,10 @@ def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
 
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
-    assert {receipt.reason for receipt in result.receipts.values()} == {
-        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
+    assert {
+        receipt.reason for receipt in result.receipts.values()
+    } == {
+        f"GLOBAL_FAMILY_INELIGIBLE:{reason}"
     }
 
 
@@ -30406,6 +30525,13 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+            "token_id=token-a:required_shares=34.4:precliff_bid_shares=0",
+            "BUY",
+            "SELL",
+        ),
+        (
             "risk_allocator_pre_submit_blocked: unknown_side_effect_same_market",
             "BUY",
             "SELL",
@@ -30590,6 +30716,25 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         candidate = actuation.decision.candidate
         calls["preflight"].append(candidate.candidate_id)
         if candidate is candidate_a:
+            if reason.startswith(
+                "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            ):
+                receipt = EventSubmissionReceipt(
+                    False,
+                    _event.event_id,
+                    _event.causal_snapshot_id,
+                    reason=reason,
+                    proof_accepted=False,
+                )
+                supersession = era._global_curve_supersession_from_receipt(receipt)
+                assert supersession is not None
+                status, replacement_candidate, preflight_reason = supersession
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status=status,
+                    replacement_candidate=replacement_candidate,
+                    reason=preflight_reason,
+                    rejection_receipt=receipt,
+                )
             if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"):
                 proof_failure = reason.partition(":")[2]
 
@@ -36140,592 +36285,19 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
     )
 
 
-def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
-    from src.events.day0_authority import bind_day0_probability_semantics
-    from src.state.schema.no_trade_regret_events_schema import ensure_table
 
-    at = _dt.datetime(2026, 8, 11, 16, 0, tzinfo=_dt.timezone.utc)
 
-    def curve(token_id: str, price: str) -> ExecutableCostCurve:
-        return ExecutableCostCurve(
-            token_id=token_id,
-            side="YES",
-            snapshot_id=f"snapshot-{token_id}",
-            book_hash=f"book-{token_id}",
-            levels=(BookLevel(price=Decimal(price), size=Decimal("10")),),
-            fee_model=FeeModel(fee_rate=Decimal("0.02")),
-            min_tick=Decimal("0.01"),
-            min_order_size=Decimal("5"),
-            quote_ttl=_dt.timedelta(seconds=30),
-        )
+def test_global_capital_receipt_is_the_only_non_actuating_alpha_path():
+    """The live batch keeps the canonical receipt proof, not a second lane."""
 
-    def witness(family_key: str, q: float) -> SimpleNamespace:
-        return SimpleNamespace(
-            family_key=family_key,
-            bin_ids=("20C", "21C"),
-            bindings=(
-                SimpleNamespace(
-                    bin_id="20C",
-                    condition_id=f"condition-{family_key}",
-                    yes_token_id=f"token-{family_key}",
-                    no_token_id=f"no-token-{family_key}",
-                ),
-                SimpleNamespace(
-                    bin_id="21C",
-                    condition_id=f"condition-21-{family_key}",
-                    yes_token_id=f"token-21-{family_key}",
-                    no_token_id=f"no-token-21-{family_key}",
-                ),
-            ),
-            yes_point_q=np.array([q, 1.0 - q]),
-            yes_q_samples=np.tile(np.array([q, 1.0 - q]), (100, 1)),
-            q_version=bind_day0_probability_semantics(f"q-{family_key}"),
-            witness_identity=f"witness-{family_key}",
-            probability_content_identity=f"content-{family_key}",
-            posterior_identity_hash=f"posterior-{family_key}",
-            source_truth_identity=f"source-{family_key}",
-            resolution_identity=f"resolution-{family_key}",
-            topology_identity=f"topology-{family_key}",
-            band_alpha=0.05,
-            band_basis="current-day0",
-            captured_at_utc=at,
-        )
-
-    family_a = "family-a"
-    family_b = "family-b"
-    evaluations = tuple(
-        SimpleNamespace(
-            candidate_id=f"candidate-{family_key}",
-            family_key=family_key,
-            bin_id="20C",
-            condition_id=f"condition-{family_key}",
-            side="YES",
-            token_id=f"token-{family_key}",
-            action="BUY",
-            status="REJECTED",
-            rejection_reason=(
-                "STRATEGY_POLICY_GATED:day0_nowcast_entry:"
-                "sources=risk_action:gate"
-            ),
-        )
-        for family_key in (family_a, family_b)
+    assert hasattr(
+        global_batch_runtime,
+        "_capital_proof_counterfactual_receipt",
     )
-
-    def proof_for(evaluation: SimpleNamespace) -> SimpleNamespace:
-        # Live BUY candidates predate the explicit action field and rely on the
-        # solver's canonical BUY default. The shadow writer must preserve that
-        # runtime shape while matching the candidate id back to the gated row.
-        proof_candidate_fields = dict(vars(evaluation))
-        proof_candidate_fields.pop("action", None)
-        return SimpleNamespace(
-            decision=SimpleNamespace(
-                candidate=SimpleNamespace(**proof_candidate_fields),
-                shares=Decimal("5"),
-                cost_usd=Decimal("1.01"),
-                expected_growth=SimpleNamespace(
-                    expected_delta_log_wealth=0.01,
-                    expected_ev_usd=1.0,
-                ),
-            )
-        )
-
-    assets = tuple(
-        SimpleNamespace(
-            family_key=family_key,
-            bin_id="20C",
-            condition_id=f"condition-{family_key}",
-            side="YES",
-            token_id=f"token-{family_key}",
-            curve=curve(
-                f"token-{family_key}",
-                "0.20" if family_key == family_a else "0.30",
-            ),
-            captured_at_utc=at,
-        )
-        for family_key in (family_a, family_b)
+    assert not any(
+        "shadow" in name.lower()
+        for name in vars(global_batch_runtime)
     )
-    events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[0]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.90),
-            family_b: witness(family_b, 0.80),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-    )
-
-    assert len(events) == 1
-    assert events[0].city == "Alpha"
-    assert events[0].q_live == pytest.approx(0.90)
-    assert events[0].hypothetical_fill_price == pytest.approx(0.20)
-    envelope = json.loads(events[0].envelope_json)
-    assert envelope["schema_version"] == 3
-    assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
-    assert envelope["global_selection_revision"] == (
-        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    )
-    assert envelope["selection_rule"].endswith(
-        "posterior_mean_expected_growth_winner_v3"
-    )
-    assert envelope["global_proof_winner"] is True
-    assert envelope["global_proof_candidate_id"] == "candidate-family-a"
-    assert envelope["q"] == pytest.approx(0.90)
-    assert envelope["expected_net_edge_per_share"] > 0.0
-
-    no_capital_edge = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[0]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.10),
-            family_b: witness(family_b, 0.20),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-    )
-    assert no_capital_edge == ()
-
-    qkernel_evaluations = tuple(
-        SimpleNamespace(
-            **{
-                **vars(evaluation),
-                "rejection_reason": (
-                    "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
-                    "sources=risk_action:gate"
-                ),
-            }
-        )
-        for evaluation in evaluations
-    )
-    qkernel_witnesses = {
-        family_key: SimpleNamespace(
-            **{
-                **vars(witness(family_key, q)),
-                "q_version": f"qkernel-current-{family_key}",
-            }
-        )
-        for family_key, q in ((family_a, 0.90), (family_b, 0.80))
-    }
-    semantics_conn = sqlite3.connect(":memory:")
-    semantics_conn.execute(
-        "CREATE TABLE forecast_posteriors ("
-        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT)"
-    )
-    for family_key, revision, lag, reused in (
-        (
-            family_a,
-            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            0.0,
-            False,
-        ),
-        (
-            family_b,
-            "stale_ensemble_absolute_disagreement_v2",
-            6.0,
-            True,
-        ),
-    ):
-        semantics_conn.execute(
-            "INSERT INTO forecast_posteriors VALUES (?,?)",
-            (
-                f"posterior-{family_key}",
-                json.dumps(
-                    {
-                        "bayes_precision_fusion": {
-                            "current_evidence_shape": {
-                                "semantics_revision": revision,
-                                "translation_applied": False,
-                                "shape_lag_hours": lag,
-                                "stale_shape_reused": reused,
-                                "source_cycle_time": (
-                                    "2026-08-11T00:00:00+00:00"
-                                ),
-                                "between_cohort_status": (
-                                    "SIMULTANEOUS_PROVEN"
-                                ),
-                            }
-                        }
-                    }
-                ),
-            ),
-        )
-    semantics_by_posterior = (
-        global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-            semantics_conn,
-            qkernel_witnesses,
-        )
-    )
-    semantics_conn.close()
-    assert semantics_by_posterior == {
-        f"posterior-{family_a}": (
-            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
-        ),
-    }
-    qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
-        ),
-        proof_selected=proof_for(qkernel_evaluations[0]),
-        probability_witnesses=qkernel_witnesses,
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-        qkernel_semantics_by_posterior=semantics_by_posterior,
-        strategy_keys=("forecast_qkernel_entry",),
-    )
-    assert len(qkernel_events) == 1
-    qkernel_envelopes = [
-        json.loads(event.envelope_json) for event in qkernel_events
-    ]
-    assert {
-        envelope["probability_semantics_revision"]
-        for envelope in qkernel_envelopes
-    } == {
-        global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-    }
-    assert all(
-        envelope["strategy_key"] == "forecast_qkernel_entry"
-        for envelope in qkernel_envelopes
-    )
-    assert all(
-        event.rejection_reason
-        == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
-        and event.event_id.startswith(
-            "market-relative-alpha-shadow-v6-city-date-cluster:"
-        )
-        and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-        in event.event_id
-        for event in qkernel_events
-    )
-    stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(
-                candidate_evaluations=qkernel_evaluations
-            )
-        ),
-        proof_selected=proof_for(qkernel_evaluations[0]),
-        probability_witnesses=qkernel_witnesses,
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch",
-        selection_cut_at_utc=at,
-        decision_at_utc=at,
-        qkernel_semantics_by_posterior={
-            f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
-            for family_key in (family_a, family_b)
-        },
-        strategy_keys=("forecast_qkernel_entry",),
-    )
-    assert stale_events == ()
-    missing_posterior_witnesses = {
-        family_key: SimpleNamespace(
-            **{
-                **vars(qkernel_witness),
-                "posterior_identity_hash": "",
-            }
-        )
-        for family_key, qkernel_witness in qkernel_witnesses.items()
-    }
-    assert (
-        global_batch_runtime._market_relative_alpha_shadow_events(
-            selected=SimpleNamespace(
-                decision=SimpleNamespace(
-                    candidate_evaluations=qkernel_evaluations
-                )
-            ),
-            proof_selected=proof_for(qkernel_evaluations[0]),
-            probability_witnesses=missing_posterior_witnesses,
-            book_epoch=SimpleNamespace(
-                assets=assets,
-                witness_identity="book-epoch",
-            ),
-            family_context_by_key={
-                family_a: {
-                    "city": "Alpha",
-                    "target_date": "2026-08-11",
-                    "metric": "high",
-                },
-                family_b: {
-                    "city": "Beta",
-                    "target_date": "2026-08-11",
-                    "metric": "low",
-                },
-            },
-            selection_epoch_identity="selection-epoch",
-            selection_cut_at_utc=at,
-            decision_at_utc=at,
-            strategy_keys=("forecast_qkernel_entry",),
-        )
-        == ()
-    )
-
-    conn = sqlite3.connect(":memory:")
-    ensure_table(conn)
-    beta_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
-        selected=SimpleNamespace(
-            decision=SimpleNamespace(candidate_evaluations=evaluations)
-        ),
-        proof_selected=proof_for(evaluations[1]),
-        probability_witnesses={
-            family_a: witness(family_a, 0.90),
-            family_b: witness(family_b, 0.80),
-        },
-        book_epoch=SimpleNamespace(
-            assets=assets,
-            witness_identity="book-epoch-beta",
-        ),
-        family_context_by_key={
-            family_a: {
-                "city": "Alpha",
-                "target_date": "2026-08-11",
-                "metric": "high",
-            },
-            family_b: {
-                "city": "Beta",
-                "target_date": "2026-08-11",
-                "metric": "low",
-            },
-        },
-        selection_epoch_identity="selection-epoch-beta",
-        selection_cut_at_utc=at + _dt.timedelta(seconds=1),
-        decision_at_utc=at + _dt.timedelta(seconds=1),
-    )
-    assert len(beta_events) == 1
-    assert beta_events[0].city == "Beta"
-    assert beta_events[0].target_date == events[0].target_date
-    assert beta_events[0].event_id != events[0].event_id
-    first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, events
-    )
-    second = global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, events
-    )
-    assert first == second
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 1
-    global_batch_runtime._record_day0_market_relative_alpha_shadows(
-        conn, beta_events
-    )
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 2
-    global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, qkernel_events
-    )
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 3
-
-    exit_at = at + _dt.timedelta(hours=1)
-    wealth = SimpleNamespace(
-        ledger_snapshot_id="ledger",
-        witness_identity="wealth-witness",
-        economic_identity="wealth-economics",
-        strategy_capital_allocation=SimpleNamespace(
-            utility_liquid_cash_usd=Decimal("100")
-        ),
-    )
-    holdings = SimpleNamespace(
-        family_key=family_a,
-        ledger_snapshot_id="ledger",
-        endowment_claims=(),
-    )
-
-    def exit_epoch(*, price: str, size: str = "5") -> SimpleNamespace:
-        return SimpleNamespace(
-            witness_identity=f"exit-book-{price}-{size}",
-            max_age=_dt.timedelta(seconds=30),
-            sell_assets=(
-                SimpleNamespace(
-                    family_key=family_a,
-                    bin_id="20C",
-                    condition_id=f"condition-{family_a}",
-                    side="YES",
-                    token_id=f"token-{family_a}",
-                    captured_at_utc=exit_at,
-                    neg_risk=False,
-                    curve=ExecutableSellCurve(
-                        token_id=f"token-{family_a}",
-                        side="YES",
-                        snapshot_id=f"exit-snapshot-{price}-{size}",
-                        book_hash=f"exit-book-hash-{price}-{size}",
-                        levels=(
-                            BidBookLevel(
-                                price=Decimal(price),
-                                size=Decimal(size),
-                            ),
-                        ),
-                        fee_model=FeeModel(fee_rate=Decimal("0.02")),
-                        min_tick=Decimal("0.01"),
-                        min_order_size=Decimal("5"),
-                        quote_ttl=_dt.timedelta(seconds=30),
-                    ),
-                ),
-            ),
-        )
-
-    exits = global_batch_runtime._market_relative_alpha_shadow_exit_events(
-        conn,
-        probability_witnesses={family_a: witness(family_a, 0.10)},
-        holdings_by_family={family_a: holdings},
-        wealth_witness=wealth,
-        book_epoch=exit_epoch(price="0.30"),
-        decision_at_utc=exit_at,
-    )
-    assert len(exits) == 1
-    assert exits[0].direction == "sell_yes"
-    assert exits[0].regret_bucket == "EXECUTABLE_GAIN_LOCKED"
-    exit_envelope = json.loads(exits[0].envelope_json)
-    assert exit_envelope["decision_law_id"].endswith("sell-over-hold-v1")
-    assert exit_envelope["global_selection_revision"] == (
-        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    )
-    assert Decimal(exit_envelope["locked_gain_usd"]) >= Decimal("0.05")
-    assert Decimal(exit_envelope["sell_over_hold_usd"]) >= Decimal("0.05")
-    assert exit_envelope["full_depth_executable"] is True
-    assert exit_envelope["venue_submit_count"] == 0
-
-    qkernel_exit_witness = SimpleNamespace(
-        **{
-            **vars(qkernel_witnesses[family_a]),
-            "yes_point_q": np.array([0.10, 0.90]),
-            "yes_q_samples": np.tile(np.array([0.10, 0.90]), (100, 1)),
-        }
-    )
-    qkernel_exits = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: qkernel_exit_witness},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30"),
-            decision_at_utc=exit_at,
-            qkernel_semantics_by_posterior={
-                f"posterior-{family_a}": (
-                    global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
-                )
-            },
-        )
-    )
-    assert len(qkernel_exits) == 1
-    assert json.loads(qkernel_exits[0].envelope_json)["strategy_key"] == (
-        "forecast_qkernel_entry"
-    )
-
-    hold_dominates = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.30)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert hold_dominates == ()
-    sub_tick_gain = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.10)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.21"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert sub_tick_gain == ()
-    no_full_depth = (
-        global_batch_runtime._market_relative_alpha_shadow_exit_events(
-            conn,
-            probability_witnesses={family_a: witness(family_a, 0.10)},
-            holdings_by_family={family_a: holdings},
-            wealth_witness=wealth,
-            book_epoch=exit_epoch(price="0.30", size="4"),
-            decision_at_utc=exit_at,
-        )
-    )
-    assert no_full_depth == ()
-
-    first_exit = global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, exits
-    )
-    second_exit = global_batch_runtime._record_market_relative_alpha_shadows(
-        conn, exits
-    )
-    assert first_exit == second_exit
-    assert conn.execute(
-        "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 4
-    conn.close()
 
 
 def test_global_auction_trade_receipt_yields_to_registered_monitor(

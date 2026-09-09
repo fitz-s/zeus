@@ -83,6 +83,7 @@ from src.venue.response_contracts import (
 )
 
 _SCREEN_CANCEL_DISPATCH_BOOT_ID = f"{uuid.uuid4()}:{os.getpid()}"
+_SCREEN_CANCEL_OPERATION_BUDGET_SECONDS = 8.0
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
@@ -4306,6 +4307,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                pc.shares AS projected_shares,
                pc.cost_basis_usd AS projected_cost_basis_usd,
                pc.order_id AS projected_order_id,
+               pc.fill_authority AS projected_fill_authority,
                env.condition_id AS env_condition_id,
                env.yes_token_id AS env_yes_token_id,
                env.no_token_id AS env_no_token_id,
@@ -4374,6 +4376,17 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     )
                 ) <= 0.000001
                 AND NOT (
+                    COALESCE(pc.fill_authority, '') IN ('', 'none')
+                    AND COALESCE(flow.exit_filled_size, 0) <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.shares, 0) - entry_fill.filled_size
+                    ) <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.cost_basis_usd, 0)
+                        - (entry_fill.filled_size * entry_fill.fill_price)
+                    ) <= 0.000001
+                )
+                AND NOT (
                     COALESCE(flow.exit_filled_size, 0) <= 0.000001
                     AND EXISTS (
                         SELECT 1
@@ -4407,6 +4420,40 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND ABS(CAST(COALESCE(pc.shares, '0') AS REAL)) <= 0.000000001
                     AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)) <= 0.000000001
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                )
+                OR (
+                    -- A prior projection atom may carry exact authenticated
+                    -- fill economics but lack the authority field required by
+                    -- the runtime exposure contract.  Re-run the same
+                    -- command-bound fold without changing quantity or cost.
+                    (
+                        cmd.state IN ('FILLED', 'PARTIAL', 'CANCELLED')
+                        OR (
+                            cmd.state = 'REVIEW_REQUIRED'
+                            AND entry_fill.has_confirmed_fill = 1
+                        )
+                    )
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                    AND lower(COALESCE(pc.order_id, '')) =
+                        lower(cmd.venue_order_id)
+                    AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                    AND ABS(COALESCE(pc.shares, 0) - entry_fill.filled_size)
+                        <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.cost_basis_usd, 0)
+                        - (entry_fill.filled_size * entry_fill.fill_price)
+                    ) <= 0.000001
+                    AND EXISTS (
+                        SELECT 1
+                          FROM position_events pe
+                         WHERE pe.position_id = cmd.position_id
+                           AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                           AND (
+                                pe.command_id = cmd.command_id
+                                OR lower(COALESCE(pe.order_id, '')) =
+                                   lower(cmd.venue_order_id)
+                           )
+                    )
                 )
                 OR (
                     -- Command control state cannot veto authenticated fill
@@ -4522,30 +4569,33 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                       )
                   )
            )
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM venue_command_events absorbed_event
-                WHERE absorbed_event.command_id = cmd.command_id
-                  AND absorbed_event.event_type = 'FILL_CONFIRMED'
-                  AND json_extract(absorbed_event.payload_json, '$.recovered_from') =
-                      'edli_confirmed_fill_already_absorbed'
-                  AND json_type(absorbed_event.payload_json, '$.proof_hash') = 'text'
-                  AND NULLIF(TRIM(CAST(json_extract(
-                      absorbed_event.payload_json, '$.proof_hash'
-                  ) AS TEXT)), '') IS NOT NULL
-                  AND json_type(absorbed_event.payload_json, '$.absorbed_position_id') =
-                      'text'
-                  AND json_extract(absorbed_event.payload_json, '$.absorbed_position_id') =
-                      cmd.position_id
-                  AND json_type(absorbed_event.payload_json, '$.filled_size') IN (
-                      'integer', 'real', 'text'
-                  )
-                  AND CAST(COALESCE(json_extract(
-                      absorbed_event.payload_json, '$.filled_size'
-                  ), '0') AS REAL) > 0
-                  AND CAST(json_extract(
-                      absorbed_event.payload_json, '$.filled_size'
-                  ) AS REAL) = CAST(entry_fill.filled_size AS REAL)
+           AND (
+               COALESCE(pc.fill_authority, '') IN ('', 'none')
+               OR NOT EXISTS (
+                   SELECT 1
+                     FROM venue_command_events absorbed_event
+                    WHERE absorbed_event.command_id = cmd.command_id
+                      AND absorbed_event.event_type = 'FILL_CONFIRMED'
+                      AND json_extract(absorbed_event.payload_json, '$.recovered_from') =
+                          'edli_confirmed_fill_already_absorbed'
+                      AND json_type(absorbed_event.payload_json, '$.proof_hash') = 'text'
+                      AND NULLIF(TRIM(CAST(json_extract(
+                          absorbed_event.payload_json, '$.proof_hash'
+                      ) AS TEXT)), '') IS NOT NULL
+                      AND json_type(absorbed_event.payload_json, '$.absorbed_position_id') =
+                          'text'
+                      AND json_extract(absorbed_event.payload_json, '$.absorbed_position_id') =
+                          cmd.position_id
+                      AND json_type(absorbed_event.payload_json, '$.filled_size') IN (
+                          'integer', 'real', 'text'
+                      )
+                      AND CAST(COALESCE(json_extract(
+                          absorbed_event.payload_json, '$.filled_size'
+                      ), '0') AS REAL) > 0
+                      AND CAST(json_extract(
+                          absorbed_event.payload_json, '$.filled_size'
+                      ) AS REAL) = CAST(entry_fill.filled_size AS REAL)
+               )
            )
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
@@ -6244,6 +6294,9 @@ def _append_filled_entry_projection_repair(
                 return False
         before_shares = _float_or_none(candidate.get("projected_shares"))
         before_cost = _float_or_none(candidate.get("projected_cost_basis_usd"))
+        before_fill_authority = str(
+            candidate.get("projected_fill_authority") or ""
+        ).strip()
         expected_shares = _float_or_none(candidate.get("fill_filled_size"))
         expected_price = _float_or_none(candidate.get("fill_price"))
         same_order_reobservation = (
@@ -6401,6 +6454,7 @@ def _append_filled_entry_projection_repair(
                 )
         return bool(
             existing_fill is None
+            or before_fill_authority in {"", "none"}
             or (
                 same_order_reobservation
                 and expected_position_shares is not None
@@ -24954,6 +25008,7 @@ def _confirmed_entry_trade_fact_summary(
         + """
         SELECT fact.trade_fact_id,
                fact.trade_id,
+               fact.state,
                fact.filled_size,
                fact.fill_price,
                fact.raw_payload_json,
@@ -24983,6 +25038,7 @@ def _confirmed_entry_trade_fact_summary(
     sources: set[str] = set()
     trade_ids: list[str] = []
     fact_ids: list[int] = []
+    states: list[str] = []
     from src.execution.exchange_reconcile import (
         _json_mapping,
         _taker_buy_trade_economics,
@@ -25018,6 +25074,7 @@ def _confirmed_entry_trade_fact_summary(
         cost += exact_cost
         trade_ids.append(trade_id)
         fact_ids.append(int(fact["trade_fact_id"]))
+        states.append(str(fact.get("state") or "").upper())
         sources.add(str(fact.get("source") or "").upper())
         source_at = str(
             fact.get("venue_timestamp") or fact.get("observed_at") or ""
@@ -25032,6 +25089,7 @@ def _confirmed_entry_trade_fact_summary(
         "source": "REST" if "REST" in sources else "WS_USER",
         "trade_ids": trade_ids,
         "trade_fact_ids": fact_ids,
+        "states": states,
     }
 
 
@@ -25225,13 +25283,17 @@ def _reconcile_authenticated_entry_trade_fact(
     order_type = order_type.removesuffix("_LIMIT")
     filled_notional = filled * fill_price
     submitted_notional = requested * submitted_price
-    price_improved_fak_overfill = bool(
+    all_trade_facts_confirmed = bool(
+        facts["count"]
+        and all(state == "CONFIRMED" for state in facts.get("states", ()))
+    )
+    price_improved_taker_overfill = bool(
         share_overfill
         and str(command.get("side") or "").upper() == "BUY"
-        and order_type == "FAK"
+        and order_type in {"FAK", "FOK"}
         and filled_notional <= submitted_notional
     )
-    if share_overfill and not price_improved_fak_overfill:
+    if share_overfill and not price_improved_taker_overfill:
         raise ValueError(
             "authenticated entry fill exceeds submitted share/capital bound"
         )
@@ -25306,8 +25368,8 @@ def _reconcile_authenticated_entry_trade_fact(
         "filled_notional": _decimal_text(filled_notional),
         "submitted_notional": _decimal_text(submitted_notional),
         "fill_bound_semantics": (
-            "PRICE_IMPROVED_FAK_NOTIONAL_BOUNDED"
-            if price_improved_fak_overfill
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+            if price_improved_taker_overfill
             else "SHARE_AND_NOTIONAL_BOUNDED"
         ),
         "remaining_size": _decimal_text(remaining),
@@ -25316,10 +25378,11 @@ def _reconcile_authenticated_entry_trade_fact(
             "command_state_accepts_fill": True,
             "entry_buy_identity": True,
             "bound_venue_order_id_matches_trade": True,
-            "authenticated_confirmed_trade_facts": True,
+            "authenticated_trade_facts": True,
+            "authenticated_confirmed_trade_facts": all_trade_facts_confirmed,
             "fill_price_respects_submitted_limit": True,
             "cumulative_fill_within_submitted_capital_bound": True,
-            "price_improved_fak_share_overfill": price_improved_fak_overfill,
+            "price_improved_taker_share_overfill": price_improved_taker_overfill,
         },
         "source_proof": {
             "source_function": (
@@ -25386,10 +25449,20 @@ def _reconcile_authenticated_entry_trade_fact(
             )
         fill_event_payload = payload
         if cancel_pending or terminal_fill_review:
+            terminal_proof_class = (
+                "authenticated_trade_fact_full_fill"
+                if all_trade_facts_confirmed
+                else "authenticated_trade_fact_terminal_fill"
+            )
+            terminal_auth_predicate = (
+                "authenticated_confirmed_trade_facts"
+                if all_trade_facts_confirmed
+                else "authenticated_trade_facts"
+            )
             fill_event_payload = {
                 **payload,
                 "reason": "review_cleared_confirmed_fill",
-                "proof_class": "authenticated_trade_fact_full_fill",
+                "proof_class": terminal_proof_class,
                 "trade_id": str(facts["trade_ids"][-1]),
                 "cleared_at": observed_at,
                 "required_predicates": {
@@ -25398,6 +25471,7 @@ def _reconcile_authenticated_entry_trade_fact(
                     "latest_event_is_review_boundary": True,
                     "trade_facts_cover_command_or_leave_only_dust": True,
                     "source_fill_time_valid": True,
+                    terminal_auth_predicate: True,
                 },
             }
         if not already_filled and not partial_control_fold_complete:
@@ -26787,7 +26861,10 @@ def drain_screen_redecision_cancel_obligations(
     if not entries:
         return summary
     summary["scanned"] = len(entries)
-    obligation_deadline = min(time.monotonic() + 2.0, deadline_monotonic)
+    obligation_deadline = min(
+        time.monotonic() + _SCREEN_CANCEL_OPERATION_BUDGET_SECONDS,
+        deadline_monotonic,
+    )
 
     class _DeadlineClient:
         def __init__(self, wrapped):
@@ -29206,16 +29283,42 @@ def _reconcile_passes_short_conn(
             obligation_conn_factory = _capital_apply_conn_factory(
                 obligation_deadline,
             )
-            preexisting_obligation_result = _run_capital_pass(
+
+            def _materialize_and_release_terminal_entry_obligations(conn):
+                """Materialize terminal entry facts and release capital atomically."""
+
+                no_fill = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+                partial = reconcile_cancel_ack_terminal_partial_facts(conn)
+                obligations = reconcile_terminal_entry_exposure_obligations(conn)
+                return {
+                    "no_fill": no_fill,
+                    "partial": partial,
+                    "obligations": obligations,
+                }
+
+            terminal_obligation_bundle = _run_capital_pass(
                 "terminal_entry_exposure_obligations_fast",
                 lambda: run_db_only_pass(
-                    reconcile_terminal_entry_exposure_obligations,
+                    _materialize_and_release_terminal_entry_obligations,
                     conn_factory=obligation_conn_factory,
                     label="recovery.terminal_entry_exposure_obligations_fast",
                 ),
                 deadline_monotonic=obligation_deadline,
             )
-            if preexisting_obligation_result is not None:
+            if terminal_obligation_bundle is not None:
+                _accumulate(
+                    summary,
+                    "cancel_ack_terminal_no_fill_facts_fast",
+                    terminal_obligation_bundle["no_fill"],
+                )
+                _accumulate(
+                    summary,
+                    "cancel_ack_terminal_partial_facts_fast",
+                    terminal_obligation_bundle["partial"],
+                )
+                preexisting_obligation_result = terminal_obligation_bundle[
+                    "obligations"
+                ]
                 _accumulate(
                     summary,
                     "terminal_entry_exposure_obligations_fast",
