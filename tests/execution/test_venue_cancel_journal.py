@@ -908,7 +908,7 @@ def test_screen_witness_age_and_incompatible_client_are_fail_closed():
     conn.close()
 
 
-def test_screen_post_deadline_cancel_keeps_started_debt():
+def test_screen_deadline_shorter_than_journal_reserve_never_starts_side_effect():
     import time
 
     conn = _db()
@@ -934,13 +934,104 @@ def test_screen_post_deadline_cancel_keeps_started_debt():
         owner="boot-a:11",
         close_connections=False,
     )
-    assert stats["journal_failed"] == 1
+    assert stats["deferred"] == 1
+    assert stats["journal_failed"] == 0
     row = conn.execute(
         "SELECT state, event_type FROM venue_commands JOIN venue_command_events "
         "ON venue_commands.last_event_id = venue_command_events.event_id WHERE venue_commands.command_id='late-1'"
     ).fetchone()
-    assert tuple(row) == ("CANCEL_PENDING", "CANCEL_DISPATCH_STARTED")
+    assert tuple(row) == ("CANCEL_PENDING", "CANCEL_REQUESTED")
     conn.close()
+
+
+def test_screen_cancel_timeout_reserves_post_side_effect_journal():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="timed-1", venue_order_id="order-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("timed-1", "order-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+
+    class DeadlineCancel(_PointOrderClob):
+        def cancel_order(self, order_id: str, *, deadline_monotonic=None):
+            assert deadline_monotonic is not None
+            time.sleep(max(0.0, deadline_monotonic - time.monotonic()) + 0.01)
+            raise TimeoutError("deadline")
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        DeadlineCancel(matched_size="0"),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 0.8,
+        owner="boot-a:11",
+        close_connections=False,
+    )
+
+    assert stats["deferred"] == 1
+    assert stats["journal_failed"] == 0
+    row = conn.execute(
+        "SELECT state, event_type FROM venue_commands JOIN venue_command_events "
+        "ON venue_commands.last_event_id = venue_command_events.event_id "
+        "WHERE venue_commands.command_id='timed-1'"
+    ).fetchone()
+    assert tuple(row) == ("REVIEW_REQUIRED", "CANCEL_REPLACE_BLOCKED")
+    conn.close()
+
+
+def test_recovery_screen_cancel_gets_a_complete_network_and_journal_budget(
+    monkeypatch,
+):
+    import time
+
+    import src.execution.command_recovery as recovery
+    import src.execution.venue_cancel_journal as journal
+    import src.state.db as state_db
+
+    class ReadConn:
+        def execute(self, *_args):
+            return self
+
+        def set_progress_handler(self, *_args):
+            return None
+
+        def close(self):
+            return None
+
+    captured = {}
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda *, deadline_monotonic: ReadConn(),
+    )
+    monkeypatch.setattr(
+        journal,
+        "find_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: [
+            {"command_id": "budget-1", "venue_order_id": "order-1"}
+        ],
+    )
+
+    def dispatch(_entries, _client, **kwargs):
+        captured["seconds"] = kwargs["deadline_monotonic"] - time.monotonic()
+        return {"cancelled": 0, "deferred": 1, "errors": 0, "journal_failed": 0}
+
+    monkeypatch.setattr(
+        journal,
+        "dispatch_screen_redecision_cancel_obligations",
+        dispatch,
+    )
+
+    summary = recovery.drain_screen_redecision_cancel_obligations(
+        object(),
+        deadline_monotonic=time.monotonic() + 20.0,
+    )
+
+    assert captured["seconds"] >= 7.5
+    assert summary == {"scanned": 1, "cancelled": 0, "deferred": 1, "errors": 0}
 
 
 def test_screen_cancel_without_deadline_contract_never_falls_back_to_http():
@@ -1363,6 +1454,7 @@ class TestPersistedRestCancel:
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema
         from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+        from src.state.snapshot_repo import init_snapshot_schema
         from src.state.schema.entry_exposure_obligations_schema import (
             ensure_table as ensure_entry_exposure_obligations_table,
         )
@@ -1377,6 +1469,7 @@ class TestPersistedRestCancel:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_collateral_schema(conn)
+        init_snapshot_schema(conn)
         ensure_entry_exposure_obligations_table(conn)
         _insert(conn, size=13.45, price=0.68)
         _advance_to_acked(conn, venue_order_id="ord-live")

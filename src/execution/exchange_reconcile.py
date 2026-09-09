@@ -69,7 +69,11 @@ from src.state.fill_dedup import (
     canonical_trade_fact_cte as _canonical_trade_fact_cte,
     economic_trade_fact_cte as _economic_trade_fact_cte,
 )
-from src.state.portfolio import INACTIVE_RUNTIME_STATES
+from src.state.portfolio import (
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    INACTIVE_RUNTIME_STATES,
+)
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 from src.venue.response_contracts import VenueOrderNotFound
 
@@ -6161,6 +6165,12 @@ def _ensure_entry_fill_position_event(
             "order_id": projection_order_id,
             "entry_order_id": venue_order_id,
             "order_status": projection_order_status,
+            "fill_authority": (
+                FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+                if projection_order_status == "filled"
+                else FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+            ),
+            "recovery_authority": current.get("recovery_authority"),
             "entered_at": current.get("entered_at") or occurred_at,
             "order_posted_at": current.get("order_posted_at") or occurred_at,
             "increment_filled_at": occurred_at if incremental_fill else "",

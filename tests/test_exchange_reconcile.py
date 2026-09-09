@@ -3377,7 +3377,8 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(
         """
         SELECT phase, city, target_date, temperature_metric, direction,
                shares, entry_price, cost_basis_usd, order_status,
-               token_id, no_token_id, condition_id, entry_method
+               token_id, no_token_id, condition_id, entry_method,
+               fill_authority
           FROM position_current
          WHERE position_id = 'pos-missing-projection'
         """
@@ -3396,6 +3397,7 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(
     assert projection["no_token_id"] == no_token
     assert projection["condition_id"] == "condition-m5"
     assert projection["entry_method"] == "qkernel_spine"
+    assert projection["fill_authority"] == "venue_confirmed_partial"
     assert [
         row["event_type"]
         for row in conn.execute(

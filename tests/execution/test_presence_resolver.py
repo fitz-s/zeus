@@ -245,10 +245,13 @@ def test_build_presence_proof_cross_order_guard_refuses(monkeypatch):
         pr.build_presence_proof(None, "agg", trades=[t], funder_address=FUNDER)
 
 
-def test_build_presence_proof_accepts_price_improved_fak_share_overfill(monkeypatch):
+@pytest.mark.parametrize("order_type", ["FAK_LIMIT", "FOK"])
+def test_build_presence_proof_accepts_price_improved_taker_share_overfill(
+    monkeypatch, order_type
+):
     """Real live shape: better BUY price yields more shares but spends less
     than the submitted size*limit capital bound."""
-    _patch_plan(monkeypatch, size=173.0, limit_price=0.09, order_type="FAK_LIMIT")
+    _patch_plan(monkeypatch, size=173.0, limit_price=0.09, order_type=order_type)
     t = {
         "id": "live-price-improvement",
         "status": "CONFIRMED",
@@ -294,7 +297,7 @@ def test_build_presence_proof_refuses_non_fak_share_overfill(monkeypatch):
     t = _our_maker_trade()
     t["maker_orders"][0]["price"] = "0.50"
     t["maker_orders"][0]["matched_amount"] = "5.3"
-    with pytest.raises(RuntimeError, match="non-FAK presence legs sum"):
+    with pytest.raises(RuntimeError, match="non-immediate-taker presence legs sum"):
         pr.build_presence_proof(None, "agg", trades=[t], funder_address=FUNDER)
 
 
