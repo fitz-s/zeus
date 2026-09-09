@@ -328,7 +328,7 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
-CANONICAL_CORPUS_REVISION = "sealed_raw_finalized_payout_event_weight_v1"
+CANONICAL_CORPUS_REVISION = "sealed_raw_finalized_payout_event_weight_v2_legacy_provenance_bound"
 
 
 @dataclass(frozen=True)
@@ -479,6 +479,9 @@ def load_canonical_fit_corpus(
         except sqlite3.Error:
             forecast_table_available = False
 
+    # Cache only the immutable source row.  Eligibility clocks depend on the
+    # child decision, so caching a clock-validated result would make PIT order
+    # observable when two commands share one posterior.
     forecast_cache: dict[tuple[object, ...], dict | None] = {}
 
     def parent_for(certificate, child_edge_rows, role, certificate_type, decision_at):
@@ -519,10 +522,9 @@ def load_canonical_fit_corpus(
         if posterior_id in (None, "") or not identity:
             return None
         cache_key = (str(posterior_id), str(identity), city, target.isoformat(), metric)
-        if cache_key in forecast_cache:
-            return forecast_cache[cache_key]
-        try:
-            cursor = forecast_conn.execute(f"""
+        if cache_key not in forecast_cache:
+            try:
+                cursor = forecast_conn.execute(f"""
                 SELECT posterior_id, city, target_date, temperature_metric,
                        source_available_at, computed_at, recorded_at,
                        q_json, provenance_json, posterior_identity_hash,
@@ -531,20 +533,22 @@ def load_canonical_fit_corpus(
                 WHERE posterior_id = ? AND posterior_identity_hash = ?
                   AND city = ? AND target_date = ? AND temperature_metric = ?
                 LIMIT 1
-            """, (posterior_id, str(identity), city, target.isoformat(), metric)).fetchone()
-        except sqlite3.Error:
-            cursor = None
-        if cursor is None:
-            forecast_cache[cache_key] = None
+                """, (posterior_id, str(identity), city, target.isoformat(), metric)).fetchone()
+            except sqlite3.Error:
+                cursor = None
+            if cursor is None:
+                forecast_cache[cache_key] = None
+            else:
+                names = [column[0] for column in forecast_conn.execute(
+                    f"SELECT posterior_id, city, target_date, temperature_metric, "
+                    "source_available_at, computed_at, recorded_at, q_json, "
+                    "provenance_json, posterior_identity_hash, runtime_layer, training_allowed "
+                    f"FROM {forecast_schema}.forecast_posteriors LIMIT 0"
+                ).description]
+                forecast_cache[cache_key] = dict(zip(names, cursor))
+        result = forecast_cache[cache_key]
+        if result is None:
             return None
-        names = [column[0] for column in forecast_conn.execute(
-            f"SELECT posterior_id, city, target_date, temperature_metric, "
-            "source_available_at, computed_at, recorded_at, q_json, "
-            "provenance_json, posterior_identity_hash, runtime_layer, training_allowed "
-            f"FROM {forecast_schema}.forecast_posteriors LIMIT 0"
-        ).description]
-        selected_row = cursor
-        result = dict(zip(names, selected_row))
         source_at = _parse_ts(result.get("source_available_at"))
         computed_at = _parse_ts(result.get("computed_at"))
         recorded_at = _parse_ts(result.get("recorded_at"))
@@ -553,8 +557,7 @@ def load_canonical_fit_corpus(
         if (result.get("runtime_layer") != "live" or int(result.get("training_allowed")) != 0
                 or source_at is None or computed_at is None or source_at > decision_at
                 or computed_at > decision_at or recorded_at is None or recorded_at >= cutoff):
-            result = None
-        forecast_cache[cache_key] = result
+            return None
         return result
 
     def legacy_replacement_input(certificate, child_edge_rows, payload, economics,
@@ -597,7 +600,8 @@ def load_canonical_fit_corpus(
             return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
         if not payload.get("bin_label") or not equal(source_q, parent_q):
             return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
-        raw = source_q if side == "YES" else (1.0 - probability(source_q) if probability(source_q) is not None else None)
+        source_q_value = probability(source_q)
+        raw = source_q_value if side == "YES" else (1.0 - source_q_value if source_q_value is not None else None)
         if raw is None:
             return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
         provenance = obj(row.get("provenance_json"))
@@ -609,9 +613,11 @@ def load_canonical_fit_corpus(
             shape = shape.get("current_evidence_shape") if isinstance(shape, dict) else None
             source_revision = shape.get("semantics_revision") if isinstance(shape, dict) else None
         source_revision = source_revision if isinstance(source_revision, str) and source_revision.strip() else None
-        if child_revision != source_revision and (child_revision is not None or source_revision is not None):
+        if (child_revision is not None and source_revision is not None
+                and child_revision != source_revision):
             return None, None, "LEGACY_PROBABILITY_REVISION_UNBOUND"
-        return raw, child_revision, None
+        raw_revision = child_revision if child_revision == source_revision else None
+        return raw, raw_revision, None
 
     def legacy_anchor(certificate, child_edge_rows, payload, economics, command,
                       side, decision_at):
@@ -647,6 +653,9 @@ def load_canonical_fit_corpus(
                 or quote.get("quote_depth_hash") != snapshot.get("orderbook_hash")
                 or cost.get("cost_source") != "native_orderbook_ask"
                 or cost.get("quote_source_kind") != "executable_market_snapshot_native_book"):
+            return None, None, "LEGACY_ANCHOR_BOOK_UNBOUND"
+        captured_at = _parse_ts(snapshot.get("captured_at"))
+        if captured_at is None or decision_at is None or captured_at > decision_at:
             return None, None, "LEGACY_ANCHOR_BOOK_UNBOUND"
         proof = str(payload.get("proof_execution_mode_intent") or "").strip().upper()
         global_mode = str(economics.get("global_execution_mode") or "").strip().upper()

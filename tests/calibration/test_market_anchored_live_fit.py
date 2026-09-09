@@ -13,6 +13,7 @@ expires.
 from __future__ import annotations
 
 import sqlite3
+import json
 import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1005,7 +1006,8 @@ def test_duplicated_claim_window_refused_though_row_count_meets_floor():
 
 def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size=10.0,
                               legacy=False, probability_revision="fixture-revision-v1",
-                              return_forecast=False, legacy_maker=False):
+                              return_forecast=False, legacy_maker=False,
+                              return_details=False):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1014,10 +1016,11 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     world = sqlite3.connect(":memory:")
     trade = sqlite3.connect(":memory:")
     decision = NOW - timedelta(days=3)
+    parent_decision = decision - timedelta(hours=3) if legacy else decision
     parent = build_certificate(
         certificate_type="ProbabilityEvidenceCertificate", semantic_key="fixture-parent",
-        claim_type="fixture", mode="LIVE", decision_time=decision,
-        source_available_at=decision, agent_received_at=decision, persisted_at=decision,
+        claim_type="fixture", mode="LIVE", decision_time=parent_decision,
+        source_available_at=parent_decision, agent_received_at=parent_decision, persisted_at=parent_decision,
         payload={}, authority_id="fixture", authority_version="1", algorithm_id="fixture", algorithm_version="1",
     )
     token = "11" if side == "YES" else "12"
@@ -1044,8 +1047,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         }
         forecast_certificate = build_certificate(
             certificate_type="ForecastAuthorityCertificate", semantic_key="fixture-forecast",
-            claim_type="fixture", mode="LIVE", decision_time=decision,
-            source_available_at=decision, agent_received_at=decision, persisted_at=decision,
+            claim_type="fixture", mode="LIVE", decision_time=parent_decision,
+            source_available_at=parent_decision, agent_received_at=parent_decision, persisted_at=parent_decision,
             payload=forecast_payload, authority_id="fixture", authority_version="1",
             algorithm_id="fixture", algorithm_version="1",
         )
@@ -1061,6 +1064,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
             ("executable_snapshot", "ExecutableSnapshotCertificate", {
                 "condition_id": "condition", "token_id": token,
                 "selected_snapshot_id": "snapshot", "orderbook_hash": "book-hash",
+                "captured_at": decision.isoformat(),
             }),
             ("candidate", "CandidateEvidenceCertificate", {
                 "condition_id": "condition", "selected_token_id": token,
@@ -1072,8 +1076,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         ):
             parents.append(build_certificate(
                 certificate_type=ctype, semantic_key=f"fixture-{role}", claim_type="fixture",
-                mode="LIVE", decision_time=decision, source_available_at=decision,
-                agent_received_at=decision, persisted_at=decision, payload=fields,
+                mode="LIVE", decision_time=parent_decision, source_available_at=parent_decision,
+                agent_received_at=parent_decision, persisted_at=parent_decision, payload=fields,
                 authority_id="fixture", authority_version="1", algorithm_id="fixture",
                 algorithm_version="1",
             ))
@@ -1116,7 +1120,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         world.execute(
             "UPDATE decision_certificates SET created_at=? WHERE certificate_hash IN (%s)"
             % ",".join("?" for _ in parents),
-            ((decision + timedelta(seconds=1)).isoformat(),
+            ((decision - timedelta(hours=2)).isoformat(),
              *[item.certificate_hash for item in parents]),
         )
     trade.executescript("""
@@ -1170,6 +1174,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     world.commit()
     trade.commit()
     result = (world, trade, certificate_payload_json(certificate))
+    if return_details:
+        return (*result, forecast_conn, certificate, tuple(parents))
     return (*result, forecast_conn) if return_forecast else result
 
 
@@ -1257,6 +1263,89 @@ def test_canonical_fit_legacy_revision_unknown_cannot_fit_or_mix():
         ) == []
         with pytest.raises(ValueError, match="probability_revision is required"):
             corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT", probability_revision="")
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_keeps_independent_raw_when_child_revision_is_missing():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        legacy=True, probability_revision=None, return_forecast=True,
+    )
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET provenance_json=?",
+            (json.dumps({"probability_semantics_revision": "fixture-source-v1"}),),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.records[0]["q_raw"] == pytest.approx(.70)
+        assert corpus.records[0]["raw_probability_revision"] is None
+        assert corpus.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            probability_revision="fixture-source-v1",
+        ) == []
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("reverse_command_order", [False, True])
+def test_canonical_fit_forecast_cache_is_point_in_time_safe(reverse_command_order):
+    """A shared posterior cannot be accepted/rejected based on traversal order."""
+    from src.decision_kernel.certificate import ParentEdge, build_certificate
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+
+    world, trade, _, forecast, first_certificate, parents = _canonical_corpus_fixture(
+        legacy=True, return_details=True,
+    )
+    decision = NOW - timedelta(days=3)
+    earlier = decision - timedelta(hours=2)
+    source_time = decision - timedelta(hours=1)
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET source_available_at=?, computed_at=?, recorded_at=?",
+            (source_time.isoformat(), source_time.isoformat(), decision.isoformat()),
+        )
+        second_payload = dict(first_certificate.payload)
+        second_certificate = build_certificate(
+            certificate_type="ActionableTradeCertificate", semantic_key="fixture-entry-earlier",
+            claim_type="fixture", mode="LIVE", decision_time=earlier,
+            source_available_at=earlier, agent_received_at=earlier, persisted_at=earlier,
+            payload=second_payload, parent_edges=first_certificate.header.parent_edges,
+            parent_certificates=parents, authority_id="fixture", authority_version="1",
+            algorithm_id="fixture", algorithm_version="1",
+        )
+        DecisionCertificateLedger(world).insert_idempotent(second_certificate, preverified=True)
+        original_id = "command"
+        later_id = "a-later" if reverse_command_order else original_id
+        earlier_id = "z-earlier" if reverse_command_order else "a-earlier"
+        if reverse_command_order:
+            trade.execute("UPDATE venue_commands SET command_id=? WHERE command_id=?", (later_id, original_id))
+            trade.execute("UPDATE position_decision_attribution SET command_id=? WHERE command_id=?", (later_id, original_id))
+            trade.execute("UPDATE venue_trade_facts SET command_id=? WHERE command_id=?", (later_id, original_id))
+        trade.execute(
+            "INSERT INTO venue_commands(command_id,token_id,created_at,venue_order_id,snapshot_id,intent_kind,side,envelope_id) VALUES (?,?,?,?,?,?,?,?)",
+            (earlier_id, "11", earlier.isoformat(), "order-earlier", "snapshot", "ENTRY", "BUY", "envelope-earlier"),
+        )
+        trade.execute("INSERT INTO venue_submission_envelopes VALUES ('envelope-earlier','FAK',0)")
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?)",
+            (earlier_id, second_certificate.certificate_hash, "ENTRY", earlier.isoformat()),
+        )
+        filled = earlier + timedelta(seconds=2)
+        for fact_id, state, sequence in [(10, "MATCHED", 1), (11, "MINED", 2), (12, "CONFIRMED", 3)]:
+            trade.execute("INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+                fact_id, earlier_id, "fill-earlier", "order-earlier", state, 10.0,
+                "tx-earlier", filled.isoformat(), filled.strftime("%Y-%m-%d %H:%M:%S"),
+                filled.isoformat(), sequence, "{}",
+            ))
+        trade.commit()
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["command_id"] == later_id
+        assert corpus.unknown.get("LEGACY_FORECAST_POSTERIOR_UNBOUND") == 1
     finally:
         world.close()
         trade.close()
