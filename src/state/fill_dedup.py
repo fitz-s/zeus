@@ -73,6 +73,19 @@ class PartialExitEconomicDebtError(RuntimeError):
 ECONOMIC_NOTIONAL_STORAGE_TOLERANCE_USD = Decimal("0.000000001")
 
 
+def _venue_trade_facts_table(source_schema: str | None) -> str:
+    """Resolve the only supported venue-fact schema names to SQL identifiers."""
+
+    tables = {
+        None: "venue_trade_facts",
+        "main": "main.venue_trade_facts",
+        "trades": "trades.venue_trade_facts",
+    }
+    if source_schema not in tables:
+        raise ValueError(f"unsupported source_schema: {source_schema!r}")
+    return tables[source_schema]
+
+
 def economic_notional_storage_equal(left: object, right: object) -> bool:
     """Treat only sub-nanodollar decimal serialization drift as equal."""
 
@@ -211,6 +224,7 @@ def canonical_trade_fact_cte(
     cte_name: str = "canonical_trade_fact",
     *,
     source_clause_sql: str = "",
+    source_schema: str | None = None,
 ) -> str:
     """Rank trade facts by proof strength before local_sequence recency.
 
@@ -227,6 +241,7 @@ def canonical_trade_fact_cte(
     ``canonical_rank``).
     """
 
+    source_table = _venue_trade_facts_table(source_schema)
     return f"""
         {cte_name} AS (
             SELECT ranked.*
@@ -272,7 +287,7 @@ def canonical_trade_fact_cte(
                                        THEN 300
                                        ELSE 100
                                    END AS proof_rank
-                              FROM venue_trade_facts fact
+                              FROM {source_table} fact
                               {source_clause_sql}
                            ) scored
                    ) ranked
@@ -285,6 +300,7 @@ def economic_trade_fact_cte(
     *,
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
+    source_schema: str | None = None,
 ) -> str:
     """Exclude every derived alias once its source economic fact exists.
 
@@ -293,6 +309,7 @@ def economic_trade_fact_cte(
     them to a positive source fact for the same command and venue order.
     """
 
+    source_table = _venue_trade_facts_table(source_schema)
     return f"""
         {cte_name} AS (
             SELECT fact.*
@@ -316,7 +333,7 @@ def economic_trade_fact_cte(
                 )
                AND NOT EXISTS (
                        SELECT 1
-                         FROM venue_trade_facts source_fact
+                         FROM {source_table} source_fact
                         WHERE source_fact.trade_fact_id = CASE
                                   WHEN json_valid(fact.raw_payload_json)
                                   THEN CAST(json_extract(

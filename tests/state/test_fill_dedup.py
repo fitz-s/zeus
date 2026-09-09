@@ -4,7 +4,7 @@
 #   trade_id <-> tx_hash <-> child-id alias graph to be a single, queryable home
 #   so a future derive-on-read reducer consumes exactly-once economics
 #   (fees included) regardless of the order aggregate/child rows are observed in.
-# Lifecycle: created=2026-07-13; last_reviewed=2026-07-13; last_reused=never
+# Lifecycle: created=2026-07-13; last_reviewed=2026-09-09; last_reused=2026-09-09
 # Purpose: property tests for src.state.fill_dedup's economic_trade_fact_cte /
 #   alias_edge_cte / economic_trade_facts_for_command / alias_edges_for_command.
 # Reuse: run when fill_dedup.py or the tx-hash-aggregate-vs-child-trade alias
@@ -23,7 +23,9 @@ import pytest
 
 from src.state.fill_dedup import (
     alias_edges_for_command,
+    canonical_trade_fact_cte,
     economic_trade_facts_for_command,
+    economic_trade_fact_cte,
 )
 from src.state.venue_command_repo import append_trade_fact
 
@@ -95,6 +97,188 @@ def _append(
         tx_hash=tx_hash,
     )
     conn.commit()
+
+
+def _insert_fact(
+    conn: sqlite3.Connection,
+    *,
+    trade_fact_id: int,
+    trade_id: str,
+    command_id: str,
+    filled_size: str,
+    state: str,
+    tx_hash: str | None = None,
+    local_sequence: int = 1,
+    raw_payload_json: str = "{}",
+    schema: str = "main",
+) -> None:
+    table = "venue_trade_facts" if schema == "main" else "trades.venue_trade_facts"
+    conn.execute(
+        f"""
+        INSERT INTO {table} (
+            trade_fact_id, trade_id, venue_order_id, command_id, state,
+            filled_size, fill_price, fee_paid_micro, tx_hash, source,
+            observed_at, local_sequence, raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, 'ord-schema', ?, ?, ?, '0.50', 0, ?, 'REST',
+                  ?, ?, ?, ?)
+        """,
+        (
+            trade_fact_id,
+            trade_id,
+            command_id,
+            state,
+            filled_size,
+            tx_hash,
+            NOW.isoformat(),
+            local_sequence,
+            f"hash-{trade_fact_id}",
+            raw_payload_json,
+        ),
+    )
+
+
+def _schema_query(conn: sqlite3.Connection, *, source_schema: str | None) -> list[sqlite3.Row]:
+    sql = f"""
+        WITH {canonical_trade_fact_cte(
+            source_schema=source_schema,
+            source_clause_sql="WHERE fact.command_id = 'cmd-schema'",
+        )}, {economic_trade_fact_cte(source_schema=source_schema)}
+        SELECT trade_id, filled_size, state
+          FROM economic_trade_fact
+         ORDER BY trade_id
+    """
+    return conn.execute(sql).fetchall()
+
+
+def test_source_schema_selects_attached_trade_facts_for_both_ctes(conn):
+    """The explicit source schema scopes canonical and EDLI source-fact reads."""
+
+    assert "FROM venue_trade_facts fact" in canonical_trade_fact_cte()
+    assert "FROM main.venue_trade_facts fact" in canonical_trade_fact_cte(
+        source_schema="main"
+    )
+    assert "FROM trades.venue_trade_facts source_fact" in economic_trade_fact_cte(
+        source_schema="trades"
+    )
+    _seed_bare_command(conn, "cmd-schema")
+    _insert_fact(
+        conn,
+        trade_fact_id=1,
+        trade_id="schema-main",
+        command_id="cmd-schema",
+        filled_size="2",
+        state="CONFIRMED",
+    )
+    conn.execute(
+        "ATTACH DATABASE ':memory:' AS trades"
+    )
+    conn.execute(
+        "CREATE TABLE trades.venue_trade_facts AS "
+        "SELECT * FROM main.venue_trade_facts WHERE 0"
+    )
+    _insert_fact(
+        conn,
+        trade_fact_id=1,
+        trade_id="schema-trades",
+        command_id="cmd-schema",
+        filled_size="7",
+        state="CONFIRMED",
+        schema="trades",
+    )
+
+    # CONFIRMED outranks a later MINED revision for the same trade_id.
+    _insert_fact(
+        conn,
+        trade_fact_id=10,
+        trade_id="strength",
+        command_id="cmd-schema",
+        filled_size="4",
+        state="CONFIRMED",
+        local_sequence=1,
+    )
+    _insert_fact(
+        conn,
+        trade_fact_id=11,
+        trade_id="strength",
+        command_id="cmd-schema",
+        filled_size="99",
+        state="MINED",
+        local_sequence=9,
+    )
+    conn.execute(
+        "INSERT INTO trades.venue_trade_facts SELECT * FROM main.venue_trade_facts "
+        "WHERE trade_id = 'strength'"
+    )
+
+    # Aggregate rows are excluded once exact children share the tx hash.
+    for fact in (
+        (20, "0xalias", "10", "CONFIRMED"),
+        (21, "child-alias", "10", "CONFIRMED"),
+    ):
+        _insert_fact(
+            conn,
+            trade_fact_id=fact[0],
+            trade_id=fact[1],
+            command_id="cmd-schema",
+            filled_size=fact[2],
+            state=fact[3],
+            tx_hash="0xalias",
+        )
+    conn.execute(
+        "INSERT INTO trades.venue_trade_facts SELECT * FROM main.venue_trade_facts "
+        "WHERE trade_fact_id IN (20, 21)"
+    )
+
+    # Same source_trade_fact_id deliberately has opposite source-schema truth:
+    # only trades has a positive source, so only trades excludes the EDLI alias.
+    _insert_fact(
+        conn,
+        trade_fact_id=30,
+        trade_id="edli-source",
+        command_id="cmd-schema",
+        filled_size="0",
+        state="CONFIRMED",
+    )
+    _insert_fact(
+        conn,
+        trade_fact_id=31,
+        trade_id="edli:source",
+        command_id="cmd-schema",
+        filled_size="5",
+        state="CONFIRMED",
+        raw_payload_json='{"raw_fill_payload":{"source_trade_fact_id":30}}',
+    )
+    conn.execute(
+        "INSERT INTO trades.venue_trade_facts SELECT * FROM main.venue_trade_facts "
+        "WHERE trade_fact_id IN (30, 31)"
+    )
+    conn.execute(
+        "UPDATE trades.venue_trade_facts SET filled_size = '5' WHERE trade_fact_id = 30"
+    )
+    conn.commit()
+
+    main_rows = _schema_query(conn, source_schema=None)
+    explicit_main_rows = _schema_query(conn, source_schema="main")
+    trades_rows = _schema_query(conn, source_schema="trades")
+    main_by_id = {row[0]: (row[1], row[2]) for row in main_rows}
+    assert main_by_id["schema-main"] == ("2", "CONFIRMED")
+    assert "schema-trades" not in main_by_id
+    assert main_by_id["strength"] == ("4", "CONFIRMED")
+    assert main_by_id["edli:source"] == ("5", "CONFIRMED")
+    assert [tuple(row) for row in explicit_main_rows] == [tuple(row) for row in main_rows]
+    trades_by_id = {row[0]: (row[1], row[2]) for row in trades_rows}
+    assert trades_by_id["schema-trades"] == ("7", "CONFIRMED")
+    assert trades_by_id["strength"] == ("4", "CONFIRMED")
+    assert trades_by_id["child-alias"] == ("10", "CONFIRMED")
+    assert trades_by_id["edli-source"] == ("5", "CONFIRMED")
+    assert "0xalias" not in trades_by_id
+    assert "edli:source" not in trades_by_id
+
+
+@pytest.mark.parametrize("builder", (canonical_trade_fact_cte, economic_trade_fact_cte))
+def test_source_schema_rejects_non_whitelisted_identifiers_before_sql(builder):
+    with pytest.raises(ValueError, match="unsupported source_schema"):
+        builder(source_schema="trades; DROP TABLE venue_trade_facts")
 
 
 def _seed_exit_command(

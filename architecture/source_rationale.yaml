@@ -2728,6 +2728,15 @@ files:
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
+  src/state/fill_dedup.py:
+    zone: K2_runtime
+    authority_role: canonical_economic_fill_reader
+    why: Reads canonical trade revisions by proof strength and excludes aggregate and source-bound aliases so one economic fill contributes once. Explicit main or trades schema selection binds both revision ranking and source-alias lookup to the same physical table; default unqualified readers retain their existing behavior. This module does not write facts or open connections.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - src/execution/exchange_reconcile.py
+    - src/state/chain_reconciliation.py
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
