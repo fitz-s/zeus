@@ -341,10 +341,15 @@ class CanonicalFitCorpus:
     training_cutoff: str
     revision: str = CANONICAL_CORPUS_REVISION
 
-    def fit_rows(self, *, metric: str, execution_mode: str) -> list[FitRow]:
+    def fit_rows(
+        self, *, metric: str, execution_mode: str, probability_revision: str
+    ) -> list[FitRow]:
         """Keep HIGH/LOW and execution policies separate; normalize each event."""
+        if not isinstance(probability_revision, str) or not probability_revision.strip():
+            raise ValueError("probability_revision is required")
         records = [r for r in self.records if r["metric"] == metric
                    and r["execution_mode"] == execution_mode
+                   and r.get("raw_probability_revision") == probability_revision
                    and r["lead_bucket"] is not None and r["payout"] in (0, 1)]
         totals: dict[tuple, float] = defaultdict(float)
         for record in records:
@@ -413,8 +418,10 @@ def load_canonical_fit_corpus(
     *,
     training_cutoff: datetime,
     city_timezone_snapshot: tuple[tuple[str, str], ...],
+    forecast_conn: sqlite3.Connection | None = None,
     world_schema: str = "main",
     trade_schema: str = "main",
+    forecast_schema: str = "main",
 ) -> CanonicalFitCorpus:
     """Read raw inputs, actual fills and labels from their canonical owners.
 
@@ -428,7 +435,9 @@ def load_canonical_fit_corpus(
     from src.ingest.payout_observer import _coherent_finalized_pair
     from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
-    if world_schema not in ("main", "world") or trade_schema not in ("main", "trades"):
+    if (world_schema not in ("main", "world")
+            or trade_schema not in ("main", "trades")
+            or forecast_schema not in ("main", "forecasts")):
         raise ValueError("unsupported canonical corpus schema")
     if training_cutoff.tzinfo is None or not _snapshot_is_valid(city_timezone_snapshot):
         raise ValueError("canonical corpus requires an aware cutoff and city clocks")
@@ -460,12 +469,238 @@ def load_canonical_fit_corpus(
         a, b = probability(a), probability(b)
         return a is not None and b is not None and abs(a - b) <= 1e-12
 
+    forecast_table_available = False
+    if forecast_conn is not None:
+        try:
+            forecast_table_available = bool(forecast_conn.execute(
+                f"SELECT 1 FROM {forecast_schema}.sqlite_master "
+                "WHERE type='table' AND name='forecast_posteriors'"
+            ).fetchone())
+        except sqlite3.Error:
+            forecast_table_available = False
+
+    forecast_cache: dict[tuple[object, ...], dict | None] = {}
+
+    def parent_for(certificate, child_edge_rows, role, certificate_type, decision_at):
+        matches = [
+            edge for edge in child_edge_rows
+            if edge.get("parent_role") == role
+        ]
+        if len(matches) != 1:
+            return None
+        edge = matches[0]
+        if edge.get("parent_certificate_type") != certificate_type:
+            return None
+        parent = parent_certificates.get(edge.get("parent_certificate_hash"))
+        if parent is None or parent.get("certificate_type") != certificate_type:
+            return None
+        if parent.get("mode") != "LIVE" or parent.get("verifier_status") != "VERIFIED":
+            return None
+        if stable_hash(obj(parent.get("payload_json"))) != parent.get("payload_hash"):
+            return None
+        if not _certificate_header_bound(parent, parent_edges[parent["certificate_id"]]):
+            return None
+        created_at = _parse_ts(parent.get("created_at"))
+        if created_at is None or created_at >= cutoff:
+            return None
+        if decision_at is None:
+            return None
+        for field in ("source_available_at", "agent_received_at", "persisted_at"):
+            stamp = _parse_ts(parent.get(field))
+            if stamp is None or stamp > decision_at:
+                return None
+        return parent
+
+    def forecast_row_for(parent_payload, city, target, metric, decision_at):
+        if not forecast_table_available:
+            return None
+        posterior_id = parent_payload.get("replacement_posterior_id", parent_payload.get("posterior_id"))
+        identity = parent_payload.get("posterior_identity_hash")
+        if posterior_id in (None, "") or not identity:
+            return None
+        cache_key = (str(posterior_id), str(identity), city, target.isoformat(), metric)
+        if cache_key in forecast_cache:
+            return forecast_cache[cache_key]
+        try:
+            cursor = forecast_conn.execute(f"""
+                SELECT posterior_id, city, target_date, temperature_metric,
+                       source_available_at, computed_at, recorded_at,
+                       q_json, provenance_json, posterior_identity_hash,
+                       runtime_layer, training_allowed
+                FROM {forecast_schema}.forecast_posteriors
+                WHERE posterior_id = ? AND posterior_identity_hash = ?
+                  AND city = ? AND target_date = ? AND temperature_metric = ?
+                LIMIT 1
+            """, (posterior_id, str(identity), city, target.isoformat(), metric)).fetchone()
+        except sqlite3.Error:
+            cursor = None
+        if cursor is None:
+            forecast_cache[cache_key] = None
+            return None
+        names = [column[0] for column in forecast_conn.execute(
+            f"SELECT posterior_id, city, target_date, temperature_metric, "
+            "source_available_at, computed_at, recorded_at, q_json, "
+            "provenance_json, posterior_identity_hash, runtime_layer, training_allowed "
+            f"FROM {forecast_schema}.forecast_posteriors LIMIT 0"
+        ).description]
+        selected_row = cursor
+        result = dict(zip(names, selected_row))
+        source_at = _parse_ts(result.get("source_available_at"))
+        computed_at = _parse_ts(result.get("computed_at"))
+        recorded_at = _parse_ts(result.get("recorded_at"))
+        if recorded_at is None and result.get("recorded_at"):
+            recorded_at = _parse_ts(str(result["recorded_at"]).replace(" ", "T") + "Z")
+        if (result.get("runtime_layer") != "live" or int(result.get("training_allowed")) != 0
+                or source_at is None or computed_at is None or source_at > decision_at
+                or computed_at > decision_at or recorded_at is None or recorded_at >= cutoff):
+            result = None
+        forecast_cache[cache_key] = result
+        return result
+
+    def legacy_replacement_input(certificate, child_edge_rows, payload, economics,
+                                 correction, side, city, target, metric, decision_at):
+        """Bind the old replacement path to its exact forecast parent and row."""
+        q_source = payload.get("_edli_q_source") or payload.get("q_source")
+        if correction.get("applied") in (True, False) or q_source != "replacement_0_1":
+            return None, None, None
+        forecast_parent = parent_for(
+            certificate, child_edge_rows, "forecast_authority",
+            "ForecastAuthorityCertificate", decision_at,
+        )
+        if forecast_parent is None:
+            return None, None, "LEGACY_FORECAST_AUTHORITY_UNBOUND"
+        forecast_payload = obj(forecast_parent.get("payload_json"))
+        if (forecast_payload.get("city") != city
+                or forecast_payload.get("target_date") != target.isoformat()
+                or forecast_payload.get("metric", forecast_payload.get("temperature_metric")) != metric):
+            return None, None, "LEGACY_FORECAST_IDENTITY_UNBOUND"
+        parent_posterior_id = forecast_payload.get(
+            "replacement_posterior_id", forecast_payload.get("posterior_id")
+        )
+        child_posterior_id = payload.get("posterior_id", economics.get("global_posterior_id"))
+        if (child_posterior_id not in (None, "")
+                and str(child_posterior_id) != str(parent_posterior_id)):
+            return None, None, "LEGACY_FORECAST_IDENTITY_UNBOUND"
+        child_identity = payload.get("posterior_identity_hash")
+        if (child_identity not in (None, "")
+                and str(child_identity) != str(forecast_payload.get("posterior_identity_hash"))):
+            return None, None, "LEGACY_FORECAST_IDENTITY_UNBOUND"
+        row = forecast_row_for(forecast_payload, city, target, metric, decision_at)
+        if row is None:
+            return None, None, "LEGACY_FORECAST_POSTERIOR_UNBOUND"
+        try:
+            q_map = obj(row.get("q_json"))
+            parent_q_map = forecast_payload.get("replacement_q")
+            parent_q = parent_q_map.get(payload.get("bin_label")) if isinstance(parent_q_map, dict) else None
+            source_q = q_map.get(payload.get("bin_label"))
+        except (AttributeError, TypeError):
+            return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
+        if not payload.get("bin_label") or not equal(source_q, parent_q):
+            return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
+        raw = source_q if side == "YES" else (1.0 - probability(source_q) if probability(source_q) is not None else None)
+        if raw is None:
+            return None, None, "LEGACY_FORECAST_BIN_UNBOUND"
+        provenance = obj(row.get("provenance_json"))
+        child_revision = payload.get("probability_semantics_revision")
+        child_revision = child_revision if isinstance(child_revision, str) and child_revision.strip() else None
+        source_revision = provenance.get("probability_semantics_revision")
+        if source_revision is None:
+            shape = provenance.get("bayes_precision_fusion")
+            shape = shape.get("current_evidence_shape") if isinstance(shape, dict) else None
+            source_revision = shape.get("semantics_revision") if isinstance(shape, dict) else None
+        source_revision = source_revision if isinstance(source_revision, str) and source_revision.strip() else None
+        if child_revision != source_revision and (child_revision is not None or source_revision is not None):
+            return None, None, "LEGACY_PROBABILITY_REVISION_UNBOUND"
+        return raw, child_revision, None
+
+    def legacy_anchor(certificate, child_edge_rows, payload, economics, command,
+                      side, decision_at):
+        required = {
+            role: parent_for(certificate, child_edge_rows, role, kind, decision_at)
+            for role, kind in (
+                ("quote_feasibility", "QuoteFeasibilityCertificate"),
+                ("executable_snapshot", "ExecutableSnapshotCertificate"),
+                ("candidate", "CandidateEvidenceCertificate"),
+                ("cost_model", "CostModelCertificate"),
+            )
+        }
+        if any(value is None for value in required.values()):
+            return None, None, "LEGACY_ANCHOR_PARENT_UNBOUND"
+        parent_payloads = {role: obj(cert.get("payload_json")) for role, cert in required.items()}
+        quote = parent_payloads["quote_feasibility"]
+        snapshot = parent_payloads["executable_snapshot"]
+        candidate = parent_payloads["candidate"]
+        cost = parent_payloads["cost_model"]
+        token = command["token_id"]
+        condition = command["condition_id"]
+        identity_pairs = (
+            (quote.get("condition_id"), condition), (quote.get("token_id"), token),
+            (quote.get("selected_token_id"), token), (quote.get("quote_book_condition_id"), condition),
+            (quote.get("quote_book_token_id"), token), (snapshot.get("condition_id"), condition),
+            (snapshot.get("token_id"), token), (candidate.get("condition_id"), condition),
+            (candidate.get("selected_token_id"), token), (cost.get("condition_id"), condition),
+            (cost.get("token_id"), token),
+        )
+        if any(left in (None, "") or str(left) != str(right) for left, right in identity_pairs):
+            return None, None, "LEGACY_ANCHOR_IDENTITY_UNBOUND"
+        if (payload.get("executable_snapshot_id") != snapshot.get("selected_snapshot_id")
+                or quote.get("quote_depth_hash") != snapshot.get("orderbook_hash")
+                or cost.get("cost_source") != "native_orderbook_ask"
+                or cost.get("quote_source_kind") != "executable_market_snapshot_native_book"):
+            return None, None, "LEGACY_ANCHOR_BOOK_UNBOUND"
+        proof = str(payload.get("proof_execution_mode_intent") or "").strip().upper()
+        global_mode = str(economics.get("global_execution_mode") or "").strip().upper()
+        command_type = str(command.get("command_order_type") or "").strip().upper()
+        try:
+            command_post_only = int(command.get("command_post_only"))
+        except (TypeError, ValueError):
+            command_post_only = None
+        if proof == "TAKER":
+            mode = "TAKER_LIMIT"
+            if global_mode and global_mode != mode:
+                return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
+            if command_type not in {"FOK", "FAK"} or command_post_only != 0:
+                return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
+            if (quote.get("cost_source") != "native_orderbook_ask"
+                    or quote.get("quote_source_kind") != "executable_market_snapshot_native_book"
+                    or quote.get("native_quote_available") is not True):
+                return None, None, "LEGACY_ANCHOR_QUOTE_UNBOUND"
+            p0 = probability(quote.get("best_ask"))
+        elif proof == "MAKER":
+            mode = "MAKER_REST"
+            if global_mode and global_mode != mode:
+                return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
+            if command_type not in {"GTC", "GTD"} or command_post_only != 1:
+                return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
+            p0 = probability(payload.get("proof_maker_limit_price"))
+        else:
+            return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
+        if p0 is None:
+            return None, None, "LEGACY_ANCHOR_PRICE_UNBOUND"
+        return mode, p0, None
+
+    trade_tables = {
+        str(row[0]).strip()
+        for row in trade_conn.execute(
+            f"SELECT name FROM {trade_schema}.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    envelope_join = ""
+    envelope_columns = "NULL AS command_order_type, NULL AS command_post_only"
+    if "venue_submission_envelopes" in trade_tables:
+        envelope_join = (
+            f"LEFT JOIN {trade_schema}.venue_submission_envelopes e "
+            "ON e.envelope_id=c.envelope_id"
+        )
+        envelope_columns = "e.order_type AS command_order_type, e.post_only AS command_post_only"
     commands = records(trade_conn, f"""
         SELECT c.command_id, c.token_id, c.created_at, c.venue_order_id, c.snapshot_id, c.side AS order_side,
+               {envelope_columns},
                s.condition_id, s.yes_token_id, s.no_token_id,
                s.selected_outcome_token_id, s.orderbook_top_ask,
                s.raw_orderbook_hash, s.captured_at, s.token_map_json
         FROM {trade_schema}.venue_commands c
+        {envelope_join}
         LEFT JOIN {trade_schema}.executable_market_snapshots s ON s.snapshot_id=c.snapshot_id
         WHERE c.intent_kind='ENTRY' AND julianday(c.created_at)<julianday(?)
         ORDER BY c.command_id
@@ -494,6 +729,35 @@ def load_canonical_fit_corpus(
             WHERE c.certificate_hash IN ({marks}) ORDER BY e.rowid
         """, keys):
             edges[row["child_certificate_id"]].append(row)
+
+    # Legacy replacement rows need the exact parent certificate payloads, not
+    # merely the edge labels copied onto the actionable child.  Load the
+    # transitive parent rows and their own edges once, still read-only.
+    parent_certificates = {}
+    parent_edges = defaultdict(list)
+    parent_hashes = sorted({
+        row["parent_certificate_hash"]
+        for rows in edges.values()
+        for row in rows
+        if row.get("parent_certificate_hash")
+    })
+    for start in range(0, len(parent_hashes), 400):
+        keys = parent_hashes[start:start + 400]
+        marks = ",".join("?" for _ in keys)
+        for row in records(world_conn, f"""
+            SELECT * FROM {world_schema}.decision_certificates
+            WHERE certificate_hash IN ({marks})
+        """, keys):
+            parent_certificates[row["certificate_hash"]] = row
+    parent_ids = [row["certificate_id"] for row in parent_certificates.values()]
+    for start in range(0, len(parent_ids), 400):
+        keys = parent_ids[start:start + 400]
+        marks = ",".join("?" for _ in keys)
+        for row in records(world_conn, f"""
+            SELECT e.* FROM {world_schema}.decision_certificate_edges e
+            WHERE e.child_certificate_id IN ({marks}) ORDER BY e.rowid
+        """, keys):
+            parent_edges[row["child_certificate_id"]].append(row)
 
     fact_scope = "WHERE julianday(fact.observed_at)<julianday(?) AND julianday(fact.ingested_at)<julianday(?)"
     source_scope = "AND julianday(source_fact.observed_at)<julianday(?) AND julianday(source_fact.ingested_at)<julianday(?)"
@@ -574,12 +838,28 @@ def load_canonical_fit_corpus(
             reasons.append("ACTING_Q_UNBOUND")
         raw = None
         raw_source = None
+        raw_probability_revision = payload.get("probability_semantics_revision")
+        if not isinstance(raw_probability_revision, str) or not raw_probability_revision.strip():
+            raw_probability_revision = None
         if correction.get("applied") is True and equal(correction.get("q_corrected"), payload.get("q_live")):
             raw = probability(correction.get("q_raw"))
             raw_source = "SEALED_CORRECTION_INPUT"
         elif correction.get("applied") is False:
             raw = probability(economics.get("payoff_q_point"))
             raw_source = "EXPLICIT_UNCORRECTED_INPUT"
+        elif (payload.get("_edli_q_source") or payload.get("q_source")) == "replacement_0_1":
+            city = payload.get("city")
+            target = _parse_date(payload.get("target_date"))
+            metric = payload.get("temperature_metric", payload.get("metric"))
+            if target is not None:
+                raw, raw_probability_revision, legacy_reason = legacy_replacement_input(
+                    certificate, edges[certificate["certificate_id"]], payload, economics,
+                    correction, side, city, target, metric, decision_at,
+                )
+                if raw is not None:
+                    raw_source = "LEGACY_REPLACEMENT_POSTERIOR_INPUT"
+                elif legacy_reason:
+                    reasons.append(legacy_reason)
         if raw is None:
             reasons.append("RAW_INPUT_UNBOUND")
         mode = economics.get("global_execution_mode")
@@ -603,6 +883,16 @@ def load_canonical_fit_corpus(
                     and economics.get("global_candidate_id") == payload.get("candidate_id")
                     and economics.get("global_jit_execution_curve_identity")) :
                 p0 = probability(economics.get("decision_p0"))
+        if (raw_source == "LEGACY_REPLACEMENT_POSTERIOR_INPUT"
+                and decision_at is not None):
+            legacy_mode, legacy_p0, legacy_reason = legacy_anchor(
+                certificate, edges[certificate["certificate_id"]], payload, economics,
+                command, side, decision_at,
+            )
+            if legacy_reason:
+                reasons.append(legacy_reason)
+            else:
+                mode, p0 = legacy_mode, legacy_p0
         capture = obj(economics.get("raw_calibration_input"))
         if capture:
             captured_identity = (
@@ -692,6 +982,7 @@ def load_canonical_fit_corpus(
             event_key=(city, target.isoformat(), metric), execution_mode=mode,
             decision_time=decision_at.isoformat(), lead_days=(target-local_date).days,
             lead_bucket=lead_bucket_of(local_date, target), q_raw=raw, raw_source=raw_source,
+            raw_probability_revision=raw_probability_revision,
             acting_q=probability(payload.get("q_live")), p0=p0, confirmed_shares=shares,
             fill_available_at=fill_available_at.isoformat(),
             payout=held["payout_numerator"] / held["payout_denominator"],
