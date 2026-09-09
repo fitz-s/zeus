@@ -1007,7 +1007,7 @@ def test_duplicated_claim_window_refused_though_row_count_meets_floor():
 def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size=10.0,
                               legacy=False, probability_revision="fixture-revision-v1",
                               return_forecast=False, legacy_maker=False,
-                              return_details=False):
+                              return_details=False, native_quote_available=True):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1059,7 +1059,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 "selected_token_id": token, "quote_book_condition_id": "condition",
                 "quote_book_token_id": token, "quote_depth_hash": "book-hash",
                 "cost_source": "native_orderbook_ask", "quote_source_kind": "executable_market_snapshot_native_book",
-                "native_quote_available": True,
+                "native_quote_available": native_quote_available,
             }),
             ("executable_snapshot", "ExecutableSnapshotCertificate", {
                 "condition_id": "condition", "token_id": token,
@@ -1209,9 +1209,13 @@ def test_canonical_fit_preserves_raw_and_yes_no_event_geometry(side, corrected):
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
 @pytest.mark.parametrize("legacy_maker", [False, True])
-def test_canonical_fit_recovers_legacy_replacement_raw_and_anchor(side, legacy_maker):
+@pytest.mark.parametrize("native_quote_available", [True, False])
+def test_canonical_fit_recovers_legacy_replacement_raw_and_anchor(
+    side, legacy_maker, native_quote_available,
+):
     world, trade, _, forecast = _canonical_corpus_fixture(
-        side=side, legacy=True, legacy_maker=legacy_maker, return_forecast=True,
+        side=side, legacy=True, legacy_maker=legacy_maker,
+        native_quote_available=native_quote_available, return_forecast=True,
     )
     try:
         corpus = _read_canonical(world, trade, forecast=forecast)
@@ -1294,7 +1298,7 @@ def test_canonical_fit_keeps_independent_raw_when_child_revision_is_missing():
 @pytest.mark.parametrize("reverse_command_order", [False, True])
 def test_canonical_fit_forecast_cache_is_point_in_time_safe(reverse_command_order):
     """A shared posterior cannot be accepted/rejected based on traversal order."""
-    from src.decision_kernel.certificate import ParentEdge, build_certificate
+    from src.decision_kernel.certificate import build_certificate
     from src.decision_kernel.ledger import DecisionCertificateLedger
 
     world, trade, _, forecast, first_certificate, parents = _canonical_corpus_fixture(
@@ -1364,6 +1368,42 @@ def test_canonical_fit_legacy_rejects_tampered_forecast_bindings(mutation, reaso
         (world if "decision_certificates" in mutation else forecast).execute(mutation)
         corpus = _read_canonical(world, trade, forecast=forecast)
         assert corpus.records == () and corpus.unknown == {reason: 1}
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("role,field,value", [
+    ("quote_feasibility", "native_quote_available", None),
+    ("cost_model", "cost_source", "synthetic_quote"),
+    ("executable_snapshot", "captured_at", (NOW + timedelta(days=1)).isoformat()),
+])
+def test_canonical_fit_legacy_anchor_projection_gaps_remain_unknown(role, field, value):
+    world, trade, _, forecast = _canonical_corpus_fixture(legacy=True, return_forecast=True)
+    try:
+        row = world.execute(
+            """SELECT certificate_hash, payload_json FROM decision_certificates
+               WHERE certificate_type=?""",
+            ({"quote_feasibility": "QuoteFeasibilityCertificate",
+             "cost_model": "CostModelCertificate",
+             "executable_snapshot": "ExecutableSnapshotCertificate"}[role],),
+        ).fetchone()
+        payload = json.loads(row[1])
+        if value is None:
+            payload.pop(field, None)
+        else:
+            payload[field] = value
+        # Deliberately leave the sealed hash untouched: this is a tamper
+        # antibody, while a separately resigned future payload is checked by
+        # the captured_at <= child-decision gate in the reader.
+        world.execute(
+            "UPDATE decision_certificates SET payload_json=? WHERE certificate_hash=?",
+            (json.dumps(payload), row[0]),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.records == ()
+        assert corpus.command_count == 1
     finally:
         world.close()
         trade.close()

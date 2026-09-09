@@ -671,8 +671,7 @@ def load_canonical_fit_corpus(
             if command_type not in {"FOK", "FAK"} or command_post_only != 0:
                 return None, None, "LEGACY_ANCHOR_MODE_UNBOUND"
             if (quote.get("cost_source") != "native_orderbook_ask"
-                    or quote.get("quote_source_kind") != "executable_market_snapshot_native_book"
-                    or quote.get("native_quote_available") is not True):
+                    or quote.get("quote_source_kind") != "executable_market_snapshot_native_book"):
                 return None, None, "LEGACY_ANCHOR_QUOTE_UNBOUND"
             p0 = probability(quote.get("best_ask"))
         elif proof == "MAKER":
