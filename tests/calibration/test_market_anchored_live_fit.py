@@ -1296,7 +1296,8 @@ def test_canonical_fit_keeps_independent_raw_when_child_revision_is_missing():
 
 
 @pytest.mark.parametrize("reverse_command_order", [False, True])
-def test_canonical_fit_forecast_cache_is_point_in_time_safe(reverse_command_order):
+@pytest.mark.parametrize("late_field", ["source_and_computed", "recorded_only"])
+def test_canonical_fit_forecast_cache_is_point_in_time_safe(reverse_command_order, late_field):
     """A shared posterior cannot be accepted/rejected based on traversal order."""
     from src.decision_kernel.certificate import build_certificate
     from src.decision_kernel.ledger import DecisionCertificateLedger
@@ -1306,11 +1307,12 @@ def test_canonical_fit_forecast_cache_is_point_in_time_safe(reverse_command_orde
     )
     decision = NOW - timedelta(days=3)
     earlier = decision - timedelta(hours=2)
-    source_time = decision - timedelta(hours=1)
+    source_time = decision - timedelta(hours=(3 if late_field == "recorded_only" else 1))
+    recorded_time = decision - timedelta(hours=(1 if late_field == "recorded_only" else 3))
     try:
         forecast.execute(
             "UPDATE forecast_posteriors SET source_available_at=?, computed_at=?, recorded_at=?",
-            (source_time.isoformat(), source_time.isoformat(), decision.isoformat()),
+            (source_time.isoformat(), source_time.isoformat(), recorded_time.isoformat()),
         )
         second_payload = dict(first_certificate.payload)
         second_certificate = build_certificate(

@@ -556,7 +556,8 @@ def load_canonical_fit_corpus(
             recorded_at = _parse_ts(str(result["recorded_at"]).replace(" ", "T") + "Z")
         if (result.get("runtime_layer") != "live" or int(result.get("training_allowed")) != 0
                 or source_at is None or computed_at is None or source_at > decision_at
-                or computed_at > decision_at or recorded_at is None or recorded_at >= cutoff):
+                or computed_at > decision_at or recorded_at is None
+                or recorded_at > decision_at or recorded_at >= cutoff):
             return None
         return result
 
