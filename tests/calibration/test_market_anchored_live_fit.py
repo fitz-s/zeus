@@ -36,7 +36,10 @@ from src.calibration.market_anchored_live_fit import (
 from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
 from src.calibration.market_anchored_residual import (
     CLIP_D,
+    LEGACY_LEAD_BUCKETS,
+    LEGACY_LEAD_CALENDAR_REVISION,
     LEAD_BUCKETS,
+    LEAD_CALENDAR_REVISION,
     P_CLIP_HI,
     P_CLIP_LO,
     ResidualCalibratorArtifact,
@@ -233,7 +236,7 @@ def test_fit_produces_artifact_at_min_train_rows():
 
     assert artifact is not None
     assert artifact.n_train == 40
-    assert set(artifact.alpha) == {"day0", "day1", "day2"}
+    assert set(artifact.alpha) == {"day0", "day1", "day2plus"}
 
 
 def test_unreachable_database_fails_open_to_none():
@@ -786,7 +789,7 @@ def test_missing_or_invalid_grade_cannot_be_admitted_by_old_settlement_time():
 
 def test_unmodeled_lead_is_excluded_from_training():
     conn = _memory_db(
-        [_row(i, settled_at=NOW - timedelta(days=3), lead_days=7) for i in range(6)]
+        [_row(i, settled_at=NOW - timedelta(days=3), lead_days=-1) for i in range(6)]
     )
 
     assert load_fit_rows(conn, training_cutoff=NOW, city_timezone_snapshot=tuple(_TEST_CITY_TIMEZONES.items())) == []
@@ -864,7 +867,69 @@ def test_corrected_probability_fails_closed_on_unmodeled_lead():
         decision_at=NOW, target_date=date(2026, 8, 28), side="YES",
     )
     assert corrected_probability(**kwargs) is not None
-    assert corrected_probability(**{**kwargs, "target_date": date(2026, 9, 3)}) is None
+    assert corrected_probability(**{**kwargs, "target_date": date(2026, 8, 26)}) is None
+
+
+@pytest.mark.parametrize("lead_days", [2, 3, 7])
+def test_corrected_probability_v2_serves_all_day2plus_leads(lead_days):
+    artifact = _synthetic_artifact(alpha_day1=0.0, alpha_day2plus=0.21, beta=0.08)
+    result = corrected_probability(
+        artifact, p0=0.3, q_raw=0.6, city="city-0", decision_at=NOW,
+        target_date=(NOW.date() + timedelta(days=lead_days)), side="YES",
+    )
+    assert result is not None
+    assert result[1] == "day2plus"
+
+
+@pytest.mark.parametrize("lead_days", [2, 3, 7])
+def test_corrected_probability_v2_day2plus_preserves_no_complement(lead_days):
+    artifact = _synthetic_artifact(alpha_day1=0.0, alpha_day2plus=0.21, beta=0.08)
+    common = dict(
+        city="city-0", decision_at=NOW,
+        target_date=NOW.date() + timedelta(days=lead_days),
+    )
+    yes = corrected_probability(artifact, p0=0.3, q_raw=0.6, side="YES", **common)
+    no = corrected_probability(artifact, p0=0.7, q_raw=0.4, side="NO", **common)
+    assert yes is not None and no is not None
+    assert yes[1] == no[1] == "day2plus"
+    assert no[0] == pytest.approx(1.0 - yes[0], abs=1e-12)
+
+
+def test_corrected_probability_uses_city_local_midnight_and_dst_for_v2_tail():
+    artifact = _synthetic_artifact(
+        alpha_day1=0.0, alpha_day2plus=0.21, beta=0.08,
+        training_cutoff="2026-03-01T00:00:00Z",
+        city_timezone_snapshot=(("Warsaw", "Europe/Warsaw"),),
+    )
+    for decision_at in (
+        datetime(2026, 3, 28, 23, 30, tzinfo=timezone.utc),
+        datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc),
+    ):
+        result = corrected_probability(
+            artifact, p0=0.3, q_raw=0.6, city="Warsaw", decision_at=decision_at,
+            target_date=date(2026, 3, 31), side="YES",
+        )
+        assert result is not None and result[1] == "day2plus"
+
+
+def test_corrected_probability_v1_artifact_keeps_exact_day2_and_rejects_tail():
+    artifact = _synthetic_artifact(
+        alpha_day1=0.0, alpha_day2plus=0.17, beta=0.08,
+        lead_calendar_revision=LEGACY_LEAD_CALENDAR_REVISION,
+    )
+    kwargs = dict(
+        p0=0.3, q_raw=0.6, city="city-0", decision_at=NOW,
+        side="YES",
+    )
+    exact_two = corrected_probability(
+        **kwargs, artifact=artifact, target_date=NOW.date() + timedelta(days=2),
+    )
+    assert exact_two is not None and exact_two[1] == "day2"
+    for lead_days in (3, 7):
+        assert corrected_probability(
+            **kwargs, artifact=artifact,
+            target_date=NOW.date() + timedelta(days=lead_days),
+        ) is None
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
@@ -881,22 +946,39 @@ def test_corrected_probability_fails_closed_on_non_finite_inputs(bad):
     assert corrected_probability(**{**kwargs, "p0": bad}) is None
 
 
-def _synthetic_artifact(*, alpha_day1: float, beta: float) -> ResidualCalibratorArtifact:
-    alpha = {bucket: (alpha_day1 if bucket == "day1" else 0.0) for bucket in LEAD_BUCKETS}
+def _synthetic_artifact(
+    *, alpha_day1: float, beta: float, alpha_day2plus: float = 0.0,
+    lead_calendar_revision: str = LEAD_CALENDAR_REVISION,
+    training_cutoff: str = "2026-08-25T00:00:00Z",
+    city_timezone_snapshot: tuple[tuple[str, str], ...] = (("city-0", "UTC"),),
+) -> ResidualCalibratorArtifact:
+    buckets = (
+        LEGACY_LEAD_BUCKETS
+        if lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
+        else LEAD_BUCKETS
+    )
+    alpha = {
+        bucket: (
+            alpha_day1 if bucket == "day1"
+            else alpha_day2plus if bucket == "day2plus"
+            else 0.0
+        )
+        for bucket in buckets
+    }
     return ResidualCalibratorArtifact(
         alpha=alpha,
         beta=beta,
         lambda_=10.0,
         clip_d=CLIP_D,
         p_clip=(P_CLIP_LO, P_CLIP_HI),
-        lead_buckets=LEAD_BUCKETS,
-        training_cutoff="2026-08-25T00:00:00Z",
+        lead_buckets=buckets,
+        training_cutoff=training_cutoff,
         n_train=100,
         n_excluded=0,
         excluded_reasons={},
         param_hash="synthetic",
-        lead_calendar_revision="city_local_target_date_v1",
-        city_timezone_snapshot=(("city-0", "UTC"),),
+        lead_calendar_revision=lead_calendar_revision,
+        city_timezone_snapshot=city_timezone_snapshot,
     )
 
 
@@ -2740,6 +2822,51 @@ def test_canonical_policy_scope_must_bind_the_actual_corpus_payload():
         execution_contract="FOK_FULL_OR_ZERO",
         raw_probability_revision="fixture-revision-v1",
     )[1] == "CALIBRATION_FIT_SCOPE_INVALID"
+
+
+def test_v1_sealed_corrected_evidence_remains_readable_at_exact_day2():
+    policy = _known_policy()
+    correction = {
+        "applied": True, "q_raw": .70, "p0": .35, "alpha_lead": .01,
+        "beta": .12, "lambda": policy.lambda_, "lead_bucket": "day2",
+        "calibration_policy": policy.as_payload(),
+    }
+    correction["q_corrected"] = live_fit._reproduced_policy_probability(
+        policy, raw_q=.70, p0=.35, alpha_lead=.01, beta=.12,
+        lead_bucket="day2", side="YES",
+    )
+    accepted, reason = live_fit._sealed_calibration_policy(
+        correction, raw_q=.70, p0=.35, payload={"temperature_metric": "high"},
+        side="YES", expected_lead_bucket="day2plus",
+        legacy_expected_lead_bucket="day2", execution_mode="TAKER_LIMIT",
+        execution_contract="FOK_FULL_OR_ZERO", raw_probability_revision=None,
+    )
+    assert accepted == policy.as_payload()
+    assert reason is None
+
+    rejected, reason = live_fit._sealed_calibration_policy(
+        correction, raw_q=.70, p0=.35, payload={"temperature_metric": "high"},
+        side="YES", expected_lead_bucket="day2plus",
+        legacy_expected_lead_bucket=None, execution_mode="TAKER_LIMIT",
+        execution_contract="FOK_FULL_OR_ZERO", raw_probability_revision=None,
+    )
+    assert rejected is None and reason == "CALIBRATION_POLICY_INVALID"
+
+
+def test_v2_policy_hash_and_artifact_cache_key_are_distinct_from_v1():
+    provider = CanonicalMarketAnchoredFitProvider(
+        lambda: (_ for _ in ()).throw(AssertionError("not called")),
+        city_timezones=_TEST_CITY_TIMEZONES, min_train_rows=1,
+    )
+    v1 = _known_policy()
+    v2 = provider.calibration_policy
+    assert v2.lead_calendar_revision == LEAD_CALENDAR_REVISION
+    assert v2.as_payload()["policy_hash"] != v1.as_payload()["policy_hash"]
+    key = provider._cache_key(
+        (("world", 1, 1), ("trade", 1, 2), ("forecast", 1, 3)),
+        _canonical_scope(),
+    )
+    assert key[-1] == v2.as_payload()["policy_hash"]
 
 
 def test_canonical_shared_corpus_preserves_cutoff_across_batches_and_scopes(tmp_path, monkeypatch):

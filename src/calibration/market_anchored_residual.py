@@ -16,7 +16,7 @@ top-of-book until item 3 (decision certificate: explicit p0 provenance)
 lands; anything computed from it inherits that proxy's noise (fill price is
 observed AFTER the decision, and only for our own side).
 
-alpha_lead is one regularized intercept per lead bucket (day0/day1/day2,
+alpha_lead is one regularized intercept per lead bucket (day0/day1/day2plus,
 lead = target_date - decision_date in days; an unseen lead value fails
 closed to no calibrated output rather than guessing). beta is ONE global
 residual-information coefficient shared across leads and cities (per-city
@@ -78,12 +78,13 @@ LAMBDA_GRID: tuple[float, ...] = (0.1, 1.0, 10.0)
 BETA_MIN = 0.0
 BETA_MAX = 0.12
 
-# lead = (target_date - decision_date).days. Only these three buckets are
-# modeled; any other lead value (including negative, or >=3) fails closed —
-# lead_bucket_of returns None and the row is excluded from fit/predict,
-# never silently folded into an existing bucket or raising a KeyError.
-LEAD_BUCKETS: tuple[str, ...] = ("day0", "day1", "day2")
-LEAD_CALENDAR_REVISION = "city_local_target_date_v1"
+# lead = (target_date - decision_date).days. The live v2 calendar models
+# day0/day1/day2plus; negative leads fail closed. Keep the v1 exact-day2
+# vocabulary available so sealed historical evidence can still be verified.
+LEGACY_LEAD_BUCKETS: tuple[str, ...] = ("day0", "day1", "day2")
+LEGACY_LEAD_CALENDAR_REVISION = "city_local_target_date_v1"
+LEAD_BUCKETS: tuple[str, ...] = ("day0", "day1", "day2plus")
+LEAD_CALENDAR_REVISION = "city_local_target_date_day2plus_v2"
 UNBOUND_LEAD_CALENDAR_REVISION = "UNBOUND"
 
 # A decision date with fewer prior settled rows than this cannot support a
@@ -115,10 +116,23 @@ def sigmoid(z: float) -> float:
 def lead_bucket_of(decision_date: date, target_date: date) -> str | None:
     """Map (decision_date, target_date) to a modeled lead bucket, or None.
 
-    None is the fail-closed signal for an unmodeled lead (e.g. lead=3, or a
-    negative lead from bad data) — callers must treat it as "no calibrated
-    output available", never guess a nearest bucket.
+    None is the fail-closed signal for a negative lead from bad data — callers
+    must treat it as "no calibrated output available", never guess a nearest
+    bucket.
     """
+    lead = (target_date - decision_date).days
+    if lead == 0:
+        return "day0"
+    if lead == 1:
+        return "day1"
+    if lead >= 2:
+        return "day2plus"
+    return None
+
+
+def legacy_lead_bucket_of(decision_date: date, target_date: date) -> str | None:
+    """Map the v1 exact-day2 calendar for sealed historical evidence."""
+
     lead = (target_date - decision_date).days
     if lead == 0:
         return "day0"
@@ -235,13 +249,15 @@ class FitRow:
     w: float = 1.0
 
 
-def _design_row(row: FitRow) -> tuple[np.ndarray, float, float, float] | None:
+def _design_row(
+    row: FitRow, *, lead_buckets: tuple[str, ...] = LEAD_BUCKETS,
+) -> tuple[np.ndarray, float, float, float] | None:
     """Build (feature_vector, offset, y, w) for one row, or None if invalid.
 
-    feature_vector = [1{day0}, 1{day1}, 1{day2}, clipped_logit_residual].
+    feature_vector = [1{day0}, 1{day1}, 1{day2plus}, clipped_logit_residual].
     Invalid: unmodeled lead_bucket, non-finite p0/q_raw, or y not in {0,1}.
     """
-    if row.lead_bucket not in LEAD_BUCKETS:
+    if row.lead_bucket not in lead_buckets:
         return None
     if not _is_finite_number(row.p0) or not _is_finite_number(row.q_raw):
         return None
@@ -250,7 +266,7 @@ def _design_row(row: FitRow) -> tuple[np.ndarray, float, float, float] | None:
     p0_c = clip_p(float(row.p0))
     q_c = clip_p(float(row.q_raw))
     x = max(-CLIP_D, min(CLIP_D, logit(q_c) - logit(p0_c)))
-    onehot = [1.0 if row.lead_bucket == bucket else 0.0 for bucket in LEAD_BUCKETS]
+    onehot = [1.0 if row.lead_bucket == bucket else 0.0 for bucket in lead_buckets]
     features = np.array([*onehot, x], dtype=np.float64)
     offset = logit(p0_c)
     return features, offset, float(row.y), float(row.w)
@@ -297,6 +313,11 @@ def fit(
     excluded and counted in the returned artifact's excluded_reasons —
     never silently dropped, never crash the fit.
     """
+    lead_buckets = (
+        LEGACY_LEAD_BUCKETS
+        if lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
+        else LEAD_BUCKETS
+    )
     excluded_reasons: dict[str, int] = {
         "unmapped_lead_bucket": 0,
         "invalid_probability": 0,
@@ -304,7 +325,7 @@ def fit(
     }
     design_rows: list[tuple[np.ndarray, float, float]] = []
     for row in rows:
-        if row.lead_bucket not in LEAD_BUCKETS:
+        if row.lead_bucket not in lead_buckets:
             excluded_reasons["unmapped_lead_bucket"] += 1
             continue
         if not _is_finite_number(row.p0) or not _is_finite_number(row.q_raw):
@@ -313,12 +334,11 @@ def fit(
         if row.y not in (0, 1):
             excluded_reasons["invalid_outcome"] += 1
             continue
-        built = _design_row(row)
+        built = _design_row(row, lead_buckets=lead_buckets)
         assert built is not None  # validity already checked above
         design_rows.append(built)
 
     n_excluded = sum(excluded_reasons.values())
-    lead_buckets = LEAD_BUCKETS
     if not design_rows:
         alpha = {bucket: 0.0 for bucket in lead_buckets}
         beta = 0.0

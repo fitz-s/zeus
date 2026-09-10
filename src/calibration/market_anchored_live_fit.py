@@ -47,10 +47,14 @@ from src.calibration.market_anchored_residual import (
     P_CLIP_LO,
     FitRow,
     ResidualCalibratorArtifact,
+    LEGACY_LEAD_BUCKETS,
+    LEGACY_LEAD_CALENDAR_REVISION,
+    LEAD_BUCKETS,
     LEAD_CALENDAR_REVISION,
     UNBOUND_LEAD_CALENDAR_REVISION,
     apply_artifact,
     fit,
+    legacy_lead_bucket_of,
     lead_bucket_of,
 )
 from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
@@ -747,9 +751,16 @@ def _reproduced_policy_probability(
 ) -> float | None:
     """Reproduce the sealed correction using only its policy and certificate fields."""
 
+    allowed_lead_buckets = (
+        LEGACY_LEAD_BUCKETS
+        if policy.lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
+        else LEAD_BUCKETS
+        if policy.lead_calendar_revision == LEAD_CALENDAR_REVISION
+        else ()
+    )
     if (
         not isinstance(lead_bucket, str)
-        or lead_bucket not in {"day0", "day1", "day2"}
+        or lead_bucket not in allowed_lead_buckets
         or not isinstance(side, str)
         or side not in {"YES", "NO"}
         or not all(
@@ -794,6 +805,7 @@ def _sealed_calibration_policy(
     payload: Mapping[str, object],
     side: object,
     expected_lead_bucket: str,
+    legacy_expected_lead_bucket: str | None = None,
     execution_mode: str,
     execution_contract: str,
     raw_probability_revision: str | None,
@@ -815,22 +827,35 @@ def _sealed_calibration_policy(
         policy.input_revision == CANONICAL_CALIBRATION_INPUT_REVISION
         and policy.metric_pooling == CANONICAL_CALIBRATION_METRIC_POOLING
     )
+    supported_lead_revisions = {
+        LEGACY_LEAD_CALENDAR_REVISION,
+        LEAD_CALENDAR_REVISION,
+    }
+    expected_policy_lead_bucket = (
+        legacy_expected_lead_bucket
+        if policy.lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
+        else expected_lead_bucket
+    )
     if (
         policy.algorithm_revision != CALIBRATION_ALGORITHM_REVISION
         or not (legacy_policy or canonical_policy)
-        or policy.lead_calendar_revision != LEAD_CALENDAR_REVISION
+        or policy.lead_calendar_revision not in supported_lead_revisions
         or policy.beta_bounds != (float(BETA_MIN), float(BETA_MAX))
         or policy.logit_clip != float(CLIP_D)
         or policy.probability_clip != (float(P_CLIP_LO), float(P_CLIP_HI))
         or not isinstance(expected_lead_bucket, str)
-        or correction_lead_bucket != expected_lead_bucket
+        or correction_lead_bucket != expected_policy_lead_bucket
         or not _finite_policy_number(correction.get("lambda"))
         or abs(policy.lambda_ - float(correction["lambda"])) > 1e-12
         or not _finite_policy_number(correction.get("beta"))
         or not policy.beta_bounds[0] <= float(correction["beta"]) <= policy.beta_bounds[1]
         or payload.get("temperature_metric", payload.get("metric")) not in ("high", "low")
         or not isinstance(correction_lead_bucket, str)
-        or correction_lead_bucket not in {"day0", "day1", "day2"}
+        or correction_lead_bucket not in (
+            LEGACY_LEAD_BUCKETS
+            if policy.lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
+            else LEAD_BUCKETS
+        )
     ):
         return None, "CALIBRATION_POLICY_INVALID"
     if canonical_policy:
@@ -1629,6 +1654,7 @@ def load_canonical_fit_corpus(
             payload=payload,
             side=side,
             expected_lead_bucket=lead_bucket_of(local_date, target),
+            legacy_expected_lead_bucket=legacy_lead_bucket_of(local_date, target),
             execution_mode=mode,
             execution_contract=execution_contract,
             raw_probability_revision=raw_probability_revision,
@@ -2354,7 +2380,10 @@ def corrected_probability(
     if artifact is None:
         return None
     artifact_revision = getattr(artifact, "lead_calendar_revision", UNBOUND_LEAD_CALENDAR_REVISION)
-    if artifact_revision == LEAD_CALENDAR_REVISION:
+    if artifact_revision in {
+        LEGACY_LEAD_CALENDAR_REVISION,
+        LEAD_CALENDAR_REVISION,
+    }:
         if (
             not isinstance(decision_at, datetime)
             or decision_at.tzinfo is None
@@ -2376,7 +2405,11 @@ def corrected_probability(
             return None
     else:
         return None
-    lead_bucket = lead_bucket_of(decision_date, target_date)
+    lead_bucket = (
+        legacy_lead_bucket_of(decision_date, target_date)
+        if artifact_revision == LEGACY_LEAD_CALENDAR_REVISION
+        else lead_bucket_of(decision_date, target_date)
+    )
     if lead_bucket is None:
         return None
     is_no = _is_no_side(side)

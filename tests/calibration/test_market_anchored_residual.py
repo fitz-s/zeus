@@ -24,7 +24,10 @@ from src.calibration.market_anchored_residual import (
     BETA_MAX,
     BETA_MIN,
     CLIP_D,
+    LEGACY_LEAD_BUCKETS,
+    LEGACY_LEAD_CALENDAR_REVISION,
     LEAD_BUCKETS,
+    LEAD_CALENDAR_REVISION,
     FitRow,
     ResidualCalibratorArtifact,
     WalkForwardRow,
@@ -55,16 +58,41 @@ def _identity_artifact() -> ResidualCalibratorArtifact:
 
 
 class TestLeadBucketOf:
-    def test_day0_day1_day2(self):
+    @pytest.mark.parametrize(
+        "lead_days, expected",
+        [(0, "day0"), (1, "day1"), (2, "day2plus"),
+         (3, "day2plus"), (7, "day2plus"), (-1, None)],
+    )
+    def test_v2_day2plus_and_negative(self, lead_days, expected):
         d0 = datetime(2026, 1, 1).date()
-        assert lead_bucket_of(d0, d0) == "day0"
-        assert lead_bucket_of(d0, d0 + timedelta(days=1)) == "day1"
-        assert lead_bucket_of(d0, d0 + timedelta(days=2)) == "day2"
+        assert lead_bucket_of(d0, d0 + timedelta(days=lead_days)) == expected
 
-    def test_lead_3_and_negative_fail_closed_not_a_default_bucket(self):
+    def test_v1_exact_day2_compatibility_mapping(self):
         d0 = datetime(2026, 1, 1).date()
-        assert lead_bucket_of(d0, d0 + timedelta(days=3)) is None
-        assert lead_bucket_of(d0, d0 - timedelta(days=1)) is None
+        from src.calibration.market_anchored_residual import legacy_lead_bucket_of
+
+        assert tuple(LEGACY_LEAD_BUCKETS) == ("day0", "day1", "day2")
+        assert LEAD_CALENDAR_REVISION == "city_local_target_date_day2plus_v2"
+        assert LEGACY_LEAD_CALENDAR_REVISION == "city_local_target_date_v1"
+        assert legacy_lead_bucket_of(d0, d0 + timedelta(days=2)) == "day2"
+        assert legacy_lead_bucket_of(d0, d0 + timedelta(days=3)) is None
+        assert legacy_lead_bucket_of(d0, d0 - timedelta(days=1)) is None
+
+    def test_v1_and_v2_fits_have_distinct_bucket_and_parameter_identity(self):
+        common = dict(p0=0.3, q_raw=0.4, y=1)
+        v1 = fit(
+            [FitRow(lead_bucket="day2", **common)], lambda_=1.0,
+            training_cutoff="2026-01-01T00:00:00Z",
+            lead_calendar_revision=LEGACY_LEAD_CALENDAR_REVISION,
+        )
+        v2 = fit(
+            [FitRow(lead_bucket="day2plus", **common)], lambda_=1.0,
+            training_cutoff="2026-01-01T00:00:00Z",
+            lead_calendar_revision=LEAD_CALENDAR_REVISION,
+        )
+        assert v1.lead_buckets == LEGACY_LEAD_BUCKETS
+        assert v2.lead_buckets == LEAD_BUCKETS
+        assert v1.param_hash != v2.param_hash
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +414,7 @@ class TestBetaClamp:
 class TestRecovery:
     def test_fit_recovers_known_beta_and_alpha_within_tolerance(self):
         rng = random.Random(7)
-        true_alpha = {"day0": 0.2, "day1": 0.0, "day2": 0.0}
+        true_alpha = {"day0": 0.2, "day1": 0.0, "day2plus": 0.0}
         # Within [BETA_MIN, BETA_MAX] (review verdict: beta converges 0.10-0.12
         # in walk-forward fits) so this test exercises IRLS recovery accuracy,
         # not the clamp — TestBetaClamp covers the clamp itself.
@@ -405,7 +433,7 @@ class TestRecovery:
         assert artifact.beta == pytest.approx(true_beta, abs=0.1)
         assert artifact.alpha["day0"] == pytest.approx(true_alpha["day0"], abs=0.15)
         assert artifact.alpha["day1"] == pytest.approx(true_alpha["day1"], abs=0.15)
-        assert artifact.alpha["day2"] == pytest.approx(true_alpha["day2"], abs=0.15)
+        assert artifact.alpha["day2plus"] == pytest.approx(true_alpha["day2plus"], abs=0.15)
 
 
 # ---------------------------------------------------------------------------
