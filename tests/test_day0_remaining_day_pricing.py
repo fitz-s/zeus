@@ -7297,7 +7297,7 @@ class TestRemainingDayMembers:
 
 class TestRequestHashProvenance:
     @pytest.fixture(autouse=True)
-    def _isolate_refresh_state(self):
+    def _isolate_refresh_state(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
         state = (
@@ -7307,6 +7307,14 @@ class TestRequestHashProvenance:
         )
         for values in state:
             values.clear()
+        # Refresh fixtures use a historical 2026-06-10 source decision.  Pin
+        # only the producer's real local clock so strict freshness remains
+        # exercised without making those fixed rows stale against today's wall clock.
+        monkeypatch.setattr(
+            hv,
+            "_day0_utc_now",
+            lambda: datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
+        )
         yield
         for values in state:
             values.clear()
@@ -8545,6 +8553,11 @@ class TestRequestHashProvenance:
 
         before_midnight_utc = datetime(2026, 6, 25, 11, 59, tzinfo=UTC)
         after_midnight_utc = datetime(2026, 6, 25, 12, 1, tzinfo=UTC)
+        monkeypatch.setattr(
+            hv,
+            "_day0_utc_now",
+            lambda: after_midnight_utc + timedelta(minutes=1),
+        )
 
         n1 = hv.maybe_refresh_day0_hourly_vectors(
             [_wellington()],

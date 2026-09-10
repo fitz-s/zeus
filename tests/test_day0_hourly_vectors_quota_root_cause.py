@@ -1,4 +1,6 @@
 # Created: 2026-09-05
+# Last reused or audited: 2026-09-10
+# Lifecycle: created=2026-09-05; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Purpose: Regression tests for the round-3 quota root-cause fixes in
 #   src/data/day0_hourly_vectors.py: a monotone per-model provider-run HWM pin (Open-
 #   Meteo's meta.json is served from more than one replica; replicas have been observed
@@ -13,8 +15,14 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import src.data.day0_hourly_vectors as day0
-from src.data.day0_hourly_vectors import Day0HourlyVector, Day0ProviderRunHwm
+from src.data.day0_hourly_vectors import (
+    Day0HourlyVector,
+    Day0ProviderRunHwm,
+    select_ready_day0_hourly_vectors,
+)
 
 
 def _hwm(model: str, init: datetime, avail: datetime) -> Day0ProviderRunHwm:
@@ -249,6 +257,171 @@ def _ensemble_member_vector(
         times=times, temps_c=tuple(15.0 for _ in times),
         source_run_meta_json=_json.dumps(meta),
     )
+
+
+def test_producer_uses_completion_clock_for_deterministic_strict_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fetch that crosses D is rejected at D and accepted at completion."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    city = SimpleNamespace(name="Clock City", timezone="UTC", lat=0.0, lon=0.0)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    fetch_started = decision + timedelta(minutes=1)
+    fetch_finished = decision + timedelta(minutes=3)
+    materialized = decision + timedelta(minutes=4)
+    persisted_readback = decision + timedelta(minutes=5)
+    clock = iter((fetch_started, fetch_finished, materialized, persisted_readback))
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+
+    times = [
+        f"{(decision.date() + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset in (0, 1)
+        for hour in range(24)
+    ]
+    payload = {"hourly": {"time": times, "temperature_2m": [20.0] * len(times)}}
+    update = OpenMeteoModelUpdate(
+        model="icon_d2",
+        last_run_initialisation_time=decision - timedelta(hours=2),
+        last_run_availability_time=decision - timedelta(minutes=30),
+        last_run_modification_time=decision - timedelta(minutes=25),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda models, **_kwargs: tuple(update for _model in models),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download._fetch_single_runs_hourly_payloads_batched",
+        lambda **_kwargs: (payload,),
+    )
+
+    vectors, request_hash = day0.fetch_day0_hourly_vectors(
+        city, models=["icon_d2"], now=decision
+    )
+    assert request_hash.startswith("sha256:")
+    assert len(vectors) == 1
+    meta = _json.loads(vectors[0].source_run_meta_json or "{}")
+    assert vectors[0].captured_at == decision.isoformat()
+    assert meta["fetch_started_at"] == fetch_started.isoformat()
+    assert meta["fetch_finished_at"] == fetch_finished.isoformat()
+
+    strict = dict(
+        target_date=decision.date().isoformat(),
+        expected_models=["icon_d2"],
+        require_expected=True,
+        remaining_window_start=decision,
+        require_complete_remaining_window=True,
+    )
+    assert select_ready_day0_hourly_vectors(vectors, now=decision, **strict) == []
+    assert select_ready_day0_hourly_vectors(
+        vectors, now=materialized, **strict
+    ) == vectors
+
+    stored: list[Day0HourlyVector] = []
+    readback_times: list[datetime] = []
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["icon_d2"])
+    monkeypatch.setattr(
+        day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        day0,
+        "persist_day0_hourly_vectors",
+        lambda rows, **_kwargs: stored.extend(rows) or len(rows),
+    )
+
+    def strict_readback(**kwargs):
+        readback_times.append(kwargs["now"])
+        return select_ready_day0_hourly_vectors(
+            stored,
+            target_date=kwargs["target_date"],
+            now=kwargs["now"],
+            expected_models=kwargs["expected_models"],
+            require_expected=kwargs["require_expected"],
+            max_bundle_skew_minutes=kwargs["max_bundle_skew_minutes"],
+            remaining_window_start=kwargs["remaining_window_start"],
+            require_complete_remaining_window=kwargs["require_complete_remaining_window"],
+        )
+
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", strict_readback)
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    clock = iter((fetch_started, fetch_finished, materialized, persisted_readback))
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+    assert stats.vectors_written == 2
+    assert readback_times == [persisted_readback, persisted_readback]
+    for target_date, window_start in (
+        (decision.date().isoformat(), decision),
+        ((decision.date() + timedelta(days=1)).isoformat(), decision + timedelta(days=1)),
+    ):
+        assert select_ready_day0_hourly_vectors(
+            stored,
+            target_date=target_date,
+            now=decision,
+            expected_models=["icon_d2"],
+            require_expected=True,
+            remaining_window_start=window_start,
+            require_complete_remaining_window=True,
+        ) == []
+
+
+def test_ensemble_fetch_uses_completion_clock_for_strict_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source-clock 51-member twin obeys the same possession boundary."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    city = SimpleNamespace(name="ENS Clock City", timezone="UTC", lat=0.0, lon=0.0)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    fetch_started = decision + timedelta(minutes=1)
+    fetch_finished = decision + timedelta(minutes=3)
+    clock = iter((fetch_started, fetch_finished))
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    times = [
+        f"{(decision.date() + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset in (0, 1)
+        for hour in range(24)
+    ]
+    hourly = {"time": times, "temperature_2m": [20.0] * len(times)}
+    for index in range(1, 51):
+        hourly[f"temperature_2m_member{index:02d}"] = [20.0] * len(times)
+    update = OpenMeteoModelUpdate(
+        model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        last_run_initialisation_time=decision - timedelta(hours=2),
+        last_run_availability_time=decision - timedelta(minutes=30),
+        last_run_modification_time=decision - timedelta(minutes=25),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda models, **_kwargs: tuple(update for _model in models),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_client.fetch",
+        lambda *_args, **_kwargs: {"hourly": hourly},
+    )
+
+    vectors, request_hash = day0.fetch_day0_source_clock_ensemble_vectors(
+        city, now=decision
+    )
+    assert request_hash.startswith("sha256:")
+    assert len(vectors) == day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT
+    meta = _json.loads(vectors[0].source_run_meta_json or "{}")
+    assert vectors[0].captured_at == decision.isoformat()
+    assert meta["fetch_started_at"] == fetch_started.isoformat()
+    assert meta["fetch_finished_at"] == fetch_finished.isoformat()
+
+    strict = dict(
+        target_date=decision.date().isoformat(),
+        now=decision,
+        expected_models=day0.day0_source_clock_ensemble_member_models(),
+        require_expected=True,
+        max_bundle_skew_minutes=day0.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=decision,
+        require_complete_remaining_window=True,
+    )
+    assert select_ready_day0_hourly_vectors(vectors, **strict) == []
+    strict["now"] = fetch_finished
+    assert len(select_ready_day0_hourly_vectors(vectors, **strict)) == 51
 
 
 def test_current_ensemble_bundle_already_persisted_matches_a_single_run_hwm_across_51_members(

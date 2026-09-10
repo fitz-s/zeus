@@ -65,6 +65,12 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
+
+def _day0_utc_now() -> datetime:
+    """Return the local aware UTC clock used for fetch possession checks."""
+
+    return datetime.now(UTC)
+
 OPENMETEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPENMETEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
@@ -1391,7 +1397,7 @@ def _day0_exact_run_payloads(
         model_api_id = OPENMETEO_MODEL_IDS.get(model, model)
         request_identity["models"].append(model_api_id)
         request_identity["runs"][model] = run.isoformat()
-        fetch_started = datetime.now(UTC)
+        fetch_started = _day0_utc_now()
         authority = "run_pinned_single_runs"
         endpoint_mode = "single_runs"
         try:
@@ -1422,7 +1428,7 @@ def _day0_exact_run_payloads(
                     f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
                     f"single={type(single_exc).__name__}:standard={type(standard_exc).__name__}"
                 ) from standard_exc
-        fetch_finished = datetime.now(UTC)
+        fetch_finished = _day0_utc_now()
         request_identity["endpoint_modes"][model] = endpoint_mode
         fetched.append((model, payload, {
             "model_api_id": model_api_id,
@@ -1482,12 +1488,13 @@ def fetch_day0_hourly_vectors(
         return [], ""
     # This is the local request/capture clock used for vector row identity;
     # possession is the separate fetch_finished_at in source_run_meta_json.
-    captured_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+    source_time = (now or _day0_utc_now()).astimezone(UTC)
+    captured_at = source_time.isoformat()
     try:
         fetched, _request_identity = _day0_exact_run_payloads(
             city=city,
             models=[str(model).strip() for model in chosen if str(model).strip()],
-            decision_time=(now or datetime.now(UTC)).astimezone(UTC),
+            decision_time=source_time,
             timeout_s=timeout_s,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft lane
@@ -1650,7 +1657,7 @@ def fetch_day0_source_clock_ensemble_vectors(
         source_publicly_usable_at,
     )
 
-    decision_time = (now or datetime.now(UTC)).astimezone(UTC)
+    decision_time = (now or _day0_utc_now()).astimezone(UTC)
     captured_at = decision_time.isoformat()
     try:
         before_rows = fetch_model_updates(
@@ -1679,7 +1686,7 @@ def fetch_day0_source_clock_ensemble_vectors(
             "temperature_unit": "celsius",
             "cell_selection": "land",
         }
-        fetch_started = datetime.now(UTC)
+        fetch_started = _day0_utc_now()
         payload = fetch_openmeteo(
             OPENMETEO_ENSEMBLE_URL,
             params,
@@ -1687,7 +1694,7 @@ def fetch_day0_source_clock_ensemble_vectors(
             max_retries=1,
             endpoint_label="day0_source_clock_ensemble",
         )
-        fetch_finished = datetime.now(UTC)
+        fetch_finished = _day0_utc_now()
         after_rows = fetch_model_updates(
             [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
             timeout_seconds=max(0.25, float(timeout_s)),
@@ -2732,7 +2739,7 @@ def _persist_complete_ensemble_bundle(
     ensemble_request_hash: str,
     ensemble_target_dates: tuple[str, ...],
     ensemble_window_starts: Mapping[str, datetime | None],
-    decision_time: datetime,
+    materialization_time: datetime,
     persist_lock_blocking: bool,
 ) -> int:
     """Persist a complete 51-member ENS carrier for every requested date.
@@ -2752,7 +2759,7 @@ def _persist_complete_ensemble_bundle(
             select_ready_day0_hourly_vectors(
                 ensemble_vectors,
                 target_date=target_date,
-                now=decision_time,
+                now=materialization_time,
                 expected_models=ensemble_expected,
                 require_expected=True,
                 max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
@@ -2781,6 +2788,23 @@ def _persist_complete_ensemble_bundle(
             endpoint=OPENMETEO_ENSEMBLE_URL,
             lock_blocking=persist_lock_blocking,
         )
+        post_persist_materialization_time = _day0_utc_now()
+        if not read_freshest_day0_hourly_vectors(
+            city=name,
+            target_date=target_date,
+            now=post_persist_materialization_time,
+            expected_models=ensemble_expected,
+            require_expected=True,
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=window_start,
+            require_complete_remaining_window=True,
+        ):
+            logger.warning(
+                "DAY0_SOURCE_CLOCK_ENSEMBLE_PERSIST_READBACK_INCOMPLETE "
+                "city=%s target_date=%s",
+                name,
+                target_date,
+            )
     return persisted
 
 
@@ -2821,6 +2845,7 @@ def maybe_refresh_day0_hourly_vectors(
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
+    source_decision_time = decision_time.astimezone(UTC)
     from src.data.bayes_precision_fusion_download import (
         bayes_precision_fusion_held_quota_priority,
         bayes_precision_fusion_recovery_quota_priority,
@@ -3081,22 +3106,27 @@ def maybe_refresh_day0_hourly_vectors(
                 checked += 1
                 try:
                     vectors, request_hash = fetch_day0_hourly_vectors(
-                        city, models=models, now=decision_time, timeout_s=timeout_s
+                        city,
+                        models=models,
+                        now=source_decision_time,
+                        timeout_s=timeout_s,
                     )
                 except TypeError as exc:
                     if "timeout_s" not in str(exc):
                         raise
                     vectors, request_hash = fetch_day0_hourly_vectors(
-                        city, models=models, now=decision_time
+                        city, models=models, now=source_decision_time
                     )
+                materialization_time = _day0_utc_now()
                 if ensemble_target_dates:
                     ensemble_vectors, ensemble_request_hash = (
                         fetch_day0_source_clock_ensemble_vectors(
                             city,
-                            now=decision_time,
+                            now=source_decision_time,
                             timeout_s=timeout_s,
                         )
                     )
+                    materialization_time = _day0_utc_now()
                     # QUOTA (round 6, 2026-09-06): persist the ENS carrier the moment it
                     # is complete. It used to be persisted only after the deterministic
                     # bundle had passed every completeness gate below, so each
@@ -3113,7 +3143,7 @@ def maybe_refresh_day0_hourly_vectors(
                         ensemble_request_hash=ensemble_request_hash,
                         ensemble_target_dates=ensemble_target_dates,
                         ensemble_window_starts=ensemble_window_starts,
-                        decision_time=decision_time,
+                        materialization_time=materialization_time,
                         persist_lock_blocking=persist_lock_blocking,
                     )
             expected_models = tuple(dict.fromkeys(str(model) for model in models))
@@ -3181,7 +3211,7 @@ def maybe_refresh_day0_hourly_vectors(
                 selected = select_ready_day0_hourly_vectors(
                     vectors,
                     target_date=target_date,
-                    now=decision_time,
+                    now=materialization_time,
                     expected_models=expected_models,
                     require_expected=True,
                     max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
@@ -3213,11 +3243,12 @@ def maybe_refresh_day0_hourly_vectors(
                     request_hash=request_hash,
                     lock_blocking=persist_lock_blocking,
                 )
+            post_persist_materialization_time = _day0_utc_now()
             drained = all(
                 read_freshest_day0_hourly_vectors(
                     city=name,
                     target_date=target_date,
-                    now=decision_time,
+                    now=post_persist_materialization_time,
                     expected_models=expected_models,
                     require_expected=True,
                     max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
