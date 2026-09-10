@@ -5768,6 +5768,66 @@ def test_deploy_live_pre_stop_handoff_classifies_current_all_no_action_failures(
     assert handoff["fresh_failed_monitor_timestamp_stale_position_ids"] == ()
 
 
+def test_deploy_live_pre_stop_handoff_real_cadence_reads_held_position(
+    tmp_path,
+):
+    """The real pre-stop cadence reader proves one fresh held position."""
+
+    dl = _load("deploy_live_pre_stop_real_cadence", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'pos-real-cadence', 'active', 1.0, 1.0, 'synced'
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-real-cadence', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.5,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.5,
+                    "last_monitor_market_price_is_fresh": True,
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is True
+    assert handoff["open_position_count"] == 1
+    assert handoff["monitored_position_ids"] == ("pos-real-cadence",)
+    assert handoff["fresh_position_count"] == 1
+    assert handoff["restart_blocking_position_count"] == 0
+    assert handoff["quote_only_stale_position_ids"] == ()
+
+
 @pytest.mark.parametrize(
     ("held_bid", "expected_ok"),
     (("0.0", True), ("0.05", False), ("UNKNOWN", False)),

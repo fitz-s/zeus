@@ -1229,6 +1229,7 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
         cadence = collect_monitor_cadence_evidence(
             conn,
             now=now,
