@@ -6168,30 +6168,35 @@ def _target_context_by_family(
 def _market_anchored_correction_resolver(
     world_conn,
     *,
+    trade_conn,
+    forecast_conn,
     target_context_by_family: Mapping[str, tuple[str, date]],
+    prepared_by_family: Mapping[str, object],
+    calibration_scope_resolver: Callable[[object, object], object | None] | None,
+    deadline_monotonic: float | None = None,
 ):
-    """Build the per-candidate market-anchored correction resolver, or None.
+    """Fit ENTRY corrections from canonical fills on the batch's borrowed handles.
 
-    The fit rides ``world_conn`` — the batch's already-open world connection —
-    rather than dialing its own: opening a second handle mid-decision is exactly
-    what the entry path forbids. The provider caches behind a TTL, so the table
-    is read once per TTL for the whole batch, not once per candidate.
-
-    Returns None when no family in this batch has a usable target date; the
-    solver then keeps every raw q, which is the pre-calibrator behavior.
+    Each exact metric, probability revision and execution contract has its own
+    artifact. The provider shares one causal corpus read across this batch's
+    scopes; unavailable canonical evidence never falls back to selected claims.
     """
 
     from src.calibration.market_anchored_live_fit import (
-        MarketAnchoredFitProvider,
+        CanonicalMarketAnchoredFitProvider,
         corrected_probability,
-        get_shared_artifact_cache,
     )
-    from src.contracts.payoff_q_correction import PayoffQCorrection
+    from src.contracts.payoff_q_correction import (
+        CalibrationFitScope, PayoffQCorrection, PayoffQCorrectionUnavailable,
+    )
     from src.config import runtime_cities_by_name
 
-    if not target_context_by_family:
-        return None
+    if calibration_scope_resolver is None:
+        def no_correction(candidate, raw_q, p0, decision_at_utc):
+            return None
+        return no_correction
 
+    provider = None
     try:
         runtime_city_configs = runtime_cities_by_name()
         if not isinstance(runtime_city_configs, Mapping):
@@ -6200,25 +6205,36 @@ def _market_anchored_correction_resolver(
             city: getattr(config, "timezone", "")
             for city, config in runtime_city_configs.items()
         }
-        provider = MarketAnchoredFitProvider(
-            lambda: world_conn,
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (world_conn, trade_conn, forecast_conn),
             city_timezones=city_timezones,
-            schema_alias="main",
-            cache=get_shared_artifact_cache(),
         )
     except (AttributeError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         _LOG.warning(
             "MARKET_ANCHORED_CITY_SNAPSHOT_UNAVAILABLE:%s",
             type(exc).__name__,
         )
-        return None
 
-    def resolve(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+    def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+        if provider is None:
+            raise PayoffQCorrectionUnavailable("PROVIDER_UNAVAILABLE")
         target_context = target_context_by_family.get(str(candidate.family_key))
         if target_context is None:
-            return None
+            raise PayoffQCorrectionUnavailable("TARGET_CONTEXT_UNAVAILABLE")
+        prepared = prepared_by_family.get(str(candidate.family_key))
+        if prepared is None:
+            raise PayoffQCorrectionUnavailable("PREPARED_FAMILY_UNAVAILABLE")
+        scope = calibration_scope_resolver(candidate, prepared)
+        if (
+            not isinstance(scope, CalibrationFitScope)
+            or scope.execution_mode != str(getattr(candidate, "execution_mode", ""))
+            or str(getattr(candidate, "action", "BUY")) != "BUY"
+        ):
+            raise PayoffQCorrectionUnavailable("FIT_SCOPE_UNAVAILABLE")
         city, target_date = target_context
-        artifact = provider.artifact(now=decision_at_utc)
+        artifact = provider.artifact(
+            scope=scope, now=decision_at_utc, deadline_monotonic=deadline_monotonic
+        )
         applied = corrected_probability(
             artifact,
             p0=p0,
@@ -6229,7 +6245,7 @@ def _market_anchored_correction_resolver(
             side=str(candidate.side),
         )
         if applied is None:
-            return None
+            raise PayoffQCorrectionUnavailable("SCOPED_FIT_UNAVAILABLE")
         corrected_q, lead_bucket, alpha_lead = applied
         return PayoffQCorrection(
             family_key=str(candidate.family_key),
@@ -6246,7 +6262,17 @@ def _market_anchored_correction_resolver(
             training_cutoff=artifact.training_cutoff,
             n_train=int(artifact.n_train),
             param_hash=artifact.param_hash,
+            calibration_policy=provider.calibration_policy,
+            fit_scope=scope,
         )
+
+    def resolve(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+        try:
+            return resolve_current(candidate, raw_q, p0, decision_at_utc)
+        except PayoffQCorrectionUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - never reinterpret required-fit failure as raw q
+            raise PayoffQCorrectionUnavailable(type(exc).__name__) from exc
 
     return resolve
 
@@ -6837,6 +6863,7 @@ def process_current_global_batch(
     | None = None,
     proof_candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
+    calibration_scope_resolver: Callable[[object, object], object | None] | None = None,
     buy_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[
@@ -8063,6 +8090,14 @@ def process_current_global_batch(
             return reject(f"GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAPS_INVALID:{exc}")
         payoff_q_correction_resolver = _market_anchored_correction_resolver(
             world_conn,
+            trade_conn=trade_conn,
+            forecast_conn=forecast_conn,
+            calibration_scope_resolver=calibration_scope_resolver,
+            prepared_by_family={
+                str(prepared.probability_witness.family_key): prepared
+                for prepared in prepared_by_event.values()
+            },
+            deadline_monotonic=(work_context.deadline_monotonic if work_context else None),
             target_context_by_family=_target_context_by_family(
                 full_scope_event_by_family,
                 payload_reader=payload_reader,
@@ -9343,6 +9378,7 @@ def process_current_global_batch(
                         proof_candidate_policy_rejection_resolver=(
                             proof_candidate_policy_rejection_resolver
                         ),
+                        calibration_scope_resolver=calibration_scope_resolver,
                         buy_candidates_enabled=buy_candidates_enabled,
                         fractional_kelly_multiplier=fractional_kelly_multiplier,
                         claim_unpaged_winner=claim_unpaged_winner,

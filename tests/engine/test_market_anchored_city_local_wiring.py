@@ -1,7 +1,7 @@
 """City-local calendar identity tests for market-anchored correction."""
 
 # Created: 2026-09-08
-# Last reused or audited: 2026-09-08
+# Last reused or audited: 2026-09-10
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 import sqlite3
 import threading
 import time
+
+import pytest
 from types import SimpleNamespace
 
 from src.calibration.market_anchored_live_fit import (
@@ -31,10 +33,32 @@ from src.calibration.market_anchored_live_fit import (
     load_fit_rows,
     register_active_provider,
 )
+from src.contracts.payoff_q_correction import (
+    CalibrationFitScope, CalibrationPolicySpec, PayoffQCorrectionUnavailable,
+)
+from src.engine import event_reactor_adapter as adapter
 from src.engine import cycle_runner
 from src.engine import global_batch_runtime as runtime
 from src.state import portfolio as portfolio_module
 from src.state.portfolio import ExitContext, Position
+
+
+def _entry_resolver(world_conn, *, target_context_by_family, **kwargs):
+    return runtime._market_anchored_correction_resolver(
+        world_conn,
+        trade_conn=kwargs.pop("trade_conn", object()),
+        forecast_conn=kwargs.pop("forecast_conn", object()),
+        target_context_by_family=target_context_by_family,
+        prepared_by_family=kwargs.pop("prepared_by_family", {
+            family: object() for family in target_context_by_family
+        }),
+        calibration_scope_resolver=kwargs.pop("calibration_scope_resolver", lambda candidate, prepared: (
+            adapter._global_entry_calibration_fit_scope(
+                candidate, metric="high", raw_probability_revision="fixture-revision-v1",
+            )
+        )),
+        **kwargs,
+    )
 
 
 def _artifact(*, snapshot, revision="city_local_target_date_v1"):
@@ -250,7 +274,7 @@ def test_resolver_snapshots_all_runtime_cities(monkeypatch):
         def __init__(self, connect, **kwargs):
             self.__class__.seen = kwargs["city_timezones"]
 
-        def artifact(self, *, now):
+        def artifact(self, *, now, scope=None, deadline_monotonic=None):
             return None
 
     monkeypatch.setattr(
@@ -259,7 +283,7 @@ def test_resolver_snapshots_all_runtime_cities(monkeypatch):
         runtime._market_anchored_correction_resolver,
     )
     monkeypatch.setattr(
-        "src.calibration.market_anchored_live_fit.MarketAnchoredFitProvider",
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
         CapturingProvider,
     )
     monkeypatch.setattr(
@@ -270,7 +294,7 @@ def test_resolver_snapshots_all_runtime_cities(monkeypatch):
             "Broken": SimpleNamespace(timezone="No/Such_Zone"),
         },
     )
-    resolver = runtime._market_anchored_correction_resolver(
+    resolver = _entry_resolver(
         object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))}
     )
     assert resolver is not None
@@ -287,14 +311,27 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch)
     )
 
     class StubProvider:
+        calibration_policy = CalibrationPolicySpec(
+            algorithm_revision="test-algorithm-v1",
+            input_revision="test-input-v1",
+            metric_pooling="unfiltered_attribution_claims",
+            lead_calendar_revision="city_local_target_date_v1",
+            lambda_=1.0,
+            min_train_weight=20,
+            beta_bounds=(0.0, 0.12),
+            logit_clip=3.0,
+            probability_clip=(0.005, 0.995),
+            refit_seconds=21600.0,
+        )
+
         def __init__(self, connect, **kwargs):
             self.city_timezones = kwargs["city_timezones"]
 
-        def artifact(self, *, now):
+        def artifact(self, *, now, scope=None, deadline_monotonic=None):
             return artifact
 
     monkeypatch.setattr(
-        "src.calibration.market_anchored_live_fit.MarketAnchoredFitProvider",
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
         StubProvider,
     )
     monkeypatch.setattr(
@@ -304,15 +341,15 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch)
             "Tokyo": SimpleNamespace(timezone="Asia/Tokyo"),
         },
     )
-    resolver = runtime._market_anchored_correction_resolver(
+    resolver = _entry_resolver(
         object(),
         target_context_by_family={
             "ny": ("New York", date(2026, 1, 2)),
             "tokyo": ("Tokyo", date(2026, 1, 2)),
         },
     )
-    ny = SimpleNamespace(family_key="ny", side="YES", bin_id="b", token_id="t")
-    tokyo = SimpleNamespace(family_key="tokyo", side="YES", bin_id="b", token_id="t")
+    ny = SimpleNamespace(family_key="ny", side="YES", bin_id="b", token_id="t", execution_mode="TAKER_LIMIT")
+    tokyo = SimpleNamespace(family_key="tokyo", side="YES", bin_id="b", token_id="t", execution_mode="TAKER_LIMIT")
     ny_correction = resolver(
         ny, 0.9, 0.35, datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
     )
@@ -321,6 +358,14 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch)
     )
     assert ny_correction and ny_correction.lead_bucket == "day1"
     assert tokyo_correction and tokyo_correction.lead_bucket == "day0"
+    assert ny_correction.fit_scope == CalibrationFitScope(
+        "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "fixture-revision-v1",
+    )
+    assert ny_correction.as_cert_fields()["fit_scope"] == ny_correction.fit_scope.as_payload()
+    assert ny_correction.calibration_policy is StubProvider.calibration_policy
+    assert ny_correction.as_cert_fields()["calibration_policy"] == (
+        StubProvider.calibration_policy.as_payload()
+    )
 
     fixed_now = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
 
@@ -374,12 +419,10 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch)
 def test_snapshot_failure_and_empty_context_leave_monitor_scope_untouched(monkeypatch, caplog):
     stale = object()
     register_active_provider(stale)
-    assert (
-        runtime._market_anchored_correction_resolver(
-            object(), target_context_by_family={}
-        )
-        is None
-    )
+    empty = _entry_resolver(object(), target_context_by_family={})
+    assert callable(empty)
+    with pytest.raises(PayoffQCorrectionUnavailable, match="TARGET_CONTEXT_UNAVAILABLE"):
+        empty(SimpleNamespace(family_key="missing"), .8, .4, datetime.now(timezone.utc))
     # Entry resolver state is batch-local; it must not mutate a caller's
     # monitor-scoped provider.
     assert get_active_provider() is stale
@@ -390,12 +433,11 @@ def test_snapshot_failure_and_empty_context_leave_monitor_scope_untouched(monkey
         "src.config.runtime_cities_by_name",
         lambda: (_ for _ in ()).throw(ValueError("bad city snapshot")),
     )
-    assert (
-        runtime._market_anchored_correction_resolver(
-            object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))}
-        )
-        is None
+    unavailable = _entry_resolver(
+        object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))}
     )
+    with pytest.raises(PayoffQCorrectionUnavailable, match="PROVIDER_UNAVAILABLE"):
+        unavailable(SimpleNamespace(family_key="one"), .8, .4, datetime.now(timezone.utc))
     assert get_active_provider() is stale
     register_active_provider(None)
     assert "MARKET_ANCHORED_CITY_SNAPSHOT_UNAVAILABLE:ValueError" in caplog.text
@@ -452,10 +494,10 @@ def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(m
     assert get_active_provider() is None
 
 
-def test_real_world_entry_warm_close_then_monitor_refits_on_attached_trade(
+def test_legacy_monitor_warm_close_then_refits_on_attached_trade(
     monkeypatch, tmp_path
 ):
-    """The monitor must recover a real expired entry artifact from fresh WORLD."""
+    """The legacy monitor refits its own expired artifact from fresh WORLD."""
 
     entry_at = datetime.now(timezone.utc) - timedelta(hours=7)
     target_date = entry_at.date() + timedelta(days=1)
@@ -495,15 +537,10 @@ def test_real_world_entry_warm_close_then_monitor_refits_on_attached_trade(
         lambda: {"Chicago": SimpleNamespace(timezone="UTC")},
     )
 
-    entry_resolver = runtime._market_anchored_correction_resolver(
-        world,
-        target_context_by_family={"family": ("Chicago", target_date)},
+    prior_monitor = MarketAnchoredFitProvider(
+        lambda: world, city_timezones={"Chicago": "UTC"},
     )
-    candidate = SimpleNamespace(
-        family_key="family", bin_id="bin-0", side="YES", token_id="token-0"
-    )
-    entry_correction = entry_resolver(candidate, 0.9, 0.35, entry_at)
-    assert entry_correction is not None
+    assert prior_monitor.artifact(now=entry_at) is not None
     world.close()
 
     trade = sqlite3.connect(":memory:")
@@ -602,3 +639,133 @@ def test_cycle_runner_monitor_budget_includes_provider_setup_time(monkeypatch):
     assert observed["warm_remaining"] < 0.04
     assert observed["runtime_budget"] < 0.04
     assert get_active_provider() is None
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("mode,contract", [
+    ("TAKER_LIMIT", "FOK_FULL_OR_ZERO"), ("MAKER_REST", "MAKER_REST"),
+])
+def test_current_entry_fit_scope_uses_exact_execution_contract(metric, mode, contract):
+    scope = adapter._global_entry_calibration_fit_scope(
+        SimpleNamespace(action="BUY", execution_mode=mode),
+        metric=metric, raw_probability_revision="current-raw-v3",
+    )
+    assert scope == CalibrationFitScope(metric, mode, contract, "current-raw-v3")
+
+
+@pytest.mark.parametrize("action,metric,revision,mode", [
+    ("SELL", "high", "v3", "TAKER_LIMIT"),
+    ("BUY", None, "v3", "TAKER_LIMIT"),
+    ("BUY", "high", None, "TAKER_LIMIT"),
+    ("BUY", "low", "v3", "UNKNOWN"),
+])
+def test_unbound_or_sell_candidate_has_no_entry_fit_scope(action, metric, revision, mode):
+    assert adapter._global_entry_calibration_fit_scope(
+        SimpleNamespace(action=action, execution_mode=mode),
+        metric=metric, raw_probability_revision=revision,
+    ) is None
+
+
+def test_entry_resolver_borrows_all_handles_and_passes_deadline_and_scope(monkeypatch):
+    seen = {}
+    world, trade, forecast = object(), object(), object()
+    scope = CalibrationFitScope("low", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-raw-v3")
+
+    class Provider:
+        def __init__(self, connects, **kwargs):
+            seen["connections"] = connects()
+
+        def artifact(self, *, scope, now, deadline_monotonic):
+            seen.update(scope=scope, now=now, deadline=deadline_monotonic)
+            return None
+
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider", Provider)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")})
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    resolver = _entry_resolver(
+        world, trade_conn=trade, forecast_conn=forecast,
+        target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        calibration_scope_resolver=lambda candidate, prepared: scope, deadline_monotonic=123.0,
+    )
+    with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
+        resolver(SimpleNamespace(family_key="one", side="YES", execution_mode="TAKER_LIMIT"), .8, .4, now)
+    assert seen == {"connections": (world, trade, forecast), "scope": scope, "now": now, "deadline": 123.0}
+
+
+def test_missing_canonical_scope_does_not_construct_legacy_fit(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("selected attribution cannot replace canonical ENTRY evidence")
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.MarketAnchoredFitProvider", forbidden)
+    resolver = _entry_resolver(
+        object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        calibration_scope_resolver=None,
+    )
+    assert callable(resolver)
+    assert resolver(object(), .8, .4, datetime(2026, 1, 1, tzinfo=timezone.utc)) is None
+
+
+@pytest.mark.parametrize("with_family_endowment", [False, True])
+def test_unavailable_canonical_fit_cannot_size_raw_buy(monkeypatch, with_family_endowment):
+    from tests.solve.test_solver_properties import _global_candidate, _global_select, _family_endowment
+
+    class Provider:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def artifact(self, **kwargs):
+            return None
+
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider", Provider)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")})
+    candidate = _global_candidate(
+        candidate_id="unavailable-fit", family="one", side="YES", q=.8,
+        levels=((".35", "100"),),
+    )
+    resolver = _entry_resolver(
+        object(), target_context_by_family={"one": ("Tokyo", date(2026, 7, 11))},
+    )
+    kwargs = {"cap": "60"}
+    if with_family_endowment:
+        kwargs["family_portfolio_endowment_resolver"] = lambda _: _family_endowment(candidate)
+    raw = _global_select((candidate,), **kwargs)
+    decision = _global_select((candidate,), payoff_q_correction_resolver=resolver, **kwargs)
+    assert raw.candidate is candidate and raw.shares > 0, raw.rejection_reasons
+    assert decision.candidate is None and decision.shares == 0
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "CALIBRATED_PAYOFF_Q_UNAVAILABLE:SCOPED_FIT_UNAVAILABLE"
+    )
+
+
+def test_missing_fit_rejects_only_its_cell_and_preserves_calibrated_competitor(monkeypatch):
+    from tests.solve.test_solver_properties import _global_candidate, _global_select
+    from src.calibration.market_anchored_live_fit import CanonicalMarketAnchoredFitProvider
+
+    policy = CanonicalMarketAnchoredFitProvider(
+        lambda: (), city_timezones={"Tokyo": "Asia/Tokyo"},
+    ).calibration_policy
+    artifact = _artifact(snapshot=(("Tokyo", "Asia/Tokyo"),))
+
+    class Provider:
+        calibration_policy = policy
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def artifact(self, *, scope, **kwargs):
+            return None if scope.metric == "high" else artifact
+
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider", Provider)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")})
+    missing = _global_candidate(candidate_id="no-fit", family="high", side="YES", q=.95, levels=((".35", "100"),))
+    qualified = _global_candidate(candidate_id="has-fit", family="low", side="YES", q=.8, levels=((".35", "100"),))
+    resolver = _entry_resolver(
+        object(), target_context_by_family={key: ("Tokyo", date(2026, 7, 11)) for key in ("high", "low")},
+        calibration_scope_resolver=lambda candidate, prepared: adapter._global_entry_calibration_fit_scope(
+            candidate, metric=candidate.family_key, raw_probability_revision="raw-v3",
+        ),
+    )
+    decision = _global_select((missing, qualified), cap="60", payoff_q_correction_resolver=resolver)
+    assert decision.candidate is qualified and decision.shares > 0, decision.rejection_reasons
+    assert decision.payoff_q_correction.fit_scope.metric == "low"
+    assert decision.expected_terminal_wealth.win_probability_mean < .8
+    assert decision.rejection_reasons[missing.candidate_id].startswith("CALIBRATED_PAYOFF_Q_UNAVAILABLE:")

@@ -77,7 +77,7 @@ from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
-from src.contracts.payoff_q_correction import PayoffQCorrection
+from src.contracts.payoff_q_correction import PayoffQCorrection, PayoffQCorrectionUnavailable
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -7038,9 +7038,9 @@ def select_global_single_order(
         Excluded by construction: SELL legs (the calibrator is fitted on entry
         decisions only) and any candidate whose payoff is a PROVED 0/1 Day0
         fact — shrinking a settled truth toward the market price would corrupt
-        a certainty into a guess. Every other failure path (no resolver, no
-        fit, unmodeled lead, unusable price) also returns None, so the raw
-        witness probability stays in force.
+        a certainty into a guess. Optional legacy resolvers may return None;
+        the canonical ENTRY resolver raises PayoffQCorrectionUnavailable when
+        its required fit is missing, so this proposal cannot size on raw q.
         """
 
         if (
@@ -7063,7 +7063,9 @@ def select_global_single_order(
             correction = payoff_q_correction_resolver(
                 candidate, float(raw_q), p0, decision_at_utc
             )
-        except Exception:  # noqa: BLE001 - an unavailable correction keeps raw q
+        except PayoffQCorrectionUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 - optional legacy correction keeps raw q
             return None
         if correction is None:
             return None
@@ -7530,6 +7532,25 @@ def select_global_single_order(
             ):
                 rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
                 continue
+        payoff_probability_mean = family_payoff_point_q(
+            probability_witness,
+            bin_id=candidate.bin_id,
+            side=candidate.side,
+        )
+        if payoff_probability_mean is None:
+            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
+            continue
+        try:
+            correction = resolve_payoff_q_correction(
+                candidate,
+                raw_q=payoff_probability_mean,
+                witness=probability_witness,
+            )
+        except PayoffQCorrectionUnavailable as exc:
+            # SCOPE: this BUY proposal. DRAIN: retry its canonical fit next cut.
+            # RESET: the exact current fit supplies a calibrated acting q.
+            rejections[candidate.candidate_id] = f"CALIBRATED_PAYOFF_Q_UNAVAILABLE:{exc}"
+            continue
         if (
             family_portfolio_endowment_resolver is not None
             and isinstance(
@@ -7545,19 +7566,6 @@ def select_global_single_order(
             joint_buy_candidates_by_family.setdefault(
                 candidate.family_key, []
             ).append(candidate)
-        payoff_probability_mean = family_payoff_point_q(
-            probability_witness,
-            bin_id=candidate.bin_id,
-            side=candidate.side,
-        )
-        if payoff_probability_mean is None:
-            rejections[candidate.candidate_id] = "POINT_PROBABILITY_UNAVAILABLE"
-            continue
-        correction = resolve_payoff_q_correction(
-            candidate,
-            raw_q=payoff_probability_mean,
-            witness=probability_witness,
-        )
         buy_corrections[candidate.candidate_id] = correction
         if correction is not None:
             payoff_probability_mean = correction.corrected_q

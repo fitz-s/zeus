@@ -4,38 +4,33 @@
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring. Row
 #   extraction mirrors scripts/calibrator_walkforward_report.py (load_rows /
 #   build_walk_forward_rows); the calibrator math is imported, never restated.
-"""In-process fit provider for the market-anchored residual calibrator.
+"""In-process market-anchored residual fit serving.
 
-Fits ONE artifact from settled history and caches it in module state behind a
-TTL. There is deliberately no artifact FILE: a written artifact plus a separate
-refitter is a known failure class here — the refitter stops, the file goes
-stale, and the live path keeps acting on frozen parameters while every
-freshness check it has still passes. An in-process cache cannot outlive the
-process that fitted it, so staleness is bounded by the TTL by construction.
+``MarketAnchoredFitProvider`` remains the legacy monitor provider over its
+selected attribution corpus. ``CanonicalMarketAnchoredFitProvider`` serves
+ENTRY only from the canonical command corpus, with a causal cutoff and exact
+metric/execution-contract/raw-revision scope. Both cache immutable artifacts,
+never DB handles.
 
-Walk-forward law: ``training_cutoff`` is the fit instant, and only rows whose
-settlement is strictly before it and whose CURRENT attribution version was
-graded at or before it are trained on. A late grade or a later regrade cannot
-reach back into an artifact already fitted, so covered historical versions are
-conservatively absent rather than reconstructed from supersession history.
-
-Fail-open is the whole contract. Too few rows, an unreadable database, a lead
-outside day0/day1/day2, a non-finite probability — every one of these returns
-None, and the caller keeps the raw q it already had. This module never raises
-into the decision path and never degrades an unfittable case into a guess.
+Canonical probability serving omits receipt-decoded cash proof and terminal
+markout, while retaining its complete command denominator and marking those
+endpoint facts UNKNOWN. The default corpus reader still validates cash proof
+for OOS/markout consumers. ``None`` only means no usable fit: it preserves raw
+q and is neither calibrated probability nor positive-edge evidence.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import json
-from collections import Counter, defaultdict
-from dataclasses import dataclass, fields
+from collections import Counter, OrderedDict, defaultdict
+from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
 import threading
 import time
 import math
 from decimal import Decimal
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -43,8 +38,13 @@ from typing import Callable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.calibration.market_anchored_residual import (
+    BETA_MAX,
+    BETA_MIN,
+    CLIP_D,
     LAMBDA_GRID,
     MIN_TRAIN_ROWS,
+    P_CLIP_HI,
+    P_CLIP_LO,
     FitRow,
     ResidualCalibratorArtifact,
     LEAD_CALENDAR_REVISION,
@@ -53,6 +53,7 @@ from src.calibration.market_anchored_residual import (
     fit,
     lead_bucket_of,
 )
+from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
 
 # One fit serves this long before a refit is attempted. Six hours matches the
 # forecast cycle interval (00/06/12/18Z): settled rows arrive in bursts tied to
@@ -67,6 +68,17 @@ DEFAULT_TTL = timedelta(hours=6)
 # acting probability manufactures edge; over-regularizing shrinks toward the
 # market price, which is the plan's explicit safe direction.
 LIVE_LAMBDA = max(LAMBDA_GRID)
+CALIBRATION_ALGORITHM_REVISION = "market_anchored_ridge_offset_irls_v1"
+CALIBRATION_INPUT_REVISION = (
+    "settlement_attribution.q_in_bin_current_graded_before_cutoff_claim_weight_v1"
+)
+CALIBRATION_METRIC_POOLING = "unfiltered_attribution_claims"
+CANONICAL_CALIBRATION_INPUT_REVISION = (
+    "canonical_fit_corpus.sealed_entry_fill_finalized_payout_v1"
+)
+CANONICAL_CALIBRATION_METRIC_POOLING = (
+    "metric_separated_entry_execution_contract_raw_probability_revision"
+)
 
 _FIT_TABLE_BY_ALIAS = {
     "main": "settlement_attribution",
@@ -100,11 +112,37 @@ def _canonical_db_identity(
         return None
 
 
+def _borrowed_db_identity(
+    conn: sqlite3.Connection,
+    *,
+    schema_alias: str,
+) -> tuple[str, int, int] | None:
+    """Physical identity for a borrowed canonical handle; never retains it."""
+
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        raw_path = next(
+            str(row[2] or "")
+            for row in rows
+            if len(row) > 2 and str(row[1]) == schema_alias
+        )
+        if not raw_path:
+            return None
+        path = Path(raw_path).resolve(strict=False)
+        stat = path.stat()
+        return str(path), int(stat.st_dev), int(stat.st_ino)
+    except (OSError, StopIteration, TypeError, ValueError, sqlite3.Error):
+        return None
+
+
 class MarketAnchoredArtifactCache:
     """Thread-safe cache of immutable fit artifacts, never database handles."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_entries: int | None = None) -> None:
+        if max_entries is not None and (type(max_entries) is not int or max_entries <= 0):
+            raise ValueError("artifact cache max_entries must be positive")
         self._lock = threading.Lock()
+        self._max_entries = max_entries
         self._entries: dict[
             ArtifactCacheKey,
             tuple[ResidualCalibratorArtifact, datetime],
@@ -157,6 +195,9 @@ class MarketAnchoredArtifactCache:
             ):
                 if cached is None or now >= cached[1]:
                     self._entries[key] = (artifact, now)
+                    if self._max_entries is not None:
+                        while len(self._entries) > self._max_entries:
+                            self._entries.pop(next(iter(self._entries)))
                     return artifact, now
                 # This was a causal backfill earlier than a newer shared
                 # artifact.  Serve the backfill to this caller without
@@ -170,6 +211,91 @@ class MarketAnchoredArtifactCache:
 
 
 _SHARED_ARTIFACT_CACHE = MarketAnchoredArtifactCache()
+_CANONICAL_CACHE_MAX_ENTRIES = 128
+_SHARED_CANONICAL_ARTIFACT_CACHE = MarketAnchoredArtifactCache(
+    max_entries=_CANONICAL_CACHE_MAX_ENTRIES,
+)
+
+
+def _freeze_corpus_value(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_corpus_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_corpus_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_corpus_value(item) for item in value)
+    return value
+
+
+class CanonicalCorpusCache:
+    """Bounded cache of immutable canonical corpora, never SQLite handles."""
+
+    def __init__(self, *, max_entries: int = _CANONICAL_CACHE_MAX_ENTRIES) -> None:
+        if type(max_entries) is not int or max_entries <= 0:
+            raise ValueError("canonical corpus cache max_entries must be positive")
+        self._lock = threading.Lock()
+        self._max_entries = max_entries
+        self._entries: OrderedDict[ArtifactCacheKey, tuple[CanonicalFitCorpus, datetime]] = OrderedDict()
+
+    def get_or_load(
+        self,
+        key: ArtifactCacheKey,
+        *,
+        requested_cutoff: datetime,
+        ttl: timedelta,
+        load_current: Callable[[], CanonicalFitCorpus | None],
+        deadline_monotonic: float | None = None,
+    ) -> tuple[CanonicalFitCorpus | None, datetime | None]:
+        """Reuse only a corpus causally no newer than the requested cutoff."""
+
+        if deadline_monotonic is None:
+            acquired = self._lock.acquire()
+        else:
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if not math.isfinite(remaining) or remaining <= 0:
+                return None, None
+            acquired = self._lock.acquire(timeout=remaining)
+        if not acquired:
+            return None, None
+        try:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return None, None
+            cached = self._entries.get(key)
+            if cached is not None:
+                corpus, corpus_cutoff = cached
+                age = requested_cutoff - corpus_cutoff
+                if timedelta(0) <= age < ttl:
+                    self._entries.move_to_end(key)
+                    return corpus, corpus_cutoff
+            corpus = load_current()
+            if (
+                corpus is None
+                or _parse_ts(corpus.training_cutoff) != requested_cutoff
+                or (deadline_monotonic is not None and time.monotonic() >= deadline_monotonic)
+            ):
+                return None, None
+            corpus = replace(
+                corpus,
+                records=_freeze_corpus_value(corpus.records),
+                unknown=_freeze_corpus_value(corpus.unknown),
+                command_accounting=_freeze_corpus_value(corpus.command_accounting),
+            )
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return None, None
+            # A backward request must not replace the newer corpus used by the
+            # ordinary forward cadence, but its caller still receives its own
+            # causally valid result.
+            if cached is None or requested_cutoff >= cached[1]:
+                self._entries[key] = (corpus, requested_cutoff)
+                self._entries.move_to_end(key)
+                while len(self._entries) > self._max_entries:
+                    self._entries.popitem(last=False)
+            return corpus, requested_cutoff
+        finally:
+            self._lock.release()
+
+
+_SHARED_CANONICAL_CORPUS_CACHE = CanonicalCorpusCache()
 
 
 def get_shared_artifact_cache() -> MarketAnchoredArtifactCache:
@@ -385,11 +511,12 @@ def _execution_contract_for(
 class CanonicalFitCorpus:
     """Filled-policy evidence; neither account returns nor admission authority."""
 
-    records: tuple[dict, ...]
+    records: tuple[Mapping[str, object], ...]
     unknown: Mapping[str, int]
     command_count: int
     training_cutoff: str
     revision: str = CANONICAL_CORPUS_REVISION
+    command_accounting: tuple[Mapping[str, object], ...] = ()
 
     def fit_rows(
         self, *, metric: str, execution_mode: str, probability_revision: str,
@@ -424,6 +551,133 @@ class CanonicalFitCorpus:
             w=r["confirmed_shares"] / totals[r["event_key"]],
         ) for r in records]
 
+
+
+def _command_outcome_index(command: dict) -> int | None:
+    """Bind a token to its snapshot's CTF slot independently of model evidence."""
+    try:
+        token_map = command["token_map_json"]
+        token_map = json.loads(token_map) if isinstance(token_map, str) else token_map
+        if not isinstance(token_map, dict):
+            return None
+        token = command["token_id"]
+        yes, no = command["yes_token_id"], command["no_token_id"]
+        if not token or not yes or not no or yes == no:
+            return None
+        token_ids = token_map.get("clobTokenIds")
+        if (token_map.get("token_map_valid") is True and isinstance(token_ids, list)
+                and len(token_ids) == 2 and len(set(map(str, token_ids))) == 2
+                and {str(t) for t in token_ids} == {yes, no} and str(token) in token_ids):
+            return token_ids.index(str(token))
+        if token_map.get("YES") == yes and token_map.get("NO") == no and token in (yes, no):
+            from src.venue.polymarket_v2_adapter import _zeus_index_set_to_ctf_bitmask
+            return _zeus_index_set_to_ctf_bitmask(2 if token == yes else 1).bit_length() - 1
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def _command_accounting(command, fills, pair, *, conn, cutoff, schema,
+                        available_cash_transactions=None, include_cash_proofs=True):
+    """Preserve physical ENTRY outcomes before any calibration sample selection.
+
+    The endpoint is token settlement markout, not exited-position cash PnL.
+    Numerator/denominator fields retain fractional payouts without rounding.
+    """
+    from src.ingest.payout_observer import _coherent_finalized_pair
+    index = _command_outcome_index(command)
+    # Absence of a proof is enough to report UNKNOWN. Do not repeatedly scan
+    # signed envelopes for the entire unproved population. Presence still
+    # requires the full independent decoder and identity checks below.
+    if not include_cash_proofs:
+        cash = {"status": "UNKNOWN", "reason": "CHAIN_CASH_NOT_REQUESTED"}
+    elif not fills:
+        cash = {"status": "UNKNOWN", "reason": "LOCAL_FILL_CHILDREN_MISSING"}
+    elif (available_cash_transactions is not None
+            and any(str(fill.get("tx_hash") or "").lower() not in available_cash_transactions
+                    for fill in fills)):
+        cash = {"status": "UNKNOWN", "reason": "CHAIN_CASH_PROOF_UNAVAILABLE"}
+    else:
+        from src.state.fill_cash_reader import read_command_fill_cash
+
+        cash = read_command_fill_cash(conn, command=command, fills=fills, cutoff=cutoff, schema=schema)
+    row = {key: command.get(key) for key in (
+        "command_id", "created_at", "order_side", "snapshot_id", "condition_id", "token_id",
+    )}
+    row.update(outcome_index=index, confirmed_fill_count=len(fills), confirmed_shares_atoms=None,
+               chain_cash=cash, payout_pair=tuple(pair),
+               terminal_net_payoff_numerator_atoms=None, terminal_net_payoff_denominator=None,
+               net_markout_per_share_numerator=None, net_markout_per_share_denominator=None,
+               endpoint_available_at=None, physical_endpoint_status="UNKNOWN",
+               physical_endpoint_reason=None, calibration_evidence_reason=None,
+               calibration_policy=None, calibration_policy_reason=None)
+    reasons = []
+    if command.get("order_side") != "BUY":
+        reasons.append("ENTRY_SIDE_UNSUPPORTED_FOR_BUY_MARKOUT")
+    if not fills:
+        reasons.append("NO_CONFIRMED_FILL_AT_CUTOFF")
+    created = _parse_ts(command.get("created_at"))
+    shares_atoms = 0
+    available = []
+    for fill in fills:
+        observed = _parse_ts(fill.get("observed_at"))
+        ingested_text = str(fill.get("ingested_at"))
+        if "+" not in ingested_text and not ingested_text.endswith("Z"):
+            ingested_text = ingested_text.replace(" ", "T") + "Z"
+        ingested, executed = _parse_ts(ingested_text), _parse_ts(fill.get("execution_ts"))
+        try:
+            atoms = Decimal(str(fill.get("filled_size"))) * 1_000_000
+            valid_atoms = atoms.is_finite() and atoms > 0 and atoms == atoms.to_integral_value()
+        except ArithmeticError:
+            valid_atoms = False
+        if (not valid_atoms or not created or not observed or not ingested or not executed
+                or not created <= executed <= observed < cutoff or not executed <= ingested < cutoff
+                or fill.get("command_id") != command["command_id"]
+                or not command.get("venue_order_id")
+                or fill.get("venue_order_id") != command["venue_order_id"]):
+            reasons.append("CONFIRMED_FILL_CLOCK_OR_IDENTITY_UNBOUND")
+            break
+        shares_atoms += int(atoms)
+        available.extend((observed, ingested))
+    else:
+        if fills:
+            row["confirmed_shares_atoms"] = shares_atoms
+    if cash["status"] != "PROVEN":
+        reasons.append("CHAIN_CASH_UNKNOWN")
+    elif cash["shares_atoms"] != row["confirmed_shares_atoms"]:
+        reasons.append("CHAIN_CASH_SHARE_MISMATCH")
+    if index is None or not command.get("condition_id"):
+        reasons.append("PAYOUT_IDENTITY_UNKNOWN")
+    captured = _parse_ts(command.get("captured_at"))
+    if not captured or not created or captured > created:
+        reasons.append("SNAPSHOT_CLOCK_UNBOUND")
+    if not _coherent_finalized_pair(pair):
+        reasons.append("PAYOUT_PENDING_OR_UNKNOWN")
+    else:
+        payout_clocks = [_parse_ts(value["observed_at"]) for value in pair]
+        if any(stamp is None or stamp >= cutoff for stamp in payout_clocks):
+            reasons.append("PAYOUT_CLOCK_UNBOUND")
+        else:
+            available.extend(payout_clocks)
+    if cash["status"] == "PROVEN":
+        cash_clock = _parse_ts(cash.get("available_at"))
+        if cash_clock is None or cash_clock >= cutoff:
+            reasons.append("CHAIN_CASH_CLOCK_UNBOUND")
+        else:
+            available.append(cash_clock)
+    row["physical_endpoint_reason"] = reasons[0] if reasons else None
+    if not reasons:
+        held = next(value for value in pair if value["outcome_index"] == index)
+        denominator = held["payout_denominator"]
+        net_numerator = (shares_atoms * held["payout_numerator"]
+                         - (cash["principal_atoms"] + cash["fee_atoms"]) * denominator)
+        row.update(physical_endpoint_status="PROVEN",
+                   terminal_net_payoff_numerator_atoms=net_numerator,
+                   terminal_net_payoff_denominator=denominator,
+                   net_markout_per_share_numerator=net_numerator,
+                   net_markout_per_share_denominator=denominator * shares_atoms,
+                   endpoint_available_at=max(available).isoformat())
+    return row
 
 
 def _certificate_header_bound(record: dict, edge_rows: list[dict]) -> bool:
@@ -472,6 +726,148 @@ def _maker_anchor_bound(payload, economics, witness, side, decision_at) -> bool:
         return False
 
 
+def _finite_policy_number(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _reproduced_policy_probability(
+    policy: CalibrationPolicySpec,
+    *,
+    raw_q: object,
+    p0: object,
+    alpha_lead: object,
+    beta: object,
+    lead_bucket: object,
+    side: object,
+) -> float | None:
+    """Reproduce the sealed correction using only its policy and certificate fields."""
+
+    if (
+        not isinstance(lead_bucket, str)
+        or lead_bucket not in {"day0", "day1", "day2"}
+        or not isinstance(side, str)
+        or side not in {"YES", "NO"}
+        or not all(
+            _finite_policy_number(value)
+            for value in (raw_q, p0, alpha_lead, beta)
+        )
+        or not 0 <= float(raw_q) <= 1
+        or not 0 <= float(p0) <= 1
+    ):
+        return None
+    clip_lo, clip_hi = policy.probability_clip
+
+    def apply(in_p0: float, in_raw: float, alpha: float) -> float:
+        p0_clipped = min(max(in_p0, clip_lo), clip_hi)
+        raw_clipped = min(max(in_raw, clip_lo), clip_hi)
+        logit_delta = math.log(raw_clipped / (1.0 - raw_clipped)) - math.log(
+            p0_clipped / (1.0 - p0_clipped)
+        )
+        logit_delta = min(max(logit_delta, -policy.logit_clip), policy.logit_clip)
+        value = 1.0 / (
+            1.0
+            + math.exp(
+                -(
+                    math.log(p0_clipped / (1.0 - p0_clipped))
+                    + alpha
+                    + float(beta) * logit_delta
+                )
+            )
+        )
+        return min(max(value, clip_lo), clip_hi)
+
+    if side == "NO":
+        return 1.0 - apply(1.0 - float(p0), 1.0 - float(raw_q), -float(alpha_lead))
+    return apply(float(p0), float(raw_q), float(alpha_lead))
+
+
+def _sealed_calibration_policy(
+    correction: Mapping[str, object],
+    *,
+    raw_q: object,
+    p0: object,
+    payload: Mapping[str, object],
+    side: object,
+    expected_lead_bucket: str,
+    execution_mode: str,
+    execution_contract: str,
+    raw_probability_revision: str | None,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Validate policy identity and correction reproduction without refitting."""
+
+    if correction.get("applied") is not True or "calibration_policy" not in correction:
+        return None, "CALIBRATION_POLICY_MISSING" if correction.get("applied") is True else None
+    try:
+        policy = CalibrationPolicySpec.from_payload(correction["calibration_policy"])
+    except (TypeError, ValueError, KeyError):
+        return None, "CALIBRATION_POLICY_INVALID"
+    correction_lead_bucket = correction.get("lead_bucket")
+    legacy_policy = (
+        policy.input_revision == CALIBRATION_INPUT_REVISION
+        and policy.metric_pooling == CALIBRATION_METRIC_POOLING
+    )
+    canonical_policy = (
+        policy.input_revision == CANONICAL_CALIBRATION_INPUT_REVISION
+        and policy.metric_pooling == CANONICAL_CALIBRATION_METRIC_POOLING
+    )
+    if (
+        policy.algorithm_revision != CALIBRATION_ALGORITHM_REVISION
+        or not (legacy_policy or canonical_policy)
+        or policy.lead_calendar_revision != LEAD_CALENDAR_REVISION
+        or policy.beta_bounds != (float(BETA_MIN), float(BETA_MAX))
+        or policy.logit_clip != float(CLIP_D)
+        or policy.probability_clip != (float(P_CLIP_LO), float(P_CLIP_HI))
+        or not isinstance(expected_lead_bucket, str)
+        or correction_lead_bucket != expected_lead_bucket
+        or not _finite_policy_number(correction.get("lambda"))
+        or abs(policy.lambda_ - float(correction["lambda"])) > 1e-12
+        or not _finite_policy_number(correction.get("beta"))
+        or not policy.beta_bounds[0] <= float(correction["beta"]) <= policy.beta_bounds[1]
+        or payload.get("temperature_metric", payload.get("metric")) not in ("high", "low")
+        or not isinstance(correction_lead_bucket, str)
+        or correction_lead_bucket not in {"day0", "day1", "day2"}
+    ):
+        return None, "CALIBRATION_POLICY_INVALID"
+    if canonical_policy:
+        try:
+            scope = CalibrationFitScope.from_payload(correction.get("fit_scope"))
+            expected_scope = CalibrationFitScope(
+                metric=str(payload.get("temperature_metric", payload.get("metric"))),
+                execution_mode=execution_mode,
+                execution_contract=execution_contract,
+                raw_probability_revision=str(raw_probability_revision or ""),
+            )
+        except (TypeError, ValueError):
+            return None, "CALIBRATION_FIT_SCOPE_INVALID"
+        if scope != expected_scope:
+            return None, "CALIBRATION_FIT_SCOPE_INVALID"
+    try:
+        reproduced = _reproduced_policy_probability(
+            policy,
+            raw_q=raw_q,
+            p0=p0,
+            alpha_lead=correction.get("alpha_lead"),
+            beta=correction.get("beta"),
+            lead_bucket=correction.get("lead_bucket"),
+            side=side,
+        )
+    except (OverflowError, TypeError, ValueError):
+        return None, "CALIBRATION_POLICY_INVALID"
+    corrected_q = correction.get("q_corrected")
+    if (
+        reproduced is None
+        or not _finite_policy_number(corrected_q)
+        or abs(reproduced - float(corrected_q)) > 1e-12
+    ):
+        return None, "CALIBRATION_POLICY_INVALID"
+    return policy.as_payload(), None
+
+
 def load_canonical_fit_corpus(
     world_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
@@ -482,6 +878,8 @@ def load_canonical_fit_corpus(
     world_schema: str = "main",
     trade_schema: str = "main",
     forecast_schema: str = "main",
+    deadline_monotonic: float | None = None,
+    include_cash_proofs: bool = True,
 ) -> CanonicalFitCorpus:
     """Read raw inputs, actual fills and labels from their canonical owners.
 
@@ -490,6 +888,10 @@ def load_canonical_fit_corpus(
     Both connections are borrowed; this function opens, writes and closes none.
     Row availability is filtered BEFORE latest/proof ranking, including the
     source rows used for economic-alias exclusion.
+
+    ``include_cash_proofs=False`` is probability-serving only: it preserves
+    command, fill, payout, raw-q and anchor validation while reporting cash and
+    terminal markout as UNKNOWN.  It is never a terminal-net-payoff proof.
     """
     from src.decision_kernel.canonicalization import stable_hash
     from src.ingest.payout_observer import _coherent_finalized_pair
@@ -501,13 +903,25 @@ def load_canonical_fit_corpus(
         raise ValueError("unsupported canonical corpus schema")
     if training_cutoff.tzinfo is None or not _snapshot_is_valid(city_timezone_snapshot):
         raise ValueError("canonical corpus requires an aware cutoff and city clocks")
+    if type(include_cash_proofs) is not bool:
+        raise ValueError("canonical corpus include_cash_proofs must be boolean")
     cutoff = training_cutoff.astimezone(timezone.utc)
     cutoff_text = cutoff.isoformat()
 
+    def check_deadline() -> None:
+        if deadline_monotonic is not None and (
+            not math.isfinite(float(deadline_monotonic))
+            or time.monotonic() >= float(deadline_monotonic)
+        ):
+            raise TimeoutError("canonical fit corpus deadline expired")
+
     def records(conn, sql, params=()):
+        check_deadline()
         cursor = conn.execute(sql, params)
         names = [column[0] for column in cursor.description]
-        return [dict(zip(names, row)) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        check_deadline()
+        return [dict(zip(names, row)) for row in rows]
 
     def obj(value):
         try:
@@ -522,7 +936,7 @@ def load_canonical_fit_corpus(
         try:
             value = float(value)
             return value if math.isfinite(value) and 0 <= value <= 1 else None
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return None
 
     def equal(a, b):
@@ -892,6 +1306,7 @@ def load_canonical_fit_corpus(
     edges = defaultdict(list)
     hashes = sorted({h for command in commands for h in links[command["command_id"]] if h})
     for start in range(0, len(hashes), 400):
+        check_deadline()
         keys = hashes[start:start + 400]
         marks = ",".join("?" for _ in keys)
         for row in records(world_conn, f"""
@@ -906,18 +1321,48 @@ def load_canonical_fit_corpus(
         """, keys):
             edges[row["child_certificate_id"]].append(row)
 
-    # Legacy replacement rows need the exact parent certificate payloads, not
-    # merely the edge labels copied onto the actionable child.  Load the
-    # transitive parent rows and their own edges once, still read-only.
+    # Parse each child payload once for parent selection and the later command
+    # validation loop. Parent/PIT validation remains per child and uncached.
+    child_payloads = {
+        certificate["certificate_id"]: obj(certificate.get("payload_json"))
+        for certificate in certificates.values()
+    }
+    legacy_parent_roles = frozenset({
+        "quote_feasibility", "executable_snapshot", "candidate", "cost_model",
+    })
+    legacy_children = {
+        child_id
+        for child_id, payload in child_payloads.items()
+        if (
+            obj(obj(payload.get("qkernel_execution_economics")).get(
+                "market_anchored_correction"
+            )).get("applied") not in (True, False)
+            and (payload.get("_edli_q_source") or payload.get("q_source"))
+            == "replacement_0_1"
+        )
+    }
+    # Header reconstruction below consumes every child edge. Parent payloads
+    # are narrower: forecast authority is always used by raw lineage; legacy
+    # anchors consume four additional roles only for an actual legacy child.
     parent_certificates = {}
     parent_edges = defaultdict(list)
     parent_hashes = sorted({
         row["parent_certificate_hash"]
-        for rows in edges.values()
+        for child_id, rows in edges.items()
         for row in rows
-        if row.get("parent_certificate_hash")
+        if (
+            row.get("parent_certificate_hash")
+            and (
+                row.get("parent_role") == "forecast_authority"
+                or (
+                    child_id in legacy_children
+                    and row.get("parent_role") in legacy_parent_roles
+                )
+            )
+        )
     })
     for start in range(0, len(parent_hashes), 400):
+        check_deadline()
         keys = parent_hashes[start:start + 400]
         marks = ",".join("?" for _ in keys)
         for row in records(world_conn, f"""
@@ -927,6 +1372,7 @@ def load_canonical_fit_corpus(
             parent_certificates[row["certificate_hash"]] = row
     parent_ids = [row["certificate_id"] for row in parent_certificates.values()]
     for start in range(0, len(parent_ids), 400):
+        check_deadline()
         keys = parent_ids[start:start + 400]
         marks = ",".join("?" for _ in keys)
         for row in records(world_conn, f"""
@@ -946,29 +1392,61 @@ def load_canonical_fit_corpus(
         fills[row["command_id"]].append(row)
 
     payouts: dict[str, list[dict]] = defaultdict(list)
-    for row in records(trade_conn, f"""
-        WITH ranked AS (
-          SELECT *, ROW_NUMBER() OVER(PARTITION BY condition_id,outcome_index ORDER BY id DESC) AS rn
-          FROM {trade_schema}.payout_observations
-          WHERE julianday(observed_at)<julianday(?) AND outcome_index IN (0,1)
-        ) SELECT * FROM ranked WHERE rn=1
-    """, (cutoff_text,)):
-        payouts[row["condition_id"]].append(row)
+    condition_ids = sorted({
+        str(command["condition_id"])
+        for command in commands
+        if command.get("condition_id") not in (None, "")
+    })
+    for start in range(0, len(condition_ids), 400):
+        check_deadline()
+        keys = condition_ids[start:start + 400]
+        marks = ",".join("?" for _ in keys)
+        for row in records(trade_conn, f"""
+            WITH ranked AS (
+              SELECT *, ROW_NUMBER() OVER(PARTITION BY condition_id,outcome_index ORDER BY id DESC) AS rn
+              FROM {trade_schema}.payout_observations
+              WHERE condition_id IN ({marks})
+                AND julianday(observed_at)<julianday(?) AND outcome_index IN (0,1)
+            ) SELECT * FROM ranked WHERE rn=1
+        """, (*keys, cutoff_text)):
+            payouts[row["condition_id"]].append(row)
 
+    available_cash_transactions = None
+    if include_cash_proofs and "venue_fill_cash_facts" in trade_tables:
+        available_cash_transactions = {
+            str(row[0]).lower() for row in trade_conn.execute(f"""
+                SELECT DISTINCT tx_hash FROM {trade_schema}.venue_fill_cash_facts
+                WHERE chain_id=137 AND status='PROVEN' AND julianday(observed_at)<julianday(?)
+            """, (cutoff_text,))
+        }
+    accounting = {}
+    for command in commands:
+        check_deadline()
+        accounting[command["command_id"]] = _command_accounting(
+            command, fills[command["command_id"]], payouts[command["condition_id"]],
+            conn=trade_conn, cutoff=cutoff, schema=trade_schema,
+            available_cash_transactions=available_cash_transactions,
+            include_cash_proofs=include_cash_proofs,
+        )
+        check_deadline()
     unknown: Counter[str] = Counter()
     accepted = []
     for command in commands:
+        check_deadline()
         command_id = command["command_id"]
+        accounting_row = accounting[command_id]
         reasons = []
         if command["order_side"] != "BUY":
             unknown["ENTRY_NOT_BUY"] += 1
+            accounting_row["calibration_evidence_reason"] = "ENTRY_NOT_BUY"
             continue
         hs = links[command_id]
         certificate = certificates.get(next(iter(hs))) if len(hs) == 1 else None
         if certificate is None:
             unknown["CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS"] += 1
+            accounting_row["calibration_evidence_reason"] = "CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS"
             continue
-        payload = obj(certificate["payload_json"])
+        payload = child_payloads.get(certificate["certificate_id"], {})
         economics = obj(payload.get("qkernel_execution_economics"))
         correction = obj(economics.get("market_anchored_correction"))
         token = command["token_id"]
@@ -985,20 +1463,7 @@ def load_canonical_fit_corpus(
             reasons.append("CERTIFICATE_IDENTITY_UNBOUND")
         if not _certificate_header_bound(certificate, edges[certificate["certificate_id"]]):
             reasons.append("CERTIFICATE_HEADER_HASH_UNBOUND")
-        token_map = obj(command["token_map_json"])
-        token_ids = token_map.get("clobTokenIds")
-        outcome_index = None
-        if (token_map.get("token_map_valid") is True and isinstance(token_ids, list)
-                and len(token_ids) == 2 and len(set(map(str, token_ids))) == 2
-                and {str(t) for t in token_ids} == {command["yes_token_id"], command["no_token_id"]}
-                and str(token) in token_ids):
-            outcome_index = token_ids.index(str(token))
-        elif (token_map.get("YES") == command["yes_token_id"]
-              and token_map.get("NO") == command["no_token_id"] and side is not None):
-            # The current snapshot writer seals typed YES/NO, not Gamma's raw
-            # array. Its slot convention is owned by the venue CTF adapter.
-            from src.venue.polymarket_v2_adapter import _zeus_index_set_to_ctf_bitmask
-            outcome_index = _zeus_index_set_to_ctf_bitmask(2 if side == "YES" else 1).bit_length() - 1
+        outcome_index = accounting_row["outcome_index"]
         if outcome_index is None:
             reasons.append("TOKEN_OUTCOME_INDEX_UNBOUND")
         decision_at = _parse_ts(certificate["decision_time"])
@@ -1126,6 +1591,7 @@ def load_canonical_fit_corpus(
         shares = 0.0
         fill_available_at = None
         for fill in fills[command_id]:
+            check_deadline()
             observed = _parse_ts(fill["observed_at"])
             # ingested_at is SQLite datetime('now'), explicitly UTC in its owner schema.
             ingested = _parse_ts(str(fill["ingested_at"]).replace(" ", "T") + "Z") if "+" not in str(fill["ingested_at"]) and not str(fill["ingested_at"]).endswith("Z") else _parse_ts(fill["ingested_at"])
@@ -1154,16 +1620,33 @@ def load_canonical_fit_corpus(
         if reasons:
             # One primary reason per command keeps the unknown denominator additive.
             unknown[reasons[0]] += 1
+            accounting_row["calibration_evidence_reason"] = reasons[0]
             continue
+        calibration_policy_payload, calibration_policy_reason = _sealed_calibration_policy(
+            correction,
+            raw_q=raw,
+            p0=p0,
+            payload=payload,
+            side=side,
+            expected_lead_bucket=lead_bucket_of(local_date, target),
+            execution_mode=mode,
+            execution_contract=execution_contract,
+            raw_probability_revision=raw_probability_revision,
+        )
         raw_forecast_lineage, raw_forecast_lineage_reason = forecast_lineage_for(
             certificate, edges[certificate["certificate_id"]], payload, economics, raw,
             raw_probability_revision, side, city, target, metric, decision_at,
         )
         held = next(row for row in pair if row["outcome_index"] == outcome_index)
-        from src.state.fill_cash_reader import read_command_fill_cash
+        accounting_row["calibration_policy"] = calibration_policy_payload
+        accounting_row["calibration_policy_reason"] = calibration_policy_reason
+        cash = accounting_row["chain_cash"]
+        if include_cash_proofs and cash["status"] != "PROVEN":
+            from src.state.fill_cash_reader import read_command_fill_cash
 
-        cash = read_command_fill_cash(trade_conn, command=command, fills=fills[command_id],
-                                      cutoff=cutoff, schema=trade_schema)
+            # Preserve the existing fit reader's more specific UNKNOWN reason.
+            cash = read_command_fill_cash(trade_conn, command=command, fills=fills[command_id],
+                                          cutoff=cutoff, schema=trade_schema)
         terminal_net_atoms = None
         if cash["status"] == "PROVEN":
             terminal_net_atoms = (cash["shares_atoms"] * int(held["payout_numerator"] == held["payout_denominator"])
@@ -1179,6 +1662,8 @@ def load_canonical_fit_corpus(
             raw_probability_revision=raw_probability_revision,
             raw_forecast_lineage=raw_forecast_lineage,
             raw_forecast_lineage_reason=raw_forecast_lineage_reason,
+            calibration_policy=calibration_policy_payload,
+            calibration_policy_reason=calibration_policy_reason,
             acting_q=probability(payload.get("q_live")), p0=p0, confirmed_shares=shares,
             fill_available_at=fill_available_at.isoformat(),
             payout=held["payout_numerator"] / held["payout_denominator"],
@@ -1186,7 +1671,10 @@ def load_canonical_fit_corpus(
             fill_proof_tier="CLOB_CONFIRMED", payout_proof_tier="FINALIZED_CHAIN_PAIR",
             chain_cash=cash, terminal_net_payoff_atoms=terminal_net_atoms,
         ))
-    return CanonicalFitCorpus(tuple(accepted), dict(unknown), len(commands), cutoff_text)
+    return CanonicalFitCorpus(
+        tuple(accepted), dict(unknown), len(commands), cutoff_text,
+        command_accounting=tuple(accounting.values()),
+    )
 
 
 def load_fit_rows(
@@ -1328,6 +1816,24 @@ class MarketAnchoredFitProvider:
         self._lock = threading.Lock()
         self._artifact: ResidualCalibratorArtifact | None = None
         self._fitted_at: datetime | None = None
+        self._calibration_policy = CalibrationPolicySpec(
+            algorithm_revision=CALIBRATION_ALGORITHM_REVISION,
+            input_revision=CALIBRATION_INPUT_REVISION,
+            metric_pooling=CALIBRATION_METRIC_POOLING,
+            lead_calendar_revision=self._lead_calendar_revision,
+            lambda_=self._lambda,
+            min_train_weight=self._min_train_rows,
+            beta_bounds=(BETA_MIN, BETA_MAX),
+            logit_clip=CLIP_D,
+            probability_clip=(P_CLIP_LO, P_CLIP_HI),
+            refit_seconds=self._ttl.total_seconds(),
+        )
+
+    @property
+    def calibration_policy(self) -> CalibrationPolicySpec:
+        """Immutable identity of this provider's calibration component."""
+
+        return self._calibration_policy
 
     def _cache_key(self, db_identity: tuple[str, int, int]) -> ArtifactCacheKey:
         return (
@@ -1538,6 +2044,180 @@ class MarketAnchoredFitProvider:
             ),
             deadline_monotonic=deadline_monotonic,
         )
+
+
+class CanonicalMarketAnchoredFitProvider:
+    """Scope-separated ENTRY fits; deliberately excludes cash-proof markout."""
+
+    def __init__(
+        self,
+        connects: Callable[[], tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection]],
+        *,
+        city_timezones: Mapping[str, str] | None,
+        lambda_: float = LIVE_LAMBDA,
+        min_train_rows: int = MIN_TRAIN_ROWS,
+        ttl: timedelta = DEFAULT_TTL,
+        cache: MarketAnchoredArtifactCache | None = None,
+        corpus_cache: CanonicalCorpusCache | None = None,
+    ) -> None:
+        if not callable(connects):
+            raise TypeError("canonical fit provider requires a connects callable")
+        snapshot = _validated_city_timezone_snapshot(city_timezones)
+        if snapshot is None:
+            raise ValueError("canonical fit provider requires valid city timezones")
+        if not _finite_policy_number(lambda_) or float(lambda_) < 0:
+            raise ValueError("canonical fit provider lambda is invalid")
+        if type(min_train_rows) is not int or min_train_rows <= 0:
+            raise ValueError("canonical fit provider min_train_rows is invalid")
+        if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+            raise ValueError("canonical fit provider ttl is invalid")
+        self._connects = connects
+        self._city_timezone_snapshot = snapshot
+        self._lambda = float(lambda_)
+        self._min_train_rows = min_train_rows
+        self._ttl = ttl
+        self._cache = cache or _SHARED_CANONICAL_ARTIFACT_CACHE
+        self._corpus_cache = corpus_cache or _SHARED_CANONICAL_CORPUS_CACHE
+        self._calibration_policy = CalibrationPolicySpec(
+            algorithm_revision=CALIBRATION_ALGORITHM_REVISION,
+            input_revision=CANONICAL_CALIBRATION_INPUT_REVISION,
+            metric_pooling=CANONICAL_CALIBRATION_METRIC_POOLING,
+            lead_calendar_revision=LEAD_CALENDAR_REVISION,
+            lambda_=self._lambda,
+            min_train_weight=self._min_train_rows,
+            beta_bounds=(BETA_MIN, BETA_MAX), logit_clip=CLIP_D,
+            probability_clip=(P_CLIP_LO, P_CLIP_HI),
+            refit_seconds=self._ttl.total_seconds(),
+        )
+
+    @property
+    def calibration_policy(self) -> CalibrationPolicySpec:
+        return self._calibration_policy
+
+    @staticmethod
+    def _expired(deadline_monotonic: float | None) -> bool:
+        return deadline_monotonic is not None and (
+            not math.isfinite(float(deadline_monotonic))
+            or time.monotonic() >= float(deadline_monotonic)
+        )
+
+    def _cache_key(
+        self, identities: tuple[tuple[str, int, int], ...], scope: CalibrationFitScope,
+    ) -> ArtifactCacheKey:
+        return (
+            "canonical_market_anchored_fit_v1", identities,
+            ("main", "main", "main"), CANONICAL_CORPUS_REVISION,
+            "probability_only_no_cash_proofs",
+            scope.as_payload()["scope_hash"], self._city_timezone_snapshot,
+            self._calibration_policy.as_payload()["policy_hash"],
+        )
+
+    def artifact(
+        self, *, scope: CalibrationFitScope, now: datetime,
+        deadline_monotonic: float | None = None,
+    ) -> ResidualCalibratorArtifact | None:
+        """Return a canonical scoped fit or None; never select legacy rows."""
+        if (
+            not isinstance(scope, CalibrationFitScope)
+            or not isinstance(now, datetime) or now.tzinfo is None
+            or now.utcoffset() is None or self._expired(deadline_monotonic)
+        ):
+            return None
+        cutoff = now.astimezone(timezone.utc)
+        try:
+            handles = self._connects()
+            if (not isinstance(handles, tuple) or len(handles) != 3
+                    or any(not isinstance(conn, sqlite3.Connection) for conn in handles)):
+                return None
+            with ExitStack() as stack:
+                for conn in dict.fromkeys(handles):
+                    stack.enter_context(_sqlite_fit_deadline(conn, deadline_monotonic))
+                identities = tuple(
+                    _borrowed_db_identity(conn, schema_alias="main") for conn in handles
+                )
+        except Exception:  # noqa: BLE001 - closed borrowed handles cannot authorize a fit
+            return None
+        physical_identities = tuple(identity for identity in identities if identity is not None)
+        corpus_key = None
+        if len(physical_identities) == len(handles):
+            corpus_key = (
+                physical_identities, ("main", "main", "main"),
+                CANONICAL_CORPUS_REVISION, "probability_only_no_cash_proofs",
+                self._city_timezone_snapshot, self._ttl.total_seconds(),
+            )
+        corpus = self._corpus(
+            handles, cutoff=cutoff, corpus_key=corpus_key,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if corpus is None or self._expired(deadline_monotonic):
+            return None
+        corpus_cutoff = _parse_ts(corpus.training_cutoff)
+        if corpus_cutoff is None or not timedelta(0) <= cutoff - corpus_cutoff < self._ttl:
+            return None
+        def fit_current() -> ResidualCalibratorArtifact | None:
+            return self._fit_scope(
+                corpus, scope=scope, deadline_monotonic=deadline_monotonic,
+            )
+        if corpus_key is None:
+            return fit_current()
+        # Cache age starts at the actual evidence cutoff. Fitting another scope
+        # later must not renew the same corpus for an additional refit interval.
+        return self._cache.get_or_fit(
+            (*self._cache_key(physical_identities, scope), corpus_cutoff),
+            now=corpus_cutoff, ttl=self._ttl, fit_current=fit_current,
+            deadline_monotonic=deadline_monotonic,
+        )[0]
+
+    def _corpus(
+        self, handles: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
+        *, cutoff: datetime, corpus_key: tuple[object, ...] | None,
+        deadline_monotonic: float | None,
+    ) -> CanonicalFitCorpus | None:
+        def load_current() -> CanonicalFitCorpus | None:
+            if self._expired(deadline_monotonic):
+                return None
+            try:
+                with ExitStack() as stack:
+                    for conn in dict.fromkeys(handles):
+                        stack.enter_context(_sqlite_fit_deadline(conn, deadline_monotonic))
+                    corpus = load_canonical_fit_corpus(
+                        handles[0], handles[1], training_cutoff=cutoff,
+                        city_timezone_snapshot=self._city_timezone_snapshot,
+                        forecast_conn=handles[2], deadline_monotonic=deadline_monotonic,
+                        include_cash_proofs=False,
+                    )
+                if self._expired(deadline_monotonic):
+                    return None
+                return corpus
+            except Exception:  # noqa: BLE001 - failed reads are never cached
+                return None
+
+        if corpus_key is None:
+            return load_current()
+        return self._corpus_cache.get_or_load(
+            corpus_key, requested_cutoff=cutoff, ttl=self._ttl,
+            load_current=load_current, deadline_monotonic=deadline_monotonic,
+        )[0]
+
+    def _fit_scope(
+        self, corpus: CanonicalFitCorpus, *, scope: CalibrationFitScope,
+        deadline_monotonic: float | None,
+    ) -> ResidualCalibratorArtifact | None:
+        if self._expired(deadline_monotonic):
+            return None
+        try:
+            rows = corpus.fit_rows(metric=scope.metric, execution_mode=scope.execution_mode,
+                                   execution_contract=scope.execution_contract,
+                                   probability_revision=scope.raw_probability_revision)
+            if sum(row.w for row in rows) < self._min_train_rows:
+                return None
+            artifact = fit(rows, lambda_=self._lambda,
+                           training_cutoff=corpus.training_cutoff,
+                           lead_calendar_revision=LEAD_CALENDAR_REVISION,
+                           city_timezone_snapshot=self._city_timezone_snapshot)
+        except Exception:  # noqa: BLE001 - required-fit callers handle absence
+            return None
+        return None if self._expired(deadline_monotonic) else artifact
 
 
 # The active provider is monitor-scope state only.  Entry selection uses its

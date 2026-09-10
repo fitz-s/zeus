@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import math
 import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -22,12 +23,17 @@ import pytest
 
 import src.calibration.market_anchored_live_fit as live_fit
 from src.calibration.market_anchored_live_fit import (
+    CALIBRATION_ALGORITHM_REVISION,
+    CALIBRATION_INPUT_REVISION,
+    CALIBRATION_METRIC_POOLING,
+    CanonicalMarketAnchoredFitProvider,
     MarketAnchoredArtifactCache,
     MarketAnchoredFitProvider,
     _sqlite_fit_deadline,
     corrected_probability,
     load_fit_rows,
 )
+from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
 from src.calibration.market_anchored_residual import (
     CLIP_D,
     LEAD_BUCKETS,
@@ -126,6 +132,92 @@ def _settled_rows(count: int, *, settled_at: datetime | None = None) -> list[dic
     return [_row(i, settled_at=when) for i in range(count)]
 
 
+def _known_policy(**changes) -> CalibrationPolicySpec:
+    values = dict(
+        algorithm_revision=CALIBRATION_ALGORITHM_REVISION,
+        input_revision=CALIBRATION_INPUT_REVISION,
+        metric_pooling=CALIBRATION_METRIC_POOLING,
+        lead_calendar_revision="city_local_target_date_v1",
+        lambda_=10.0,
+        min_train_weight=20,
+        beta_bounds=(0.0, 0.12),
+        logit_clip=3.0,
+        probability_clip=(0.005, 0.995),
+        refit_seconds=21600.0,
+    )
+    values.update(changes)
+    return CalibrationPolicySpec(**values)
+
+
+def test_calibration_policy_is_frozen_and_round_trips_without_fitted_values():
+    policy = _known_policy()
+    payload = policy.as_payload()
+    restored = CalibrationPolicySpec.from_payload(payload)
+
+    assert restored == policy
+    assert payload["policy_hash"] == restored.as_payload()["policy_hash"]
+    payload["beta_bounds"][0] = 0.01
+    assert policy.beta_bounds == (0.0, 0.12)
+    with pytest.raises((AttributeError, TypeError)):
+        policy.lambda_ = 1.0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda p: p.update(policy_hash="tampered"),
+        lambda p: p.update(extra="unknown"),
+        lambda p: p.update(min_train_weight=True),
+        lambda p: p.update(probability_clip=[0.0, 0.9]),
+    ],
+)
+def test_calibration_policy_rejects_tampered_and_invalid_payloads(mutation):
+    payload = _known_policy().as_payload()
+    mutation(payload)
+    with pytest.raises((TypeError, ValueError, KeyError)):
+        CalibrationPolicySpec.from_payload(payload)
+
+
+def test_calibration_policy_hash_ignores_fitted_values_but_tracks_policy_inputs():
+    first = _known_policy()
+    second = _known_policy(lambda_=1.0, refit_seconds=3600.0, min_train_weight=21)
+    assert first.as_payload()["policy_hash"] != second.as_payload()["policy_hash"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_revision": "other-input-v1"},
+        {"beta_bounds": (0.0, 0.11)},
+        {"probability_clip": (0.01, 0.99)},
+    ],
+)
+def test_calibration_policy_hash_tracks_semantic_revision_and_clips(changes):
+    assert _known_policy().as_payload()["policy_hash"] != (
+        _known_policy(**changes).as_payload()["policy_hash"]
+    )
+
+
+def test_calibration_policy_rejects_noncanonical_integer_hash_and_huge_numeric_value():
+    from src.decision_kernel.canonicalization import stable_hash
+
+    payload = _known_policy().as_payload()
+    payload["lambda_"] = 10
+    payload["policy_hash"] = stable_hash(
+        {key: value for key, value in payload.items() if key != "policy_hash"}
+    )
+    with pytest.raises(ValueError):
+        CalibrationPolicySpec.from_payload(payload)
+
+    huge = _known_policy().as_payload()
+    huge["lambda_"] = 10**1000
+    huge["policy_hash"] = stable_hash(
+        {key: value for key, value in huge.items() if key != "policy_hash"}
+    )
+    with pytest.raises(ValueError):
+        CalibrationPolicySpec.from_payload(huge)
+
+
 def test_fit_returns_none_below_min_train_rows():
     conn = _memory_db(_settled_rows(5))
     provider = MarketAnchoredFitProvider(lambda: conn, min_train_rows=20, city_timezones=_TEST_CITY_TIMEZONES)
@@ -196,6 +288,33 @@ def test_artifact_is_reused_within_ttl_then_refitted():
     assert len(fits) == 2
     assert refit is not None
     assert refit.training_cutoff != first.training_cutoff
+
+
+def test_policy_identity_is_stable_across_refits_and_tracks_configuration():
+    conn = _memory_db(_settled_rows(40))
+    provider = MarketAnchoredFitProvider(
+        lambda: conn,
+        min_train_rows=20,
+        ttl=timedelta(hours=6),
+        city_timezones=_TEST_CITY_TIMEZONES,
+    )
+    policy_hash = provider.calibration_policy.as_payload()["policy_hash"]
+    first = provider.artifact(now=NOW)
+    refit = provider.artifact(now=NOW + timedelta(hours=6, minutes=1))
+    assert first is not None and refit is not None
+    assert first.param_hash != refit.param_hash
+    assert provider.calibration_policy.as_payload()["policy_hash"] == policy_hash
+
+    changed = MarketAnchoredFitProvider(
+        lambda: conn,
+        min_train_rows=21,
+        ttl=timedelta(hours=1),
+        lambda_=1.0,
+        city_timezones=_TEST_CITY_TIMEZONES,
+    )
+    assert changed.calibration_policy.as_payload()["policy_hash"] != (
+        provider.calibration_policy.as_payload()["policy_hash"]
+    )
 
 
 def test_backward_time_does_not_reuse_a_future_cached_artifact_then_recovers():
@@ -1009,8 +1128,10 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                               return_forecast=False, legacy_maker=False,
                               return_details=False, native_quote_available=True,
                               forecast_lineage=False, child_posterior_id=None,
-                              child_global_posterior_id=None,
-                              child_posterior_identity=None):
+                              child_global_posterior_id=None, child_posterior_identity=None,
+                              include_calibration_policy=True, calibration_policy_payload=None,
+                              correction_lead_bucket="day1", correction_alpha_lead=None,
+                              unused_large_parent=False, extra_legacy_anchor_edges=False):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1028,10 +1149,32 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     )
     token = "11" if side == "YES" else "12"
     bin_label = "Will Austin be 80°F on 2026-08-28?"
+    correction_alpha_lead = (
+        correction_alpha_lead
+        if correction_alpha_lead is not None
+        else (
+            math.log(.52 / .48) - math.log(.35 / .65)
+            if side == "YES"
+            else -(math.log(.52 / .48) - math.log(.65 / .35))
+        )
+    )
+    corrected_payload = {
+        "applied": True, "q_raw": .70, "q_corrected": .52, "p0": .35,
+        "alpha_lead": correction_alpha_lead,
+        "beta": 0.0, "lambda": 10.0,
+        "lead_bucket": correction_lead_bucket, "training_cutoff": decision.isoformat(),
+        "n_train": 20, "param_hash": "fixture-param",
+    }
+    if include_calibration_policy:
+        corrected_payload["calibration_policy"] = (
+            calibration_policy_payload
+            if calibration_policy_payload is not None
+            else _known_policy().as_payload()
+        )
     economics = {
         "payoff_q_point": .52 if corrected else .70,
         "market_anchored_correction": ({} if legacy else
-                                       ({"applied": True, "q_raw": .70, "q_corrected": .52, "p0": .35}
+                                       (corrected_payload
                                         if corrected else {"applied": False})),
         "global_execution_mode": ("MAKER_REST" if legacy_maker else "TAKER_LIMIT"), "decision_p0": .35,
         "decision_p0_source": "snapshot", "global_book_hash": "book-hash",
@@ -1052,6 +1195,19 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
             economics["market_anchored_correction"] = {
                 "applied": True, "q_raw": raw_token_q,
                 "q_corrected": acting_token_q, "p0": .35,
+                "alpha_lead": correction_alpha_lead,
+                "beta": 0.0, "lambda": 10.0,
+                "lead_bucket": correction_lead_bucket, "training_cutoff": decision.isoformat(),
+                "n_train": 20, "param_hash": "fixture-param",
+                **(
+                    {"calibration_policy": (
+                        calibration_policy_payload
+                        if calibration_policy_payload is not None
+                        else _known_policy().as_payload()
+                    )}
+                    if include_calibration_policy
+                    else {}
+                ),
             }
     if include_forecast:
         forecast_payload = {
@@ -1088,7 +1244,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 "condition_id": "condition", "token_id": token,
                 "cost_source": "native_orderbook_ask", "quote_source_kind": "executable_market_snapshot_native_book",
             }),
-        ) if legacy else ()):
+        ) if (legacy or extra_legacy_anchor_edges) else ()):
             parents.append(build_certificate(
                 certificate_type=ctype, semantic_key=f"fixture-{role}", claim_type="fixture",
                 mode="LIVE", decision_time=parent_decision, source_available_at=parent_decision,
@@ -1096,6 +1252,15 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 authority_id="fixture", authority_version="1", algorithm_id="fixture",
                 algorithm_version="1",
             ))
+    if unused_large_parent:
+        parents.append(build_certificate(
+            certificate_type="UnusedFixtureCertificate", semantic_key="fixture-unused-large",
+            claim_type="fixture", mode="LIVE", decision_time=parent_decision,
+            source_available_at=parent_decision, agent_received_at=parent_decision,
+            persisted_at=parent_decision, payload={"unused": "x" * 1_000_000},
+            authority_id="fixture", authority_version="1", algorithm_id="fixture",
+            algorithm_version="1",
+        ))
     q_live = (.70 if legacy else (
         ((.52 if side == "YES" else .48) if corrected else (.70 if side == "YES" else .30))
         if forecast_lineage else (.52 if corrected else .70)
@@ -1125,7 +1290,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 [("forecast_authority", parents[1])]
                 + ([("quote_feasibility", parents[2]), ("executable_snapshot", parents[3]),
                     ("candidate", parents[4]), ("cost_model", parents[5])]
-                   if legacy else [])
+                   if (legacy or extra_legacy_anchor_edges) else [])
+                + ([("unused_large_parent", parents[-1])] if unused_large_parent else [])
             )
         )
     certificate = build_certificate(
@@ -1217,9 +1383,10 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     return (*result, forecast_conn) if return_forecast else result
 
 
-def _read_canonical(world, trade, cutoff=NOW, forecast=None):
+def _read_canonical(world, trade, cutoff=NOW, forecast=None, *, include_cash_proofs=True):
     return live_fit.load_canonical_fit_corpus(world, trade, training_cutoff=cutoff,
-        city_timezone_snapshot=tuple(sorted(_TEST_CITY_TIMEZONES.items())), forecast_conn=forecast)
+        city_timezone_snapshot=tuple(sorted(_TEST_CITY_TIMEZONES.items())), forecast_conn=forecast,
+        include_cash_proofs=include_cash_proofs)
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
@@ -1240,6 +1407,87 @@ def test_canonical_fit_preserves_raw_and_yes_no_event_geometry(side, corrected):
         assert fit_row.y == 1 and fit_row.w == 1
         assert corpus.fit_rows(metric="low", execution_mode="TAKER_LIMIT", execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1") == []
         assert corpus.fit_rows(metric="high", execution_mode="MAKER_REST", execution_contract="MAKER_REST", probability_revision="fixture-revision-v1") == []
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_seals_and_validates_calibration_policy_without_provider_backfill():
+    world, trade, _ = _canonical_corpus_fixture(side="YES", corrected=True)
+    try:
+        corpus = _read_canonical(world, trade)
+        row, = corpus.records
+        assert row["calibration_policy"] == _known_policy().as_payload()
+        assert row["calibration_policy_reason"] is None
+    finally:
+        world.close()
+        trade.close()
+
+    world, trade, _ = _canonical_corpus_fixture(
+        side="YES", corrected=True, include_calibration_policy=False
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["calibration_policy"] is None
+        assert corpus.records[0]["calibration_policy_reason"] == (
+            "CALIBRATION_POLICY_MISSING"
+        )
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_keeps_malformed_calibration_policy_as_attribution_evidence():
+    malformed = _known_policy().as_payload()
+    malformed["policy_hash"] = "tampered"
+    world, trade, _ = _canonical_corpus_fixture(
+        side="YES", corrected=True, calibration_policy_payload=malformed
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["calibration_policy"] is None
+        assert corpus.records[0]["calibration_policy_reason"] == (
+            "CALIBRATION_POLICY_INVALID"
+        )
+        assert corpus.unknown == {}
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize("correction_lead_bucket", [[], "day0"])
+def test_canonical_fit_rejects_malformed_or_wrong_city_local_lead_without_dropping_row(
+    correction_lead_bucket,
+):
+    world, trade, _ = _canonical_corpus_fixture(
+        side="YES", corrected=True, correction_lead_bucket=correction_lead_bucket
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["calibration_policy"] is None
+        assert corpus.records[0]["calibration_policy_reason"] == (
+            "CALIBRATION_POLICY_INVALID"
+        )
+        assert corpus.unknown == {}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_rejects_huge_sealed_alpha_without_crashing_or_dropping_row():
+    world, trade, _ = _canonical_corpus_fixture(
+        side="YES", corrected=True, correction_alpha_lead=10**1000
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["calibration_policy_reason"] == (
+            "CALIBRATION_POLICY_INVALID"
+        )
+        assert corpus.unknown == {}
     finally:
         world.close()
         trade.close()
@@ -1830,3 +2078,658 @@ def test_canonical_event_weight_preserves_shares_without_inventing_sample_size()
     rows = corpus.fit_rows(metric="high",execution_mode="MAKER_REST", execution_contract="MAKER_REST", probability_revision="fixture-revision-v1")
     assert [row.w for row in rows] == [.25,.75]
     assert sum(row.w for row in rows) == 1
+
+
+def _accounting_cash_fixture(monkeypatch, *, available_at=None):
+    # Isolate cohort selection from the independently tested receipt decoder.
+    import src.state.fill_cash_reader as cash_reader
+    available_at = available_at or (NOW - timedelta(days=2)).isoformat()
+
+    def cash(_conn, *, command, fills, cutoff, schema):
+        assert schema == 'main'
+        if not fills or datetime.fromisoformat(available_at) >= cutoff:
+            return {'status': 'UNKNOWN', 'reason': 'CHAIN_CASH_PROOF_UNAVAILABLE'}
+        return {'status': 'PROVEN', 'reason': 'FINALIZED_FILL_CASH_PROVEN',
+                'shares_atoms': 10_000_000, 'principal_atoms': 3_500_000,
+                'fee_atoms': 100_000, 'collateral_delta_atoms': -3_600_000,
+                'available_at': available_at, 'proof_hashes': ['receipt-proof']}
+    monkeypatch.setattr(cash_reader, 'read_command_fill_cash', cash)
+
+
+@pytest.mark.parametrize('side,net', [('YES', 6_400_000), ('NO', -3_600_000)])
+def test_command_accounting_retains_wins_and_losses_without_selected_certificate(monkeypatch, side, net):
+    _accounting_cash_fixture(monkeypatch)
+    world, trade, _ = _canonical_corpus_fixture(side=side, include_calibration_policy=False)
+    try:
+        trade.execute('DELETE FROM position_decision_attribution')
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.command_count == len(corpus.command_accounting) == 1
+        row, = corpus.command_accounting
+        assert row['physical_endpoint_status'] == 'PROVEN'
+        assert row['terminal_net_payoff_numerator_atoms'] == net
+        assert row['terminal_net_payoff_denominator'] == 1
+        assert row['net_markout_per_share_numerator'] / row['net_markout_per_share_denominator'] == pytest.approx(net / 10_000_000)
+        assert row['confirmed_fill_count'] == 1  # MATCHED/MINED/CONFIRMED are one fill.
+        assert row['calibration_evidence_reason'] == 'CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS'
+        assert row['calibration_policy'] is None
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_command_accounting_preserves_fractional_settlement_and_legacy_policy_unknown(monkeypatch):
+    _accounting_cash_fixture(monkeypatch)
+    world, trade, _ = _canonical_corpus_fixture(include_calibration_policy=False)
+    try:
+        before = _read_canonical(world, trade).command_accounting[0]
+        assert before['physical_endpoint_status'] == 'PROVEN'
+        assert before['calibration_policy_reason'] == 'CALIBRATION_POLICY_MISSING'
+        trade.execute("UPDATE payout_observations SET payout_denominator=100,payout_numerator=40+outcome_index*20,state='RESOLVED_NONZERO'")
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()  # Fit only supports binary labels.
+        row, = corpus.command_accounting
+        assert row['physical_endpoint_status'] == 'PROVEN'
+        assert row['terminal_net_payoff_numerator_atoms'] == 40_000_000
+        assert row['terminal_net_payoff_denominator'] == 100
+        assert row['net_markout_per_share_numerator'] / row['net_markout_per_share_denominator'] == pytest.approx(.04)
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize('mutation,reason', [
+    ("UPDATE venue_trade_facts SET state='MINED'", 'NO_CONFIRMED_FILL_AT_CUTOFF'),
+    ("DELETE FROM venue_trade_facts", 'NO_CONFIRMED_FILL_AT_CUTOFF'),
+    ("UPDATE venue_commands SET side='SELL'", 'ENTRY_SIDE_UNSUPPORTED_FOR_BUY_MARKOUT'),
+    ("UPDATE venue_trade_facts SET venue_timestamp='2099-01-01T00:00:00Z'", 'CONFIRMED_FILL_CLOCK_OR_IDENTITY_UNBOUND'),
+    ("UPDATE payout_observations SET block_hash='different' WHERE outcome_index=1", 'PAYOUT_PENDING_OR_UNKNOWN'),
+    ("UPDATE payout_observations SET source='local_pnl'", 'PAYOUT_PENDING_OR_UNKNOWN'),
+    ("UPDATE executable_market_snapshots SET token_map_json='{}'", 'PAYOUT_IDENTITY_UNKNOWN'),
+])
+def test_command_accounting_unknown_is_never_zero_or_deleted(monkeypatch, mutation, reason):
+    _accounting_cash_fixture(monkeypatch)
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        trade.execute(mutation)
+        corpus = _read_canonical(world, trade)
+        assert len(corpus.command_accounting) == corpus.command_count == 1
+        row, = corpus.command_accounting
+        assert row['physical_endpoint_status'] == 'UNKNOWN'
+        assert row['physical_endpoint_reason'] == reason
+        assert row['terminal_net_payoff_numerator_atoms'] is None
+        assert row['net_markout_per_share_numerator'] is None
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize('late_surface', ['cash', 'payout'])
+def test_command_accounting_evidence_arrival_does_not_rewrite_earlier_cutoff(monkeypatch, late_surface):
+    future = (NOW + timedelta(hours=1)).isoformat()
+    _accounting_cash_fixture(monkeypatch, available_at=future if late_surface == 'cash' else None)
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        if late_surface == 'payout':
+            trade.execute('UPDATE payout_observations SET observed_at=?', (future,))
+        early = _read_canonical(world, trade)
+        late = _read_canonical(world, trade, NOW + timedelta(hours=2))
+        assert early.command_count == late.command_count == 1
+        assert early.command_accounting[0]['physical_endpoint_status'] == 'UNKNOWN'
+        assert late.command_accounting[0]['physical_endpoint_status'] == 'PROVEN'
+        assert early.command_accounting[0]['terminal_net_payoff_numerator_atoms'] is None
+        assert _read_canonical(world, trade).command_accounting == early.command_accounting
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_command_accounting_cash_presence_prefilter_never_grants_proof(monkeypatch):
+    import src.state.fill_cash_reader as cash_reader
+    world, trade, _ = _canonical_corpus_fixture()
+    calls = []
+
+    def reject_cash(_conn, **kwargs):
+        calls.append(kwargs['command']['command_id'])
+        return {'status': 'UNKNOWN', 'reason': 'SIGNED_ENVELOPE_IDENTITY_MISMATCH'}
+    monkeypatch.setattr(cash_reader, 'read_command_fill_cash', reject_cash)
+    try:
+        trade.execute('DELETE FROM position_decision_attribution')
+        trade.execute('CREATE TABLE venue_fill_cash_facts(chain_id INTEGER, tx_hash TEXT, status TEXT, observed_at TEXT)')
+        trade.execute('INSERT INTO venue_fill_cash_facts VALUES(137,?,?,?)', ('tx', 'UNKNOWN', (NOW-timedelta(days=1)).isoformat()))
+        before = _read_canonical(world, trade).command_accounting[0]
+        assert calls == []
+        assert before['chain_cash']['reason'] == 'CHAIN_CASH_PROOF_UNAVAILABLE'
+        trade.execute("UPDATE venue_fill_cash_facts SET status='PROVEN',chain_id=1")
+        _read_canonical(world, trade)
+        assert calls == []
+        trade.execute('UPDATE venue_fill_cash_facts SET chain_id=137,observed_at=?', ((NOW+timedelta(days=1)).isoformat(),))
+        _read_canonical(world, trade)
+        assert calls == []
+        trade.execute('UPDATE venue_fill_cash_facts SET observed_at=?', ((NOW-timedelta(days=1)).isoformat(),))
+        after = _read_canonical(world, trade).command_accounting[0]
+        assert calls == ['command']
+        assert after['physical_endpoint_status'] == 'UNKNOWN'
+        assert after['chain_cash']['reason'] == 'SIGNED_ENVELOPE_IDENTITY_MISMATCH'
+        assert after['terminal_net_payoff_numerator_atoms'] is None
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_probability_only_corpus_skips_cash_decode_without_changing_fit_rows(monkeypatch, side):
+    import src.state.fill_cash_reader as cash_reader
+
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        side=side, return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        full = _read_canonical(world, trade, forecast=forecast)
+        monkeypatch.setattr(
+            cash_reader, "read_command_fill_cash",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cash decode used")),
+        )
+        probability_only = _read_canonical(
+            world, trade, forecast=forecast, include_cash_proofs=False,
+        )
+        kwargs = dict(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FOK_FULL_OR_ZERO",
+            probability_revision="fixture-revision-v1",
+        )
+        assert probability_only.command_count == full.command_count
+        assert probability_only.unknown == full.unknown
+        assert len(probability_only.records) == len(full.records)
+        assert probability_only.fit_rows(**kwargs) == full.fit_rows(**kwargs)
+        accounting, = probability_only.command_accounting
+        assert accounting["chain_cash"] == {
+            "status": "UNKNOWN", "reason": "CHAIN_CASH_NOT_REQUESTED",
+        }
+        assert accounting["physical_endpoint_status"] == "UNKNOWN"
+        assert accounting["terminal_net_payoff_numerator_atoms"] is None
+        assert accounting["net_markout_per_share_numerator"] is None
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_skips_unused_parent_payload_but_keeps_child_header_edges():
+    world, trade, _, forecast, certificate, parents = _canonical_corpus_fixture(
+        return_details=True, forecast_lineage=True, unused_large_parent=True,
+    )
+    unused = parents[-1]
+    trace: list[str] = []
+    try:
+        world.set_trace_callback(trace.append)
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert len(corpus.records) == 1
+        parent_payload_queries = [
+            sql for sql in trace
+            if "FROM main.decision_certificates" in sql
+            and "WHERE certificate_hash IN" in sql
+        ]
+        assert parent_payload_queries
+        assert all(unused.certificate_hash not in sql for sql in parent_payload_queries)
+
+        child_id = world.execute(
+            "SELECT certificate_id FROM decision_certificates WHERE certificate_hash=?",
+            (certificate.certificate_hash,),
+        ).fetchone()[0]
+        world.execute(
+            """UPDATE decision_certificate_edges
+               SET parent_certificate_type='TamperedUnusedCertificate'
+               WHERE child_certificate_id=? AND parent_role='unused_large_parent'""",
+            (child_id,),
+        )
+        world.commit()
+        rejected = _read_canonical(world, trade, forecast=forecast)
+        assert rejected.records == ()
+        assert rejected.unknown == {"CERTIFICATE_HEADER_HASH_UNBOUND": 1}
+    finally:
+        world.set_trace_callback(None)
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_corrected_child_does_not_load_its_legacy_anchor_parent_payloads():
+    world, trade, _, forecast, _certificate, parents = _canonical_corpus_fixture(
+        return_details=True, forecast_lineage=True, extra_legacy_anchor_edges=True,
+        unused_large_parent=True,
+    )
+    trace: list[str] = []
+    try:
+        world.set_trace_callback(trace.append)
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert len(corpus.records) == 1
+        parent_payload_queries = [
+            sql for sql in trace
+            if "FROM main.decision_certificates" in sql
+            and "WHERE certificate_hash IN" in sql
+        ]
+        assert any(parents[1].certificate_hash in sql for sql in parent_payload_queries)
+        assert all(
+            parent.certificate_hash not in sql
+            for parent in (*parents[2:6], parents[-1])
+            for sql in parent_payload_queries
+        )
+    finally:
+        world.set_trace_callback(None)
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_mixed_legacy_and_corrected_children_share_forecast_but_skip_unused_parent():
+    from src.decision_kernel.certificate import ParentEdge, build_certificate
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+
+    world, trade, _, forecast, legacy_certificate, parents = _canonical_corpus_fixture(
+        legacy=True, return_details=True, unused_large_parent=True,
+    )
+    decision = NOW - timedelta(days=3)
+    trace: list[str] = []
+    try:
+        corrected_payload = dict(legacy_certificate.payload)
+        corrected_payload.pop("q_source", None)
+        corrected_payload.pop("_edli_q_source", None)
+        corrected_payload["q_live"] = .52
+        economics = dict(corrected_payload["qkernel_execution_economics"])
+        economics["payoff_q_point"] = .52
+        economics["market_anchored_correction"] = {
+            "applied": True, "q_raw": .70, "q_corrected": .52, "p0": .35,
+            "alpha_lead": math.log(.52 / .48) - math.log(.35 / .65),
+            "beta": 0.0, "lambda": 10.0, "lead_bucket": "day1",
+            "training_cutoff": decision.isoformat(), "n_train": 20,
+            "param_hash": "mixed-corrected", "calibration_policy": _known_policy().as_payload(),
+        }
+        corrected_payload["qkernel_execution_economics"] = economics
+        corrected = build_certificate(
+            certificate_type="ActionableTradeCertificate", semantic_key="fixture-mixed-corrected",
+            claim_type="fixture", mode="LIVE", decision_time=decision,
+            source_available_at=decision, agent_received_at=decision, persisted_at=decision,
+            payload=corrected_payload,
+            parent_edges=(
+                ParentEdge("forecast_authority", parents[1].certificate_hash, parents[1].certificate_type),
+                ParentEdge("unused_large_parent", parents[-1].certificate_hash, parents[-1].certificate_type),
+            ),
+            parent_certificates=parents, authority_id="fixture", authority_version="1",
+            algorithm_id="fixture", algorithm_version="1",
+        )
+        DecisionCertificateLedger(world).insert_idempotent(corrected, preverified=True)
+        trade.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+            ("corrected-command", "11", decision.isoformat(), "corrected-order", "snapshot", "ENTRY", "BUY", "corrected-envelope"),
+        )
+        trade.execute("INSERT INTO venue_submission_envelopes VALUES ('corrected-envelope','FOK',0)")
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?)",
+            ("corrected-command", corrected.certificate_hash, "ENTRY", decision.isoformat()),
+        )
+        filled = decision + timedelta(seconds=2)
+        for fact_id, state, sequence in ((10, "MATCHED", 1), (11, "MINED", 2), (12, "CONFIRMED", 3)):
+            trade.execute(
+                "INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (fact_id, "corrected-command", "corrected-fill", "corrected-order", state, 10,
+                 "corrected-tx", filled.isoformat(), filled.strftime("%Y-%m-%d %H:%M:%S"),
+                 filled.isoformat(), sequence, "{}"),
+            )
+        world.commit()
+        trade.commit()
+        world.set_trace_callback(trace.append)
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert len(corpus.records) == 2
+        parent_payload_queries = [
+            sql for sql in trace
+            if "FROM main.decision_certificates" in sql
+            and "WHERE certificate_hash IN" in sql
+        ]
+        assert any(parents[1].certificate_hash in sql for sql in parent_payload_queries)
+        assert all(
+            parent.certificate_hash in "\n".join(parent_payload_queries)
+            for parent in parents[2:6]
+        )
+        assert all(parents[-1].certificate_hash not in sql for sql in parent_payload_queries)
+    finally:
+        world.set_trace_callback(None)
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_ranks_payouts_only_for_entry_conditions():
+    world, trade, _ = _canonical_corpus_fixture()
+    trace: list[str] = []
+    try:
+        for index in range(20):
+            trade.execute(
+                "INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    100 + index, f"other-condition-{index}", index % 2, 1, 1,
+                    "RESOLVED_NONZERO", "chain_rpc_finalized_v1", 100,
+                    "0x" + "bb" * 32, (NOW - timedelta(days=1)).isoformat(), None,
+                ),
+            )
+        trade.commit()
+        trade.set_trace_callback(trace.append)
+        corpus = _read_canonical(trade=trade, world=world)
+        assert len(corpus.records) == 1
+        payout_queries = [sql for sql in trace if "payout_observations" in sql]
+        assert payout_queries
+        assert all("other-condition-" not in sql for sql in payout_queries)
+        assert any("condition_id IN ('condition')" in sql for sql in payout_queries)
+    finally:
+        trade.set_trace_callback(None)
+        world.close()
+        trade.close()
+
+
+def _canonical_provider(world, trade, forecast, *, cache=None):
+    return CanonicalMarketAnchoredFitProvider(
+        lambda: (world, trade, forecast),
+        city_timezones=_TEST_CITY_TIMEZONES,
+        min_train_rows=1,
+        cache=cache or MarketAnchoredArtifactCache(),
+    )
+
+
+def _canonical_scope(*, metric="high", execution_contract="FOK_FULL_OR_ZERO",
+                     revision="fixture-revision-v1"):
+    return CalibrationFitScope(
+        metric=metric,
+        execution_mode=("MAKER_REST" if execution_contract == "MAKER_REST" else "TAKER_LIMIT"),
+        execution_contract=execution_contract,
+        raw_probability_revision=revision,
+    )
+
+
+def test_canonical_provider_fits_actual_corpus_without_selected_attribution(monkeypatch):
+    import src.state.fill_cash_reader as cash_reader
+
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        # If serving accidentally regresses to selected settlement_attribution,
+        # it would call this loader instead of the canonical corpus reader.
+        monkeypatch.setattr(live_fit, "load_fit_rows", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("selected corpus used")))
+        monkeypatch.setattr(cash_reader, "read_command_fill_cash", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cash decode used")))
+        provider = _canonical_provider(world, trade, forecast)
+        artifact = provider.artifact(scope=_canonical_scope(), now=NOW)
+        assert artifact is not None
+        assert provider.calibration_policy.input_revision == live_fit.CANONICAL_CALIBRATION_INPUT_REVISION
+        assert provider.calibration_policy.metric_pooling == live_fit.CANONICAL_CALIBRATION_METRIC_POOLING
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_provider_keeps_no_geometry_and_backward_cutoff_causal():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        side="NO", return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        scope = _canonical_scope()
+        assert provider.artifact(scope=scope, now=NOW) is not None
+        # The only command is later than this cutoff; it cannot reuse the
+        # future artifact through the shared cache.
+        assert provider.artifact(scope=scope, now=NOW - timedelta(days=4)) is None
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_provider_scope_and_cache_keys_do_not_mix():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        high = _canonical_scope()
+        high_fak = _canonical_scope(execution_contract="FAK_PARTIAL")
+        low = _canonical_scope(metric="low")
+        revision = _canonical_scope(revision="another-revision")
+        assert provider.artifact(scope=high, now=NOW) is not None
+        assert provider.artifact(scope=high_fak, now=NOW) is None
+        assert provider.artifact(scope=low, now=NOW) is None
+        assert provider.artifact(scope=revision, now=NOW) is None
+        identities = tuple(live_fit._borrowed_db_identity(conn, schema_alias="main") for conn in (world, trade, forecast))
+        keys = {provider._cache_key(identities, scope) for scope in (high, high_fak, low, revision)}
+        assert len(keys) == 4
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_provider_deadline_and_closed_handles_never_serve_stale_fit():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    provider = _canonical_provider(world, trade, forecast)
+    scope = _canonical_scope()
+    try:
+        assert provider.artifact(scope=scope, now=NOW) is not None
+        assert provider.artifact(
+            scope=scope, now=NOW,
+            deadline_monotonic=time.monotonic() - 0.001,
+        ) is None
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+    assert provider.artifact(scope=scope, now=NOW) is None
+
+
+def test_canonical_provider_reloads_corpus_when_connector_changes_physical_db(tmp_path):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    copies = []
+    try:
+        forecast.commit()
+
+        def copy(source, name):
+            destination = sqlite3.connect(tmp_path / name)
+            destination.row_factory = sqlite3.Row
+            source.backup(destination)
+            copies.append(destination)
+            return destination
+
+        first = tuple(copy(conn, name) for conn, name in zip(
+            (world, trade, forecast), ("world-a.db", "trade-a.db", "forecast-a.db"), strict=True,
+        ))
+        second = tuple(copy(conn, name) for conn, name in zip(
+            (world, trade, forecast), ("world-b.db", "trade-b.db", "forecast-b.db"), strict=True,
+        ))
+        second[1].execute("DELETE FROM venue_commands")
+        second[1].commit()
+        active = [first]
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: active[0], city_timezones=_TEST_CITY_TIMEZONES,
+            min_train_rows=1, cache=MarketAnchoredArtifactCache(),
+        )
+        scope = _canonical_scope()
+        assert provider.artifact(scope=scope, now=NOW) is not None
+        active[0] = second
+        assert provider.artifact(scope=scope, now=NOW) is None
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+        for conn in copies:
+            conn.close()
+
+
+def test_calibration_fit_scope_round_trips_and_rejects_mismatched_contract():
+    scope = _canonical_scope()
+    assert CalibrationFitScope.from_payload(scope.as_payload()) == scope
+    with pytest.raises(ValueError, match="execution_contract"):
+        CalibrationFitScope(
+            metric="high", execution_mode="TAKER_LIMIT", execution_contract="MAKER_REST",
+            raw_probability_revision="fixture-revision-v1",
+        )
+    payload = scope.as_payload()
+    payload["version"] = True
+    with pytest.raises(ValueError, match="type or version"):
+        CalibrationFitScope.from_payload(payload)
+
+
+def test_canonical_policy_scope_must_bind_the_actual_corpus_payload():
+    provider = CanonicalMarketAnchoredFitProvider(
+        lambda: (_ for _ in ()).throw(AssertionError("not called")),
+        city_timezones=_TEST_CITY_TIMEZONES, min_train_rows=1,
+    )
+    scope = _canonical_scope()
+    correction = {
+        "applied": True, "q_raw": .70, "p0": .35, "alpha_lead": .01,
+        "beta": .12, "lambda": provider.calibration_policy.lambda_,
+        "lead_bucket": "day1", "calibration_policy": provider.calibration_policy.as_payload(),
+        "fit_scope": scope.as_payload(),
+    }
+    correction["q_corrected"] = live_fit._reproduced_policy_probability(
+        provider.calibration_policy, raw_q=.70, p0=.35, alpha_lead=.01,
+        beta=.12, lead_bucket="day1", side="YES",
+    )
+    payload = {"temperature_metric": "high"}
+    assert live_fit._sealed_calibration_policy(
+        correction, raw_q=.70, p0=.35, payload=payload, side="YES",
+        expected_lead_bucket="day1", execution_mode="TAKER_LIMIT",
+        execution_contract="FOK_FULL_OR_ZERO",
+        raw_probability_revision="fixture-revision-v1",
+    )[1] is None
+    correction["fit_scope"] = _canonical_scope(metric="low").as_payload()
+    assert live_fit._sealed_calibration_policy(
+        correction, raw_q=.70, p0=.35, payload=payload, side="YES",
+        expected_lead_bucket="day1", execution_mode="TAKER_LIMIT",
+        execution_contract="FOK_FULL_OR_ZERO",
+        raw_probability_revision="fixture-revision-v1",
+    )[1] == "CALIBRATION_FIT_SCOPE_INVALID"
+
+
+def test_canonical_shared_corpus_preserves_cutoff_across_batches_and_scopes(tmp_path, monkeypatch):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    handles = []
+    try:
+        forecast.commit()
+        for source, name in zip((world, trade, forecast), ("world", "trade", "forecast"), strict=True):
+            destination = sqlite3.connect(tmp_path / (name + ".db"))
+            destination.row_factory = sqlite3.Row
+            source.backup(destination)
+            handles.append(destination)
+        corpus_cache = live_fit.CanonicalCorpusCache()
+        artifact_cache = MarketAnchoredArtifactCache()
+        cutoffs = []
+        load = live_fit.load_canonical_fit_corpus
+
+        def counted_load(*args, **kwargs):
+            cutoffs.append(kwargs["training_cutoff"])
+            return load(*args, **kwargs)
+
+        monkeypatch.setattr(live_fit, "load_canonical_fit_corpus", counted_load)
+
+        def provider():
+            return CanonicalMarketAnchoredFitProvider(
+                lambda: tuple(handles), city_timezones=_TEST_CITY_TIMEZONES,
+                min_train_rows=1, cache=artifact_cache, corpus_cache=corpus_cache,
+            )
+
+        first = provider().artifact(scope=_canonical_scope(), now=NOW)
+        assert first is not None
+        # A later batch and an unfittable scope use the same completed corpus.
+        assert provider().artifact(scope=_canonical_scope(metric="low"), now=NOW + timedelta(hours=1)) is None
+        later = provider().artifact(scope=_canonical_scope(), now=NOW + timedelta(hours=5))
+        assert later == first
+        assert datetime.fromisoformat(later.training_cutoff) == NOW
+        assert cutoffs == [NOW]
+        # A new scope first fitted at hour five must retain the hour-zero cutoff.
+        late_scope = _canonical_scope(execution_contract="FAK_PARTIAL")
+        scoped_corpus = next(iter(corpus_cache._entries.values()))[0]
+        original_rows = live_fit.CanonicalFitCorpus.fit_rows
+
+        def equivalent_rows(self, **kwargs):
+            kwargs["execution_contract"] = "FOK_FULL_OR_ZERO"
+            return original_rows(self, **kwargs)
+
+        monkeypatch.setattr(live_fit.CanonicalFitCorpus, "fit_rows", equivalent_rows)
+        delayed = provider().artifact(scope=late_scope, now=NOW + timedelta(hours=5))
+        assert delayed is not None and delayed.training_cutoff == first.training_cutoff
+        # Exactly TTL refreshes both input and artifact; no second TTL extension.
+        refreshed = provider().artifact(scope=late_scope, now=NOW + timedelta(hours=6))
+        assert refreshed is not None
+        assert datetime.fromisoformat(refreshed.training_cutoff) == NOW + timedelta(hours=6)
+        assert cutoffs == [NOW, NOW + timedelta(hours=6)]
+        assert next(iter(corpus_cache._entries.values()))[0] is not scoped_corpus
+        # Backward requests do not use future outcomes or displace forward cache.
+        assert provider().artifact(scope=_canonical_scope(), now=NOW - timedelta(days=4)) is None
+        assert provider().artifact(scope=late_scope, now=NOW + timedelta(hours=7)) == refreshed
+        assert cutoffs == [NOW, NOW + timedelta(hours=6), NOW - timedelta(days=4)]
+    finally:
+        for conn in (*handles, world, trade, forecast):
+            conn.close()
+
+
+def test_canonical_shared_corpus_failed_or_late_load_is_retryable():
+    cache = live_fit.CanonicalCorpusCache(max_entries=2)
+    corpus = live_fit.CanonicalFitCorpus((), {}, 0, NOW.isoformat())
+    assert cache.get_or_load(("db",), requested_cutoff=NOW, ttl=timedelta(hours=6), load_current=lambda: None) == (None, None)
+    assert not cache._entries
+    future = live_fit.CanonicalFitCorpus((), {}, 0, (NOW + timedelta(seconds=1)).isoformat())
+    assert cache.get_or_load(("db",), requested_cutoff=NOW, ttl=timedelta(hours=6), load_current=lambda: future) == (None, None)
+    assert not cache._entries
+
+    def late():
+        time.sleep(.02)
+        return corpus
+
+    assert cache.get_or_load(("db",), requested_cutoff=NOW, ttl=timedelta(hours=6), load_current=late,
+                             deadline_monotonic=time.monotonic() + .005) == (None, None)
+    assert not cache._entries
+    assert cache.get_or_load(("db",), requested_cutoff=NOW, ttl=timedelta(hours=6), load_current=lambda: corpus) == (corpus, NOW)
+    cache._lock.acquire()
+    try:
+        assert cache.get_or_load(("db",), requested_cutoff=NOW, ttl=timedelta(hours=6),
+                                 load_current=lambda: pytest.fail("locked cache must honor deadline"),
+                                 deadline_monotonic=time.monotonic() + .005) == (None, None)
+    finally:
+        cache._lock.release()
+    for key in ("second", "third"):
+        cache.get_or_load((key,), requested_cutoff=NOW, ttl=timedelta(hours=6), load_current=lambda: corpus)
+    assert len(cache._entries) == 2 and ("db",) not in cache._entries
+
+
+def test_canonical_shared_corpus_is_deeply_detached_and_immutable():
+    cache = live_fit.CanonicalCorpusCache()
+    record = {"payout": 1, "policy": {"bounds": [0, 1]}}
+    accounting = {"reason": {"codes": ["unknown"]}}
+    unknown = {"missing": 1}
+    corpus = live_fit.CanonicalFitCorpus((record,), unknown, 1, NOW.isoformat(),
+                                         command_accounting=(accounting,))
+    first, cutoff = cache.get_or_load(("db",), requested_cutoff=NOW,
+                                     ttl=timedelta(hours=6), load_current=lambda: corpus)
+    assert first is not corpus and cutoff == NOW
+    record["payout"] = 0
+    record["policy"]["bounds"].append(2)
+    accounting["reason"]["codes"].append("tampered")
+    unknown["missing"] = 99
+    with pytest.raises(TypeError):
+        first.records[0]["payout"] = 0
+    with pytest.raises(TypeError):
+        first.records[0]["policy"]["bounds"][0] = 2
+    with pytest.raises(TypeError):
+        first.command_accounting[0]["reason"]["codes"][0] = "tampered"
+    with pytest.raises(TypeError):
+        first.unknown["missing"] = 2
+    second, _ = cache.get_or_load(("db",), requested_cutoff=NOW + timedelta(hours=1),
+                                  ttl=timedelta(hours=6), load_current=lambda: pytest.fail("cache miss"))
+    assert second.records[0]["payout"] == 1
+    assert second.records[0]["policy"]["bounds"] == (0, 1)
+    assert second.command_accounting[0]["reason"]["codes"] == ("unknown",)
+    assert second.unknown == {"missing": 1}

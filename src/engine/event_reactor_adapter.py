@@ -7526,6 +7526,30 @@ def _prepared_global_probability_semantics_revision(
     return revision or None
 
 
+def _global_entry_calibration_fit_scope(
+    candidate: object, *, metric: str | None, raw_probability_revision: str | None,
+):
+    """Bind calibration to the current global ENTRY execution contract."""
+
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+
+    if str(getattr(candidate, "action", "BUY")) != "BUY":
+        return None
+    mode = str(getattr(candidate, "execution_mode", ""))
+    # Global takers persist FOK in build_final_intent_certificate_from_actionable;
+    # an FAK training population cannot authorize that full-or-zero proposal.
+    contract = {"TAKER_LIMIT": "FOK_FULL_OR_ZERO", "MAKER_REST": "MAKER_REST"}.get(mode)
+    try:
+        return CalibrationFitScope(
+            metric=metric,
+            execution_mode=mode,
+            execution_contract=contract,
+            raw_probability_revision=raw_probability_revision,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def _stamp_global_receipt_probability_semantics_revision(
     receipt: EventSubmissionReceipt,
     global_actuation: object | None,
@@ -11225,6 +11249,17 @@ def event_bound_live_adapter_from_trade_conn(
 
         strategy_policy_cache: dict[tuple[str, str], str | None] = {}
 
+        def _current_entry_calibration_scope(candidate, prepared):
+            family_key = str(getattr(candidate, "family_key", ""))
+            owner = _global_entry_policy_by_family.get(family_key)
+            return _global_entry_calibration_fit_scope(
+                candidate,
+                metric=owner[1] if owner is not None else None,
+                raw_probability_revision=_prepared_global_probability_semantics_revision(
+                    prepared, forecast_conn,
+                ),
+            )
+
         def _current_entry_candidate_policy(
             candidate,
             *,
@@ -11406,6 +11441,7 @@ def event_bound_live_adapter_from_trade_conn(
                 current_book_epoch_provider=_current_book_epoch,
                 market_authority_refresh=_require_market_authority_refresh,
                 work_context=global_work_context,
+                calibration_scope_resolver=_current_entry_calibration_scope,
                 current_capital_limit_resolver=_current_entry_capital_limit,
                 # Apply the same configured submit authority before expensive
                 # preflight. SELL remains eligible in reduce-only operation.
@@ -17017,6 +17053,22 @@ def _global_actuation_selected_proof(
         != candidate.probability_witness_identity
     ):
         raise ValueError("GLOBAL_ACTUATION_FAMILY_PROBABILITY_MISMATCH")
+
+    correction = getattr(decision, "payoff_q_correction", None)
+    fit_scope = getattr(correction, "fit_scope", None)
+    if fit_scope is not None:
+        payload = _payload(event)
+        current_scope = _global_entry_calibration_fit_scope(
+            candidate,
+            metric=payload.get("metric") or payload.get("temperature_metric"),
+            raw_probability_revision=_prepared_global_probability_semantics_revision(
+                prepared_global_family, forecast_conn,
+            ),
+        )
+        # SCOPE: this corrected proposal. DRAIN: prepare and solve on current
+        # scope next cut. RESET: exact current scope matches the sealed fit.
+        if fit_scope != current_scope:
+            raise ValueError("GLOBAL_CALIBRATION_FIT_SCOPE_SUPERSEDED")
 
     # The caller already rebuilt this scope from current locks, holdings, policy,
     # and executable books.  Bind the global certificate before any legacy local

@@ -73,7 +73,7 @@ from src.events.day0_authority import (
     assert_live_day0_probability_authority,
     assert_live_day0_qkernel_guard_authority,
 )
-from src.contracts.payoff_q_correction import PayoffQCorrection
+from src.contracts.payoff_q_correction import CalibrationPolicySpec, PayoffQCorrection
 from src.events.reactor import EventSubmissionReceipt
 from src.solve.solver import (
     BinaryTerminalWealthCertificate,
@@ -26915,6 +26915,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
         selected_kwargs.clear()
         stored_kwargs.clear()
+        calibration_prepared = []
         global_batch_runtime.process_current_global_batch(
             (event,),
             decision_time=decision_at,
@@ -26942,6 +26943,9 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             current_execution=lambda *_: object(),
             current_time_provider=lambda: decision_at,
             portfolio_state_provider=lambda: object(),
+            calibration_scope_resolver=lambda candidate, prepared: (
+                calibration_prepared.append(prepared) or None
+            ),
         )
 
         merged = next(iter(selected_kwargs["prepared_by_event"].values()))
@@ -26952,6 +26956,20 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         assert merged.sell_action_authority_identity == "held-sell-authority"
         assert selected_kwargs["buy_disabled_family_keys"] == frozenset()
         assert stored_kwargs["buy_disabled_reason_by_family"] == {}
+
+        # The fit owner must be the actual entry object retained by the cut,
+        # even though HELD was prepared later for the same family.
+        resolver = selected_kwargs["payoff_q_correction_resolver"]
+        assert resolver is not None
+        from src.contracts.payoff_q_correction import PayoffQCorrectionUnavailable
+        with pytest.raises(PayoffQCorrectionUnavailable, match="FIT_SCOPE_UNAVAILABLE"):
+            resolver(
+                SimpleNamespace(family_key=family_key, action="BUY", execution_mode="TAKER_LIMIT"),
+                .2, .1, decision_at,
+            )
+        assert len(calibration_prepared) == 1
+        assert calibration_prepared[0].probability_witness is lane_entry_witness
+        assert calibration_prepared[0].probability_witness is not lane_held_witness
 
     selected_kwargs.clear()
     stored_kwargs.clear()
@@ -38578,15 +38596,109 @@ def _market_anchored_cert_fixture(*, corrected_q, raw_q=0.70):
     return seed, decision, witness, correction
 
 
+def _valid_calibration_policy() -> CalibrationPolicySpec:
+    return CalibrationPolicySpec(
+        algorithm_revision="market_anchored_ridge_offset_irls_v1",
+        input_revision=(
+            "settlement_attribution.q_in_bin_current_graded_before_cutoff_claim_weight_v1"
+        ),
+        metric_pooling="unfiltered_attribution_claims",
+        lead_calendar_revision="city_local_target_date_v1",
+        lambda_=10.0,
+        min_train_weight=20,
+        beta_bounds=(0.0, 0.12),
+        logit_clip=3.0,
+        probability_clip=(0.005, 0.995),
+        refit_seconds=21600.0,
+    )
+
+
 def test_global_current_state_cert_acts_on_the_sealed_corrected_probability():
     corrected_q = 0.52
     seed, decision, witness, correction = _market_anchored_cert_fixture(
         corrected_q=corrected_q
     )
+    valid_policy = _valid_calibration_policy()
+    decision_fields = vars(decision).copy()
+    decision_fields["payoff_q_correction"] = replace(
+        correction, calibration_policy=valid_policy
+    )
+    decision_fields["expected_growth"] = ExpectedGrowthComparison(
+        probability_basis=decision.expected_terminal_wealth.probability_basis,
+        probability_witness_identity=witness.witness_identity,
+        expected_delta_log_wealth=decision.expected_terminal_wealth.expected_delta_log_wealth,
+        expected_ev_usd=decision.expected_terminal_wealth.expected_ev_usd,
+        capital_lock_hours=24.0,
+        expected_log_growth_per_hour=(
+            decision.expected_terminal_wealth.expected_delta_log_wealth / 24.0
+        ),
+        expected_capital_efficiency=(
+            decision.expected_terminal_wealth.expected_delta_log_wealth
+            / float(decision.cost_usd)
+        ),
+    )
+    decision = SimpleNamespace(**decision_fields)
 
     current = era._global_current_state_execution_economics(
         seed, decision=decision, witness=witness, payoff_q_lcb_cap=0.35
     )
+    candidate = decision.candidate
+    current.update(
+        {
+            "global_actuation_identity": "global-actuation-1",
+            "global_winner_event_id": "global-event-1",
+            "global_auction_receipt": _test_global_auction_receipt_ref(
+                candidate_id=candidate.candidate_id,
+                actuation_identity="global-actuation-1",
+                event_id="global-event-1",
+                selection_epoch_identity="global-epoch-1",
+            ).as_payload(),
+            "global_economic_identity": "global-economic-1",
+            "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+            "global_proposal_expected_delta_log_wealth": (
+                decision.expected_growth.expected_delta_log_wealth
+            ),
+            "global_proposal_expected_ev_usd": decision.expected_growth.expected_ev_usd,
+            "global_proposal_expected_log_growth_per_hour": (
+                decision.expected_growth.expected_log_growth_per_hour
+            ),
+            "global_proposal_expected_capital_efficiency": (
+                decision.expected_growth.expected_capital_efficiency
+            ),
+            "global_proposal_capital_lock_hours": (
+                decision.expected_growth.capital_lock_hours
+            ),
+            "global_proposal_fill_semantics": "IMMEDIATE_FILL",
+            "global_ruin_probability_reduction": (
+                decision.expected_growth.ruin_probability_reduction
+            ),
+            "global_terminal_ruin_probability_reduction": (
+                decision.expected_terminal_wealth.ruin_probability_reduction
+            ),
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_selection_revision": (
+                global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "global_candidate_id": candidate.candidate_id,
+            "global_condition_id": candidate.condition_id,
+            "global_token_id": candidate.token_id,
+            "global_family_key": candidate.family_key,
+            "global_bin_id": candidate.bin_id,
+            "global_probability_witness_identity": witness.witness_identity,
+            "global_probability_authority": "current-evidence",
+            "global_universe_witness_identity": "global-universe-1",
+            "global_wealth_witness_identity": "global-wealth-1",
+            "global_wealth_economic_identity": "global-wealth-economic-1",
+            "global_selection_epoch_identity": "global-epoch-1",
+            "global_selection_cut_at": "2026-07-26T12:00:00+00:00",
+            "global_selection_decision_at": "2026-07-26T12:00:00+00:00",
+            "global_jit_book_hash": "global-book-1",
+            "global_jit_venue_book_hash": "global-venue-book-1",
+            "global_jit_book_snapshot_id": "global-snapshot-1",
+            "global_jit_execution_curve_identity": "global-curve-1",
+        }
+    )
+    current["current_state_identity_hash"] = qkernel_current_state_identity_hash(current)
 
     # One value: every acting field names the corrected probability, and the
     # mean-action identity point_q == cut_win_probability holds on it.
@@ -38607,6 +38719,8 @@ def test_global_current_state_cert_acts_on_the_sealed_corrected_probability():
     assert stamp["beta"] == pytest.approx(correction.beta)
     assert stamp["training_cutoff"] == "2026-07-25T00:00:00Z"
     assert stamp["param_hash"] == "param-hash-live"
+    assert stamp["calibration_policy"] == valid_policy.as_payload()
+    assert era._valid_selected_qkernel_execution_economics_payload(current) is current
 
 
 def test_global_current_state_cert_without_a_correction_is_unchanged():
@@ -38726,3 +38840,58 @@ def test_venue_metadata_stale_exclusion_is_constructible_inside_live_epoch():
         match="GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID",
     ):
         replace(excluded, book_state="STALE")
+
+
+@pytest.mark.parametrize("metric,revision,contract,expected", [
+    ("high", "raw-v3", "FOK_FULL_OR_ZERO", "GLOBAL_ACTUATION_PROOF_BINDING_MISSING"),
+    ("low", "raw-v3", "FOK_FULL_OR_ZERO", "GLOBAL_CALIBRATION_FIT_SCOPE_SUPERSEDED"),
+    ("high", "other-revision", "FOK_FULL_OR_ZERO", "GLOBAL_CALIBRATION_FIT_SCOPE_SUPERSEDED"),
+    ("high", "raw-v3", "FAK_PARTIAL", "GLOBAL_CALIBRATION_FIT_SCOPE_SUPERSEDED"),
+])
+def test_global_selected_proof_rechecks_canonical_fit_scope(
+    monkeypatch, metric, revision, contract, expected,
+):
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+
+    _, decision, witness, correction = _market_anchored_cert_fixture(corrected_q=.52)
+    decision.payoff_q_correction = replace(
+        correction,
+        fit_scope=CalibrationFitScope("high", "TAKER_LIMIT", contract, "raw-v3"),
+    )
+    actuation = SimpleNamespace(
+        decision=decision, probability_witness=witness,
+        winner_event_id="event-current", actuation_identity="actuation-current",
+        selection_epoch_identity="epoch-current",
+        auction_receipt_ref=_test_global_auction_receipt_ref(
+            candidate_id=decision.candidate.candidate_id,
+            actuation_identity="actuation-current",
+        ),
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    monkeypatch.setattr(
+        era, "_prepared_global_probability_semantics_revision",
+        lambda current, conn: revision if current is prepared else None,
+    )
+    with pytest.raises(ValueError, match=expected):
+        era._global_actuation_selected_proof(
+            global_actuation=actuation, prepared_global_family=prepared,
+            family=SimpleNamespace(family_id=decision.candidate.family_key),
+            event=SimpleNamespace(payload_json=json.dumps({"metric": metric})),
+            all_proofs=(), eligible_proofs=(), forecast_conn=object(),
+            decision_time=witness.captured_at_utc,
+        )
+    # Matching scope reaches the independent proof-completeness guard. The
+    # mismatch cases must stop earlier; no venue action or fake proof is used.
+
+
+def test_global_current_economics_seals_scope_without_refitting_q():
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+
+    seed, decision, witness, correction = _market_anchored_cert_fixture(corrected_q=.52)
+    scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "raw-v3")
+    decision.payoff_q_correction = replace(correction, fit_scope=scope)
+    current = era._global_current_state_execution_economics(
+        seed, decision=decision, witness=witness, payoff_q_lcb_cap=.35,
+    )
+    assert current["payoff_q_action"] == pytest.approx(.52)
+    assert current["market_anchored_correction"]["fit_scope"] == scope.as_payload()
