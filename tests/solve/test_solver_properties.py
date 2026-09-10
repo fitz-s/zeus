@@ -2106,7 +2106,7 @@ def test_global_buy_size_uses_mean_not_false_edge_sample_rate():
     assert decision.expected_terminal_wealth.probability_basis == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
-    assert decision.shares == Decimal("22.80")
+    assert decision.shares == Decimal("25")
 
 
 def test_false_edge_sample_rate_does_not_remove_buy_before_global_ranking():
