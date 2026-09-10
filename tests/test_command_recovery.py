@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-09-07; last_reused=2026-09-07
+# Lifecycle: created=2026-04-26; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-09-07
+# Last reused/audited: 2026-09-10
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -35995,6 +35995,11 @@ def test_systemic_or_unclassified_capital_debt_requires_global_handoff(
         lambda _conn: projection_count,
     )
     monkeypatch.setattr(
+        recovery,
+        "_terminal_filled_entry_projection_blocker_command_ids",
+        lambda _conn: tuple(f"projection-{i}" for i in range(projection_count)),
+    )
+    monkeypatch.setattr(
         recovery, "_terminal_filled_exit_projection_blocker_count", lambda _conn: 0
     )
     scope = recovery.capital_blocking_command_scope(conn)
@@ -38167,3 +38172,125 @@ def test_authenticated_absence_release_only_clears_exact_exit_order_id(conn, mon
         "exit_retry_count": 0,
         "next_exit_retry_at": None,
     }
+
+
+@pytest.mark.parametrize(
+    "reason,fact_state,filled_size,fill_price,expected",
+    [
+        ("matched_submit_missing_trade_id", "CONFIRMED", "11", "0.23", "FILLED"),
+        ("matched_submit_missing_trade_id", "MATCHED", "11", "0.23", "REVIEW_REQUIRED"),
+        ("matched_submit_missing_trade_id", "CONFIRMED", "10", "0.23", "REVIEW_REQUIRED"),
+        ("matched_submit_missing_trade_id", "CONFIRMED", "11", "0.24", "REVIEW_REQUIRED"),
+        ("unrecognized_review_reason", "CONFIRMED", "11", "0.23", "REVIEW_REQUIRED"),
+    ],
+)
+def test_matched_submit_review_uses_authenticated_priority_route(
+    conn, reason, fact_state, filled_size, fill_price, expected
+):
+    from src.execution import command_recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn, size=11, price=0.23)
+    _advance_to_submitting(conn, venue_order_id="ord-001")
+    append_event(
+        conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z", payload={"reason": reason},
+    )
+    _append_trade_fact(
+        conn, state=fact_state, filled_size=filled_size, fill_price=fill_price,
+    )
+    candidates = command_recovery._bounded_authenticated_entry_trade_fact_candidates(
+        conn, states=("REVIEW_REQUIRED",),
+    )
+    assert len(candidates) == (0 if reason == "unrecognized_review_reason" else 1)
+    result = command_recovery.reconcile_authenticated_entry_trade_facts(
+        conn, command_id="cmd-001",
+    )
+    assert result["errors"] == 0
+    assert _get_state(conn, "cmd-001") == expected
+    if expected == "FILLED":
+        assert result["advanced"] == 1
+        before = len(_get_events(conn, "cmd-001"))
+        repeated = command_recovery.reconcile_authenticated_entry_trade_facts(
+            conn, command_id="cmd-001",
+        )
+        assert repeated["advanced"] == 0
+        assert len(_get_events(conn, "cmd-001")) == before
+    else:
+        assert result["advanced"] == 0
+
+
+def test_live_tick_matched_submit_review_precedes_expired_maintenance(
+    conn, tmp_path, monkeypatch
+):
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.venue_command_repo import append_event
+
+    monkeypatch.setattr(
+        command_recovery._exchange_reconcile,
+        "_canonical_market_event_metadata_for_entry_fill",
+        lambda **_kwargs: {
+            "city": "Miami", "target_date": "2026-04-27",
+            "temperature_metric": "high", "bin_label": "80°F", "unit": "F",
+        },
+    )
+    _insert(conn, size=11, price=0.23)
+    _advance_to_submitting(conn, venue_order_id="ord-001")
+    append_event(
+        conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={"reason": "matched_submit_missing_trade_id"},
+    )
+    _append_confirmed_trade_fact(conn, filled_size="11", fill_price="0.23")
+    conn.commit()
+    db_path = tmp_path / "matched-submit.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+    now = [0.0]
+
+    def factory():
+        result = sqlite3.connect(db_path)
+        result.row_factory = sqlite3.Row
+        return result
+
+    def expire_maintenance(_conn):
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery, "reconcile_review_required_matched_submit_trade_facts",
+        expire_maintenance,
+    )
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    client = MagicMock()
+    command_recovery._reconcile_passes_short_conn(
+        client, summary, "2026-04-26T00:07:00Z", scope="live_tick",
+    )
+    assert summary["authenticated_terminal_fill_review_fast"]["advanced"] == 1
+    assert summary["db_budget_deferred_at"] == "review_required_matched_submit_trade_fact"
+    with factory() as persisted:
+        assert _get_state(persisted, "cmd-001") == "FILLED"
+        payload = json.loads(_get_events(persisted, "cmd-001")[-1]["payload_json"])
+        assert payload["proof_class"] == "matched_submit_missing_trade_id_confirmed_trade"
+        position = persisted.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert position is not None
+        assert position["phase"] == "active"
+        assert float(position["shares"]) == pytest.approx(11)
+        assert float(position["cost_basis_usd"]) == pytest.approx(2.53)
+        assert persisted.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = 'pos-001' "
+            "AND (command_id = 'cmd-001' OR order_id = 'ord-001') "
+            "AND event_type = 'ENTRY_ORDER_FILLED'"
+        ).fetchone()[0] == 1
+        execution = persisted.execute(
+            "SELECT shares FROM execution_fact WHERE command_id = 'cmd-001' "
+            "AND position_id = 'pos-001' AND order_role = 'entry'"
+        ).fetchall()
+        assert len(execution) == 1
+        assert float(execution[0]["shares"]) == pytest.approx(11)
+    assert not client.mock_calls

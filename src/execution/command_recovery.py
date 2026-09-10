@@ -25647,7 +25647,7 @@ def _review_required_matched_submit_trade_fact_recovery(
     )
     rows = conn.execute(
         "WITH "
-        + _canonical_trade_fact_cte()
+        + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
         + ", "
         + _economic_trade_fact_cte()
         + """
@@ -25670,7 +25670,7 @@ def _review_required_matched_submit_trade_fact_recovery(
            AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
          ORDER BY proof_rank DESC, local_sequence DESC
         """,
-        (cmd.command_id, str(cmd.venue_order_id)),
+        (cmd.command_id, cmd.command_id, str(cmd.venue_order_id)),
     ).fetchall()
     if len(rows) != 1:
         return "stayed"
@@ -25847,8 +25847,10 @@ def _authenticated_entry_trade_fact_candidates(
                                  WHERE latest.command_id = cmd.command_id
                                    AND latest.event_type = 'REVIEW_REQUIRED'
                            )
-                           AND json_extract(review.payload_json, '$.reason') =
-                               'partial_remainder_point_order_filled_without_full_trade_fact'
+                           AND json_extract(review.payload_json, '$.reason') IN (
+                               'partial_remainder_point_order_filled_without_full_trade_fact',
+                               'matched_submit_missing_trade_id'
+                           )
                     )
                 )
            )
@@ -26231,6 +26233,15 @@ def _reconcile_authenticated_entry_trade_fact(
     """Atomically fold exact authenticated fill facts into command and position truth."""
 
     command_id = str(command.get("command_id") or "")
+    if (
+        str(command.get("state") or "") == CommandState.REVIEW_REQUIRED.value
+        and _latest_review_required_payload(
+            _command_events(conn, command_id)
+        ).get("reason") == "matched_submit_missing_trade_id"
+    ):
+        return _review_required_matched_submit_trade_fact_recovery(
+            conn, VenueCommand.from_row(command)
+        )
     venue_order_id = str(command.get("venue_order_id") or "")
     facts = _confirmed_entry_trade_fact_summary(
         conn,
@@ -29201,7 +29212,7 @@ def capital_blocking_command_scope(
                 not in existing_command_ids
             )
         )
-    authenticated_entry_projection_count = 0
+    authenticated_entry_projection_command_ids: set[str] = set()
     authenticated_nonterminal_states = (
         CommandState.SUBMITTING.value,
         CommandState.POST_ACKED.value,
@@ -29231,11 +29242,15 @@ def capital_blocking_command_scope(
             filled_size=filled_size,
             fill_price=fill_price,
         ):
-            authenticated_entry_projection_count += 1
+            authenticated_entry_projection_command_ids.add(
+                str(candidate["command_id"])
+            )
     projection_count = (
-        _terminal_filled_entry_projection_blocker_count(conn)
+        len(
+            authenticated_entry_projection_command_ids
+            | set(_terminal_filled_entry_projection_blocker_command_ids(conn))
+        )
         + _terminal_filled_exit_projection_blocker_count(conn)
-        + authenticated_entry_projection_count
         + len(
             _exchange_reconcile.persisted_terminal_late_entry_fill_command_ids(
                 conn
