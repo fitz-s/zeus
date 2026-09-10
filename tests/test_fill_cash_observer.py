@@ -77,6 +77,75 @@ def test_recent_fills_do_not_wait_for_historical_sweep():
         conn.close()
 
 
+def test_proven_recent_rows_do_not_consume_pending_transaction_slots():
+    from src.state.venue_command_repo import append_fill_cash_fact
+    from src.venue.fill_cash_proof import decode_fill_cash_proof
+    from tests.test_fill_cash_proof import (
+        COLLATERAL, EXCHANGE, TX, WALLET, _buy_logs, _valid_receipt,
+    )
+
+    conn = database()
+    try:
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(i, f"0x{i:064x}") for i in range(1, 9)] + [(9, TX), (10, TX)])
+        receipt, header, finalized, after = _valid_receipt(_buy_logs())
+        proof = dict(chain_id=137, tx_hash=TX, wallet=WALLET, receipt=receipt,
+                     header=header, finalized_header=finalized, header_after=after,
+                     collateral_by_exchange={EXCHANGE: {"address": COLLATERAL, "decimals": 6}})
+        proof["decoded"] = decode_fill_cash_proof(**proof)
+        assert proof["decoded"]["status"] == "PROVEN"
+        proof.update(rpc_chain_id=137, observed_at="2026-09-10T00:00:00Z")
+        append_fill_cash_fact(conn, proof=proof)
+        rows, cursor = select_cash_batch(conn, limit=4, wallet=WALLET.upper())
+        assert {row["trade_fact_id"] for row in rows} == {1, 2, 7, 8}
+        assert json.loads(cursor) == {"after": 2, "ceiling": 10}
+        other_rows, _ = select_cash_batch(conn, limit=4, wallet="0x" + "12" * 20)
+        assert TX in {row["tx_hash"] for row in other_rows}
+    finally:
+        conn.close()
+
+
+def test_transaction_refreshes_share_one_batch_slot_and_normalized_identity():
+    conn = database()
+    try:
+        tx = "0x" + "ab" * 32
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(1, "old"), (2, "middle"), (3, "new"), (4, tx), (5, tx.upper())])
+        rows, cursor = select_cash_batch(conn, limit=4, wallet="wallet")
+        assert [row["tx_hash"] for row in rows] == [tx, "new", "old", "middle"]
+        assert json.loads(cursor) == {"after": 2, "ceiling": 5}
+    finally:
+        conn.close()
+
+
+def test_history_cursor_does_not_jump_over_transactions_between_refreshes():
+    conn = database()
+    try:
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(1, "repeated"), (2, "middle"), (100, "repeated")])
+        first, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        assert first == [{"trade_fact_id": 1, "tx_hash": "repeated"}]
+        assert json.loads(cursor) == {"after": 1, "ceiling": 100}
+        save_cursor(conn, cursor)
+        second, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        assert second == [{"trade_fact_id": 2, "tx_hash": "middle"}]
+        assert json.loads(cursor)["after"] == 2
+    finally:
+        conn.close()
+
+
+def test_recent_and_history_overlap_does_not_duplicate_rpc_work():
+    conn = database()
+    try:
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(1, "a"), (2, "b"), (3, "a")])
+        rows, cursor = select_cash_batch(conn, limit=4, wallet="wallet")
+        assert len(rows) == len({row["tx_hash"] for row in rows}) == 2
+        assert json.loads(cursor) == {"after": 3, "ceiling": 3}
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 def test_invalid_batch_size(limit):
     conn = database()

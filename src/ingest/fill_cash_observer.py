@@ -37,27 +37,38 @@ def select_cash_batch(conn: sqlite3.Connection, *, limit: int, wallet: str) -> t
         ceiling = conn.execute("SELECT COALESCE(MAX(trade_fact_id),0) FROM venue_trade_facts").fetchone()[0]
         after = 0
     recent_limit = limit // 2
-    recent = conn.execute("""
-        SELECT trade_fact_id, tx_hash FROM venue_trade_facts
-        WHERE state IN ('MATCHED','MINED','CONFIRMED') AND tx_hash IS NOT NULL
-        ORDER BY trade_fact_id DESC LIMIT ?
-    """, (recent_limit,))
+    pending_filter = """
+        state IN ('MATCHED','MINED','CONFIRMED') AND tx_hash IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM venue_fill_cash_facts cash
+            WHERE cash.chain_id=137 AND cash.wallet=?
+              AND cash.tx_hash=LOWER(venue_trade_facts.tx_hash) AND cash.status='PROVEN'
+        )
+    """
+    recent = conn.execute(f"""
+        SELECT MAX(trade_fact_id) AS trade_fact_id, LOWER(tx_hash) AS tx_hash
+        FROM venue_trade_facts WHERE {pending_filter}
+        GROUP BY LOWER(tx_hash) ORDER BY trade_fact_id DESC LIMIT ?
+    """, (wallet.lower(), recent_limit))
     recent_rows = [dict(zip((c[0] for c in recent.description), row)) for row in recent.fetchall()]
     sweep_limit = limit - len(recent_rows)
-    result = conn.execute("""
-        SELECT trade_fact_id, tx_hash FROM venue_trade_facts
+    recent_txs = [row["tx_hash"] for row in recent_rows]
+    recent_exclusion = (
+        " AND LOWER(tx_hash) NOT IN (" + ",".join("?" for _ in recent_txs) + ")"
+        if recent_txs else ""
+    )
+    # Advance by the first pending fact of each transaction. Using its last
+    # refresh could jump over other transactions inside the frozen interval.
+    result = conn.execute(f"""
+        SELECT MIN(trade_fact_id) AS trade_fact_id, LOWER(tx_hash) AS tx_hash
+        FROM venue_trade_facts
         WHERE trade_fact_id > ? AND trade_fact_id <= ?
-          AND state IN ('MATCHED','MINED','CONFIRMED') AND tx_hash IS NOT NULL
-        ORDER BY trade_fact_id LIMIT ?
-    """, (after, ceiling, sweep_limit))
+          AND {pending_filter} {recent_exclusion}
+        GROUP BY LOWER(tx_hash) ORDER BY trade_fact_id LIMIT ?
+    """, (after, ceiling, wallet.lower(), *recent_txs, sweep_limit))
     rows = [dict(zip((c[0] for c in result.description), row)) for row in result.fetchall()]
     next_after = rows[-1]["trade_fact_id"] if len(rows) == sweep_limit else ceiling
-    combined = {row["trade_fact_id"]: row for row in recent_rows + rows}
-    pending = [row for row in combined.values() if not conn.execute("""
-        SELECT 1 FROM venue_fill_cash_facts
-        WHERE chain_id=137 AND wallet=? AND tx_hash=? AND status='PROVEN' LIMIT 1
-    """, (wallet.lower(), str(row["tx_hash"]).lower())).fetchone()]
-    return pending, json.dumps({"after": next_after, "ceiling": ceiling}, sort_keys=True)
+    return recent_rows + rows, json.dumps({"after": next_after, "ceiling": ceiling}, sort_keys=True)
 
 
 def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
