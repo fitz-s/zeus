@@ -2613,6 +2613,7 @@ def append_event(
             event_type=event_type,
             payload=payload,
             command_id=command_id,
+            occurred_at=occurred_at,
         )
         terminal_late_partial = _validate_terminal_late_fill_correction_payload(
             conn=conn,
@@ -3188,6 +3189,7 @@ def _validate_review_clearance_payload(
     event_type: str,
     payload: Optional[dict],
     command_id: str,
+    occurred_at: str,
 ) -> None:
     if event_type == "REVIEW_CLEARED_NO_VENUE_EXPOSURE":
         _validate_review_no_exposure_payload(
@@ -3195,6 +3197,7 @@ def _validate_review_clearance_payload(
             current_state=current_state,
             payload=payload,
             command_id=command_id,
+            occurred_at=occurred_at,
         )
         return
     if event_type == "REVIEW_CLEARED_VENUE_ORDER_LIVE":
@@ -3504,6 +3507,7 @@ def _validate_review_no_exposure_payload(
     current_state: str,
     payload: Optional[dict],
     command_id: str,
+    occurred_at: str,
 ) -> None:
     if current_state != "REVIEW_REQUIRED":
         raise ValueError("review no-exposure clearance is only legal from REVIEW_REQUIRED")
@@ -3514,6 +3518,32 @@ def _validate_review_no_exposure_payload(
     if payload.get("command_id") != command_id:
         raise ValueError("review no-exposure clearance payload command_id must match appended command")
     proof_class = payload.get("proof_class")
+    if proof_class == "deterministic_sdk_terminal_no_fill":
+        if payload.get("side_effect_boundary_crossed") is not True:
+            raise ValueError("deterministic no-fill clearance requires crossed SDK boundary")
+        if payload.get("sdk_submit_attempted") is not True:
+            raise ValueError("deterministic no-fill clearance requires SDK attempt")
+        if payload.get("terminal_no_fill") is not True or payload.get("exposure_created") is not False:
+            raise ValueError("deterministic no-fill clearance terminal flags are invalid")
+        actual_cleared_at = _review_clearance_parse_utc(occurred_at)
+        payload_cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
+        if actual_cleared_at is None or payload_cleared_at != actual_cleared_at:
+            raise ValueError("deterministic no-fill clearance clock does not match append")
+        proof = build_deterministic_sdk_terminal_no_fill_proof(
+            conn, command_id, occurred_at=occurred_at
+        )
+        if payload.get("proof") != proof:
+            raise ValueError("deterministic no-fill clearance proof does not match DB")
+        if payload.get("required_predicates") != proof["required_predicates"]:
+            raise ValueError("deterministic no-fill clearance predicates do not match DB")
+        if payload.get("review_required_proof") != proof["review_required_witness"]:
+            raise ValueError("deterministic no-fill clearance witness does not match DB")
+        source = payload.get("source_proof")
+        if not isinstance(source, dict) or source.get("source_function") != (
+            "command_recovery._review_required_deterministic_sdk_terminal_no_fill_recovery"
+        ):
+            raise ValueError("deterministic no-fill clearance source is unsupported")
+        return
     if proof_class in {
         "cancel_unknown_terminal_no_fill",
         "cancel_failed_already_canceled_terminal_no_fill",
@@ -5264,6 +5294,270 @@ def _actual_review_required_payload(
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+_DETERMINISTIC_SDK_TERMINAL_NO_FILL_CODES = {
+    "venue_fak_no_match_400": (
+        "FAK", "status_code=400", "no orders found to match with fak order",
+        "fak orders are partially filled or killed if no match is found",
+    ),
+    "venue_fok_not_fully_filled_400": (
+        "FOK", "status_code=400", "order couldn't be fully filled",
+        "fok orders are fully filled or killed",
+    ),
+}
+
+
+def _deterministic_no_fill_text_matches(code: object, message: object) -> bool:
+    markers = _DETERMINISTIC_SDK_TERMINAL_NO_FILL_CODES.get(str(code or ""))
+    if markers is None or not isinstance(message, str) or not message.strip():
+        return False
+    text = " ".join(message.split()).lower()
+    return all(marker in text for marker in markers[1:])
+
+
+def build_deterministic_sdk_terminal_no_fill_proof(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    occurred_at: str | None = None,
+) -> dict:
+    """Read-only proof for a post-SDK deterministic terminal rejection."""
+
+    with _row_factory_as(conn, sqlite3.Row):
+        command_row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()
+        event_rows = conn.execute(
+            """SELECT event_type, occurred_at, payload_json
+               FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no""",
+            (command_id,),
+        ).fetchall()
+    if command_row is None:
+        raise ValueError("deterministic no-fill proof command is missing")
+    command = _row_to_dict(command_row)
+    if str(command.get("state") or "") != "REVIEW_REQUIRED":
+        raise ValueError("deterministic no-fill proof requires REVIEW_REQUIRED")
+    if not event_rows or event_rows[-1]["event_type"] != "REVIEW_REQUIRED":
+        raise ValueError("deterministic no-fill proof requires latest REVIEW_REQUIRED")
+    review_row = next(
+        (row for row in reversed(event_rows) if row["event_type"] == "REVIEW_REQUIRED"),
+        None,
+    )
+    review = _review_clearance_json_dict(review_row["payload_json"] if review_row else None)
+    witness = review.get("terminal_rejection_witness")
+    if review.get("reason") != "terminal_rejection_persistence_failed_after_side_effect":
+        raise ValueError("deterministic no-fill proof review reason is unsupported")
+    if (
+        not isinstance(witness, dict)
+        or type(witness.get("schema_version")) is not int
+        or witness.get("schema_version") != 1
+    ):
+        raise ValueError("deterministic no-fill proof witness schema is unsupported")
+    code = str(witness.get("error_code") or "")
+    message = witness.get("error_message")
+    if code not in _DETERMINISTIC_SDK_TERMINAL_NO_FILL_CODES:
+        raise ValueError("deterministic no-fill proof rejection code is unsupported")
+    if not _deterministic_no_fill_text_matches(code, message):
+        raise ValueError("deterministic no-fill proof rejection message is not typed")
+    if (
+        str(witness.get("result_status") or "").lower() != "rejected"
+        or witness.get("pre_sdk_no_side_effect") is not False
+        or review.get("side_effect_boundary_crossed") is not True
+        or review.get("sdk_submit_attempted") is not True
+        or review.get("sdk_submit_returned_order_id") is not True
+    ):
+        raise ValueError("deterministic no-fill proof witness does not cross SDK boundary")
+
+    review_order_id = str(review.get("venue_order_id") or "").strip()
+    command_order_id = str(command.get("venue_order_id") or "").strip()
+    if review_order_id and command_order_id and review_order_id != command_order_id:
+        raise ValueError("deterministic no-fill proof order id conflicts with command")
+    order_id = review_order_id or command_order_id
+    review_idempotency_key = str(review.get("idempotency_key") or "").strip()
+    command_idempotency_key = str(command.get("idempotency_key") or "").strip()
+    if not review_idempotency_key or not command_idempotency_key or (
+        review_idempotency_key != command_idempotency_key
+    ):
+        raise ValueError("deterministic no-fill proof idempotency identity mismatch")
+    order_type = str(command.get("order_type") or "").upper()
+    side = str(command.get("side") or "").upper()
+    expected_type = _DETERMINISTIC_SDK_TERMINAL_NO_FILL_CODES[code][0]
+    if not order_id or side not in {"BUY", "SELL"}:
+        raise ValueError("deterministic no-fill proof order identity is unsupported")
+    intent_kind = str(command.get("intent_kind") or "").upper()
+    if (intent_kind, side) not in {("ENTRY", "BUY"), ("EXIT", "SELL")}:
+        raise ValueError("deterministic no-fill proof intent/side identity is unsupported")
+
+    def parse_time(value: object) -> datetime.datetime | None:
+        return _review_clearance_parse_utc(value)
+
+    clear_at = parse_time(
+        occurred_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
+    review_at = parse_time(review_row["occurred_at"] if review_row else None)
+    if clear_at is None or review_at is None or review_at > clear_at:
+        raise ValueError("deterministic no-fill proof clock is invalid")
+    for event_row in event_rows:
+        event_at = parse_time(event_row["occurred_at"])
+        if event_at is None or event_at > clear_at:
+            raise ValueError("deterministic no-fill proof event clock is invalid")
+
+    with _row_factory_as(conn, sqlite3.Row):
+        pre_row = conn.execute(
+            "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (str(command.get("envelope_id") or ""),),
+        ).fetchone()
+        order_rows = conn.execute(
+            """SELECT * FROM venue_submission_envelopes
+               WHERE order_id = ? ORDER BY captured_at, envelope_id""",
+            (order_id,),
+        ).fetchall()
+        duplicate_command = conn.execute(
+            """SELECT 1 FROM venue_commands
+               WHERE venue_order_id = ? AND command_id <> ? LIMIT 1""",
+            (order_id, command_id),
+        ).fetchone()
+    if pre_row is None or not order_rows or duplicate_command is not None:
+        raise ValueError("deterministic no-fill proof envelope identity is missing or ambiguous")
+    pre = _row_to_dict(pre_row)
+    order_type = str(order_type or pre.get("order_type") or "").upper()
+    if order_type != expected_type:
+        raise ValueError("deterministic no-fill proof order type does not match typed error")
+    if side == "SELL" and order_type == "FOK":
+        raise ValueError("deterministic SELL FOK no-fill is unsupported")
+    envelopes = [_row_to_dict(row) for row in order_rows]
+
+    def identity(row: dict) -> tuple[str, ...]:
+        return (
+            str(row.get("chain_id") or ""),
+            str(row.get("funder_address") or "").lower(),
+            str(row.get("selected_outcome_token_id") or ""),
+            str(row.get("side") or "").upper(),
+            str(row.get("order_type") or "").upper(),
+            str(row.get("canonical_pre_sign_payload_hash") or "").lower(),
+            str(row.get("raw_request_hash") or "").lower(),
+        )
+
+    pre_identity = identity(pre)
+    if (
+        pre_identity[0] != "137"
+        or not pre_identity[1]
+        or pre_identity[2] != str(command.get("token_id") or "")
+        or pre_identity[3] != side
+        or pre_identity[4] != order_type
+        or any(identity(row) != pre_identity for row in envelopes)
+    ):
+        raise ValueError("deterministic no-fill proof command/envelope identity mismatch")
+    for field in ("canonical_pre_sign_payload_hash", "raw_request_hash"):
+        value = str(pre.get(field) or "")
+        try:
+            _validate_sha256_hex(field, value)
+        except ValueError as exc:
+            raise ValueError("deterministic no-fill proof pre hash is invalid") from exc
+        command_value = str(command.get(field) or "")
+        if command_value and command_value.lower() != value.lower():
+            raise ValueError("deterministic no-fill proof command hash mismatch")
+    signed_hashes: set[str] = set()
+    response_rows: list[dict] = []
+    for row in envelopes:
+        blob = row.get("signed_order_blob")
+        signed_hash = str(row.get("signed_order_hash") or "").lower()
+        if blob not in (None, b"", "") or signed_hash:
+            if blob in (None, b"", "") or not signed_hash:
+                raise ValueError("deterministic no-fill proof signed identity is incomplete")
+            if hashlib.sha256(bytes(blob)).hexdigest() != signed_hash:
+                raise ValueError("deterministic no-fill proof signed hash mismatch")
+            signed_hashes.add(signed_hash)
+        has_response = bool(str(row.get("raw_response_json") or "").strip())
+        has_error = bool(str(row.get("error_code") or "").strip())
+        if has_response or has_error or str(row.get("error_message") or "").strip():
+            response_rows.append(row)
+        captured_at = parse_time(row.get("captured_at"))
+        if captured_at is None or captured_at > clear_at:
+            raise ValueError("deterministic no-fill proof evidence clock is invalid")
+    pre_captured_at = parse_time(pre.get("captured_at"))
+    if pre_captured_at is None or pre_captured_at > clear_at:
+        raise ValueError("deterministic no-fill proof pre-envelope clock is invalid")
+    if len(signed_hashes) != 1 or not response_rows:
+        raise ValueError("deterministic no-fill proof requires signed response evidence")
+    for row in response_rows:
+        if (
+            str(row.get("error_code") or "") != code
+            or str(row.get("error_message") or "") != str(message)
+            or not _deterministic_no_fill_text_matches(row.get("error_code"), row.get("error_message"))
+        ):
+            raise ValueError("deterministic no-fill proof has conflicting response evidence")
+        raw_response = str(row.get("raw_response_json") or "").strip()
+        raw_trade_ids = str(row.get("trade_ids_json") or "").strip()
+        if raw_trade_ids:
+            try:
+                persisted_trade_ids = json.loads(raw_trade_ids)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("deterministic no-fill proof trade identity is malformed") from exc
+            if persisted_trade_ids not in (None, "", [], (), {}):
+                raise ValueError("deterministic no-fill proof envelope contains trade ids")
+        if raw_response:
+            try:
+                parsed_response = json.loads(raw_response)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("deterministic no-fill proof response is malformed") from exc
+            if not isinstance(parsed_response, dict) or parsed_response.get("success") is True:
+                raise ValueError("deterministic no-fill proof response is a success/conflict")
+            status = str(
+                parsed_response.get("status") or parsed_response.get("state") or ""
+            ).strip().lower()
+            if status and status not in {"rejected", "reject", "error", "failed"}:
+                raise ValueError("deterministic no-fill proof response status is not rejected")
+            for fill_key in ("fills", "trades", "tradeIDs", "tradeIds", "trade_ids"):
+                fills = parsed_response.get(fill_key)
+                if fills not in (None, "", [], (), {}):
+                    raise ValueError("deterministic no-fill proof response contains fills")
+
+    fact_counts = {}
+    for table in ("venue_order_facts", "venue_trade_facts"):
+        if not _review_clearance_table_exists(conn, table):
+            raise ValueError("deterministic no-fill proof fact table is unavailable")
+        fact_counts[table] = int(conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE command_id = ? OR venue_order_id = ?",
+            (command_id, order_id),
+        ).fetchone()[0])
+    if any(fact_counts.values()):
+        raise ValueError("deterministic no-fill proof cannot coexist with venue facts")
+    predicates = {
+        "latest_review_reason_terminal_rejection_persistence_failed": True,
+        "terminal_rejection_witness_schema_1": True,
+        "terminal_rejection_code_typed_400": True,
+        "terminal_rejection_status_rejected": True,
+        "post_sdk_boundary_crossed": True,
+        "returned_order_id_proven": True,
+        "signed_hash_matches_blob": True,
+        "all_same_order_identities_match": True,
+        "all_same_order_responses_are_same_terminal_error": True,
+        "no_venue_order_facts": fact_counts["venue_order_facts"] == 0,
+        "no_venue_trade_facts": fact_counts["venue_trade_facts"] == 0,
+    }
+    return {
+        "schema_version": 1,
+        "proof_class": "deterministic_sdk_terminal_no_fill",
+        "command_id": command_id,
+        "venue_order_id": order_id,
+        "chain_id": 137,
+        "funder_address": pre_identity[1],
+        "selected_outcome_token_id": pre_identity[2],
+        "side": side,
+        "order_type": order_type,
+        "signed_order_hash": next(iter(signed_hashes)),
+        "canonical_pre_sign_payload_hash": pre_identity[5],
+        "raw_request_hash": pre_identity[6],
+        "error_code": code,
+        "error_message": str(message),
+        "terminal_no_fill": True,
+        "exposure_created": False,
+        "required_predicates": predicates,
+        "review_required_witness": witness,
+        "envelope_ids": [str(row.get("envelope_id") or "") for row in envelopes],
+    }
 
 
 def _actual_review_confirmed_fill_predicates(

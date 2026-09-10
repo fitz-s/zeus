@@ -38780,3 +38780,348 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure):
         "AND event_type IN ('PARTIAL_FILL_OBSERVED', 'EXPIRED')",
         (command_id,),
     ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("side", "order_type", "error_code", "message"),
+    [
+        (
+            "BUY",
+            "FOK",
+            "venue_fok_not_fully_filled_400",
+            "PolyApiException[status_code=400, error_message={'error': \"order couldn't be fully filled. FOK orders are fully filled or killed.\"}]",
+        ),
+        (
+            "BUY",
+            "FAK",
+            "venue_fak_no_match_400",
+            "PolyApiException[status_code=400, error_message={'error': 'no orders found to match with FAK order. FAK orders are partially filled or killed if no match is found.'}]",
+        ),
+        (
+            "SELL",
+            "FAK",
+            "venue_fak_no_match_400",
+            "PolyApiException[status_code=400, error_message={'error': 'no orders found to match with FAK order. FAK orders are partially filled or killed if no match is found.'}]",
+        ),
+    ],
+)
+def test_review_deterministic_sdk_terminal_no_fill_clears_without_client_io(
+    conn, mock_client, side, order_type, error_code, message
+):
+    from dataclasses import replace
+
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import append_event, insert_submission_envelope
+
+    command_id = f"cmd-terminal-no-fill-{side.lower()}-{order_type.lower()}"
+    _insert(
+        conn,
+        command_id=command_id,
+        side=side,
+        order_type=order_type,
+        intent_kind="EXIT" if side == "SELL" else "ENTRY",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "venue_order_id": f"order-{command_id}",
+            "idempotency_key": conn.execute(
+                "SELECT idempotency_key FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0],
+            "side_effect_boundary_crossed": True,
+            "sdk_submit_attempted": True,
+            "sdk_submit_returned_order_id": True,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": error_code,
+                "error_message": message,
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": False,
+            },
+        },
+    )
+    pre = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (conn.execute(
+            "SELECT envelope_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0],),
+    ).fetchone()
+    signed_blob = f"signed-{command_id}".encode()
+    final = replace(
+        _make_envelope(
+            token_id="tok-001",
+            side=side,
+            order_type=order_type,
+            signed_order=signed_blob,
+            signed_order_hash=hashlib.sha256(signed_blob).hexdigest(),
+            order_id=f"order-{command_id}",
+            error_code=error_code,
+            error_message=message,
+            raw_response_json=None,
+        ),
+        canonical_pre_sign_payload_hash=pre["canonical_pre_sign_payload_hash"],
+        raw_request_hash=pre["raw_request_hash"],
+        captured_at="2026-04-26T00:01:30Z",
+    )
+    insert_submission_envelope(conn, final, envelope_id=f"final-{command_id}")
+    conn.commit()
+
+    summary = reconcile_unresolved_commands(conn, mock_client)
+
+    assert summary["advanced"] == 1
+    assert summary["errors"] == 0
+    assert _get_state(conn, command_id) == "EXPIRED"
+    assert mock_client.get_order.call_count == 0
+    assert mock_client.get_open_orders.call_count == 0
+    assert mock_client.get_trades.call_count == 0
+    clear = [
+        event for event in _get_events(conn, command_id)
+        if event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+    ][-1]
+    assert json.loads(clear["payload_json"])["proof_class"] == (
+        "deterministic_sdk_terminal_no_fill"
+    )
+
+
+def test_review_deterministic_sdk_terminal_no_fill_rejects_sell_fok(conn):
+    from dataclasses import replace
+
+    from src.state.venue_command_repo import (
+        append_event,
+        build_deterministic_sdk_terminal_no_fill_proof,
+        insert_submission_envelope,
+    )
+
+    command_id = "cmd-terminal-no-fill-sell-fok"
+    _insert(conn, command_id=command_id, side="SELL", order_type="GTC", intent_kind="EXIT")
+    message = "PolyApiException[status_code=400, error_message={'error': \"order couldn't be fully filled. FOK orders are fully filled or killed.\"}]"
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "venue_order_id": "order-terminal-sell-fok",
+            "side_effect_boundary_crossed": True,
+            "sdk_submit_attempted": True,
+            "sdk_submit_returned_order_id": True,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": "venue_fok_not_fully_filled_400",
+                "error_message": message,
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": False,
+            },
+        },
+    )
+    pre = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (conn.execute(
+            "SELECT envelope_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0],),
+    ).fetchone()
+    signed_blob = b"signed-sell-fok"
+    final = replace(
+        _make_envelope(
+            token_id="tok-001",
+            side="SELL",
+            order_type="GTC",
+            signed_order=signed_blob,
+            signed_order_hash=hashlib.sha256(signed_blob).hexdigest(),
+            order_id="order-terminal-sell-fok",
+            error_code="venue_fok_not_fully_filled_400",
+            error_message=message,
+        ),
+        canonical_pre_sign_payload_hash=pre["canonical_pre_sign_payload_hash"],
+        raw_request_hash=pre["raw_request_hash"],
+        captured_at="2026-04-26T00:01:30Z",
+    )
+    insert_submission_envelope(conn, final, envelope_id=f"final-{command_id}")
+    conn.commit()
+
+    with pytest.raises(ValueError):
+        build_deterministic_sdk_terminal_no_fill_proof(
+            conn, command_id, occurred_at="2026-04-26T00:02:00Z"
+        )
+
+
+def _seed_deterministic_terminal_no_fill_for_test(
+    conn, *, command_id, side="BUY", order_type="FAK", error_code=None, message=None
+):
+    from dataclasses import replace
+
+    from src.state.venue_command_repo import append_event, insert_submission_envelope
+
+    error_code = error_code or "venue_fak_no_match_400"
+    message = message or (
+        "PolyApiException[status_code=400, error_message={'error': 'no orders found "
+        "to match with FAK order. FAK orders are partially filled or killed if no "
+        "match is found.'}]"
+    )
+    _insert(
+        conn,
+        command_id=command_id,
+        side=side,
+        order_type=order_type,
+        intent_kind="EXIT" if side == "SELL" else "ENTRY",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "venue_order_id": f"order-{command_id}",
+            "idempotency_key": conn.execute(
+                "SELECT idempotency_key FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0],
+            "side_effect_boundary_crossed": True,
+            "sdk_submit_attempted": True,
+            "sdk_submit_returned_order_id": True,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": error_code,
+                "error_message": message,
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": False,
+            },
+        },
+    )
+    envelope_id = conn.execute(
+        "SELECT envelope_id FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    pre = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone()
+    signed_blob = f"signed-{command_id}".encode()
+    final = replace(
+        _make_envelope(
+            token_id="tok-001",
+            side=side,
+            order_type=order_type,
+            signed_order=signed_blob,
+            signed_order_hash=hashlib.sha256(signed_blob).hexdigest(),
+            order_id=f"order-{command_id}",
+            error_code=error_code,
+            error_message=message,
+        ),
+        canonical_pre_sign_payload_hash=pre["canonical_pre_sign_payload_hash"],
+        raw_request_hash=pre["raw_request_hash"],
+        captured_at="2026-04-26T00:01:30Z",
+    )
+    insert_submission_envelope(conn, final, envelope_id=f"final-{command_id}")
+    conn.commit()
+    return message
+
+
+def test_review_deterministic_terminal_no_fill_stays_on_fact_and_writer_forgery(conn, mock_client):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        build_deterministic_sdk_terminal_no_fill_proof,
+    )
+
+    command_id = "cmd-terminal-no-fill-fact"
+    _seed_deterministic_terminal_no_fill_for_test(conn, command_id=command_id)
+    append_order_fact(
+        conn,
+        venue_order_id=f"order-{command_id}",
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="1",
+        source="REST",
+        observed_at="2026-04-26T00:01:40Z",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"test": "late fill fact"},
+    )
+    conn.commit()
+    summary = reconcile_unresolved_commands(conn, mock_client)
+    assert summary["advanced"] == 0
+    assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+    # A payload cannot promote itself by claiming all predicates are true.
+    forged_command_id = "cmd-terminal-no-fill-forged-predicate"
+    _seed_deterministic_terminal_no_fill_for_test(
+        conn, command_id=forged_command_id
+    )
+    proof = build_deterministic_sdk_terminal_no_fill_proof(
+        conn, forged_command_id, occurred_at="2026-04-26T00:02:00Z"
+    )
+    forged = dict(proof["required_predicates"])
+    forged["no_venue_order_facts"] = False
+    with pytest.raises(ValueError, match="predicates do not match"):
+        append_event(
+            conn,
+            command_id=forged_command_id,
+            event_type="REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "schema_version": 1,
+                "reason": "review_cleared_no_venue_exposure",
+                "command_id": forged_command_id,
+                "proof_class": "deterministic_sdk_terminal_no_fill",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_attempted": True,
+                "terminal_no_fill": True,
+                "exposure_created": False,
+                "required_predicates": forged,
+                "proof": proof,
+                "review_required_proof": proof["review_required_witness"],
+                "source_proof": {
+                    "source_function": "command_recovery._review_required_deterministic_sdk_terminal_no_fill_recovery"
+                },
+                "cleared_at": "2026-04-26T00:02:00Z",
+            },
+        )
+
+
+def test_review_deterministic_terminal_no_fill_stays_on_unknown_error_or_conflicting_envelope(
+    conn, mock_client
+):
+    from dataclasses import replace
+
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    command_id = "cmd-terminal-no-fill-conflict"
+    message = _seed_deterministic_terminal_no_fill_for_test(conn, command_id=command_id)
+    pre = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = (SELECT envelope_id FROM venue_commands WHERE command_id = ?)",
+        (command_id,),
+    ).fetchone()
+    signed_blob = b"conflicting-signed"
+    conflict = replace(
+        _make_envelope(
+            token_id="tok-001",
+            side="BUY",
+            order_type="FAK",
+            signed_order=signed_blob,
+            signed_order_hash=hashlib.sha256(signed_blob).hexdigest(),
+            order_id=f"order-{command_id}",
+            error_code="venue_rejected_400",
+            error_message=message,
+        ),
+        canonical_pre_sign_payload_hash=pre["canonical_pre_sign_payload_hash"],
+        raw_request_hash=pre["raw_request_hash"],
+        captured_at="2026-04-26T00:01:30Z",
+    )
+    insert_submission_envelope(conn, conflict, envelope_id=f"conflict-{command_id}")
+    conn.commit()
+    summary = reconcile_unresolved_commands(conn, mock_client)
+    assert summary["advanced"] == 0
+    assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+    assert mock_client.get_order.call_count == 0

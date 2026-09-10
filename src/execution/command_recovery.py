@@ -74,6 +74,7 @@ from src.state.venue_command_repo import (
     append_event,
     append_order_fact,
     append_trade_fact,
+    build_deterministic_sdk_terminal_no_fill_proof,
     reconciled_increment_no_fill_proof,
     UNRESOLVED_SIDE_EFFECT_STATES,
 )
@@ -19855,6 +19856,78 @@ def _typed_pre_sdk_rejection_predicates(
     return predicates, failures, witness
 
 
+def clear_review_required_deterministic_sdk_terminal_no_fill(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    occurred_at: str | None = None,
+) -> dict:
+    """Clear a deterministic post-SDK terminal no-fill REVIEW using DB proof only."""
+
+    now = occurred_at or _now_iso()
+    proof = build_deterministic_sdk_terminal_no_fill_proof(
+        conn, command_id, occurred_at=now
+    )
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_exposure",
+        "command_id": command_id,
+        "decision_id": str(
+            conn.execute(
+                "SELECT decision_id FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0]
+        ),
+        "proof_class": "deterministic_sdk_terminal_no_fill",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": True,
+        "terminal_no_fill": True,
+        "exposure_created": False,
+        "required_predicates": proof["required_predicates"],
+        "proof": proof,
+        "review_required_proof": proof["review_required_witness"],
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": (
+                "command_recovery._review_required_deterministic_sdk_terminal_no_fill_recovery"
+            ),
+            "source_reason": proof["error_code"],
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
+def _review_required_deterministic_sdk_terminal_no_fill_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+) -> str:
+    try:
+        clear_review_required_deterministic_sdk_terminal_no_fill(conn, cmd.command_id)
+    except ValueError:
+        return "stayed"
+    except Exception as exc:  # noqa: BLE001 - recovery stays fail-closed.
+        logger.warning(
+            "recovery: command %s deterministic terminal no-fill clearance failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    logger.info(
+        "recovery: command %s deterministic SDK terminal no-fill -> EXPIRED",
+        cmd.command_id,
+    )
+    return "advanced"
+
+
 def clear_review_required_typed_pre_sdk_rejection(
     conn: sqlite3.Connection,
     command_id: str,
@@ -27551,6 +27624,11 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
+            outcome = _review_required_deterministic_sdk_terminal_no_fill_recovery(
+                conn, cmd
+            )
+            if outcome != "stayed":
+                return outcome
             outcome = _review_required_typed_pre_sdk_rejection_recovery(conn, cmd)
             if outcome != "stayed":
                 return outcome
