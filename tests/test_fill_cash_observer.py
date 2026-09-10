@@ -258,6 +258,97 @@ def test_old_cursor_migrates_to_attempt_frontier_without_skipping_history():
         conn.close()
 
 
+def test_receipt_attempt_marker_requires_dispatch_before_cursor_advances(monkeypatch):
+    """A control-read deadline transition cannot mark an uncalled receipt RPC."""
+    from src.ingest import fill_cash_observer as observer
+
+    conn = database()
+    try:
+        tx_hash = "0x" + "ab" * 32
+        conn.execute("INSERT INTO venue_trade_facts VALUES (1,?,'CONFIRMED')", (tx_hash,))
+        save_cursor(conn, '{"after":0,"ceiling":1,"recent_first":false}')
+        rows, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        clock, receipt_calls = [0.0], []
+        monkeypatch.setattr(observer.time, "monotonic", lambda: clock[0])
+
+        def expire_after_control(url, calls, **kwargs):
+            if calls[0][0] == "eth_chainId":
+                clock[0] = 3.0
+                return ["0x89", {"number": "0x20", "hash": "0x" + "22" * 32}]
+            receipt_calls.append(calls)
+            raise AssertionError("receipt RPC must not run after its deadline")
+
+        proofs = collect_cash_proofs(
+            tx_hashes=[row["tx_hash"] for row in rows], wallet="wallet", rpc_url="unused",
+            budget_seconds=2, rpc_batch=expire_after_control, rpc_batch_items=3,
+        )
+        assert not receipt_calls
+        assert not getattr(proofs[0], "receipt_requested")
+        assert json.loads(_advance_cash_cursor(cursor, proofs))["after"] == 0
+    finally:
+        conn.close()
+
+
+def test_receipt_attempt_uses_one_deadline_check_before_dispatch(monkeypatch):
+    """The old precheck/call recheck pair could mark a receipt without calling it."""
+    from src.ingest import fill_cash_observer as observer
+
+    conn = database()
+    try:
+        tx_hash = "0x" + "bc" * 32
+        conn.execute("INSERT INTO venue_trade_facts VALUES (1,?,'CONFIRMED')", (tx_hash,))
+        save_cursor(conn, '{"after":0,"ceiling":1,"recent_first":false}')
+        rows, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        clock = iter([0.0, 0.0, 1.0, 3.0])
+        monkeypatch.setattr(observer.time, "monotonic", lambda: next(clock))
+        receipt_calls = []
+
+        def rpc(url, calls, **kwargs):
+            if calls[0][0] == "eth_chainId":
+                return ["0x89", {"number": "0x20", "hash": "0x" + "22" * 32}]
+            receipt_calls.append(calls)
+            return [None] * len(calls)
+
+        proofs = collect_cash_proofs(
+            tx_hashes=[row["tx_hash"] for row in rows], wallet="wallet", rpc_url="unused",
+            budget_seconds=2, rpc_batch=rpc, rpc_batch_items=3,
+        )
+        assert receipt_calls
+        assert getattr(proofs[0], "receipt_requested")
+        assert json.loads(_advance_cash_cursor(cursor, proofs))["after"] == 1
+    finally:
+        conn.close()
+
+
+def test_receipt_rpc_error_still_marks_attempt_and_advances_cursor(monkeypatch):
+    from src.ingest import fill_cash_observer as observer
+
+    conn = database()
+    try:
+        tx_hash = "0x" + "cd" * 32
+        conn.execute("INSERT INTO venue_trade_facts VALUES (1,?,'CONFIRMED')", (tx_hash,))
+        save_cursor(conn, '{"after":0,"ceiling":1,"recent_first":false}')
+        rows, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        monkeypatch.setattr(observer.time, "monotonic", lambda: 0.0)
+        receipt_calls = []
+
+        def receipt_error(url, calls, **kwargs):
+            if calls[0][0] == "eth_chainId":
+                return ["0x89", {"number": "0x20", "hash": "0x" + "22" * 32}]
+            receipt_calls.append(calls)
+            raise RuntimeError("receipt transport failure")
+
+        proofs = collect_cash_proofs(
+            tx_hashes=[row["tx_hash"] for row in rows], wallet="wallet", rpc_url="unused",
+            budget_seconds=2, rpc_batch=receipt_error, rpc_batch_items=3,
+        )
+        assert receipt_calls
+        assert getattr(proofs[0], "receipt_requested")
+        assert json.loads(_advance_cash_cursor(cursor, proofs))["after"] == 1
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 def test_invalid_batch_size(limit):
     conn = database()

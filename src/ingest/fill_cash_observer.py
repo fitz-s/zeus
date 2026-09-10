@@ -134,12 +134,14 @@ def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
     deadline = time.monotonic() + budget_seconds
     control_errors: list[str] = []
 
-    def call(calls):
+    def call(calls, *, before_rpc=None):
         if not calls:
             return []
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("rpc deadline")
+        if before_rpc is not None:
+            before_rpc()
         result = batch(rpc_url, calls, timeout_seconds=remaining)
         if not isinstance(result, list) or len(result) != len(calls):
             raise ValueError("partial response")
@@ -173,9 +175,10 @@ def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
             results = {}
             for calls, keys in calls_with_keys:
                 try:
-                    if receipt_attempts and deadline - time.monotonic() > 0:
-                        attempted_receipts.update(keys)
-                    values = call(calls)
+                    values = call(
+                        calls,
+                        before_rpc=(lambda keys=keys: attempted_receipts.update(keys)) if receipt_attempts else None,
+                    )
                 except Exception as exc:
                     errors.append(type(exc).__name__)
                     continue
