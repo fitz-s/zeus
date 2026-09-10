@@ -1606,10 +1606,11 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
 
 
 @pytest.mark.parametrize("response_mode", ["success_false", "missing_order_id"])
-@pytest.mark.parametrize("persistence_mode", ["permanent", "lock_once"])
+@pytest.mark.parametrize("persistence_mode", ["permanent", "lock_once", "release_failure"])
 def test_executor_buy_rejection_release_requires_successful_terminal_append(
     conn, monkeypatch, response_mode, persistence_mode
 ):
+    from src.execution import executor as executor_module
     from src.execution.executor import _live_order
     from src.state import venue_command_repo
     from src.state.collateral_ledger import configure_global_ledger
@@ -1660,6 +1661,7 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(
         lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
     )
     real_append_event = venue_command_repo.append_event
+    real_release = executor_module._release_entry_risk_reservation
 
     terminal_attempts = 0
 
@@ -1705,6 +1707,17 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(
                 )
             return _fake_submit_result(self.bound_envelope, status="REJECTED")
 
+    if persistence_mode == "release_failure":
+        def release_then_fail(conn, *, command_id):
+            real_release(conn, command_id=command_id)
+            raise RuntimeError("terminal release failed")
+
+        monkeypatch.setattr(
+            executor_module,
+            "_release_entry_risk_reservation",
+            release_then_fail,
+        )
+
     monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_fails_for_terminal)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     try:
@@ -1724,6 +1737,11 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(
             )
             assert terminal_attempts == 2
             assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
+        elif persistence_mode == "release_failure":
+            assert result.status == "unknown_side_effect"
+            assert result.command_state == "REVIEW_REQUIRED"
+            assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
+            assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_000_000
         else:
             # If terminal persistence remains broken, the venue result cannot
             # be reported as rejected; retain a durable recovery-owned review
@@ -1750,7 +1768,7 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(
             )
         ]
         assert ("SUBMIT_REJECTED" in event_types) is (persistence_mode == "lock_once")
-        assert ("REVIEW_REQUIRED" in event_types) is (persistence_mode == "permanent")
+        assert ("REVIEW_REQUIRED" in event_types) is (persistence_mode != "lock_once")
     finally:
         configure_global_ledger(None)
 
@@ -1965,6 +1983,176 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(
         assert ("REVIEW_REQUIRED" in event_types) is (persistence_mode == "permanent")
     finally:
         configure_global_ledger(None)
+
+
+def test_public_buy_rejection_uses_immediate_write_lock_against_deferred_reader(
+    conn, monkeypatch, tmp_path
+):
+    """A real deferred-read upgrade gets BUSY_SNAPSHOT; the public path takes the write lock first."""
+    from src.execution import executor as executor_module
+    from src.execution.executor import _live_order
+    from src.state import venue_command_repo
+    from src.state.collateral_ledger import configure_global_ledger
+    from src.state.db import init_schema, init_schema_trade_only
+
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    snapshot_kwargs = _exec_snapshot_kwargs(conn)
+    conn.commit()
+    world_path = next(
+        str(row[2])
+        for row in conn.execute("PRAGMA database_list")
+        if str(row[1]) == "world"
+    )
+    db_path = tmp_path / "public-buy-write-lock.db"
+    file_conn = sqlite3.connect(db_path, timeout=0)
+    file_conn.row_factory = sqlite3.Row
+    conn.backup(file_conn)
+    file_conn.execute("ATTACH DATABASE ? AS world", (world_path,))
+    file_conn.execute("PRAGMA journal_mode=WAL")
+    file_conn.execute("CREATE TABLE deferred_lock_probe (value TEXT NOT NULL)")
+    file_conn.commit()
+    competitor = sqlite3.connect(db_path, timeout=0)
+
+    # Reproduce the old bare-append shape against two real SQLite connections:
+    # a deferred read snapshot cannot be upgraded after the other writer commits.
+    file_conn.execute("BEGIN")
+    file_conn.execute("SELECT COUNT(*) FROM deferred_lock_probe").fetchone()
+    competitor.execute("BEGIN IMMEDIATE")
+    competitor.execute("INSERT INTO deferred_lock_probe VALUES ('competitor')")
+    competitor.commit()
+    with pytest.raises(sqlite3.OperationalError) as old_error:
+        file_conn.execute("INSERT INTO deferred_lock_probe VALUES ('legacy')")
+    assert old_error.value.sqlite_errorcode == sqlite3.SQLITE_BUSY_SNAPSHOT
+    file_conn.rollback()
+
+    ledger = CollateralLedger(file_conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 100}))
+    file_conn.commit()
+    configure_global_ledger(ledger)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_taker_quality_component",
+        lambda *args, **kwargs: {"component": "entry_taker_quality", "allowed": True, "reason": "allowed"},
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_actionable_certificate_payload_and_component",
+        lambda *args, **kwargs: (
+            {"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"},
+            {"strategy_key": "center_buy"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_economics_component",
+        lambda *args, **kwargs: {
+            "component": "entry_economics",
+            "allowed": True,
+            "reason": "allowed",
+            "details": {
+                "q_live": 0.7,
+                "q_lcb_5pct": 0.6,
+                "expected_edge": 0.1,
+                "min_entry_price": 0.01,
+                "limit_price": 0.5,
+                "submit_edge": 0.1,
+                "expected_profit_usd": 1.0,
+                "min_expected_profit_usd": 0.01,
+                "submit_edge_density": 0.1,
+                "min_submit_edge_density": 0.01,
+                "shares": 10.0,
+                "qkernel_side": "buy_yes",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_control_pause_component",
+        lambda *args, **kwargs: {"component": "entries_pause_control_override", "allowed": True, "reason": "not_paused"},
+    )
+
+    competitor_results = []
+    real_append_event = venue_command_repo.append_event
+
+    def append_event_with_competitor(
+        conn, *, command_id, event_type, occurred_at, payload=None
+    ):
+        if event_type == "SUBMIT_REJECTED":
+            conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()
+            try:
+                competitor.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                competitor_results.append(
+                    (exc.sqlite_errorcode, exc.sqlite_errorname)
+                )
+            else:  # pragma: no cover - the helper must own the writer slot.
+                competitor.rollback()
+                pytest.fail("competitor unexpectedly acquired the SQLite writer lock")
+        return real_append_event(
+            conn,
+            command_id=command_id,
+            event_type=event_type,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
+
+    submit_calls = 0
+
+    class FakeClient:
+        def v2_preflight(self):
+            return None
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
+
+        def place_limit_order(self, **kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            return _fake_submit_result(
+                self.bound_envelope,
+                status="REJECTED",
+                success=False,
+                order_id="entry-deferred-lock",
+                error_code="unit_rejected",
+                error_message="unit rejection",
+            )
+
+    monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_with_competitor)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    try:
+        result = _live_order(
+            "z4-buy-deferred-lock",
+            _buy_intent(size_usd=10.0, **snapshot_kwargs),
+            20.0,
+            conn=file_conn,
+            decision_id="z4-buy-deferred-lock",
+        )
+        assert result.status == "rejected"
+        assert result.reason == "unit_rejected"
+        assert result.command_state == "REJECTED"
+        assert submit_calls == 1
+        assert competitor_results == [(sqlite3.SQLITE_BUSY, "SQLITE_BUSY")]
+        row = file_conn.execute(
+            "SELECT state FROM venue_commands WHERE position_id = ?",
+            ("z4-buy-deferred-lock",),
+        ).fetchone()
+        assert row[0] == "REJECTED"
+        assert file_conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE event_type = 'REVIEW_REQUIRED'"
+        ).fetchone()[0] == 0
+        assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
+    finally:
+        configure_global_ledger(None)
+        competitor.close()
+        file_conn.close()
 
 
 
