@@ -2112,18 +2112,15 @@ class CanonicalMarketAnchoredFitProvider:
             self._calibration_policy.as_payload()["policy_hash"],
         )
 
-    def artifact(
-        self, *, scope: CalibrationFitScope, now: datetime,
-        deadline_monotonic: float | None = None,
-    ) -> ResidualCalibratorArtifact | None:
-        """Return a canonical scoped fit or None; never select legacy rows."""
-        if (
-            not isinstance(scope, CalibrationFitScope)
-            or not isinstance(now, datetime) or now.tzinfo is None
-            or now.utcoffset() is None or self._expired(deadline_monotonic)
-        ):
-            return None
-        cutoff = now.astimezone(timezone.utc)
+    def _borrowed_corpus_handles(
+        self, *, deadline_monotonic: float | None,
+    ) -> tuple[
+        tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
+        tuple[tuple[str, int, int], ...],
+        ArtifactCacheKey | None,
+    ] | None:
+        """Validate current borrowed handles and derive the corpus cache key."""
+
         try:
             handles = self._connects()
             if (not isinstance(handles, tuple) or len(handles) != 3
@@ -2145,6 +2142,28 @@ class CanonicalMarketAnchoredFitProvider:
                 CANONICAL_CORPUS_REVISION, "probability_only_no_cash_proofs",
                 self._city_timezone_snapshot, self._ttl.total_seconds(),
             )
+        return handles, physical_identities, corpus_key
+
+    def _prepared_corpus(
+        self, *, now: datetime, deadline_monotonic: float | None,
+    ) -> tuple[
+        tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
+        tuple[tuple[str, int, int], ...],
+        ArtifactCacheKey | None,
+        CanonicalFitCorpus,
+    ] | None:
+        if (
+            not isinstance(now, datetime) or now.tzinfo is None
+            or now.utcoffset() is None or self._expired(deadline_monotonic)
+        ):
+            return None
+        cutoff = now.astimezone(timezone.utc)
+        prepared = self._borrowed_corpus_handles(
+            deadline_monotonic=deadline_monotonic,
+        )
+        if prepared is None:
+            return None
+        handles, physical_identities, corpus_key = prepared
         corpus = self._corpus(
             handles, cutoff=cutoff, corpus_key=corpus_key,
             deadline_monotonic=deadline_monotonic,
@@ -2154,6 +2173,35 @@ class CanonicalMarketAnchoredFitProvider:
         corpus_cutoff = _parse_ts(corpus.training_cutoff)
         if corpus_cutoff is None or not timedelta(0) <= cutoff - corpus_cutoff < self._ttl:
             return None
+        return handles, physical_identities, corpus_key, corpus
+
+    def warm_corpus(
+        self, *, now: datetime, deadline_monotonic: float | None = None,
+    ) -> bool:
+        """Prepare and cache the canonical corpus without fitting an artifact."""
+
+        return self._prepared_corpus(
+            now=now, deadline_monotonic=deadline_monotonic,
+        ) is not None
+
+    def artifact(
+        self, *, scope: CalibrationFitScope, now: datetime,
+        deadline_monotonic: float | None = None,
+    ) -> ResidualCalibratorArtifact | None:
+        """Return a canonical scoped fit or None; never select legacy rows."""
+        if (
+            not isinstance(scope, CalibrationFitScope)
+            or not isinstance(now, datetime) or now.tzinfo is None
+            or now.utcoffset() is None or self._expired(deadline_monotonic)
+        ):
+            return None
+        prepared = self._prepared_corpus(
+            now=now, deadline_monotonic=deadline_monotonic,
+        )
+        if prepared is None:
+            return None
+        _handles, physical_identities, corpus_key, corpus = prepared
+        corpus_cutoff = _parse_ts(corpus.training_cutoff)
         def fit_current() -> ResidualCalibratorArtifact | None:
             return self._fit_scope(
                 corpus, scope=scope, deadline_monotonic=deadline_monotonic,

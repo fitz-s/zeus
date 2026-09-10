@@ -2526,6 +2526,136 @@ def test_canonical_provider_deadline_and_closed_handles_never_serve_stale_fit():
     assert provider.artifact(scope=scope, now=NOW) is None
 
 
+def test_canonical_provider_warm_corpus_does_not_fit(monkeypatch):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        monkeypatch.setattr(
+            live_fit, "fit",
+            lambda *args, **kwargs: pytest.fail("warm_corpus must not fit"),
+        )
+        assert provider.warm_corpus(now=NOW)
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_provider_warm_corpus_is_reused_by_new_provider_with_pit_cutoff(
+    tmp_path, monkeypatch,
+):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    handles = []
+    try:
+        forecast.commit()
+        for source, name in zip(
+            (world, trade, forecast), ("world", "trade", "forecast"), strict=True,
+        ):
+            destination = sqlite3.connect(tmp_path / (name + ".db"))
+            destination.row_factory = sqlite3.Row
+            source.backup(destination)
+            handles.append(destination)
+        corpus_cache = live_fit.CanonicalCorpusCache()
+        artifact_cache = MarketAnchoredArtifactCache()
+        original_load = live_fit.load_canonical_fit_corpus
+        load_calls = []
+
+        def counted_load(*args, **kwargs):
+            load_calls.append(kwargs["training_cutoff"])
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(live_fit, "load_canonical_fit_corpus", counted_load)
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: tuple(handles), city_timezones=_TEST_CITY_TIMEZONES,
+            min_train_rows=1, cache=artifact_cache, corpus_cache=corpus_cache,
+        )
+        assert provider.warm_corpus(now=NOW)
+        later_provider = CanonicalMarketAnchoredFitProvider(
+            lambda: tuple(handles), city_timezones=_TEST_CITY_TIMEZONES,
+            min_train_rows=1, cache=artifact_cache, corpus_cache=corpus_cache,
+        )
+        artifact = later_provider.artifact(
+            scope=_canonical_scope(), now=NOW + timedelta(hours=1),
+        )
+        assert artifact is not None
+        assert load_calls == [NOW]
+        assert artifact.training_cutoff == NOW.isoformat()
+    finally:
+        for conn in (*handles, world, trade, forecast):
+            conn.close()
+
+
+def test_canonical_provider_warm_failure_deadline_and_closed_handles_are_retryable(
+    monkeypatch,
+):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    active = [(world, trade, forecast)]
+    try:
+        corpus_cache = live_fit.CanonicalCorpusCache()
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: active[0], city_timezones=_TEST_CITY_TIMEZONES,
+            min_train_rows=1, corpus_cache=corpus_cache,
+        )
+        original_load = live_fit.load_canonical_fit_corpus
+        attempts = []
+
+        def fail_once(*args, **kwargs):
+            attempts.append(kwargs["training_cutoff"])
+            if len(attempts) == 1:
+                return None
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(live_fit, "load_canonical_fit_corpus", fail_once)
+        assert not provider.warm_corpus(now=NOW)
+        assert not corpus_cache._entries
+        assert not provider.warm_corpus(
+            now=NOW, deadline_monotonic=time.monotonic() - 1,
+        )
+        assert not corpus_cache._entries
+        for conn in active[0]:
+            conn.close()
+        assert not provider.warm_corpus(now=NOW)
+        assert not corpus_cache._entries
+        replacement_world, replacement_trade, _, replacement_forecast = (
+            _canonical_corpus_fixture(return_forecast=True, forecast_lineage=True)
+        )
+        active[0] = (replacement_world, replacement_trade, replacement_forecast)
+        assert provider.artifact(scope=_canonical_scope(), now=NOW) is not None
+        assert len(attempts) == 3
+    finally:
+        for conn in (*active[0],):
+            conn.close()
+
+
+def test_canonical_provider_warm_corpus_keeps_inmemory_no_reuse(monkeypatch):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        original_load = live_fit.load_canonical_fit_corpus
+        load_calls = []
+
+        def counted_load(*args, **kwargs):
+            load_calls.append(kwargs["training_cutoff"])
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(live_fit, "load_canonical_fit_corpus", counted_load)
+        assert provider.warm_corpus(now=NOW)
+        assert provider.artifact(scope=_canonical_scope(), now=NOW) is not None
+        assert load_calls == [NOW, NOW]
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
 def test_canonical_provider_reloads_corpus_when_connector_changes_physical_db(tmp_path):
     world, trade, _, forecast = _canonical_corpus_fixture(
         return_forecast=True, forecast_lineage=True,
