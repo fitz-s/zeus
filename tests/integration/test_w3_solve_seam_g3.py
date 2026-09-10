@@ -31214,10 +31214,23 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
         ),
     ),
 )
+@pytest.mark.parametrize("buy_enabled", [True, False])
 def test_global_batch_falls_through_family_local_preflight_block(
-    monkeypatch, blocked_reason
+    monkeypatch, blocked_reason, buy_enabled
 ):
+    stages = []
+
+    class WarmProvider:
+        def __init__(self, *args, **kwargs):
+            pass
+        def warm_corpus(self, **kwargs):
+            stages.append("calibration")
+            clock[0] += _dt.timedelta(seconds=60)
+            return True
+
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider", WarmProvider)
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    clock = [decision_at]
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
     scope = current_global_auction_scope_from_events(
@@ -31258,7 +31271,6 @@ def test_global_batch_falls_through_family_local_preflight_block(
             (event_b, "actuation-b-fallthrough", "wealth-1"),
         )
     )
-    books = iter((_global_test_book("book-1", price="0.41"),))
     calls = {
         "prepare": 0,
         "books": 0,
@@ -31312,8 +31324,10 @@ def test_global_batch_falls_through_family_local_preflight_block(
         )
 
     def book_provider(probabilities, _at):
+        stages.append("book")
         calls["books"] += 1
-        return probabilities, next(books)
+        assert _at == clock[0]
+        return probabilities, _global_test_book("book-1", price="0.41", captured_at=_at)
 
     def preflight(event, _actuation, _at, _authority):
         calls["preflight"].append(event.event_id)
@@ -31355,10 +31369,18 @@ def test_global_batch_falls_through_family_local_preflight_block(
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
-        current_time_provider=lambda: decision_at,
+        current_time_provider=lambda: clock[0],
         current_book_epoch_provider=book_provider,
+        calibration_scope_resolver=lambda candidate, prepared: None,
+        buy_candidates_enabled=buy_enabled,
     )
 
+    if not buy_enabled:
+        assert stages == []
+        assert calls["venue"] == 0
+        return
+    assert stages == ["calibration", "book"]
+    assert clock[0] == decision_at + _dt.timedelta(seconds=60)
     assert calls["prepare"] == 2
     assert calls["books"] == 1
     assert calls["wealth"] == 1

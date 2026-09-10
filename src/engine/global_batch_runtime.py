@@ -6174,6 +6174,7 @@ def _market_anchored_correction_resolver(
     prepared_by_family: Mapping[str, object],
     calibration_scope_resolver: Callable[[object, object], object | None] | None,
     deadline_monotonic: float | None = None,
+    warm_corpus_at: datetime | None = None,
 ):
     """Fit ENTRY corrections from canonical fills on the batch's borrowed handles.
 
@@ -6214,6 +6215,12 @@ def _market_anchored_correction_resolver(
             "MARKET_ANCHORED_CITY_SNAPSHOT_UNAVAILABLE:%s",
             type(exc).__name__,
         )
+
+    if provider is not None and warm_corpus_at is not None:
+        try:
+            provider.warm_corpus(now=warm_corpus_at, deadline_monotonic=deadline_monotonic)
+        except Exception as exc:  # noqa: BLE001 - warming grants no fit authority
+            _LOG.debug("CANONICAL_ENTRY_CORPUS_WARM_UNAVAILABLE:%s", type(exc).__name__)
 
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         if provider is None:
@@ -8014,6 +8021,30 @@ def process_current_global_batch(
             _invalidate_global_holding_coverage_for_wealth(
                 selection_wealth_economic_identity
             )
+        # Prepare immutable calibration input before spending the fresh-book
+        # window. Scope resolution still reads the post-book ENTRY objects.
+        entry_fit_prepared_by_family: dict[str, object] = {}
+        payoff_q_correction_resolver = _market_anchored_correction_resolver(
+            world_conn,
+            trade_conn=trade_conn,
+            forecast_conn=forecast_conn,
+            calibration_scope_resolver=calibration_scope_resolver,
+            prepared_by_family=entry_fit_prepared_by_family,
+            warm_corpus_at=(
+                current_time()
+                if buy_candidates_enabled and any(
+                    family_key not in held_only_family_keys
+                    and not isinstance(witness, DeterministicBinPayoffWitness)
+                    for family_key, witness in probabilities.items()
+                )
+                else None
+            ),
+            deadline_monotonic=(work_context.deadline_monotonic if work_context else None),
+            target_context_by_family=_target_context_by_family(
+                full_scope_event_by_family,
+                payload_reader=payload_reader,
+            ),
+        )
         book_epoch = None
         if current_book_epoch_provider is not None and probabilities:
             if cancelled("book_epoch_start"):
@@ -8088,21 +8119,10 @@ def process_current_global_batch(
             )
         except (TypeError, ValueError) as exc:
             return reject(f"GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAPS_INVALID:{exc}")
-        payoff_q_correction_resolver = _market_anchored_correction_resolver(
-            world_conn,
-            trade_conn=trade_conn,
-            forecast_conn=forecast_conn,
-            calibration_scope_resolver=calibration_scope_resolver,
-            prepared_by_family={
-                str(prepared.probability_witness.family_key): prepared
-                for prepared in prepared_by_event.values()
-            },
-            deadline_monotonic=(work_context.deadline_monotonic if work_context else None),
-            target_context_by_family=_target_context_by_family(
-                full_scope_event_by_family,
-                payload_reader=payload_reader,
-            ),
-        )
+        entry_fit_prepared_by_family.update({
+            str(prepared.probability_witness.family_key): prepared
+            for prepared in prepared_by_event.values()
+        })
         selection_epoch_identity = (
             _selection_epoch_identity_with_preflight_exclusions(
                 selection_epoch_base_identity,

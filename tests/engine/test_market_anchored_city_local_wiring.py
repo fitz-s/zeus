@@ -769,3 +769,41 @@ def test_missing_fit_rejects_only_its_cell_and_preserves_calibrated_competitor(m
     assert decision.payoff_q_correction.fit_scope.metric == "low"
     assert decision.expected_terminal_wealth.win_probability_mean < .8
     assert decision.rejection_reasons[missing.candidate_id].startswith("CALIBRATED_PAYOFF_Q_UNAVAILABLE:")
+
+
+@pytest.mark.parametrize("warm_raises", [False, True])
+def test_entry_warm_does_not_bind_scope_or_grant_fit_authority(monkeypatch, warm_raises):
+    calls = []
+    prepared_by_family = {}
+    at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-v3")
+
+    class Provider:
+        def __init__(self, connects, **kwargs):
+            calls.append("provider")
+        def warm_corpus(self, *, now, deadline_monotonic):
+            assert now == at and deadline_monotonic == 123.0
+            assert not prepared_by_family
+            calls.append("warm")
+            if warm_raises:
+                raise RuntimeError("temporary input unavailability")
+            return True
+        def artifact(self, *, scope, now, deadline_monotonic):
+            calls.append("artifact")
+            return None
+
+    def scope_for(candidate, prepared):
+        assert prepared is prepared_by_family["one"]
+        calls.append("scope")
+        return scope
+
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider", Provider)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")})
+    resolver = _entry_resolver(object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+                               prepared_by_family=prepared_by_family, calibration_scope_resolver=scope_for,
+                               warm_corpus_at=at, deadline_monotonic=123.0)
+    assert calls == ["provider", "warm"]
+    prepared_by_family["one"] = object()
+    with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
+        resolver(SimpleNamespace(family_key="one", side="YES", execution_mode="TAKER_LIMIT", action="BUY"), .8, .4, at)
+    assert calls == ["provider", "warm", "scope", "artifact"]
