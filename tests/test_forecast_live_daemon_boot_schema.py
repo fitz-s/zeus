@@ -571,3 +571,71 @@ def test_forecast_work_identity_uses_current_partial_cycle() -> None:
         2026, 8, 17, 0, tzinfo=daemon.timezone.utc
     )
     assert identity["metadata"]["partial_window"] is True
+
+
+def _coordinate_identity(manifest: str, track: str = "mx2t6_high") -> dict[str, object]:
+    from src.data.forecast_fetch_plan import data_version_for_track
+
+    return {
+        "job_name": "forecast_live_opendata_high",
+        "source_id": "ecmwf_open_data",
+        "track": track,
+        "scheduled_for": daemon.datetime(2026, 8, 17, tzinfo=daemon.timezone.utc),
+        "release_calendar_key": f"ecmwf_open_data:{track}:full",
+        "coordinate_manifest_json": manifest,
+        "data_version": data_version_for_track(track, manifest),
+    }
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_coordinate_manifest_seals_source_run_and_dataset_identity(track: str) -> None:
+    manifest_a = '{"coordinate_basis":"A"}'
+    manifest_b = '{"coordinate_basis":"B"}'
+    identity_a = _coordinate_identity(manifest_a, track)
+    identity_b = _coordinate_identity(manifest_b, track)
+
+    expected_a = daemon._expected_source_run_id(identity_a)
+    expected_b = daemon._expected_source_run_id(identity_b)
+    assert expected_a != expected_b
+    assert ":coordsha:" in expected_a
+    assert identity_a["data_version"].endswith(expected_a.split(":coordsha:", 1)[1])
+    assert identity_b["data_version"].endswith(expected_b.split(":coordsha:", 1)[1])
+    assert identity_a["data_version"] != identity_b["data_version"]
+
+    result_a = {
+        "source_run_id": expected_a,
+        "data_version": identity_a["data_version"],
+    }
+    assert daemon._collector_identity_mismatch(identity_a, result_a) is None
+    assert daemon._collector_identity_mismatch(
+        identity_b, {"source_run_id": expected_a}
+    ).startswith("SOURCE_RUN_IDENTITY_MISMATCH")
+    assert daemon._collector_identity_mismatch(
+        identity_a,
+        {"source_run_id": expected_a, "data_version": "legacy-base"},
+    ).startswith("DATA_VERSION_IDENTITY_MISMATCH")
+
+
+def test_manifest_is_sealed_once_and_old_job_cannot_be_current(monkeypatch) -> None:
+    manifest_a = '{"coordinate_basis":"A"}'
+    manifest_b = '{"coordinate_basis":"B"}'
+    identity = _coordinate_identity(manifest_a)
+
+    import src.config as config
+
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: manifest_b)
+    kwargs = daemon._collector_cycle_kwargs(
+        identity,
+        now_utc=daemon.datetime(2026, 8, 17, 1, tzinfo=daemon.timezone.utc),
+    )
+    assert kwargs["coordinate_manifest_json"] == manifest_a
+    assert daemon._expected_source_run_id(identity).endswith(
+        daemon._expected_source_run_id(_coordinate_identity(manifest_a)).split(
+            ":coordsha:", 1
+        )[1]
+    )
+    assert daemon._collector_identity_mismatch(
+        identity,
+        {"source_run_id": "ecmwf_open_data:mx2t6_high:2026-08-17T00Z"},
+    ).startswith("SOURCE_RUN_IDENTITY_MISMATCH")
+    assert ":coordsha:" in daemon._job_run_id(identity)

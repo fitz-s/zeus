@@ -201,6 +201,33 @@ class TestClassifyForecastExtremaAuthority:
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
 
+    def test_coordinate_bound_current_version_keeps_full_identity_and_current_gate(self):
+        from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+
+        data_version = coordinate_bound_data_version(
+            ECMWF_OPENDATA_HIGH_DATA_VERSION, "a" * 64
+        )
+        auth = classify_forecast_extrema_authority(
+            {
+                "contributes_to_target_extrema": None,
+                "forecast_window_attribution_status": None,
+                "boundary_ambiguous": 0,
+                "dataset_id": data_version,
+            }
+        )
+        assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
+
+    def test_coordinate_bound_parser_rejects_non_exact_suffix(self):
+        auth = classify_forecast_extrema_authority(
+            {
+                "contributes_to_target_extrema": None,
+                "forecast_window_attribution_status": None,
+                "boundary_ambiguous": 0,
+                "dataset_id": f"{ECMWF_OPENDATA_HIGH_DATA_VERSION}__coordsha_" + "A" * 64,
+            }
+        )
+        assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
+
     def test_legacy_version_contributes_none_is_passthrough(self):
         # P0 follow-up §2: NULL contribution on a LEGACY data_version passes through.
         row = {

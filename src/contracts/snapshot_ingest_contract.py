@@ -24,6 +24,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
     _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
+    split_coordinate_bound_data_version,
 )
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
@@ -91,6 +92,33 @@ _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY: HIGH_LOCALDAY_MAX,
     _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY: LOW_LOCALDAY_MIN,
 }
+
+
+def metric_identity_for_data_version(
+    data_version: str | None,
+) -> MetricIdentity | None:
+    """Resolve legacy or strict coordinate-bound data-version identity.
+
+    Coordinate-bound Open Data versions retain the exact identity in their
+    ``data_version`` field while reusing the corresponding 3-hour physical
+    metric contract.
+    """
+    spec = _ALLOWED_DATA_VERSIONS.get(data_version)
+    if spec is not None:
+        return spec
+    parsed = split_coordinate_bound_data_version(data_version or "")
+    if parsed is None:
+        return None
+    base, _manifest_sha = parsed
+    base_spec = _ALLOWED_DATA_VERSIONS.get(base)
+    if base_spec is None:
+        return None
+    return MetricIdentity(
+        temperature_metric=base_spec.temperature_metric,
+        physical_quantity=base_spec.physical_quantity,
+        observation_field=base_spec.observation_field,
+        data_version=data_version or "",
+    )
 
 
 # PR 3+6 (2026-05-19): CausalityStatus Literal — 10 values covering all DecisionSourceContext
@@ -459,9 +487,17 @@ def normalize_low_boundary_evidence(payload: dict) -> dict:
 
 def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
     data_version = payload.get("data_version")
-    spec: MetricIdentity | None = _ALLOWED_DATA_VERSIONS.get(data_version)
+    spec = metric_identity_for_data_version(data_version)
     if spec is None:
         return SnapshotIngestDecision(False, "DATA_VERSION_NOT_ALLOWED", False, "UNKNOWN")
+
+    coordinate_identity = split_coordinate_bound_data_version(data_version or "")
+    if coordinate_identity is not None:
+        _, coordinate_sha = coordinate_identity
+        if payload.get("manifest_sha256") != coordinate_sha:
+            return SnapshotIngestDecision(
+                False, "MANIFEST_SHA_MISMATCH", False, "UNKNOWN"
+            )
 
     if payload.get("temperature_metric") != spec.temperature_metric:
         return SnapshotIngestDecision(False, "METRIC_MISMATCH", False, "UNKNOWN")

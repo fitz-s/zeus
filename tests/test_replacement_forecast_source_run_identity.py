@@ -8,12 +8,34 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+
 import pytest
 
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    coordinate_bound_data_version,
+)
 from src.data.replacement_forecast_source_run_identity import (
     expected_replacement_dependency_identity_by_role,
     validate_replacement_source_run_identity,
 )
+
+
+_CURRENT_MANIFEST_JSON = '{"coordinate_profile":"test-current"}'
+
+
+@pytest.fixture(autouse=True)
+def _current_coordinate_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.config as config
+
+    monkeypatch.setattr(
+        config,
+        "runtime_coordinate_manifest_json",
+        lambda: _CURRENT_MANIFEST_JSON,
+        raising=False,
+    )
 
 
 def _source_run(role: str, metric: str = "high", **overrides):
@@ -56,6 +78,55 @@ def test_expected_dependency_identity_map_separates_raw_anchor_and_derived_produ
     assert high["soft_anchor_posterior"].source_id == "openmeteo_ecmwf_ifs9_bayes_fusion"
     assert high["soft_anchor_posterior"].data_version.endswith("_high_v1")
     assert low["soft_anchor_posterior"].data_version.endswith("_low_v1")
+
+
+@pytest.mark.parametrize(
+    ("metric", "base"),
+    (("high", ECMWF_OPENDATA_HIGH_DATA_VERSION), ("low", ECMWF_OPENDATA_LOW_DATA_VERSION)),
+)
+def test_baseline_identity_is_bound_to_the_current_coordinate_manifest(
+    metric: str,
+    base: str,
+) -> None:
+    expected = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"]
+
+    assert expected.data_version == coordinate_bound_data_version(
+        base, sha256(_CURRENT_MANIFEST_JSON.encode("utf-8")).hexdigest()
+    )
+
+
+def test_baseline_identity_rejects_a_prior_coordinate_manifest() -> None:
+    old_data_version = coordinate_bound_data_version(
+        ECMWF_OPENDATA_HIGH_DATA_VERSION, "a" * 64
+    )
+    decision = validate_replacement_source_run_identity(
+        role="baseline_b0",
+        temperature_metric="high",
+        source_run=_source_run("baseline_b0", dataset_id=old_data_version),
+    )
+
+    assert decision.valid is False
+    assert "REPLACEMENT_SOURCE_RUN_DATA_VERSION_MISMATCH" in decision.reason_codes
+
+
+def test_baseline_identity_reports_missing_current_coordinate_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.config as config
+
+    monkeypatch.delattr(config, "runtime_coordinate_manifest_json", raising=False)
+    expected = expected_replacement_dependency_identity_by_role("high")["baseline_b0"]
+    decision = validate_replacement_source_run_identity(
+        role="baseline_b0", temperature_metric="high", source_run={}
+    )
+
+    assert expected.data_version is None
+    assert decision.valid is False
+    assert decision.reason_codes == (
+        "REPLACEMENT_SOURCE_RUN_ID_MISSING",
+        "REPLACEMENT_SOURCE_RUN_SOURCE_ID_MISMATCH",
+        "REPLACEMENT_SOURCE_RUN_CURRENT_COORDINATE_PROFILE_MISSING",
+    )
 
 
 def test_source_run_identity_validates_source_run_and_coverage_pair() -> None:

@@ -146,7 +146,13 @@ from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.observability.counters import increment as _cnt_inc
-from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    assert_data_version_allowed,
+    coordinate_bound_data_version,
+    validate_members_unit,
+)
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
@@ -6187,6 +6193,109 @@ def _snapshot_identity_matches(
     )
 
 
+def _reuse_coordinate_bound_ens_snapshot(
+    conn,
+    *,
+    city,
+    target_date: str,
+    ens_result: dict,
+    snap_metric: str,
+    members_unit: str,
+    member_extrema,
+) -> str:
+    """Reuse the canonical Open Data snapshot selected by the ingest result."""
+    if ens_result.get("source_id") != "ecmwf_open_data":
+        raise ValueError("coordinate-bound ENS snapshot source_id mismatch")
+    coordinate_sha = ens_result.get("coordinate_manifest_sha")
+    from src.config import runtime_coordinate_manifest_json
+    current_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    if coordinate_sha != current_sha:
+        raise ValueError("coordinate-bound ENS current manifest mismatch")
+    base_data_version = (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION
+        if snap_metric == "high"
+        else ECMWF_OPENDATA_LOW_DATA_VERSION
+    )
+    expected_data_version = coordinate_bound_data_version(
+        base_data_version, coordinate_sha
+    )
+    assert_data_version_allowed(
+        expected_data_version,
+        context=f"evaluator._store_ens_snapshot:{city.name}:{target_date}:{snap_metric}",
+    )
+
+    identities = ens_result.get("snapshot_identity_by_metric_target_date")
+    if not isinstance(identities, dict):
+        raise ValueError("coordinate-bound ENS snapshot identities missing")
+    metric_identities = identities.get(snap_metric)
+    if not isinstance(metric_identities, dict):
+        raise ValueError("coordinate-bound ENS metric snapshot identity missing")
+    identity = metric_identities.get(str(target_date))
+    if not isinstance(identity, dict):
+        raise ValueError("coordinate-bound ENS target snapshot identity missing")
+    snapshot_id = identity.get("snapshot_id")
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise ValueError("coordinate-bound ENS snapshot_id missing")
+    if identity.get("dataset_id") != expected_data_version:
+        raise ValueError("coordinate-bound ENS dataset identity mismatch")
+    if identity.get("coordinate_manifest_sha") != coordinate_sha:
+        raise ValueError("coordinate-bound ENS manifest identity mismatch")
+    record_hash = identity.get("manifest_hash")
+    if (not isinstance(record_hash, str) or len(record_hash) != 64
+        or any(char not in "0123456789abcdef" for char in record_hash)):
+        raise ValueError("coordinate-bound ENS record provenance hash missing or invalid")
+    source_run_id = identity.get("source_run_id")
+    if not isinstance(source_run_id, str) or not source_run_id:
+        raise ValueError("coordinate-bound ENS source_run_id missing")
+    for field_name in ("issue_time", "available_at"):
+        if field_name not in identity:
+            raise ValueError(
+                f"coordinate-bound ENS {field_name} identity missing"
+            )
+
+    table = _ensemble_snapshots_table(conn)
+    row = conn.execute(
+        f"""
+        SELECT snapshot_id, city, target_date, temperature_metric,
+               physical_quantity, observation_field, dataset_id, source_id,
+               source_run_id, manifest_hash, issue_time, available_at,
+               members_json, members_unit, provenance_json
+          FROM {table}
+         WHERE snapshot_id = ?
+         LIMIT 1
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("coordinate-bound ENS canonical snapshot missing")
+    if (
+        row["snapshot_id"] != snapshot_id
+        or row["city"] != city.name
+        or row["target_date"] != str(target_date)
+        or row["temperature_metric"] != snap_metric
+        or row["dataset_id"] != expected_data_version
+        or row["source_id"] != "ecmwf_open_data"
+        or row["source_run_id"] != source_run_id
+        or row["manifest_hash"] != identity.get("manifest_hash")
+        or json.loads(row["provenance_json"]).get("manifest_sha256") != coordinate_sha
+        or row["issue_time"] != identity["issue_time"]
+        or row["available_at"] != identity["available_at"]
+        or row["members_unit"] != members_unit
+    ):
+        raise ValueError("coordinate-bound ENS canonical snapshot identity mismatch")
+
+    try:
+        canonical_members = json.loads(row["members_json"])
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("coordinate-bound ENS canonical members are invalid") from exc
+    if not isinstance(canonical_members, list):
+        raise ValueError("coordinate-bound ENS canonical members are invalid")
+    provided_members = np.asarray(member_extrema)
+    if not np.array_equal(provided_members, np.asarray(canonical_members)):
+        raise ValueError("coordinate-bound ENS canonical members mismatch")
+    return str(snapshot_id)
+
+
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
@@ -6243,6 +6352,16 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             if isinstance(getattr(ens, "member_extrema", None), np.ndarray)
             else ens.member_maxes
         )
+        if "coordinate_manifest_sha" in ens_result:
+            return _reuse_coordinate_bound_ens_snapshot(
+                conn,
+                city=city,
+                target_date=str(target_date),
+                ens_result=ens_result,
+                snap_metric=snap_metric,
+                members_unit=members_unit,
+                member_extrema=member_extrema,
+            )
         members_json = json.dumps(member_extrema.tolist())
         degradation_level = str(ens_result.get("degradation_level") or "OK")
         source_role = str(ens_result.get("forecast_source_role") or "entry_primary")

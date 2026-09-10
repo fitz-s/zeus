@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -129,6 +131,58 @@ def test_assert_data_version_allowed_rejects_observation_data_version():
 
     with pytest.raises(DataVersionRejectedError):
         assert_data_version_allowed(observation_dv, context="T2-S4_behavioral_test")
+
+
+def test_coordinate_bound_versions_are_strict_and_distinct():
+    """Coordinate identity binds each Open Data base to one exact SHA."""
+    sha_a = "a" * 64
+    sha_b = "b" * 64
+    high_a = mod.coordinate_bound_data_version(
+        mod.ECMWF_OPENDATA_HIGH_DATA_VERSION, sha_a
+    )
+    high_b = mod.coordinate_bound_data_version(
+        mod.ECMWF_OPENDATA_HIGH_DATA_VERSION, sha_b
+    )
+
+    assert high_a != high_b
+    assert mod.split_coordinate_bound_data_version(high_a) == (
+        mod.ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        sha_a,
+    )
+    assert mod.is_rejected(high_a) is False
+    mod.assert_data_version_allowed(high_a)
+
+    malformed = (
+        high_a[:-1],
+        high_a.upper(),
+        f"{high_a}_extra",
+        f"unknown__coordsha_{sha_a}",
+    )
+    for value in malformed:
+        assert mod.split_coordinate_bound_data_version(value) is None
+        with pytest.raises(mod.DataVersionRejectedError):
+            mod.assert_data_version_allowed(value)
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        mod.ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        mod.ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ],
+)
+@pytest.mark.parametrize(
+    "bad_sha",
+    ["A" * 64, "a" * 63, "a" * 65, "g" * 64],
+)
+def test_coordinate_bound_builder_rejects_invalid_sha(base, bad_sha):
+    with pytest.raises(ValueError):
+        mod.coordinate_bound_data_version(base, bad_sha)
+
+
+def test_coordinate_bound_builder_rejects_unknown_base():
+    with pytest.raises(ValueError):
+        mod.coordinate_bound_data_version("ecmwf_opendata_future", "a" * 64)
 
 
 def test_observation_allowlist_authority_tier_documentation():

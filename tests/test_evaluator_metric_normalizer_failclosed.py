@@ -26,6 +26,7 @@ remove). A3b future packet may revisit if needed.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -197,6 +198,169 @@ def test_store_ens_snapshot_does_not_write_when_inner_metric_missing(caplog):
     )
 
 
+def _coordinate_snapshot_fixture(conn):
+    """Seed one canonical Open Data row and its ingest identity envelope."""
+    import numpy as np
+
+    city = SimpleNamespace(
+        name="NYC",
+        settlement_unit="F",
+        timezone="America/New_York",
+    )
+    target_date = "2026-04-16"
+    import hashlib
+    from src.config import runtime_coordinate_manifest_json
+    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    dataset_id = (
+        "ecmwf_opendata_mx2t3_local_calendar_day_max__coordsha_"
+        + manifest_sha
+    )
+    payload_hash = hashlib.sha256(b"canonical payload provenance").hexdigest()
+    issue_time = "2026-04-15T00:00:00+00:00"
+    available_at = "2026-04-15T12:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, available_at, fetch_time,
+            lead_hours, members_json, model_version, dataset_id, source_id,
+            source_run_id, manifest_hash, members_unit, provenance_json
+        ) VALUES (?, ?, 'high', 'mx2t3_local_calendar_day_max', 'high_temp',
+                  ?, ?, ?, 0, ?, 'ecmwf_ens', ?, 'ecmwf_open_data',
+                  ?, ?, ?, ?)
+        """,
+        (
+            city.name,
+            target_date,
+            issue_time,
+            available_at,
+            available_at,
+            json.dumps([72.0, 73.0]),
+            dataset_id,
+            "run-1",
+            payload_hash,
+            "degF",
+            json.dumps({"manifest_sha256": manifest_sha}),
+        ),
+    )
+    conn.commit()
+    snapshot_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    ens = _fake_ens_with_metric("high")
+    ens_result = {
+        "source_id": "ecmwf_open_data",
+        "coordinate_manifest_sha": manifest_sha,
+        "snapshot_identity_by_metric_target_date": {
+            "high": {
+                target_date: {
+                    "snapshot_id": snapshot_id,
+                    "dataset_id": dataset_id,
+                    "source_run_id": "run-1",
+                    "manifest_hash": payload_hash,
+                    "coordinate_manifest_sha": manifest_sha,
+                    "issue_time": issue_time,
+                    "available_at": available_at,
+                }
+            }
+        },
+        "members_unit": "degF",
+        "model": "ecmwf_ens",
+        "fetch_time": available_at,
+        "issue_time": issue_time,
+    }
+    assert np.array_equal(ens.member_extrema, np.array([72.0, 73.0]))
+    return city, target_date, ens, ens_result, snapshot_id
+
+
+def test_coordinate_open_data_reuses_canonical_snapshot_without_writing():
+    conn = _make_test_conn()
+    city, target_date, ens, ens_result, snapshot_id = _coordinate_snapshot_fixture(conn)
+    before = conn.execute(
+        "SELECT COUNT(*), MIN(members_json), MAX(dataset_id) FROM ensemble_snapshots"
+    ).fetchone()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    returned = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+
+    conn.set_trace_callback(None)
+    after = conn.execute(
+        "SELECT COUNT(*), MIN(members_json), MAX(dataset_id) FROM ensemble_snapshots"
+    ).fetchone()
+    assert returned == str(snapshot_id)
+    assert tuple(after) == tuple(before)
+    assert not any(
+        statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+        for statement in statements
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["dataset", "source", "members", "manifest"])
+def test_coordinate_open_data_identity_mismatch_returns_empty_without_write(
+    mismatch,
+    caplog,
+):
+    import logging
+    import numpy as np
+
+    conn = _make_test_conn()
+    city, target_date, ens, ens_result, _snapshot_id = _coordinate_snapshot_fixture(conn)
+    if mismatch == "dataset":
+        ens_result["snapshot_identity_by_metric_target_date"]["high"][target_date][
+            "dataset_id"
+        ] = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+    elif mismatch == "source":
+        ens_result["source_id"] = "openmeteo_ecmwf_ifs_9km"
+    elif mismatch == "members":
+        ens.member_extrema = np.array([72.0, 74.0])
+    else:
+        ens_result["coordinate_manifest_sha"] = "b" * 64
+
+    before = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+    with caplog.at_level(logging.WARNING, logger="src.engine.evaluator"):
+        returned = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+    after = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+
+    assert returned == ""
+    assert after == before
+    assert any("coordinate-bound ENS" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    [
+        ("city", "Boston"),
+        ("target_date", "2026-04-17"),
+        ("temperature_metric", "low"),
+        ("source_id", "openmeteo_ecmwf_ifs_9km"),
+        ("source_run_id", "run-2"),
+        ("manifest_hash", "b" * 64),
+        ("members_unit", "degC"),
+    ],
+)
+def test_coordinate_open_data_canonical_row_scope_mismatch_is_read_only(
+    field_name,
+    bad_value,
+):
+    conn = _make_test_conn()
+    city, target_date, ens, ens_result, snapshot_id = _coordinate_snapshot_fixture(conn)
+    conn.execute(
+        f"UPDATE ensemble_snapshots SET {field_name} = ? WHERE snapshot_id = ?",
+        (bad_value, snapshot_id),
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT COUNT(*), MIN(members_json), MAX(dataset_id) FROM ensemble_snapshots"
+    ).fetchone()
+
+    returned = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+
+    after = conn.execute(
+        "SELECT COUNT(*), MIN(members_json), MAX(dataset_id) FROM ensemble_snapshots"
+    ).fetchone()
+    assert returned == ""
+    assert tuple(after) == tuple(before)
+
+
 # -----------------------------------------------------------------------------
 # No-silent-HIGH antibody: previously, a missing metric would have been
 # silently stamped HIGH. Now, the writer refuses rather than mis-stamping.
@@ -224,3 +388,15 @@ def test_no_silent_high_default_path_remains_in_normalizer():
         "_normalize_temperature_metric must NOT silently default unknown "
         "inputs to 'high'. See slice A3 commit message for context."
     )
+
+
+@pytest.mark.parametrize("record_hash", [None, "", "A" * 64, "not-a-hash"])
+def test_coordinate_snapshot_reuse_requires_record_hash_even_when_both_sides_match(record_hash):
+    conn = _make_test_conn()
+    city, target, ens, result, snapshot_id = _coordinate_snapshot_fixture(conn)
+    result["snapshot_identity_by_metric_target_date"]["high"][target]["manifest_hash"] = record_hash
+    conn.execute("UPDATE ensemble_snapshots SET manifest_hash=? WHERE snapshot_id=?", (record_hash, snapshot_id))
+    conn.commit()
+    before = tuple(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone())
+    assert _store_ens_snapshot(conn, city, target, ens, result) == ""
+    assert tuple(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()) == before

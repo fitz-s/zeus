@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import json
+import hashlib
 import logging
 import os
 import signal
@@ -466,7 +467,9 @@ def _is_source_paused(source_id: str) -> bool:
 
 
 def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, object]:
+    from src.config import runtime_coordinate_manifest_json
     from src.data.ecmwf_open_data import SOURCE_ID, STEP_HOURS, TRACKS
+    from src.data.forecast_fetch_plan import data_version_for_track
     from src.data.release_calendar import (
         cycle_profile_for_hour,
         get_entry,
@@ -475,6 +478,12 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
 
     if track not in TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
+    coordinate_manifest_json = runtime_coordinate_manifest_json()
+    if not isinstance(coordinate_manifest_json, str) or not coordinate_manifest_json:
+        raise ValueError("runtime coordinate manifest must be a non-empty string")
+    coordinate_manifest_sha = hashlib.sha256(
+        coordinate_manifest_json.encode("utf-8")
+    ).hexdigest()
     decision, metadata = select_source_run_for_target_horizon(
         now_utc=now_utc,
         source_id=SOURCE_ID,
@@ -500,6 +509,9 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
         "scheduled_for": selected_cycle.astimezone(timezone.utc),
         "release_calendar_key": f"{SOURCE_ID}:{track}:{horizon_profile}",
         "safe_fetch_not_before": metadata.get("next_safe_fetch_at"),
+        "coordinate_manifest_json": coordinate_manifest_json,
+        "coordinate_manifest_sha": coordinate_manifest_sha,
+        "data_version": data_version_for_track(track, coordinate_manifest_json),
     }
 
 
@@ -511,8 +523,16 @@ def _job_run_id(identity: dict[str, object]) -> str:
         scheduled = str(scheduled_for)
     return (
         f"{identity['job_name']}:{identity['source_id']}:{identity['track']}:"
-        f"{scheduled}:{identity['release_calendar_key']}"
+        f"{scheduled}:{identity['release_calendar_key']}:"
+        f"coordsha:{_coordinate_manifest_sha(identity)}"
     )
+
+
+def _coordinate_manifest_sha(identity: dict[str, object]) -> str:
+    manifest = identity.get("coordinate_manifest_json")
+    if not isinstance(manifest, str) or not manifest:
+        raise ValueError("forecast-live identity is missing coordinate_manifest_json")
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
 def _job_status_from_result(result: dict | None) -> tuple[str, str | None, int, int]:
@@ -587,6 +607,7 @@ def _write_job_run(
         expected_scope_json={
             "selection": identity.get("metadata"),
             "release_calendar_key": identity.get("release_calendar_key"),
+            "coordinate_manifest_sha": _coordinate_manifest_sha(identity),
         },
         affected_scope_json={
             "track": identity.get("track"),
@@ -611,6 +632,7 @@ def _collector_cycle_kwargs(identity: dict[str, object], *, now_utc: datetime) -
         "run_date": selected_cycle.date(),
         "run_hour": selected_cycle.hour,
         "now_utc": now_utc,
+        "coordinate_manifest_json": identity.get("coordinate_manifest_json"),
     }
 
 
@@ -621,7 +643,8 @@ def _expected_source_run_id(identity: dict[str, object]) -> str:
     selected_cycle = scheduled_for.astimezone(timezone.utc)
     return (
         f"{identity['source_id']}:{identity['track']}:"
-        f"{selected_cycle.date().isoformat()}T{selected_cycle.hour:02d}Z"
+        f"{selected_cycle.date().isoformat()}T{selected_cycle.hour:02d}Z:"
+        f"coordsha:{_coordinate_manifest_sha(identity)}"
     )
 
 
@@ -645,6 +668,15 @@ def _collector_identity_mismatch(identity: dict[str, object], result: dict | Non
             f"expected_release_calendar_key={expected_release_key} "
             f"observed_release_calendar_key={observed_release_key}"
         )
+    expected_data_version = str(identity["data_version"])
+    for field in ("data_version", "dataset_id"):
+        observed_data_version = result.get(field)
+        if isinstance(observed_data_version, str) and observed_data_version != expected_data_version:
+            return (
+                "DATA_VERSION_IDENTITY_MISMATCH "
+                f"expected_data_version={expected_data_version} "
+                f"observed_{field}={observed_data_version}"
+            )
     return None
 
 

@@ -2049,7 +2049,12 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_SOURCE_RUN_ID_MISSING")
     if not str(request.openmeteo_source_run_id or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_OPENMETEO_SOURCE_RUN_ID_MISSING")
-    if request.baseline_data_version != expected["baseline_b0"].data_version:
+    baseline_data_version = expected["baseline_b0"].data_version
+    if baseline_data_version is None:
+        reasons.append(
+            "REPLACEMENT_MATERIALIZATION_CURRENT_COORDINATE_PROFILE_MISSING"
+        )
+    elif request.baseline_data_version != baseline_data_version:
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_DATA_VERSION_MISMATCH")
     if request.openmeteo_anchor.source_cycle_time is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISSING")
@@ -3427,6 +3432,17 @@ def _current_evidence_snapshot_row(
 ) -> sqlite3.Row | tuple[object, ...] | None:
     """Run the one canonical causal target ENS selector."""
 
+    expected = expected_replacement_dependency_identity_by_role(metric)
+    baseline_data_version = expected["baseline_b0"].data_version
+    if (
+        baseline_data_version is None
+        or request.baseline_data_version != baseline_data_version
+    ):
+        # No current coordinate profile, or a request sealed against a prior
+        # profile, has no current-evidence ENS authority.  Do not fall back to
+        # an unbound/legacy row merely because it is newer by arrival time.
+        return None
+
     decision_at = _to_utc(
         request.computed_at, field_name="computed_at"
     ).isoformat()
@@ -3454,6 +3470,7 @@ def _current_evidence_snapshot_row(
         request.city,
         _date_text(request.target_date),
         metric,
+        request.baseline_data_version,
         carrier_cycle,
         min_evidence_cycle,
         decision_at,
@@ -3465,6 +3482,7 @@ def _current_evidence_snapshot_row(
          WHERE {{city_predicate}}
            AND target_date = ?
            AND temperature_metric = ?
+           AND dataset_id = ?
            AND source_id = 'ecmwf_open_data'
            AND model_version = 'ecmwf_ens'
            AND authority = 'VERIFIED'

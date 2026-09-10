@@ -29,6 +29,7 @@ low_vec is None: continue` and confirm A1 goes RED.  Restore fix → A1 GREEN.
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,7 +81,9 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots (
     unit TEXT,
     source_id TEXT NOT NULL DEFAULT 'ecmwf_open_data',
     source_transport TEXT,
-    source_run_id TEXT
+    source_run_id TEXT,
+    contributes_to_target_extrema INTEGER NOT NULL DEFAULT 1,
+    forecast_window_attribution_status TEXT NOT NULL DEFAULT 'FULLY_INSIDE_TARGET_LOCAL_DAY'
 );
 """
 
@@ -91,6 +94,20 @@ INSERT INTO ensemble_snapshots
      recorded_at, members_unit, issue_time, source_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'OK', 'VERIFIED', ?, 'degC', ?, 'ecmwf_open_data')
 """
+
+
+def _seal_current_coordinates(conn):
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
+    manifest = runtime_coordinate_manifest_json()
+    digest = hashlib.sha256(manifest.encode()).hexdigest()
+    for metric, track in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
+            (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
+             json.dumps({"manifest_sha256": digest}),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}", metric),
+        )
 
 
 def _make_members(base: float = 20.0, n: int = 51) -> list[float]:
@@ -123,6 +140,7 @@ def _make_db(tmp_path: Path, metrics: list[str]) -> Path:
                 _ISSUE_TIME,
             ),
         )
+    _seal_current_coordinates(conn)
     conn.commit()
     conn.close()
     return db_path

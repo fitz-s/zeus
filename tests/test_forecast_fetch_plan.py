@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timezone
 
 import pytest
@@ -21,6 +22,7 @@ from src.data.forecast_fetch_plan import (
 from src.data.forecast_target_contract import build_forecast_target_scope
 
 UTC = timezone.utc
+COORDINATE_MANIFEST = '{"coordinate_basis":"test","cities":[]}'
 
 
 def _utc(year: int, month: int, day: int, hour: int = 0) -> datetime:
@@ -46,7 +48,7 @@ def test_track_metric_mapping_is_strict() -> None:
     assert track_for_metric(cfg, "low") == "mn2t6_low_full_horizon"
     assert metric_for_track("mx2t6_high_full_horizon") == "high"
     assert metric_for_track("mn2t6_low_full_horizon") == "low"
-    assert data_version_for_track("mx2t6_high_full_horizon").startswith("ecmwf_opendata_mx2t6")
+    assert data_version_for_track("mx2t6_high_full_horizon").startswith("ecmwf_opendata_mx2t3")
 
     with pytest.raises(ValueError, match="temperature_metric"):
         track_for_metric(cfg, "mean")
@@ -71,6 +73,7 @@ def test_warm_horizon_scopes_drive_fetch_plan_when_no_market_yet() -> None:
         source_cycle_time=_utc(2026, 5, 3),
         now_utc=_utc(2026, 5, 3, 12),
         warm_horizon_days=2,
+        coordinate_manifest_json=COORDINATE_MANIFEST,
     )
 
     assert [scope.target_local_date for scope in scopes] == [
@@ -91,7 +94,9 @@ def test_active_market_future_dates_drive_fetch_plan_steps() -> None:
         target_local_date=date(2026, 5, 8),
         temperature_metric="high",
         source_cycle_time=source_cycle_time,
-        data_version=data_version_for_track("mx2t6_high_full_horizon"),
+        data_version=data_version_for_track(
+            "mx2t6_high_full_horizon", COORDINATE_MANIFEST
+        ),
         market_refs=("condition-dplus5",),
     )
     tokyo_dplus2 = build_forecast_target_scope(
@@ -101,7 +106,9 @@ def test_active_market_future_dates_drive_fetch_plan_steps() -> None:
         target_local_date=date(2026, 5, 5),
         temperature_metric="high",
         source_cycle_time=source_cycle_time,
-        data_version=data_version_for_track("mx2t6_high_full_horizon"),
+        data_version=data_version_for_track(
+            "mx2t6_high_full_horizon", COORDINATE_MANIFEST
+        ),
         market_refs=("condition-dplus2",),
     )
 
@@ -136,4 +143,24 @@ def test_fetch_plan_requires_target_scopes() -> None:
             expected_members=51,
             safe_fetch_not_before=None,
             live_authorization=False,
+        )
+
+
+def test_coordinate_bound_data_versions_are_exact_and_track_specific() -> None:
+    high = data_version_for_track("mx2t6_high_full_horizon", COORDINATE_MANIFEST)
+    low = data_version_for_track("mn2t6_low_full_horizon", COORDINATE_MANIFEST)
+    sha = hashlib.sha256(COORDINATE_MANIFEST.encode()).hexdigest()
+    assert high.endswith("__coordsha_" + sha)
+    assert low.endswith("__coordsha_" + sha)
+    assert high != low
+
+
+def test_active_warm_horizon_requires_a_sealed_coordinate_manifest() -> None:
+    with pytest.raises(ValueError, match="coordinate_manifest_json"):
+        build_warm_horizon_scopes(
+            cities=(_city("NYC"),),
+            track="mx2t6_high_full_horizon",
+            source_cycle_time=_utc(2026, 5, 3),
+            now_utc=_utc(2026, 5, 3, 12),
+            warm_horizon_days=0,
         )

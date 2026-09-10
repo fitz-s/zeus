@@ -246,3 +246,56 @@ def test_law5_gap_explicit_none_is_rejected_same_as_absent(ingest_env, tmp_path)
     assert decision.accepted is False
     assert decision.reason == "MISSING_CAUSALITY_FIELD"
     assert decision.training_allowed is False
+
+
+def test_coordinate_bound_metric_identity_and_manifest_gate():
+    """Coordinate-bound IDs keep exact provenance while retaining 3h geometry."""
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION,
+        coordinate_bound_data_version,
+    )
+    from src.contracts.snapshot_ingest_contract import (
+        metric_identity_for_data_version,
+        validate_snapshot_contract,
+    )
+
+    for base, temperature_metric, physical_quantity in (
+        (
+            ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            "high",
+            "mx2t3_local_calendar_day_max",
+        ),
+        (
+            ECMWF_OPENDATA_LOW_DATA_VERSION,
+            "low",
+            "mn2t3_local_calendar_day_min",
+        ),
+    ):
+        identity = metric_identity_for_data_version(
+            coordinate_bound_data_version(base, "a" * 64)
+        )
+        assert identity is not None
+        assert identity.temperature_metric == temperature_metric
+        assert identity.physical_quantity == physical_quantity
+        assert identity.data_version.endswith("__coordsha_" + "a" * 64)
+
+    sha = "a" * 64
+    dynamic = coordinate_bound_data_version(
+        ECMWF_OPENDATA_HIGH_DATA_VERSION, sha
+    )
+    payload = _base_payload()
+    payload.update(
+        data_version=dynamic,
+        temperature_metric="high",
+        physical_quantity="mx2t3_local_calendar_day_max",
+        manifest_sha256=sha,
+        causality={"status": "OK"},
+    )
+    accepted = validate_snapshot_contract(payload)
+    assert accepted.accepted is True
+
+    payload["manifest_sha256"] = "b" * 64
+    rejected = validate_snapshot_contract(payload)
+    assert rejected.accepted is False
+    assert rejected.reason == "MANIFEST_SHA_MISMATCH"

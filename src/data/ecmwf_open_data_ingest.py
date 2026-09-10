@@ -28,23 +28,22 @@ ecmwf_open_data is enabled_by_default=True with no requires_operator_decision.
 Follow-up: consider parameterising fetch_from_db(data_version_prefix, source_id)
 to unify both fetchers once the live path is proven stable.
 
-Data version filter:
-  ``data_version LIKE 'ecmwf_opendata_%'`` captures all four active variants:
-    ecmwf_opendata_mx2t3_local_calendar_day_max_v1  (active write path, post-cutover)
-    ecmwf_opendata_mn2t3_local_calendar_day_min_v1  (active write path, post-cutover)
-    ecmwf_opendata_mx2t6_local_calendar_day_max_v1  (legacy, pre-cutover)
-    ecmwf_opendata_mn2t6_local_calendar_day_min_v1  (legacy, pre-cutover)
+Reads only the exact current coordinate-bound OpenData dataset for each metric.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from src.config import runtime_coordinate_manifest_json
+from src.data.forecast_fetch_plan import data_version_for_track
 from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST
 from src.data.forecast_ingest_protocol import (
     ForecastBundle,
@@ -60,7 +59,6 @@ _log = logging.getLogger(__name__)
 
 SOURCE_ID = "ecmwf_open_data"
 AUTHORITY_TIER = "FORECAST"
-_DATA_VERSION_PREFIX = "ecmwf_opendata_"
 _FRESHNESS_WINDOW_HOURS = 24
 
 
@@ -68,10 +66,9 @@ class ECMWFOpenDataIngest:
     """ForecastIngestProtocol-compatible adapter for the ECMWF Open Data source.
 
     Reads from ``ensemble_snapshots`` (zeus-forecasts.db, K1 split) using
-    the same grid-assembly strategy as tigge_db_fetcher: each target_date gets
-    24 UTC timestamps, the 51-member vector is broadcast across all 24 columns
-    so that ``member_maxes_for_target_date`` / ``member_mins_for_target_date``
-    return exactly the stored value regardless of which hours are selected.
+    metric-specific local-calendar-day windows. The 51-member extrema vector
+    repeats across that local day's UTC instants, including 23/25-hour DST days,
+    so target-date extraction preserves the stored member values.
 
     No operator gate required — ecmwf_open_data is ``enabled_by_default=True``
     with no ``requires_operator_decision`` flag.  The registry-level gate check
@@ -131,17 +128,19 @@ class ECMWFOpenDataIngest:
                 cutoff = (
                     datetime.now(timezone.utc) - timedelta(hours=_FRESHNESS_WINDOW_HOURS)
                 ).isoformat()
+                manifest = runtime_coordinate_manifest_json()
                 row = conn.execute(
                     """
-                    SELECT COUNT(*) AS cnt
-                    FROM ensemble_snapshots
-                    WHERE source_id = ?
-                      AND authority = 'VERIFIED'
+                    SELECT COUNT(*) AS cnt FROM ensemble_snapshots
+                    WHERE source_id = ? AND authority = 'VERIFIED'
                       AND causality_status = 'OK'
-                      AND dataset_id LIKE ?
+                      AND dataset_id IN (?, ?)
+                      AND json_extract(CASE WHEN json_valid(provenance_json) THEN provenance_json ELSE '{}' END, '$.manifest_sha256') = ?
                       AND datetime(recorded_at) > datetime(?)
                     """,
-                    (SOURCE_ID, _DATA_VERSION_PREFIX + "%", cutoff),
+                    (SOURCE_ID, data_version_for_track("mx2t6_high", manifest),
+                     data_version_for_track("mn2t6_low", manifest),
+                     hashlib.sha256(manifest.encode()).hexdigest(), cutoff),
                 ).fetchone()
                 count = row[0] if row else 0
                 ok = count > 0
@@ -184,7 +183,7 @@ def _fetch_db_payload(
     Metric independence (PIPELINE_REVIEW.md §7):
     When ``temperature_metric`` is 'high' or 'low', ONLY that metric's rows are
     queried and assembled.  The hourly grid is filled with the single metric's
-    vector for all 24 hours (no cross-metric coupling).  This preserves the
+    vector for all local-day hours (no cross-metric coupling).  This preserves the
     no-opposite-metric-substitution invariant while decoupling HIGH-OK availability
     from LOW-OK availability — removing the fail-closed cross-metric drop that
     killed HIGH-OK entries whenever LOW-OK rows were missing (91% of LOW rows are
@@ -202,11 +201,13 @@ def _fetch_db_payload(
         fetch_time = fetch_time.replace(tzinfo=timezone.utc)
     fetch_time = fetch_time.astimezone(timezone.utc)
     cutoff = (fetch_time - timedelta(hours=_FRESHNESS_WINDOW_HOURS)).isoformat()
+    manifest_json = runtime_coordinate_manifest_json()
+    identities: dict[str, dict[str, dict]] = {}
 
     if temperature_metric is not None:
         # --- Metric-specific path (HIGH-only or LOW-only) ---
         # Only query the requested metric — no cross-metric dependency.
-        metric_rows = _query_metric(city.name, temperature_metric, cutoff)
+        metric_rows = _query_metric(city.name, temperature_metric, cutoff, manifest_json=manifest_json, decision_time=fetch_time.isoformat())
         if not metric_rows:
             _log.warning(
                 "ecmwf_open_data_ingest: no VERIFIED %s rows for city=%s within %dh",
@@ -236,6 +237,7 @@ def _fetch_db_payload(
                 )
                 continue
             by_date[target_date] = members_raw
+            identities.setdefault(temperature_metric, {})[target_date] = _snapshot_identity(row)
             for key in ("issue_time", "available_at", "fetch_time", "recorded_at"):
                 val = row[key]
                 if val and (provenance[key] is None or val > provenance[key]):  # type: ignore[operator]
@@ -249,16 +251,20 @@ def _fetch_db_payload(
         all_member_rows: list[list[float]] = []
         for date_str in all_dates:
             vec = by_date[date_str]
-            for hour in range(24):
-                all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
+            local_start = datetime.fromisoformat(date_str).replace(tzinfo=ZoneInfo(city.timezone))
+            instant = local_start.astimezone(timezone.utc)
+            end = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+            while instant < end:
+                all_times.append(instant.isoformat())
                 all_member_rows.append(list(vec))
+                instant += timedelta(hours=1)
 
         synthesised_tag = f"ensemble_snapshots.ecmwf_open_data.{temperature_metric}_only"
 
     else:
         # --- Combined-metric path (backward-compatible) ---
-        high_rows = _query_metric(city.name, "high", cutoff)
-        low_rows = _query_metric(city.name, "low", cutoff)
+        high_rows = _query_metric(city.name, "high", cutoff, manifest_json=manifest_json, decision_time=fetch_time.isoformat())
+        low_rows = _query_metric(city.name, "low", cutoff, manifest_json=manifest_json, decision_time=fetch_time.isoformat())
 
         if not high_rows and not low_rows:
             _log.warning(
@@ -277,7 +283,7 @@ def _fetch_db_payload(
             "recorded_at": None,
         }
 
-        for metric_rows, bd in ((high_rows, high_by_date), (low_rows, low_by_date)):
+        for metric, metric_rows, bd in (("high", high_rows, high_by_date), ("low", low_rows, low_by_date)):
             for row in metric_rows:
                 target_date = row["target_date"]
                 members_raw = json.loads(row["members_json"])
@@ -290,6 +296,7 @@ def _fetch_db_payload(
                     )
                     continue
                 bd[target_date] = members_raw
+                identities.setdefault(metric, {})[target_date] = _snapshot_identity(row)
                 for key in ("issue_time", "available_at", "fetch_time", "recorded_at"):
                     val = row[key]
                     if val and (provenance[key] is None or val > provenance[key]):  # type: ignore[operator]
@@ -356,6 +363,13 @@ def _fetch_db_payload(
         "captured_at": captured_at.isoformat(),
         "recorded_at": provenance["recorded_at"] or "",
         "synthesised_from": synthesised_tag,
+        "coordinate_manifest_sha": hashlib.sha256(manifest_json.encode()).hexdigest(),
+        "snapshot_identity_by_metric_target_date": identities,
+        "data_version_by_metric": {
+            metric: data_version_for_track("mx2t6_high" if metric == "high" else "mn2t6_low", manifest_json)
+            for metric in identities
+        },
+        "data_version": (data_version_for_track("mx2t6_high" if temperature_metric == "high" else "mn2t6_low", manifest_json) if temperature_metric else None),
     }
 
     return ForecastBundle(
@@ -370,10 +384,22 @@ def _fetch_db_payload(
     )
 
 
+def _snapshot_identity(row) -> dict:
+    identity = {key: row[key] for key in (
+        "snapshot_id", "dataset_id", "source_run_id", "manifest_hash",
+        "issue_time", "available_at", "members_unit",
+    )}
+    identity["coordinate_manifest_sha"] = json.loads(row["provenance_json"])["manifest_sha256"]
+    return identity
+
+
 def _query_metric(
     city_name: str,
     temperature_metric: str,
     cutoff: str,
+    *,
+    manifest_json: str,
+    decision_time: str,
 ) -> list:
     """Return VERIFIED rows from ensemble_snapshots for one temperature metric.
 
@@ -395,11 +421,16 @@ def _query_metric(
     # Use the central POSITIVE set from forecast_extrema_authority so any future
     # status additions propagate automatically to this query.
     _pos = POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST  # e.g. ('CONTRIBUTES','EXPLICIT',...)
+    track = "mx2t6_high" if temperature_metric == "high" else "mn2t6_low"
+    data_version = data_version_for_track(track, manifest_json)
+    manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
+    source_run_prefix = f"{SOURCE_ID}:{track}:"
     conn = get_forecasts_connection()
     try:
         rows = conn.execute(
             f"""
             SELECT
+                snapshot_id, dataset_id, source_run_id, manifest_hash, members_unit, provenance_json,
                 target_date,
                 issue_time,
                 available_at,
@@ -412,7 +443,13 @@ def _query_metric(
               AND source_id = ?
               AND authority = 'VERIFIED'
               AND causality_status = 'OK'
-              AND dataset_id LIKE ?
+              AND dataset_id = ?
+              AND json_extract(CASE WHEN json_valid(provenance_json) THEN provenance_json ELSE '{{}}' END, '$.manifest_sha256') = ?
+              AND source_run_id = ? || strftime('%Y-%m-%dT%HZ', issue_time) || ':coordsha:' || ?
+              AND available_at <= ?
+              AND issue_time <= ?
+              AND fetch_time <= ?
+              AND julianday(recorded_at) <= julianday(?)
               AND datetime(recorded_at) > datetime(?)
               AND contributes_to_target_extrema = 1
               AND COALESCE(forecast_window_attribution_status, '') IN {_pos}
@@ -426,7 +463,13 @@ def _query_metric(
                     AND s2.source_id = ?
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'
-                    AND s2.dataset_id LIKE ?
+                    AND s2.dataset_id = ?
+                    AND json_extract(CASE WHEN json_valid(s2.provenance_json) THEN s2.provenance_json ELSE '{{}}' END, '$.manifest_sha256') = ?
+                    AND s2.source_run_id = ? || strftime('%Y-%m-%dT%HZ', s2.issue_time) || ':coordsha:' || ?
+                    AND s2.available_at <= ?
+                    AND s2.issue_time <= ?
+                    AND s2.fetch_time <= ?
+                    AND julianday(s2.recorded_at) <= julianday(?)
                     AND datetime(s2.recorded_at) > datetime(?)
                     AND s2.contributes_to_target_extrema = 1
                     AND COALESCE(s2.forecast_window_attribution_status, '') IN {_pos}
@@ -442,10 +485,12 @@ def _query_metric(
                 city_name,
                 temperature_metric,
                 SOURCE_ID,
-                _DATA_VERSION_PREFIX + "%",
+                data_version, manifest_sha, source_run_prefix, manifest_sha,
+                decision_time, decision_time, decision_time, decision_time,
                 cutoff,
                 SOURCE_ID,
-                _DATA_VERSION_PREFIX + "%",
+                data_version, manifest_sha, source_run_prefix, manifest_sha,
+                decision_time, decision_time, decision_time, decision_time,
                 cutoff,
             ),
         ).fetchall()

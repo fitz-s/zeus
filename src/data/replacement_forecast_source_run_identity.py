@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Mapping
+
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    coordinate_bound_data_version,
+)
 
 
 @dataclass(frozen=True)
@@ -11,7 +18,7 @@ class ReplacementDependencyExpectedIdentity:
     role: str
     source_id: str
     product_id: str
-    data_version: str
+    data_version: str | None
     physical_quantity: str
     observation_field: str
     expected_members: int | None
@@ -26,6 +33,25 @@ class ReplacementSourceRunIdentityDecision:
     source_run_id: str | None
 
 
+def _current_coordinate_manifest_sha() -> str | None:
+    """Hash the current runtime coordinate profile, or report it unavailable.
+
+    A missing or malformed current profile is deliberately not interchangeable
+    with the historical unbound OpenData data version.  Callers turn ``None``
+    into their normal dependency-missing result.
+    """
+
+    try:
+        from src.config import runtime_coordinate_manifest_json
+
+        manifest_json = runtime_coordinate_manifest_json()
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(manifest_json, str) or not manifest_json:
+        return None
+    return sha256(manifest_json.encode("utf-8")).hexdigest()
+
+
 def expected_replacement_dependency_identity_by_role(
     temperature_metric: str,
 ) -> dict[str, ReplacementDependencyExpectedIdentity]:
@@ -34,7 +60,18 @@ def expected_replacement_dependency_identity_by_role(
     if temperature_metric not in {"high", "low"}:
         raise ValueError("temperature_metric must be high or low")
     suffix = "max" if temperature_metric == "high" else "min"
-    baseline_param = "mx2t3" if temperature_metric == "high" else "mn2t3"
+    baseline_data_version = (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION
+        if temperature_metric == "high"
+        else ECMWF_OPENDATA_LOW_DATA_VERSION
+    )
+    coordinate_manifest_sha = _current_coordinate_manifest_sha()
+    if coordinate_manifest_sha is not None:
+        baseline_data_version = coordinate_bound_data_version(
+            baseline_data_version, coordinate_manifest_sha
+        )
+    else:
+        baseline_data_version = None
     baseline_physical = "mx2t3_local_calendar_day_max" if temperature_metric == "high" else "mn2t3_local_calendar_day_min"
     anchor_physical = f"deterministic_2t_anchor_local_calendar_day_{suffix}"
     posterior_physical = f"openmeteo_ecmwf_ifs9_bayes_fusion_local_calendar_day_{suffix}"
@@ -44,7 +81,7 @@ def expected_replacement_dependency_identity_by_role(
             role="baseline_b0",
             source_id="ecmwf_open_data",
             product_id="ecmwf_opendata_ifs_ens_0p25",
-            data_version=f"ecmwf_opendata_{baseline_param}_local_calendar_day_{suffix}",
+            data_version=baseline_data_version,
             physical_quantity=baseline_physical,
             observation_field=observation_field,
             expected_members=51,
@@ -97,7 +134,10 @@ def validate_replacement_source_run_identity(
     if _read(source_run, "source_id") != expected.source_id:
         reasons.append("REPLACEMENT_SOURCE_RUN_SOURCE_ID_MISMATCH")
     dataset_id = _read(source_run, "dataset_id") or _read(source_run, "data_version")
-    if dataset_id is not None and dataset_id != expected.data_version:
+    coordinate_profile_missing = expected.data_version is None
+    if coordinate_profile_missing:
+        reasons.append("REPLACEMENT_SOURCE_RUN_CURRENT_COORDINATE_PROFILE_MISSING")
+    elif dataset_id is not None and dataset_id != expected.data_version:
         reasons.append("REPLACEMENT_SOURCE_RUN_DATA_VERSION_MISMATCH")
     if _read(source_run, "temperature_metric") not in {None, temperature_metric}:
         reasons.append("REPLACEMENT_SOURCE_RUN_METRIC_MISMATCH")
@@ -124,7 +164,7 @@ def validate_replacement_source_run_identity(
             reasons.append("REPLACEMENT_SOURCE_RUN_COVERAGE_ID_MISMATCH")
         if _read(coverage, "source_id") != expected.source_id:
             reasons.append("REPLACEMENT_SOURCE_RUN_COVERAGE_SOURCE_ID_MISMATCH")
-        if _read(coverage, "data_version") != expected.data_version:
+        if not coordinate_profile_missing and _read(coverage, "data_version") != expected.data_version:
             reasons.append("REPLACEMENT_SOURCE_RUN_COVERAGE_DATA_VERSION_MISMATCH")
         if _read(coverage, "temperature_metric") != temperature_metric:
             reasons.append("REPLACEMENT_SOURCE_RUN_COVERAGE_METRIC_MISMATCH")

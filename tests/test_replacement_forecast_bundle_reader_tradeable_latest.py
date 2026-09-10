@@ -16,6 +16,7 @@ import hashlib
 import math
 import sqlite3
 import numpy as np
+import pytest
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -44,6 +45,15 @@ UTC = timezone.utc
 _TOPO_HASH = "topo-hash-tradeable-001"
 _FUSED_FULL = "FUSED_NORMAL_FULL"
 _BAYES_PRECISION_FUSION_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
+_TEST_COORDINATE_MANIFEST = '{"coordinate_basis":"reader-test-profile"}'
+_CURRENT_COORDINATE_SHA = hashlib.sha256(_TEST_COORDINATE_MANIFEST.encode()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _bind_current_coordinate_identity(monkeypatch):
+    """Make every fixture row use one explicit current coordinate manifest."""
+    import src.config as config
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: _TEST_COORDINATE_MANIFEST)
 
 
 @dataclass(frozen=True)
@@ -198,11 +208,41 @@ def _insert_posterior(
     # Default: q_ucb tracks q_lcb (a real fused row materializes BOTH bounds together).
     if with_ucb is None:
         with_ucb = with_bounds
+    snapshot_dataset_id = (
+        "ecmwf_opendata_mx2t3_local_calendar_day_max__coordsha_"
+        + _CURRENT_COORDINATE_SHA
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, available_at, fetch_time,
+            lead_hours, members_json, model_version, dataset_id, source_id,
+            source_cycle_time, source_available_at, authority,
+            causality_status, boundary_ambiguous, members_unit
+        ) VALUES (?, ?, 'high', 'mx2t3_local_calendar_day_max', 'high_temp',
+                  ?, ?, ?, 0, ?, 'ecmwf_ens', ?, 'ecmwf_open_data',
+                  ?, ?, 'VERIFIED', 'OK', 0, 'degC')
+        """,
+        (
+            city,
+            target_date,
+            source_cycle_time.isoformat(),
+            source_available_at.isoformat(),
+            source_available_at.isoformat(),
+            json.dumps([20.0] * 51),
+            snapshot_dataset_id,
+            source_cycle_time.isoformat(),
+            source_available_at.isoformat(),
+        ),
+    )
+    current_snapshot_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     deps = dependency_source_run_ids or {
         "baseline_b0": "b0-run",
         "aifs_sampled_2t": "aifs-run",
         "openmeteo_ifs9_anchor": "om9-run",
     }
+    deps = {**deps, "current_ensemble_snapshot": current_snapshot_id}
     # Each posterior row carries a DISTINCT identity hash (forecast_posteriors enforces
     # UNIQUE(posterior_identity_hash)); keying on cycle+mode keeps two rows of the same scope
     # insertable, matching production where each cycle's materialization is a distinct row.
@@ -284,7 +324,7 @@ def _readiness(
             role="baseline_b0",
             source_id="ecmwf_open_data",
             product_id="ecmwf_opendata_ifs_ens_0p25",
-            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max__coordsha_" + _CURRENT_COORDINATE_SHA,
             source_run_id=baseline_run_id,
             source_available_at=_dt(6, 0),
         ),
@@ -1727,3 +1767,105 @@ def test_pinned_reader_is_entry_isolated() -> None:
 
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED"
+
+
+def _snapshot_id_for_posterior(conn: sqlite3.Connection, posterior_id: int) -> int:
+    raw = conn.execute(
+        "SELECT dependency_source_run_ids_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()[0]
+    return int(json.loads(raw)["current_ensemble_snapshot"])
+
+
+@pytest.mark.parametrize(
+    "authority_purpose",
+    [
+        ReplacementForecastAuthorityPurpose.ENTRY,
+        ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    ],
+)
+def test_fallback_requires_current_coordinate_snapshot_identity(
+    authority_purpose: ReplacementForecastAuthorityPurpose,
+) -> None:
+    """An older live row may fallback only when its ENS snapshot is current."""
+    conn = _conn()
+    old_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_BAYES_PRECISION_FUSION_MISSING,
+        with_bounds=False,
+    )
+    readiness = _readiness(
+        posterior_id=old_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        authority_purpose=authority_purpose,
+    )
+
+    assert result.ok is True, result.reason_code
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == old_id
+
+    snapshot_id = _snapshot_id_for_posterior(conn, old_id)
+    conn.execute(
+        "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = ?",
+        ("ecmwf_opendata_mx2t3_local_calendar_day_max", snapshot_id),
+    )
+    blocked = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        authority_purpose=authority_purpose,
+    )
+    assert blocked.ok is False
+    assert blocked.reason_code == "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+
+
+def test_current_coordinate_snapshot_id_is_required_for_normal_read() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    raw = conn.execute(
+        "SELECT dependency_source_run_ids_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()[0]
+    deps = json.loads(raw)
+    deps.pop("current_ensemble_snapshot")
+    conn.execute(
+        "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ? WHERE posterior_id = ?",
+        (json.dumps(deps), posterior_id),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_ID_MISSING"

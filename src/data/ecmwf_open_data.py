@@ -67,13 +67,14 @@ from typing import Any, Mapping, Optional
 
 import requests
 
-from src.config import PROJECT_ROOT, runtime_cities_by_name
+from src.config import PROJECT_ROOT, runtime_cities_by_name, runtime_coordinate_manifest_json
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
+    coordinate_bound_data_version,
 )
 from src.data.forecast_target_contract import (
     OPENDATA_MAX_STEP_HOURS,
@@ -106,24 +107,10 @@ class OpenDataPaths:
     origin: str
 
 
-def _write_runtime_coordinate_manifest(raw_root: Path) -> Path:
+def _write_runtime_coordinate_manifest(raw_root: Path, *, manifest_json: str | None = None) -> Path:
     """Bind extraction to the same station locations as current provider forecasts."""
-    cities = []
-    for name, city in sorted(runtime_cities_by_name().items()):
-        lat, lon = float(city.lat), float(city.lon)
-        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-            raise ValueError(f"invalid extraction coordinates: {name}")
-        if city.settlement_unit not in {"C", "F"} or not city.timezone:
-            raise ValueError(f"invalid extraction calendar/unit: {name}")
-        cities.append({
-            "city": name, "lat": lat, "lon": lon,
-            "timezone": city.timezone, "unit": city.settlement_unit,
-        })
-    if not cities:
-        raise ValueError("runtime extraction city universe is empty")
-    content = json.dumps(
-        {"coordinate_basis": "runtime_settlement_station", "cities": cities},
-        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    content = (
+        manifest_json if manifest_json is not None else runtime_coordinate_manifest_json()
     ).encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()
     directory = raw_root / "docs"
@@ -1829,6 +1816,7 @@ def collect_open_ens_cycle(
     _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
     _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
+    coordinate_manifest_json: str | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
 
@@ -1851,7 +1839,13 @@ def collect_open_ens_cycle(
     """
     if track not in TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
-    cfg = TRACKS[track]
+    cfg = dict(TRACKS[track])
+    manifest_json = (
+        runtime_coordinate_manifest_json()
+        if coordinate_manifest_json is None else coordinate_manifest_json
+    )
+    manifest_sha = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+    cfg["data_version"] = coordinate_bound_data_version(cfg["data_version"], manifest_sha)
     runner = _runner or _run_subprocess
 
     source_spec = gate_source(SOURCE_ID)
@@ -1896,10 +1890,14 @@ def collect_open_ens_cycle(
     source_release_time = selection_metadata.get("next_safe_fetch_at")
     if not isinstance(source_release_time, datetime):
         source_release_time = source_cycle_time
-    source_run_id = f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
+    source_run_id = (
+        f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
+        f":coordsha:{manifest_sha}"
+    )
     release_calendar_key = f"{SOURCE_ID}:{track}:{horizon_profile}"
 
     paths = _paths or _resolve_opendata_paths()
+    coordinate_raw_root = paths.raw_root / "raw" / "coordinate_manifests" / manifest_sha
     output_path = _download_output_path(
         run_date=cycle_date,
         run_hour=cycle_hour,
@@ -1938,7 +1936,9 @@ def collect_open_ens_cycle(
                 paths.raw_root,
                 paths.asset_root,
             )
-        coordinate_manifest = _write_runtime_coordinate_manifest(paths.raw_root)
+        coordinate_manifest = _write_runtime_coordinate_manifest(
+            paths.raw_root, manifest_json=manifest_json,
+        )
 
     # download_observed_steps / _partial_cycle track which steps were actually
     # fetched so _write_source_authority_chain can set the authoritative
@@ -2186,7 +2186,7 @@ def collect_open_ens_cycle(
                 str(paths.extract_script),
                 "--grib-path", str(output_path),
                 "--track", cfg["ingest_track"],
-                "--output-root", str(paths.raw_root / "raw"),
+                "--output-root", str(coordinate_raw_root),
                 "--manifest-path", str(coordinate_manifest),
             ],
             label=f"extract_{track}",
@@ -2270,7 +2270,7 @@ def collect_open_ens_cycle(
             try:
                 with tempfile.TemporaryDirectory(prefix="zeus_opendata_cycle_") as scoped_tmp:
                     scoped_json_root, cycle_extract_dir, cycle_json_files = _build_cycle_scoped_json_root(
-                        raw_root=paths.raw_root / "raw",
+                        raw_root=coordinate_raw_root,
                         extract_subdir=cfg["extract_subdir"],
                         run_date=cycle_date,
                         run_hour=cycle_hour,
@@ -2324,6 +2324,8 @@ def collect_open_ens_cycle(
                             source_available_at=datetime.fromisoformat(
                                 proof_of_possession_available_at(snapshot_possession_at)
                             ),
+                            dataset_id=cfg["data_version"],
+                            coordinate_manifest_sha=manifest_sha,
                         ),
                     )
                 logger.info(
@@ -2422,6 +2424,7 @@ def collect_open_ens_cycle(
         "run_date": cycle_date.isoformat(),
         "run_hour": cycle_hour,
         "source_run_id": source_run_id,
+        "coordinate_manifest_sha": manifest_sha,
         "release_calendar_key": release_calendar_key,
         "forecast_track": forecast_track,
         "source_id": SOURCE_ID,

@@ -77,6 +77,27 @@ LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS: frozenset[str] = frozenset({
 LEGACY_NULL_PASSTHROUGH_VALIDATION = "forecast_extrema_authority_legacy_null_passthrough"
 
 
+def _coordinate_bound_base(data_version: str | None) -> str | None:
+    """Resolve one strict coordinate-bound identity to its physical base.
+
+    The complete data_version remains the reader's identity.  This helper only
+    supplies the physical-window classification, and accepts dynamic IDs via
+    the shared strict parser rather than a broad prefix.
+    """
+    if data_version in CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS:
+        return data_version
+    if data_version in LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS:
+        return data_version
+    try:
+        from src.contracts.ensemble_snapshot_provenance import (
+            split_coordinate_bound_data_version,
+        )
+    except ImportError:  # pragma: no cover - contract lands with the producer
+        return None
+    parsed = split_coordinate_bound_data_version(data_version or "")
+    return parsed[0] if parsed is not None else None
+
+
 # Attribution status values that are considered unambiguously positive.
 # This is the single authoritative set referenced by both the classifier and
 # the SQL ORDER BY CASE in executable_forecast_reader.py.  Change here
@@ -231,7 +252,8 @@ def classify_forecast_extrema_authority(
     # data_version=None; previously None fell into LEGACY_NULL_PASSTHROUGH, silently
     # bypassing the P0 gate on schema drift or missing provenance.  Only explicit
     # legacy versions are safe to pass through.
-    if data_version in LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS:
+    physical_data_version = _coordinate_bound_base(data_version)
+    if physical_data_version in LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS:
         return ForecastExtremaAuthority(
             eligibility=ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH,
             contributes_to_target_extrema=False,
@@ -246,7 +268,7 @@ def classify_forecast_extrema_authority(
         )
     # data_version is None, a current/known-live version, or any unrecognised
     # string — fail closed.
-    if data_version in CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS:
+    if physical_data_version in CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS:
         reason = (
             f"contributes_to_target_extrema is NULL on current data_version "
             f"{data_version!r} (fail-closed)"

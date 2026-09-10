@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from src.config import EntryForecastConfig
+from src.config import EntryForecastConfig, runtime_coordinate_manifest_json
+from src.data.forecast_fetch_plan import data_version_for_track
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 
 
@@ -62,7 +63,22 @@ def _is_live_readiness_current(row: sqlite3.Row, *, now_utc: datetime) -> bool:
     return parsed.astimezone(timezone.utc) > now_utc.astimezone(timezone.utc)
 
 
-def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryForecastConfig) -> int:
+def _active_opendata_dataset_ids(config: EntryForecastConfig) -> tuple[str, str]:
+    manifest_json = runtime_coordinate_manifest_json()
+    if not isinstance(manifest_json, str) or not manifest_json:
+        raise ValueError("runtime coordinate manifest must be a non-empty string")
+    return (
+        data_version_for_track(config.high_track, manifest_json),
+        data_version_for_track(config.low_track, manifest_json),
+    )
+
+
+def _count_executable_opendata_rows(
+    conn: sqlite3.Connection,
+    *,
+    config: EntryForecastConfig,
+    dataset_ids: tuple[str, str],
+) -> int:
     if not _table_exists(conn, "ensemble_snapshots"):
         return 0
     row = conn.execute(
@@ -75,20 +91,23 @@ def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryFor
           AND release_calendar_key IS NOT NULL
           AND source_cycle_time IS NOT NULL
           AND source_release_time IS NOT NULL
-          AND dataset_id IN (?, ?, ?, ?)
+          AND dataset_id IN (?, ?)
         """,
         (
             config.source_id,
             config.source_transport.value,
-            # 2026-05-07: mx2t3/mn2t3 active versions
-            "ecmwf_opendata_mx2t3_local_calendar_day_max",
-            "ecmwf_opendata_mn2t3_local_calendar_day_min",
-            # Legacy mx2t6/mn2t6 — historical rows written before 2026-05-07
-            "ecmwf_opendata_mx2t6_local_calendar_day_max",
-            "ecmwf_opendata_mn2t6_local_calendar_day_min",
+            *dataset_ids,
         ),
     ).fetchone()
     return int(row["count"] if hasattr(row, "keys") else row[0])
+
+
+def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryForecastConfig) -> int:
+    return _count_executable_opendata_rows(
+        conn,
+        config=config,
+        dataset_ids=_active_opendata_dataset_ids(config),
+    )
 
 
 def build_live_entry_forecast_status(
@@ -100,7 +119,12 @@ def build_live_entry_forecast_status(
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
     blockers: list[str] = []
-    executable_row_count = count_executable_opendata_rows(conn, config=config)
+    dataset_ids = _active_opendata_dataset_ids(config)
+    executable_row_count = _count_executable_opendata_rows(
+        conn,
+        config=config,
+        dataset_ids=dataset_ids,
+    )
     if executable_row_count == 0:
         blockers.append("ZERO_EXECUTABLE_OPENDATA_ROWS")
 
@@ -115,13 +139,18 @@ def build_live_entry_forecast_status(
             FROM readiness_state
             WHERE strategy_key = ?
               AND source_id = ?
-              AND track IN (?, ?)
+              AND (
+                    (track = ? AND data_version = ?)
+                 OR (track = ? AND data_version = ?)
+              )
             """,
             (
                 PRODUCER_READINESS_STRATEGY_KEY,
                 config.source_id,
                 config.high_track,
+                dataset_ids[0],
                 config.low_track,
+                dataset_ids[1],
             ),
         ).fetchall()
         producer_readiness_count = len(rows)

@@ -292,7 +292,7 @@ def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch, 
         "New City": SimpleNamespace(lat=10.0, lon=-20.0,
                                     timezone="UTC", settlement_unit="F"),
     }
-    monkeypatch.setattr(ecmwf_open_data, "runtime_cities_by_name", lambda: cities)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: cities)
     extract_script.parent.mkdir(parents=True)
     extract_script.write_text("# test extractor\n")
     paths = ecmwf_open_data.OpenDataPaths(
@@ -342,7 +342,7 @@ def test_runtime_coordinate_manifest_preserves_prior_snapshots(tmp_path, monkeyp
 
     city = SimpleNamespace(lat=32.011398, lon=34.8867,
                            timezone="Asia/Jerusalem", settlement_unit="C")
-    monkeypatch.setattr(ecmwf_open_data, "runtime_cities_by_name", lambda: {"Tel Aviv": city})
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tel Aviv": city})
     first = ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path)
     content = first.read_bytes()
     assert ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path) == first

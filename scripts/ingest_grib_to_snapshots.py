@@ -114,6 +114,8 @@ class SourceRunContext:
     source_cycle_time: datetime
     source_release_time: datetime
     source_available_at: datetime | None = None
+    dataset_id: str | None = None
+    coordinate_manifest_sha: str | None = None
 
     def available_at_iso(self) -> str:
         return (self.source_available_at or self.source_release_time).isoformat()
@@ -924,6 +926,26 @@ def ingest_json_file(
     normalized_dv = normalize_opendata_data_version(data_version)
     if normalized_dv != data_version:
         data_version = normalized_dv
+        payload["data_version"] = data_version
+    if source_run_context is not None and source_run_context.dataset_id is not None:
+        from src.contracts.ensemble_snapshot_provenance import split_coordinate_bound_data_version
+
+        identity = split_coordinate_bound_data_version(source_run_context.dataset_id)
+        if (
+            identity is None
+            or data_version not in {identity[0], source_run_context.dataset_id}
+            or identity[1] != source_run_context.coordinate_manifest_sha
+            or identity[1] != payload.get("manifest_sha256")
+            or source_run_context.source_id != "ecmwf_open_data"
+            or source_run_context.source_run_id != (
+                "ecmwf_open_data:"
+                + ("mx2t6_high" if metric.temperature_metric == "high" else "mn2t6_low")
+                + source_run_context.source_cycle_time.astimezone(timezone.utc).strftime(":%Y-%m-%dT%HZ")
+                + ":coordsha:" + identity[1]
+            )
+        ):
+            return "contract_rejected: COORDINATE_MANIFEST_IDENTITY_MISMATCH"
+        data_version = source_run_context.dataset_id
         payload["data_version"] = data_version
     _fill_opendata_grid_provenance(payload)
     # NC-12: guard must fire before INSERT

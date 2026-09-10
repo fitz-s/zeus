@@ -15,6 +15,7 @@ ingester against a temporary opendata-shaped JSON file. We then assert:
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,20 @@ def test_canonical_allowlist_includes_opendata():
     # Both TIGGE archive data_versions remain valid (back-compat).
     assert "tigge_mx2t6_local_calendar_day_max" in CANONICAL_ENSEMBLE_DATA_VERSIONS
     assert "tigge_mn2t6_local_calendar_day_min" in CANONICAL_ENSEMBLE_DATA_VERSIONS
+
+
+def _coordinate_sha():
+    from src.config import runtime_coordinate_manifest_json
+    return hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+
+
+def _coordinate_raw_root(root):
+    return root / "raw" / "coordinate_manifests" / _coordinate_sha()
+
+
+def _active_high_dataset():
+    from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+    return coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, _coordinate_sha())
 
 
 def _make_opendata_high_payload(
@@ -73,8 +88,8 @@ def _make_opendata_high_payload(
         "lat": 51.4775,
         "lon": -0.4614,
         "unit": "C",
-        "manifest_sha256": "0" * 64,
-        "manifest_hash": "0" * 64,
+        "manifest_sha256": _coordinate_sha(),
+        "manifest_hash": _coordinate_sha(),
         "issue_time_utc": issue_iso,
         "target_date_local": target_date,
         "lead_day": 1,
@@ -151,7 +166,7 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
     target = "2026-05-02"
     issue = "2026-05-01T00:00:00+00:00"
     payload = _make_opendata_high_payload(target, issue)
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     json_path = json_dir / f"{extract_subdir}_target_{target}_lead_1.json"
     json_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -169,7 +184,7 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
     try:
         summary = _ingmod.ingest_track(
             track="mx2t6_high",
-            json_root=fifty_one_root / "raw",
+            json_root=_coordinate_raw_root(fifty_one_root),
             conn=conn,
             date_from=None,
             date_to=None,
@@ -215,7 +230,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         forecast_window_start_iso="2026-05-01T23:00:00+00:00",
         forecast_window_end_iso="2026-05-02T23:00:00+00:00",
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     json_path = json_dir / f"{extract_subdir}_target_{target}_lead_1.json"
     json_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -267,7 +282,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         temperature_metric="high",
         physical_quantity="mx2t3_local_calendar_day_max",
         observation_field="high_temp",
-        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        data_version=_active_high_dataset(),
         source_id="ecmwf_open_data",
         track="mx2t6_high_full_horizon",
         source_run_id=result["source_run_id"],
@@ -290,7 +305,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         temperature_metric="high",
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_db_reader",
-        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        data_version=_active_high_dataset(),
         track="mx2t6_high_full_horizon",
         strategy_key="entry_forecast",
         market_family="london-2026-05-02-high",
@@ -320,7 +335,7 @@ def test_collect_open_ens_cycle_blocks_live_when_member_value_missing(tmp_path: 
         local_day_end_iso="2026-05-02T23:00:00+00:00",
         missing_member_ids=(0,),
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_{target}_lead_1.json").write_text(
         json.dumps(payload),
@@ -377,7 +392,7 @@ def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: 
         nearest_grid_lon=None,
         nearest_grid_distance_km=None,
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
         json.dumps(payload),
@@ -465,7 +480,7 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
         forecast_window_start_iso="2026-05-01T23:00:00+00:00",
         forecast_window_end_iso="2026-05-02T23:00:00+00:00",
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
         json.dumps(payload),
@@ -525,7 +540,7 @@ def test_collect_open_ens_cycle_blocks_noncontiguous_missing_download_step(tmp_p
         local_day_start_iso="2026-04-30T23:00:00+00:00",
         local_day_end_iso="2026-05-01T23:00:00+00:00",
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_2026-05-01_lead_1.json").write_text(
         json.dumps(payload),
@@ -582,7 +597,7 @@ def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, 
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
 
-    stale_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260430"
+    stale_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260430"
     stale_dir.mkdir(parents=True)
     stale_payload = _make_opendata_high_payload(
         "2026-05-01",
@@ -595,7 +610,7 @@ def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, 
         encoding="utf-8",
     )
 
-    selected_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    selected_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     selected_dir.mkdir(parents=True)
     selected_payload = _make_opendata_high_payload(
         "2026-05-02",
@@ -608,7 +623,7 @@ def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, 
         encoding="utf-8",
     )
 
-    other_cycle_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501_cycle12z"
+    other_cycle_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501_cycle12z"
     other_cycle_dir.mkdir(parents=True)
     other_payload = _make_opendata_high_payload(
         "2026-05-03",
@@ -658,7 +673,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z"
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha()
     forecasts_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -689,7 +704,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
             192.0,
             json.dumps([18.0] * 51),
             "ecmwf_open_data",
-            ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            _active_high_dataset(),
             "ecmwf_open_data",
             "ensemble_snapshots_db_reader",
             source_run_id,
@@ -743,7 +758,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
         temperature_metric="high",
         physical_quantity="mx2t3_local_calendar_day_max",
         observation_field="high_temp",
-        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        data_version=_active_high_dataset(),
         source_id="ecmwf_open_data",
         track="mx2t6_high_full_horizon",
         source_run_id=source_run_id,
@@ -757,7 +772,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
         local_day_start_iso="2026-05-01T23:00:00+00:00",
         local_day_end_iso="2026-05-02T23:00:00+00:00",
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
         json.dumps(payload),
@@ -803,7 +818,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z"
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha()
     issue_iso = "2026-05-01T00:00:00+00:00"
     forecasts_conn.execute(
         """
@@ -829,7 +844,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
             48.0,
             json.dumps([None] * 51),
             "ecmwf_open_data",
-            ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            _active_high_dataset(),
             "ecmwf_open_data",
             "ensemble_snapshots_db_reader",
             source_run_id,
@@ -858,7 +873,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
         local_day_start_iso="2026-05-01T23:00:00+00:00",
         local_day_end_iso="2026-05-02T23:00:00+00:00",
     )
-    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir = _coordinate_raw_root(fifty_one_root) / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
     (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
         json.dumps(payload),
@@ -915,3 +930,100 @@ def test_collect_open_ens_cycle_default_extract_timeout_is_live_sized(tmp_path: 
     assert calls == [
         {"label": "extract_mx2t6_high", "timeout": 900},
     ]
+
+
+@pytest.mark.parametrize("track", ["mx2t6_high", "mn2t6_low"])
+def test_coordinate_revision_appends_without_rebinding_prior_evidence(tmp_path, monkeypatch, track):
+    from src.data import ecmwf_open_data
+    from src.config import runtime_coordinate_manifest_json
+
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    root = tmp_path / "raw-source"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    cfg = ecmwf_open_data.TRACKS[track]
+    manifests = [runtime_coordinate_manifest_json()]
+    revised = json.loads(manifests[0])
+    revised["cities"][0]["lat"] += 0.001
+    manifests.append(json.dumps(revised, sort_keys=True, separators=(",", ":")))
+    original_evidence = None
+    first_run = None
+    for index, manifest in enumerate(manifests):
+        digest = hashlib.sha256(manifest.encode()).hexdigest()
+        payload = _make_opendata_high_payload(
+            "2026-05-02", "2026-05-01T00:00:00+00:00",
+            local_day_start_iso="2026-05-01T23:00:00+00:00",
+            local_day_end_iso="2026-05-02T23:00:00+00:00",
+            forecast_window_start_iso="2026-05-01T23:00:00+00:00",
+            forecast_window_end_iso="2026-05-02T23:00:00+00:00",
+        )
+        payload.update(manifest_sha256=digest, manifest_hash=digest,
+                       data_version=cfg["data_version"])
+        if track == "mn2t6_low":
+            payload.update(physical_quantity="mn2t3_local_calendar_day_min",
+                           param="mn2t3", short_name="mn2t3", step_type="min")
+        payload["members"][0]["value_native_unit"] += index
+        directory = root / "raw" / "coordinate_manifests" / digest / cfg["extract_subdir"] / "london" / "20260501"
+        directory.mkdir(parents=True)
+        raw = directory / "sample.json"
+        raw.write_text(json.dumps(payload))
+        result = ecmwf_open_data.collect_open_ens_cycle(
+            track=track, run_date=date(2026, 5, 1), run_hour=0,
+            skip_download=True, skip_extract=True, conn=conn,
+            coordinate_manifest_json=manifest,
+            now_utc=datetime(2026, 5, 1, 9 + index, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "ok"
+        assert result["source_run_id"].endswith(":coordsha:" + digest)
+        assert result["data_version"].endswith("__coordsha_" + digest)
+        if first_run is None:
+            first_run = result["source_run_id"]
+            original_evidence = {
+                table: [tuple(row) for row in conn.execute(
+                    f"SELECT * FROM {table} WHERE source_run_id = ?", (first_run,)
+                )]
+                for table in ("ensemble_snapshots", "source_run", "source_run_coverage", "readiness_state")
+            }
+        else:
+            for table, expected in original_evidence.items():
+                assert [tuple(row) for row in conn.execute(
+                    f"SELECT * FROM {table} WHERE source_run_id = ?", (first_run,)
+                )] == expected
+    rows = conn.execute("SELECT snapshot_id, dataset_id, members_json FROM ensemble_snapshots ORDER BY snapshot_id").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["snapshot_id"] != rows[1]["snapshot_id"]
+    assert rows[0]["dataset_id"] != rows[1]["dataset_id"]
+    assert rows[0]["members_json"] != rows[1]["members_json"]
+
+
+@pytest.mark.parametrize("mismatch", ["payload", "dataset", "source_run"])
+def test_coordinate_ingest_rejects_unbound_identity(tmp_path, mismatch):
+    from src.data import ecmwf_open_data
+    from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    digest = _coordinate_sha()
+    other = "f" * 64 if digest != "f" * 64 else "a" * 64
+    payload = _make_opendata_high_payload("2026-05-02", "2026-05-01T00:00:00+00:00")
+    if mismatch == "payload":
+        payload["manifest_sha256"] = other
+    path = tmp_path / "snapshot.json"
+    path.write_text(json.dumps(payload))
+    context = ecmwf_open_data._ingest_grib_SourceRunContext(
+        source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+        source_run_id="ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + (other if mismatch == "source_run" else digest),
+        release_calendar_key="ecmwf_open_data:mx2t6_high:standard",
+        source_cycle_time=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        source_release_time=datetime(2026, 5, 1, 9, tzinfo=timezone.utc),
+        dataset_id=coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, other if mismatch == "dataset" else digest),
+        coordinate_manifest_sha=digest,
+    )
+    from ingest_grib_to_snapshots import ingest_json_file, HIGH_LOCALDAY_MAX
+    result = ingest_json_file(conn, path, metric=HIGH_LOCALDAY_MAX,
+                              model_version="ecmwf_ens", overwrite=True,
+                              source_run_context=context)
+    assert result == "contract_rejected: COORDINATE_MANIFEST_IDENTITY_MISMATCH"
+    assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0

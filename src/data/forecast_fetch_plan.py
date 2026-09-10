@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from src.config import City, EntryForecastConfig
+from src.config import City, EntryForecastConfig, runtime_coordinate_manifest_json
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    coordinate_bound_data_version,
 )
 from src.data.forecast_target_contract import ForecastTargetScope, build_forecast_target_scope
 
@@ -40,11 +42,25 @@ def metric_for_track(track: str) -> str:
     raise ValueError(f"unknown Open Data track for metric mapping: {track!r}")
 
 
-def data_version_for_track(track: str) -> str:
+def _coordinate_manifest_sha(manifest_json: str) -> str:
+    if not isinstance(manifest_json, str) or not manifest_json:
+        raise ValueError("coordinate_manifest_json must be a non-empty string")
+    return sha256(manifest_json.encode("utf-8")).hexdigest()
+
+
+def data_version_for_track(
+    track: str,
+    coordinate_manifest_json: str | None = None,
+) -> str:
     metric = metric_for_track(track)
-    if metric == "high":
-        return ECMWF_OPENDATA_HIGH_DATA_VERSION
-    return ECMWF_OPENDATA_LOW_DATA_VERSION
+    base = (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION
+        if metric == "high"
+        else ECMWF_OPENDATA_LOW_DATA_VERSION
+    )
+    if coordinate_manifest_json is None:
+        coordinate_manifest_json = runtime_coordinate_manifest_json()
+    return coordinate_bound_data_version(base, _coordinate_manifest_sha(coordinate_manifest_json))
 
 
 def track_for_metric(config: EntryForecastConfig, temperature_metric: str) -> str:
@@ -77,9 +93,14 @@ def build_warm_horizon_scopes(
     now_utc: datetime,
     warm_horizon_days: int,
     market_refs: tuple[str, ...] = (),
+    coordinate_manifest_json: str | None = None,
 ) -> tuple[ForecastTargetScope, ...]:
     temperature_metric = metric_for_track(track)
-    data_version = data_version_for_track(track)
+    if coordinate_manifest_json is None:
+        raise ValueError(
+            "coordinate_manifest_json is required for active warm-horizon scopes"
+        )
+    data_version = data_version_for_track(track, coordinate_manifest_json)
     scopes: list[ForecastTargetScope] = []
     for city in cities:
         for target_local_date in warm_horizon_target_dates(

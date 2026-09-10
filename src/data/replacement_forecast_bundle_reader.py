@@ -12,9 +12,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfoNotFoundError
 
 from src.config import cities_by_name
+from src.contracts.ensemble_snapshot_provenance import (
+    split_coordinate_bound_data_version,
+)
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
@@ -37,6 +40,9 @@ from src.data.replacement_forecast_readiness import (
     READY_STATUS,
     SOURCE_ID,
     ReplacementForecastReadinessDecision,
+)
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
 )
 from src.data.replacement_input_hwm import (
     ReplacementInputHwmReadUnavailable,
@@ -602,6 +608,53 @@ def _dependency_source_run_mismatch(
     return False
 
 
+def _current_ensemble_snapshot_identity_reason(
+    conn: sqlite3.Connection,
+    *,
+    dependency_json: Mapping[str, Any],
+    city: str,
+    target_date: str,
+    metric: str,
+) -> str | None:
+    """Require the posterior's current ENS snapshot to be current-coordinate bound."""
+    expected = expected_replacement_dependency_identity_by_role(metric).get(
+        "baseline_b0"
+    )
+    expected_dataset_id = expected.data_version if expected is not None else None
+    if (
+        not isinstance(expected_dataset_id, str)
+        or split_coordinate_bound_data_version(expected_dataset_id) is None
+    ):
+        return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_UNAVAILABLE"
+
+    snapshot_id = dependency_json.get("current_ensemble_snapshot")
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        return "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_ID_MISSING"
+    try:
+        row = conn.execute(
+            """
+            SELECT dataset_id, source_id, city, target_date, temperature_metric
+              FROM ensemble_snapshots
+             WHERE snapshot_id = ?
+             LIMIT 1
+            """,
+            (snapshot_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
+    if row is None:
+        return "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
+    if (
+        row[0] != expected_dataset_id
+        or row[1] != "ecmwf_open_data"
+        or row[2] != city
+        or row[3] != target_date
+        or row[4] != metric
+    ):
+        return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+    return None
+
+
 def _parse_utc(value: str, *, field_name: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -1111,6 +1164,15 @@ def read_replacement_forecast_bundle(
         )
 
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")
+    current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
+        conn,
+        dependency_json=dependency_json,
+        city=city,
+        target_date=target_date_text,
+        metric=metric,
+    )
+    if current_snapshot_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", current_snapshot_reason)
     if _served_via_tradeable_fallback:
         # Re-anchor the certification to the SERVED live row's intrinsic provenance. The
         # scope readiness was overwritten in place by the newer non-executable cycle's materialization

@@ -42,6 +42,9 @@ from src.data.replacement_forecast_materializer import (
 )
 import src.data.replacement_forecast_materializer as materializer_mod
 from src.data import replacement_cycle_advance_trigger as cycle_advance
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+)
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import (
@@ -78,6 +81,12 @@ class _TemperatureBin:
 
 def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
+
+
+def _current_baseline_data_version(metric: str = "high") -> str:
+    value = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
+    assert value is not None
+    return value
 
 
 def _conn() -> sqlite3.Connection:
@@ -280,7 +289,7 @@ def _install_live_fusion(
 
 def _request(
     *,
-    baseline_data_version: str = "ecmwf_opendata_mx2t3_local_calendar_day_max",
+    baseline_data_version: str | None = None,
     baseline_source_run_id: str = "b0-run",
     baseline_source_available_at: datetime | None = None,
     openmeteo_source_run_id: str | None = "om9-run",
@@ -296,6 +305,8 @@ def _request(
     day0_observed_extreme_sample_count: int | None = None,
     day0_observation_state: str | None = None,
 ) -> ReplacementForecastMaterializeRequest:
+    if baseline_data_version is None:
+        baseline_data_version = _current_baseline_data_version("high")
     guard = _precision_guard() if openmeteo_precision_guard is _DEFAULT_PRECISION_GUARD else openmeteo_precision_guard
     return ReplacementForecastMaterializeRequest(
         city="Shanghai",
@@ -460,8 +471,8 @@ def test_day0_owner_witness_allows_current_owner_posterior_write(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "absorbing_extreme", "fast_extreme"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0),
+        ("high", _current_baseline_data_version("high"), 30.0, 31.0),
+        ("low", _current_baseline_data_version("low"), 21.0, 20.0),
     ],
 )
 def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
@@ -542,14 +553,14 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "absorbing_extreme", "fast_extreme", "bound"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, None),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, float("nan")),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 31.0, 29.0),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 30.0, 29.0, 30.0),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, None),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, float("nan")),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 20.0, 22.0),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 21.0, 22.0, 21.0),
+        ("high", _current_baseline_data_version("high"), 30.0, 31.0, None),
+        ("high", _current_baseline_data_version("high"), 30.0, 31.0, float("nan")),
+        ("high", _current_baseline_data_version("high"), 30.0, 31.0, 29.0),
+        ("high", _current_baseline_data_version("high"), 30.0, 29.0, 30.0),
+        ("low", _current_baseline_data_version("low"), 21.0, 20.0, None),
+        ("low", _current_baseline_data_version("low"), 21.0, 20.0, float("nan")),
+        ("low", _current_baseline_data_version("low"), 21.0, 20.0, 22.0),
+        ("low", _current_baseline_data_version("low"), 21.0, 22.0, 21.0),
     ],
 )
 def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
@@ -616,7 +627,7 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric="low",
-        baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+        baseline_data_version=_current_baseline_data_version("low"),
     )
     assert materialize_replacement_forecast_live(conn, prior).ok is True
     current = replace(
@@ -1468,7 +1479,7 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
             day0_observed_extreme_sample_count=12,
         ),
         temperature_metric="low",
-        baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+        baseline_data_version=_current_baseline_data_version("low"),
     )
     same_source_regression = replace(
         awc,
@@ -1572,8 +1583,8 @@ def test_materializer_equal_frontier_uses_current_request_identity(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "extreme"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 31.0),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 19.0),
+        ("high", _current_baseline_data_version("high"), 31.0),
+        ("low", _current_baseline_data_version("low"), 19.0),
     ],
 )
 def test_materializer_blocks_future_day0_observation(
@@ -1672,8 +1683,8 @@ def test_materializer_blocks_malformed_day0_frontier_ledger(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "legacy_extreme", "current_extreme"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", 31.0, 32.0),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 19.0, 18.0),
+        ("high", _current_baseline_data_version("high"), 31.0, 32.0),
+        ("low", _current_baseline_data_version("low"), 19.0, 18.0),
     ],
 )
 def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
@@ -1740,12 +1751,12 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "malformation"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "missing"),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "nonfinite"),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "future"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "missing"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "nonfinite"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "future"),
+        ("high", _current_baseline_data_version("high"), "missing"),
+        ("high", _current_baseline_data_version("high"), "nonfinite"),
+        ("high", _current_baseline_data_version("high"), "future"),
+        ("low", _current_baseline_data_version("low"), "missing"),
+        ("low", _current_baseline_data_version("low"), "nonfinite"),
+        ("low", _current_baseline_data_version("low"), "future"),
     ],
 )
 def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
@@ -1806,8 +1817,8 @@ def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version"),
     [
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min"),
+        ("high", _current_baseline_data_version("high")),
+        ("low", _current_baseline_data_version("low")),
     ],
 )
 def test_materializer_blocks_unknown_frontier_finality(
@@ -1863,14 +1874,14 @@ def test_materializer_blocks_unknown_frontier_finality(
     [
         (
             "high",
-            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            _current_baseline_data_version("high"),
             "TYPO_OR_UNKNOWN_FINALITY",
         ),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", "UNKNOWN"),
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", None),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", ""),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", "UNKNOWN"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", 1),
+        ("high", _current_baseline_data_version("high"), "UNKNOWN"),
+        ("high", _current_baseline_data_version("high"), None),
+        ("low", _current_baseline_data_version("low"), ""),
+        ("low", _current_baseline_data_version("low"), "UNKNOWN"),
+        ("low", _current_baseline_data_version("low"), 1),
     ],
 )
 def test_materializer_blocks_unknown_declared_frontier_finality(
@@ -2055,7 +2066,7 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
             day0_observed_extreme_sample_count=12,
         ),
         temperature_metric="low",
-        baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+        baseline_data_version=_current_baseline_data_version("low"),
         bins=(
             _TemperatureBin(
                 "below24", upper_c=23.0, center_c=22.0,
@@ -3192,7 +3203,7 @@ def _blocked_materialization_result():
 
 def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
-        """
+        f"""
         CREATE TABLE source_run (
             source_run_id TEXT PRIMARY KEY,
             source_id TEXT, track TEXT, release_calendar_key TEXT,
@@ -3238,7 +3249,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             contributes_to_target_extrema INTEGER,
             source_cycle_time TEXT, issue_time TEXT,
             source_available_at TEXT, available_at TEXT,
-            members_json TEXT, members_unit TEXT
+            members_json TEXT, members_unit TEXT, dataset_id TEXT
         );
         CREATE TABLE unrelated_writer (value INTEGER);
         INSERT INTO source_run VALUES (
@@ -3275,7 +3286,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-            '[20.0,21.0]', 'degC'
+            '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}'
         );
         """
     )
@@ -3323,14 +3334,14 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
     conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = 102")
 
     conn.execute(
-        """
+        f"""
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
             'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
         )
         """
     )
@@ -3629,12 +3640,12 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
             observed_steps_json=list(range(3, observed_count + 1, 3)),
             expected_count=48,
             observed_count=observed_count,
-            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+            data_version=_current_baseline_data_version("high"),
         )
 
     write_run(status="PARTIAL", completeness="PARTIAL", partial=True, imported_at=_dt(3))
     conn.execute(
-        """
+        f"""
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, available_at,
@@ -3648,7 +3659,7 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
             'temperature_max', 'high_temp', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00', 24,
             '[20.0,21.0]', 'ecmwf_ens',
-            'ecmwf_opendata_mx2t3_local_calendar_day_max', 'ecmwf_open_data',
+            '{_current_baseline_data_version("high")}', 'ecmwf_open_data',
             'ens-run', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', 'VERIFIED', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'degC'
@@ -3860,14 +3871,14 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
     baseline = cli._target_dependency_witness(conn, prepared)
     assert baseline.ensemble_identity is None
     conn.execute(
-        """
+        f"""
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
             'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
         )
         """
     )
@@ -3889,14 +3900,14 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
     prepared = _prepared_target_frontier(101)
     prepared = replace(prepared, request=replace(prepared.request, city="shanghai"))
     conn.execute(
-        """
+        f"""
         INSERT INTO ensemble_snapshots VALUES (
             102, 'shanghai', '2026-06-07', 'high',
             'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
         )
         """
     )
@@ -3957,14 +3968,14 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
         _ensure_replacement_frontier_indexes(conn)
         conn.execute("DELETE FROM ensemble_snapshots")
         conn.executemany(
-            """
+            f"""
             INSERT INTO ensemble_snapshots VALUES (
                 ?, 'Shanghai', '2026-06-07', 'high',
                 'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
                 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
                 '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
                 '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                '[20.0,21.0]', 'degC'
+                '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}'
             )
             """,
             ((snapshot_id,) for snapshot_id in range(1, row_count + 1)),
@@ -4283,7 +4294,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         """
     )
     conn.execute(
-        """
+        f"""
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, available_at, fetch_time, lead_hours,
@@ -4294,7 +4305,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         ) VALUES (101, 'Shanghai', '2026-06-07', 'high', 'temperature_max',
                   'high_temp', '2026-06-06T00:00:00+00:00',
                   '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  24, '[20.0,21.0]', 'ecmwf_ens', 'ens', 'ecmwf_open_data',
+                  24, '[20.0,21.0]', 'ecmwf_ens', '{_current_baseline_data_version("high")}', 'ecmwf_open_data',
                   '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
                   'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
         """
@@ -4796,7 +4807,7 @@ def test_materialize_cli_bootstraps_hot_indexes_outside_writer_lock(
         "computed_at": "2026-06-06T04:00:00+00:00",
         "expires_at": "2026-06-06T06:00:00+00:00",
         "baseline_source_run_id": "b0-run",
-        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_data_version": _current_baseline_data_version("high"),
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
@@ -4969,7 +4980,7 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
         "computed_at": "2026-06-06T04:00:00+00:00",
         "expires_at": "2026-06-06T06:00:00+00:00",
         "baseline_source_run_id": "b0-run",
-        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_data_version": _current_baseline_data_version("high"),
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
@@ -5037,7 +5048,7 @@ def test_materialize_script_preserves_deadline_deferred_after_manifest(
         "computed_at": "2026-06-06T04:00:00+00:00",
         "expires_at": "2026-06-06T06:00:00+00:00",
         "baseline_source_run_id": "b0-run",
-        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_data_version": _current_baseline_data_version("high"),
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
@@ -5109,7 +5120,7 @@ def test_materialize_script_threads_day0_zero_observation_state(
         "computed_at": "2026-06-06T18:00:00+00:00",
         "expires_at": "2026-06-08T00:00:00+00:00",
         "baseline_source_run_id": "b0-run",
-        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_data_version": _current_baseline_data_version("high"),
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
@@ -5195,7 +5206,7 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
         "computed_at": "2026-06-06T04:00:00+00:00",
         "expires_at": "2026-06-06T06:00:00+00:00",
         "baseline_source_run_id": "b0-run",
-        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_data_version": _current_baseline_data_version("high"),
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
@@ -5485,7 +5496,7 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     baseline_q, baseline_provenance = _materialize_q(
         baseline_conn, replace(
             _request(
-                baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min"
+                baseline_data_version=_current_baseline_data_version("low")
             ),
             temperature_metric="low",
         )
@@ -5501,7 +5512,7 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     low_q, low_provenance = _materialize_q(
         low_conn, replace(
             _request(
-                baseline_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min"
+                baseline_data_version=_current_baseline_data_version("low")
             ),
             temperature_metric="low",
         )
@@ -5516,3 +5527,153 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     assert low_provenance["center_debias_training_cutoff"] is None
     # A fail-open row must not churn the config identity of every untouched row.
     assert low_hash == baseline_hash
+
+
+def _coordinate_bound_frontier_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            dataset_id TEXT, source_id TEXT, model_version TEXT, authority TEXT,
+            causality_status TEXT, boundary_ambiguous INTEGER,
+            forecast_window_attribution_status TEXT,
+            contributes_to_target_extrema INTEGER,
+            source_cycle_time TEXT, issue_time TEXT,
+            source_available_at TEXT, available_at TEXT,
+            members_json TEXT, members_unit TEXT
+        )
+        """
+    )
+    return conn
+
+
+def _insert_coordinate_bound_frontier_row(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    dataset_id: str,
+    metric: str,
+    available_at: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (?, 'Shanghai', '2026-06-07', ?,
+            ?, 'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+            '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+            ?, ?, '[20.0,21.0]', 'degC')
+        """,
+        (snapshot_id, metric, dataset_id, available_at.isoformat(), available_at.isoformat()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "base"),
+    (
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min"),
+    ),
+)
+def test_current_evidence_uses_only_the_request_coordinate_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+    base: str,
+) -> None:
+    from hashlib import sha256
+
+    from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+
+    import src.config as config
+
+    current_manifest = '{"coordinate_profile":"current"}'
+    current_data_version = coordinate_bound_data_version(
+        base, sha256(current_manifest.encode("utf-8")).hexdigest()
+    )
+    old_data_version = coordinate_bound_data_version(base, "a" * 64)
+    monkeypatch.setattr(
+        config,
+        "runtime_coordinate_manifest_json",
+        lambda: current_manifest,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "ensemble_source_authority_sql",
+        lambda **_kwargs: ("1 = 1", ()),
+    )
+    conn = _coordinate_bound_frontier_conn()
+    _insert_coordinate_bound_frontier_row(
+        conn, snapshot_id=101, dataset_id=current_data_version,
+        metric=metric, available_at=_dt(3),
+    )
+    # Neither a previous profile nor the legacy base may win through a later
+    # arrival within the same source cycle.
+    _insert_coordinate_bound_frontier_row(
+        conn, snapshot_id=102, dataset_id=old_data_version,
+        metric=metric, available_at=_dt(3, 59),
+    )
+    _insert_coordinate_bound_frontier_row(
+        conn, snapshot_id=103, dataset_id=base,
+        metric=metric, available_at=_dt(3, 58),
+    )
+    request = replace(
+        _request(), temperature_metric=metric,
+        baseline_data_version=current_data_version,
+    )
+
+    identity = materializer_mod.read_current_evidence_snapshot_identity(
+        conn, request, metric=metric
+    )
+    assert identity is not None
+    assert identity.snapshot_id == 101
+    assert materializer_mod.read_current_evidence_snapshot_id(
+        conn, request, metric=metric
+    ) == 101
+    assert materializer_mod.read_current_evidence_snapshot_id(
+        conn,
+        replace(request, baseline_data_version=old_data_version),
+        metric=metric,
+    ) is None
+
+
+def test_current_evidence_requires_current_profile_and_point_in_time_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hashlib import sha256
+
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        coordinate_bound_data_version,
+    )
+
+    import src.config as config
+
+    manifest = '{"coordinate_profile":"current"}'
+    data_version = coordinate_bound_data_version(
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        sha256(manifest.encode("utf-8")).hexdigest(),
+    )
+    monkeypatch.setattr(
+        config, "runtime_coordinate_manifest_json", lambda: manifest, raising=False
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "ensemble_source_authority_sql",
+        lambda **_kwargs: ("1 = 1", ()),
+    )
+    conn = _coordinate_bound_frontier_conn()
+    request = replace(_request(), baseline_data_version=data_version)
+    _insert_coordinate_bound_frontier_row(
+        conn, snapshot_id=101, dataset_id=data_version,
+        metric="high", available_at=_dt(5),
+    )
+
+    assert materializer_mod.read_current_evidence_snapshot_id(
+        conn, request, metric="high"
+    ) is None
+    monkeypatch.delattr(config, "runtime_coordinate_manifest_json", raising=False)
+    assert materializer_mod.read_current_evidence_snapshot_id(
+        conn, request, metric="high"
+    ) is None

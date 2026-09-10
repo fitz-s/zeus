@@ -243,6 +243,12 @@ def _fetch_registered_ingest_ensemble(
     fetch_time = datetime.now(timezone.utc)
     cache_key = _cache_key(city, model, past_days, role, temperature_metric)
     cached = _ENSEMBLE_CACHE.get(cache_key)
+    if cached is not None and getattr(ingest_class, "source_id", None) == "ecmwf_open_data":
+        import hashlib
+        from src.config import runtime_coordinate_manifest_json
+        current_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+        if cached.get("coordinate_manifest_sha") != current_sha:
+            cached = None
     if cached is not None:
         age_seconds = _cache_age_seconds(cached, fetch_time)
         cached_days = int(cached.get("forecast_days", 0))
@@ -334,6 +340,34 @@ def _parse_ingest_bundle(
         "forecast_source_role": role,
         "n_members": int(members_hourly.shape[0]),
     }
+    if bundle.source_id == "ecmwf_open_data":
+        from src.contracts.ensemble_snapshot_provenance import split_coordinate_bound_data_version
+        if not isinstance(raw, Mapping):
+            raise ValueError("OpenData bundle is missing coordinate provenance")
+        versions = raw.get("data_version_by_metric")
+        row_identities = raw.get("snapshot_identity_by_metric_target_date")
+        required_metrics = (temperature_metric,) if temperature_metric else ("high", "low")
+        for metric in required_metrics:
+            data_version = versions.get(metric) if isinstance(versions, Mapping) else None
+            identity = split_coordinate_bound_data_version(data_version)
+            if (identity is None
+                or identity[0] != _derive_data_version_from_source_and_metric(bundle.source_id, metric)
+                or identity[1] != raw.get("coordinate_manifest_sha")):
+                raise ValueError("OpenData bundle is missing exact coordinate identity")
+            rows = row_identities.get(metric) if isinstance(row_identities, Mapping) else None
+            if not isinstance(rows, Mapping) or not rows:
+                raise ValueError("OpenData bundle is missing source snapshot identities")
+            track = "mx2t6_high" if metric == "high" else "mn2t6_low"
+            for row in rows.values():
+                issue = _parse_timestamp_as_utc(str(row["issue_time"]))
+                expected_run = f"ecmwf_open_data:{track}:" + issue.strftime("%Y-%m-%dT%HZ:coordsha:") + identity[1]
+                if (row["dataset_id"] != data_version or row["coordinate_manifest_sha"] != identity[1]
+                    or row["source_run_id"] != expected_run):
+                    raise ValueError("OpenData bundle source snapshot identity mismatch")
+        result["data_version"] = versions[temperature_metric] if temperature_metric else None
+        result["data_version_by_metric"] = dict(versions)
+        result["coordinate_manifest_sha"] = raw.get("coordinate_manifest_sha")
+        result["snapshot_identity_by_metric_target_date"] = row_identities
     if available_at is not None:
         result["available_at"] = available_at
     return result

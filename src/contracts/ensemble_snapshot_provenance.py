@@ -61,6 +61,7 @@ dry-run reports always surface the refusal count even when
 
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
@@ -76,6 +77,45 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # the allow-list so the 1568 historical rows remain readable.
 ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
 ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
+
+# Coordinate-bound Open Data identities preserve the immutable snapshot's
+# manifest coordinate system.  The base is deliberately closed: accepting an
+# arbitrary ``ecmwf_opendata_*`` prefix would let a new physical product reuse
+# the 3-hour metric identity without an explicit contract update.
+_COORDINATE_BOUND_BASE_DATA_VERSIONS: frozenset[str] = frozenset({
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+})
+_COORDINATE_BOUND_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def coordinate_bound_data_version(base: str, manifest_sha: str) -> str:
+    """Return the strict data-version identity for one manifest coordinate."""
+    if not isinstance(base, str) or base not in _COORDINATE_BOUND_BASE_DATA_VERSIONS:
+        raise ValueError(f"Unknown coordinate-bound data-version base: {base!r}")
+    if not isinstance(manifest_sha, str) or not _COORDINATE_BOUND_SHA_RE.fullmatch(
+        manifest_sha
+    ):
+        raise ValueError(
+            "manifest_sha must be exactly 64 lowercase hexadecimal characters"
+        )
+    return f"{base}__coordsha_{manifest_sha}"
+
+
+def split_coordinate_bound_data_version(
+    value: str,
+) -> tuple[str, str] | None:
+    """Parse a strict coordinate-bound identity, returning ``(base, sha)``."""
+    if not isinstance(value, str):
+        return None
+    for base in _COORDINATE_BOUND_BASE_DATA_VERSIONS:
+        prefix = f"{base}__coordsha_"
+        if value.startswith(prefix):
+            manifest_sha = value[len(prefix) :]
+            if _COORDINATE_BOUND_SHA_RE.fullmatch(manifest_sha):
+                return base, manifest_sha
+            return None
+    return None
 
 # Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
 # allow-list so historical rows in ensemble_snapshots remain readable.
@@ -251,11 +291,15 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
             f"Use tigge_mx2t6_local_calendar_day_max_v1 (high track canonical, "
             f"Phase 4+) instead.{ctx}"
         )
-    if data_version not in CANONICAL_ENSEMBLE_DATA_VERSIONS:
+    if (
+        data_version not in CANONICAL_ENSEMBLE_DATA_VERSIONS
+        and split_coordinate_bound_data_version(data_version or "") is None
+    ):
         ctx = f" (context={context})" if context else ""
         raise DataVersionRejectedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
-            f"is not in the canonical allowlist {sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS)}. "
+            f"is not in the canonical allowlist {sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS)} "
+            f"or a strict coordinate-bound Open Data identity. "
             f"Only canonical dual-track versions are permitted in ensemble_snapshots.{ctx}"
         )
 

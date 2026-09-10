@@ -292,6 +292,7 @@ test_trust_policy:
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-07-17", note: "Ensemble cache, source-role gates, provenance, and pre-request shared quota reservation."}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_live_entry_forecast_status.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Current coordinate manifest scopes both snapshot counts and producer readiness; legacy and other-profile rows do not establish live readiness."}
     tests/test_replay_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_etl_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -909,6 +910,7 @@ categories:
     - tests/test_data_density_discount_v2.py
     - tests/test_forecasts_writer_provenance_required.py
     - tests/test_forecast_fetch_plan.py
+    - tests/test_live_entry_forecast_status.py
     - tests/test_forecast_calibration_domain.py
     - tests/test_low_contract_window_backfill.py
     - tests/test_oracle_posterior.py
@@ -1525,6 +1527,7 @@ law_gate:
     tests:
       - tests/test_executable_forecast_reader.py
       - tests/test_forecast_fetch_plan.py
+      - tests/test_live_entry_forecast_status.py
       - tests/test_ingest_boot_time_semantics.py
       - tests/test_ingest_grib_source_run_context.py
       - tests/test_opendata_release_calendar_selection.py

@@ -510,6 +510,27 @@ def runtime_cities_by_name() -> dict[str, City]:
     return dict(cities_by_name)
 
 
+def runtime_coordinate_manifest_json() -> str:
+    """Freeze one station-coordinate, calendar and unit snapshot for source identity."""
+    rows = []
+    for name, city in sorted(runtime_cities_by_name().items()):
+        lat, lon = float(city.lat), float(city.lon)
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            raise ValueError(f"invalid extraction coordinates: {name}")
+        if city.settlement_unit not in {"C", "F"} or not city.timezone:
+            raise ValueError(f"invalid extraction calendar/unit: {name}")
+        rows.append({
+            "city": name, "lat": lat, "lon": lon,
+            "timezone": city.timezone, "unit": city.settlement_unit,
+        })
+    if not rows:
+        raise ValueError("runtime extraction city universe is empty")
+    return json.dumps(
+        {"coordinate_basis": "runtime_settlement_station", "cities": rows},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+
+
 def settlement_source_type_for_city(
     city: City,
     target_date: date | str | None = None,

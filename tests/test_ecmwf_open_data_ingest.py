@@ -14,12 +14,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 
@@ -67,9 +67,25 @@ CREATE TABLE ensemble_snapshots (
     unit TEXT,
     source_id TEXT NOT NULL DEFAULT 'ecmwf_open_data',
     source_transport TEXT,
-    source_run_id TEXT
+    source_run_id TEXT,
+    contributes_to_target_extrema INTEGER NOT NULL DEFAULT 1,
+    forecast_window_attribution_status TEXT NOT NULL DEFAULT 'FULLY_INSIDE_TARGET_LOCAL_DAY'
 );
 """
+
+
+def _seal_current_coordinates(conn):
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
+    manifest = runtime_coordinate_manifest_json()
+    digest = hashlib.sha256(manifest.encode()).hexdigest()
+    for metric, track in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
+            (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
+             json.dumps({"manifest_sha256": digest}),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}", metric),
+        )
 
 
 def _make_members(base: float = 20.0, n: int = 51) -> list[float]:
@@ -119,6 +135,7 @@ def staged_forecasts_db(tmp_path: Path, monkeypatch):
                 _ISSUE_TIME,
             ),
         )
+    _seal_current_coordinates(conn)
     conn.commit()
     conn.close()
 
@@ -141,6 +158,7 @@ def empty_forecasts_db(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "empty-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_CREATE_TABLE_SQL)
+    _seal_current_coordinates(conn)
     conn.commit()
     conn.close()
 
@@ -290,3 +308,106 @@ def test_fetch_ensemble_ecmwf_open_data_clears_guard(fake_city, staged_forecasts
     members_arr = result["members_hourly"]
     assert hasattr(members_arr, "shape")
     assert members_arr.shape[0] == 51
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_cache(
+    fake_city, staged_forecasts_db, monkeypatch, metric,
+):
+    import src.config as config
+    import src.data.ecmwf_open_data_ingest as ingest_module
+    import src.data.ensemble_client as client
+    from src.data.forecast_fetch_plan import data_version_for_track
+    from zoneinfo import ZoneInfo
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _ANCHOR if tz is None else _ANCHOR.astimezone(tz)
+
+    monkeypatch.setattr(client, "datetime", FrozenDatetime)
+    client._clear_cache()
+    manifest_a = config.runtime_coordinate_manifest_json()
+    altered = json.loads(manifest_a)
+    altered["cities"][0]["lat"] += 0.001
+    manifest_b = json.dumps(altered, sort_keys=True, separators=(",", ":"))
+    current = {"manifest": manifest_a}
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: current["manifest"])
+    monkeypatch.setattr(ingest_module, "runtime_coordinate_manifest_json", lambda: current["manifest"])
+    track = "mx2t6_high" if metric == "high" else "mn2t6_low"
+    base_value = 20.0 if metric == "high" else 10.0
+    digest_b = hashlib.sha256(manifest_b.encode()).hexdigest()
+    with sqlite3.connect(staged_forecasts_db) as conn:
+        # The other profile arrives later, but must not win the current query.
+        conn.execute(
+            """INSERT INTO ensemble_snapshots (
+                city,target_date,temperature_metric,issue_time,available_at,fetch_time,
+                recorded_at,members_json,dataset_id,manifest_hash,source_run_id,provenance_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (fake_city.name, _TARGET_DATE, metric, _ISSUE_TIME, _AVAILABLE_AT,
+             _DB_FETCH_TIME, _RECORDED_AT, json.dumps(_make_members(base_value + 30)),
+             data_version_for_track(track, manifest_b), digest_b,
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest_b}",
+             json.dumps({"manifest_sha256": digest_b})),
+        )
+    first = client.fetch_ensemble(fake_city, forecast_days=1, model="ecmwf_ifs025",
+                                  role="entry_primary", temperature_metric=metric)
+    assert first["members_hourly"][0, 0] == base_value
+    assert first["data_version"] == data_version_for_track(track, manifest_a)
+    identity = first["snapshot_identity_by_metric_target_date"][metric][_TARGET_DATE]
+    assert identity["dataset_id"] == first["data_version"]
+    assert identity["source_run_id"].endswith(":coordsha:" + first["coordinate_manifest_sha"])
+    assert all(datetime.fromisoformat(t).astimezone(ZoneInfo(fake_city.timezone)).date().isoformat() == _TARGET_DATE
+               for t in first["times"])
+    current["manifest"] = manifest_b
+    second = client.fetch_ensemble(fake_city, forecast_days=1, model="ecmwf_ifs025",
+                                   role="entry_primary", temperature_metric=metric)
+    assert second["members_hourly"][0, 0] == base_value + 30
+    assert second["coordinate_manifest_sha"] == digest_b
+    assert second["data_version"] != first["data_version"]
+    client._clear_cache()
+
+
+@pytest.mark.parametrize("bad_field", ["dataset_id", "provenance_json", "source_run_id", "available_at", "fetch_time", "recorded_at"])
+def test_day0_ingest_rejects_unbound_or_future_snapshot(fake_city, staged_forecasts_db, bad_field):
+    from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
+    value = "2026-05-20T00:00:00+00:00" if bad_field in {"available_at", "fetch_time", "recorded_at"} else "old-or-mismatched"
+    with sqlite3.connect(staged_forecasts_db) as conn:
+        conn.execute(f"UPDATE ensemble_snapshots SET {bad_field}=?", (value,))
+    with pytest.raises(ValueError, match="No VERIFIED"):
+        ECMWFOpenDataIngest(city=fake_city, temperature_metric="high").fetch(_ANCHOR, range(24))
+
+
+@pytest.mark.parametrize("target,expected_hours", [("2026-03-29", 23), ("2026-10-25", 25)])
+def test_metric_grid_preserves_local_day_across_dst(fake_city, staged_forecasts_db, target, expected_hours):
+    from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
+    from zoneinfo import ZoneInfo
+    now = datetime.fromisoformat(target).replace(hour=12, tzinfo=timezone.utc)
+    with sqlite3.connect(staged_forecasts_db) as conn:
+        conn.execute(
+            """UPDATE ensemble_snapshots SET target_date=?, issue_time=?, available_at=?,
+               recorded_at=?, fetch_time=?, source_run_id=replace(source_run_id, '2026-05-19', ?)""",
+            (target, now.replace(hour=0).isoformat(), now.replace(hour=6).isoformat(),
+             now.replace(hour=11).isoformat(), now.replace(hour=11).isoformat(), target),
+        )
+    bundle = ECMWFOpenDataIngest(city=fake_city, temperature_metric="high").fetch(now, range(24))
+    times = [datetime.fromisoformat(value).astimezone(ZoneInfo(fake_city.timezone))
+             for value in bundle.raw_payload["times"]]
+    assert len(times) == expected_hours
+    assert {value.date().isoformat() for value in times} == {target}
+    assert all(value == _make_members(20.0)[0] for value in bundle.ensemble_members[0])
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_combined_bundle_preserves_and_validates_each_metric_identity(fake_city, staged_forecasts_db, metric):
+    from dataclasses import replace
+    from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
+    from src.data.ensemble_client import _parse_ingest_bundle
+    bundle = ECMWFOpenDataIngest(city=fake_city).fetch(_ANCHOR, range(24))
+    parsed = _parse_ingest_bundle(bundle, model="ecmwf_ifs025", fetch_time=_ANCHOR, role="diagnostic")
+    assert set(parsed["data_version_by_metric"]) == {"high", "low"}
+    raw = json.loads(json.dumps(bundle.raw_payload))
+    raw["snapshot_identity_by_metric_target_date"][metric][_TARGET_DATE]["source_run_id"] = "legacy-unbound-run"
+    with pytest.raises(ValueError, match="source snapshot identity mismatch"):
+        _parse_ingest_bundle(replace(bundle, raw_payload=raw), model="ecmwf_ifs025",
+                             fetch_time=_ANCHOR, role="diagnostic")
