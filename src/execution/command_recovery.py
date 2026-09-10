@@ -637,6 +637,10 @@ _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
     "exit_ack_persistence_failed_after_side_effect",
 })
+_MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS = frozenset({
+    "matched_submit_missing_trade_id",
+    "matched_submit_fill_evidence_review_persistence_failed",
+})
 _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
@@ -25618,9 +25622,10 @@ def _review_required_matched_submit_trade_fact_recovery(
 ) -> str:
     """Promote an exact durable fill fact without waiting for venue I/O.
 
-    ``matched_submit_missing_trade_id`` means submit already returned a bound
-    order id and positive matched economics, but no trade identity.  The
-    continuous fill synchronizer later appends the authenticated trade fact.
+    A matched-submit review reason means submit already returned a bound order
+    id and positive matched economics, but durable ACK/fill identity persistence
+    was incomplete. The continuous fill synchronizer later appends the
+    authenticated trade fact.
     Once exactly one canonical CONFIRMED fact covers the submitted BUY at a
     limit-respecting price, another network snapshot cannot add authority; it
     can only delay exposure projection and keep the governor in reduce-only.
@@ -25636,7 +25641,7 @@ def _review_required_matched_submit_trade_fact_recovery(
     latest_reason = _latest_review_required_payload(
         _command_events(conn, cmd.command_id)
     ).get("reason")
-    if latest_reason != "matched_submit_missing_trade_id":
+    if latest_reason not in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS:
         return "stayed"
 
     command = _dict_row(
@@ -25691,6 +25696,35 @@ def _review_required_matched_submit_trade_fact_recovery(
     venue_order_id = str(trade_fact.get("venue_order_id") or "")
     trade_id = str(trade_fact.get("trade_id") or "")
     observed_at = str(trade_fact.get("observed_at") or _now_iso())
+    legacy_matched_submit_reason = latest_reason == "matched_submit_missing_trade_id"
+    proof_class = (
+        "matched_submit_missing_trade_id_confirmed_trade"
+        if legacy_matched_submit_reason
+        else "review_required_matched_order_fact_with_positive_trade_fact"
+    )
+    required_predicates = {
+        "latest_event_is_review_required": True,
+        "review_reason": latest_reason,
+        "review_reason_matched_submit_trade_fact_recoverable": True,
+        "positive_trade_fact": True,
+        "maker_order_token_matches_command": True,
+        "bound_venue_order_id_matches_trade": venue_order_id
+        == str(cmd.venue_order_id),
+        "maker_order_not_open": True,
+        "venue_size_quantization_residual_lt_0_01": True,
+    }
+    if legacy_matched_submit_reason:
+        required_predicates["review_reason_matched_submit_missing_trade_id"] = True
+    else:
+        required_predicates.update(
+            {
+                "command_state_review_required": True,
+                "latest_event_is_review_boundary": True,
+                "matched_order_fact_positive": True,
+                "trade_facts_cover_command_or_leave_only_dust": True,
+                "review_reason_matched_submit_fill_evidence_review_persistence_failed": True,
+            }
+        )
     payload = {
         "schema_version": 1,
         "reason": "review_cleared_confirmed_fill",
@@ -25700,19 +25734,10 @@ def _review_required_matched_submit_trade_fact_recovery(
         "trade_id": trade_id,
         "filled_size": filled_size,
         "fill_price": fill_price,
-        "proof_class": "matched_submit_missing_trade_id_confirmed_trade",
+        "proof_class": proof_class,
         "side_effect_boundary_crossed": True,
         "sdk_submit_attempted": True,
-        "required_predicates": {
-            "latest_event_is_review_required": True,
-            "review_reason_matched_submit_missing_trade_id": True,
-            "positive_trade_fact": True,
-            "maker_order_token_matches_command": True,
-            "bound_venue_order_id_matches_trade": venue_order_id
-            == str(cmd.venue_order_id),
-            "maker_order_not_open": True,
-            "venue_size_quantization_residual_lt_0_01": True,
-        },
+        "required_predicates": required_predicates,
         "trade_fact_proof": {
             "trade_fact_id": trade_fact.get("trade_fact_id"),
             "state": trade_fact.get("state"),
@@ -25723,7 +25748,7 @@ def _review_required_matched_submit_trade_fact_recovery(
         },
         "source_proof": {
             "source_commit": "runtime",
-            "source_function": "command_recovery._reconcile_row",
+            "source_function": "command_recovery._review_required_matched_submit_trade_fact_recovery",
             "source_reason": "durable_confirmed_trade_fact_precedes_venue_snapshot",
         },
         "reviewed_by": "command_recovery",
@@ -25807,10 +25832,13 @@ def _authenticated_entry_trade_fact_candidates(
     if str(command_id or "").strip():
         command_clause = " AND cmd.command_id = ?"
         params.append(str(command_id).strip())
+    matched_submit_reason_placeholders = ",\n                               ".join(
+        "?" for _ in sorted(_MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS)
+    )
     rows = conn.execute(
         "WITH "
         + _canonical_trade_fact_cte()
-        + """
+        + f"""
         SELECT cmd.*,
                envelope.order_type AS submission_order_type,
                envelope.price AS submission_price,
@@ -25849,7 +25877,7 @@ def _authenticated_entry_trade_fact_candidates(
                            )
                            AND json_extract(review.payload_json, '$.reason') IN (
                                'partial_remainder_point_order_filled_without_full_trade_fact',
-                               'matched_submit_missing_trade_id'
+                               {matched_submit_reason_placeholders}
                            )
                     )
                 )
@@ -25915,7 +25943,7 @@ def _authenticated_entry_trade_fact_candidates(
         """
         + command_clause
         + " ORDER BY datetime(cmd.updated_at), cmd.command_id",
-        tuple(params),
+        tuple(sorted(_MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS)) + tuple(params),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -26237,7 +26265,7 @@ def _reconcile_authenticated_entry_trade_fact(
         str(command.get("state") or "") == CommandState.REVIEW_REQUIRED.value
         and _latest_review_required_payload(
             _command_events(conn, command_id)
-        ).get("reason") == "matched_submit_missing_trade_id"
+        ).get("reason") in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS
     ):
         return _review_required_matched_submit_trade_fact_recovery(
             conn, VenueCommand.from_row(command)
@@ -26623,7 +26651,7 @@ def reconcile_review_required_matched_submit_trade_facts(
         latest_reason = _latest_review_required_payload(
             _command_events(conn, cmd.command_id)
         ).get("reason")
-        if latest_reason != "matched_submit_missing_trade_id":
+        if latest_reason not in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS:
             continue
         summary["scanned"] += 1
         try:
@@ -28863,7 +28891,10 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
         latest_reason = _latest_review_required_payload(
             events
         ).get("reason")
-        if latest_reason != "matched_submit_missing_trade_id" or not venue_order_id:
+        if (
+            latest_reason not in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS
+            or not venue_order_id
+        ):
             continue
         trade_facts = conn.execute(
             "WITH " + _canonical_trade_fact_cte() + """

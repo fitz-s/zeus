@@ -4998,6 +4998,7 @@ def _validate_review_confirmed_fill_payload(
         "command_recovery.reconcile_matched_cancel_review_required_entries",
         "command_recovery.reconcile_matched_order_facts",
         "command_recovery.reconcile_authenticated_entry_trade_facts",
+        "command_recovery._review_required_matched_submit_trade_fact_recovery",
         "command_recovery.reconcile_complete_exit_trade_fact_commands",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")

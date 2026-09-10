@@ -38182,6 +38182,10 @@ def test_authenticated_absence_release_only_clears_exact_exit_order_id(conn, mon
         ("matched_submit_missing_trade_id", "CONFIRMED", "10", "0.23", "REVIEW_REQUIRED"),
         ("matched_submit_missing_trade_id", "CONFIRMED", "11", "0.24", "REVIEW_REQUIRED"),
         ("unrecognized_review_reason", "CONFIRMED", "11", "0.23", "REVIEW_REQUIRED"),
+        ("matched_submit_fill_evidence_review_persistence_failed", "CONFIRMED", "11", "0.23", "FILLED"),
+        ("matched_submit_fill_evidence_review_persistence_failed", "MATCHED", "11", "0.23", "REVIEW_REQUIRED"),
+        ("matched_submit_fill_evidence_review_persistence_failed", "CONFIRMED", "10", "0.23", "REVIEW_REQUIRED"),
+        ("matched_submit_fill_evidence_review_persistence_failed", "CONFIRMED", "11", "0.24", "REVIEW_REQUIRED"),
     ],
 )
 def test_matched_submit_review_uses_authenticated_priority_route(
@@ -38220,8 +38224,12 @@ def test_matched_submit_review_uses_authenticated_priority_route(
         assert result["advanced"] == 0
 
 
+@pytest.mark.parametrize("reason", [
+    "matched_submit_missing_trade_id",
+    "matched_submit_fill_evidence_review_persistence_failed",
+])
 def test_live_tick_matched_submit_review_precedes_expired_maintenance(
-    conn, tmp_path, monkeypatch
+    conn, tmp_path, monkeypatch, reason
 ):
     from src.execution import command_recovery, venue_sync_contract
     from src.state.venue_command_repo import append_event
@@ -38239,7 +38247,7 @@ def test_live_tick_matched_submit_review_precedes_expired_maintenance(
     append_event(
         conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
         occurred_at="2026-04-26T00:01:00Z",
-        payload={"reason": "matched_submit_missing_trade_id"},
+        payload={"reason": reason},
     )
     _append_confirmed_trade_fact(conn, filled_size="11", fill_price="0.23")
     conn.commit()
@@ -38273,7 +38281,14 @@ def test_live_tick_matched_submit_review_precedes_expired_maintenance(
     with factory() as persisted:
         assert _get_state(persisted, "cmd-001") == "FILLED"
         payload = json.loads(_get_events(persisted, "cmd-001")[-1]["payload_json"])
-        assert payload["proof_class"] == "matched_submit_missing_trade_id_confirmed_trade"
+        assert payload["proof_class"] == (
+            "matched_submit_missing_trade_id_confirmed_trade"
+            if reason == "matched_submit_missing_trade_id"
+            else "review_required_matched_order_fact_with_positive_trade_fact"
+        )
+        assert payload["source_proof"]["source_function"] == (
+            "command_recovery._review_required_matched_submit_trade_fact_recovery"
+        )
         position = persisted.execute(
             "SELECT phase, shares, cost_basis_usd FROM position_current "
             "WHERE position_id = 'pos-001'"
@@ -38294,3 +38309,148 @@ def test_live_tick_matched_submit_review_precedes_expired_maintenance(
         assert len(execution) == 1
         assert float(execution[0]["shares"]) == pytest.approx(11)
     assert not client.mock_calls
+
+
+def test_fill_evidence_persistence_review_uses_exact_candidate_and_is_idempotent(
+    conn,
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.state.venue_command_repo import append_event
+
+    command_id = "cmd-fill-evidence-review"
+    order_id = "ord-fill-evidence-review"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id="pos-fill-evidence-review",
+        decision_id="dec-fill-evidence-review",
+        token_id="tok-fill-evidence-review",
+        size=18.0,
+        price=0.09,
+    )
+    _advance_to_submitting(conn, command_id=command_id, venue_order_id=order_id)
+    monkeypatch.setattr(
+        command_recovery._exchange_reconcile,
+        "_canonical_market_event_metadata_for_entry_fill",
+        lambda **_kwargs: {
+            "city": "Miami",
+            "target_date": "2026-09-11",
+            "temperature_metric": "high",
+            "bin_label": "80°F",
+            "unit": "F",
+        },
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-09-10T00:01:00Z",
+        payload={
+            "reason": "matched_submit_fill_evidence_review_persistence_failed",
+            "detail": "database is locked",
+        },
+    )
+    _append_confirmed_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id="trade-fill-evidence-review",
+        filled_size="18",
+        fill_price="0.09",
+    )
+    assert conn.execute(
+        "SELECT 1 FROM position_current WHERE position_id = ?",
+        ("pos-fill-evidence-review",),
+    ).fetchone() is None
+
+    candidates = command_recovery._bounded_authenticated_entry_trade_fact_candidates(
+        conn,
+        states=("REVIEW_REQUIRED",),
+    )
+    assert [row["command_id"] for row in candidates] == [command_id]
+
+    first = command_recovery.reconcile_authenticated_entry_trade_facts(
+        conn,
+        command_id=command_id,
+    )
+    assert first["errors"] == 0
+    assert first["advanced"] == 1
+    assert _get_state(conn, command_id) == "FILLED"
+    current = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = ?",
+        ("pos-fill-evidence-review",),
+    ).fetchone()
+    assert current is not None
+    assert current["phase"] == "active"
+    assert Decimal(str(current["shares"])) == Decimal("18")
+    cleared = json.loads(_get_events(conn, command_id)[-1]["payload_json"])
+    assert cleared["proof_class"] == "review_required_matched_order_fact_with_positive_trade_fact"
+    assert cleared["required_predicates"].get(
+        "review_reason_matched_submit_missing_trade_id",
+        False,
+    ) is False
+
+    before = len(_get_events(conn, command_id))
+    second = command_recovery.reconcile_authenticated_entry_trade_facts(
+        conn,
+        command_id=command_id,
+    )
+    assert second["errors"] == 0
+    assert second["advanced"] == 0
+    assert len(_get_events(conn, command_id)) == before
+
+
+def test_fill_evidence_review_unknown_reason_or_missing_fact_stays_review_required(
+    conn,
+):
+    from src.execution import command_recovery
+    from src.state.venue_command_repo import append_event
+
+    for command_id, reason, with_fact in (
+        (
+            "cmd-fill-evidence-unknown-reason",
+            "matched_submit_fill_evidence_review_persistence_failed_typo",
+            True,
+        ),
+        (
+            "cmd-fill-evidence-no-fact",
+            "matched_submit_fill_evidence_review_persistence_failed",
+            False,
+        ),
+    ):
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=f"pos-{command_id}",
+            decision_id=f"dec-{command_id}",
+            token_id=f"tok-{command_id}",
+            size=18.0,
+            price=0.09,
+        )
+        _advance_to_submitting(conn, command_id=command_id, venue_order_id=f"ord-{command_id}")
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-09-10T00:01:00Z",
+            payload={"reason": reason},
+        )
+        if with_fact:
+            _append_confirmed_trade_fact(
+                conn,
+                command_id=command_id,
+                order_id=f"ord-{command_id}",
+                trade_id=f"trade-{command_id}",
+                filled_size="18",
+                fill_price="0.09",
+            )
+
+    assert command_recovery._bounded_authenticated_entry_trade_fact_candidates(
+        conn,
+        states=("REVIEW_REQUIRED",),
+    ) == []
+    summary = command_recovery.reconcile_review_required_matched_submit_trade_facts(conn)
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert _get_state(conn, "cmd-fill-evidence-unknown-reason") == "REVIEW_REQUIRED"
+    assert _get_state(conn, "cmd-fill-evidence-no-fact") == "REVIEW_REQUIRED"
