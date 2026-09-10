@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -1140,6 +1140,9 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
         raise RuntimeError("LIVE_RESTART_TRADE_DB_MISSING")
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        # The read-only command proof consumes sqlite3.Row mappings. This is
+        # owned by the classifier connection and does not alter its callers.
+        conn.row_factory = sqlite3.Row
         position_columns = _sqlite_table_columns(conn, "position_current")
         if not {"position_id", "phase"}.issubset(position_columns):
             raise RuntimeError("LIVE_RESTART_POSITION_PROJECTION_UNREADABLE")
@@ -1175,13 +1178,26 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
                 """,
                 tuple(terminal_states),
             ).fetchall()
+        from src.execution.command_recovery import (
+            canonical_terminal_fak_exit_order_proven,
+        )
         from src.execution.exit_safety import _terminal_partial_command_proven
 
         command_ids = tuple(
             str(command_id)
             for command_id, state in command_rows
-            if state != "PARTIAL"
-            or not _terminal_partial_command_proven(conn, str(command_id))
+            if (
+                not (
+                    state == "REVIEW_REQUIRED"
+                    and canonical_terminal_fak_exit_order_proven(
+                        conn, str(command_id)
+                    )
+                )
+                and (
+                    state != "PARTIAL"
+                    or not _terminal_partial_command_proven(conn, str(command_id))
+                )
+            )
         )
         return {
             "open_position_count": len(position_ids),
@@ -1213,7 +1229,6 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
-        conn.row_factory = sqlite3.Row
         cadence = collect_monitor_cadence_evidence(
             conn,
             now=now,
@@ -2770,10 +2785,14 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
     """Count canonical SELL commands still able to require venue recovery."""
 
     from src.execution.command_bus import TERMINAL_STATES
+    from src.execution.command_recovery import (
+        canonical_terminal_fak_exit_order_proven,
+    )
     from src.execution.exit_safety import _terminal_partial_command_proven
 
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
         columns = _sqlite_table_columns(conn, "venue_commands")
         if not {"side", "state"}.issubset(columns):
             raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE")
@@ -2794,8 +2813,18 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
         return sum(
             1
             for command_id, state in rows
-            if state != "PARTIAL"
-            or not _terminal_partial_command_proven(conn, str(command_id))
+            if (
+                not (
+                    state == "REVIEW_REQUIRED"
+                    and canonical_terminal_fak_exit_order_proven(
+                        conn, str(command_id)
+                    )
+                )
+                and (
+                    state != "PARTIAL"
+                    or not _terminal_partial_command_proven(conn, str(command_id))
+                )
+            )
         )
     except sqlite3.Error as exc:
         raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE") from exc

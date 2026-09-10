@@ -4,12 +4,13 @@
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-09-05
+# Last reused/audited: 2026-09-10
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -4573,6 +4574,178 @@ def test_deploy_live_nonterminal_sell_count_requires_terminal_fak_proof(
     trade.close()
 
     assert dl._nonterminal_sell_command_count(trade_db) == expected_count
+
+
+def test_deploy_live_review_terminal_fak_order_proof_is_the_only_review_exception(
+    monkeypatch, tmp_path
+):
+    """Both deploy classifiers exempt only the exact proven REVIEW order."""
+
+    dl = _load("deploy_live_review_terminal_fak_order_proof", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    trade = sqlite3.connect(trade_db)
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            side TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        """
+    )
+    rows = (
+        ("review-proven", "SELL", "REVIEW_REQUIRED"),
+        ("review-other", "SELL", "REVIEW_REQUIRED"),
+        ("review-buy", "BUY", "REVIEW_REQUIRED"),
+        ("acked-sell", "SELL", "ACKED"),
+        ("submitting-sell", "SELL", "SUBMITTING"),
+        ("partial-proven", "SELL", "PARTIAL"),
+        ("partial-unproven", "SELL", "PARTIAL"),
+    )
+    trade.executemany("INSERT INTO venue_commands VALUES (?, ?, ?)", rows)
+    trade.commit()
+    trade.close()
+
+    from src.execution import command_recovery, exit_safety
+
+    proof_calls = []
+    monkeypatch.setattr(
+        command_recovery,
+        "canonical_terminal_fak_exit_order_proven",
+        lambda _conn, command_id: proof_calls.append(command_id)
+        or command_id == "review-proven",
+    )
+    monkeypatch.setattr(
+        exit_safety,
+        "_terminal_partial_command_proven",
+        lambda _conn, command_id: command_id == "partial-proven",
+    )
+
+    obligations = dl._canonical_live_restart_obligations(trade_db)
+    assert obligations["nonterminal_command_count"] == 5
+    assert obligations["nonterminal_command_ids"] == (
+        "acked-sell",
+        "partial-unproven",
+        "review-buy",
+        "review-other",
+        "submitting-sell",
+    )
+    assert dl._nonterminal_sell_command_count(trade_db) == 4
+    assert proof_calls == [
+        "review-buy",
+        "review-other",
+        "review-proven",
+        "review-other",
+        "review-proven",
+    ]
+
+
+def test_deploy_live_review_terminal_fak_real_proof_works_on_classifier_connections(
+    tmp_path,
+):
+    """Classifier-owned tuple connections must feed the real read-only proof."""
+
+    dl = _load("deploy_live_review_terminal_fak_real_proof", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    trade = sqlite3.connect(trade_db)
+    trade.row_factory = sqlite3.Row
+    from src.state.db import init_schema_trade_only
+    from tests.test_command_recovery import (
+        _append_order_fact,
+        _append_trade_fact,
+        _advance_to_acked,
+        _ensure_envelope,
+        _insert,
+    )
+    from src.state.venue_command_repo import append_event
+
+    init_schema_trade_only(trade)
+    _insert(
+        trade,
+        command_id="review-real-proof",
+        position_id="position-real-proof",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="FAK",
+        size=9.5,
+        price=0.06,
+    )
+    _advance_to_acked(
+        trade,
+        command_id="review-real-proof",
+        venue_order_id="order-real-proof",
+        order_type="FAK",
+    )
+    signed_order = b"signed-review-real-proof"
+    _ensure_envelope(
+        trade,
+        token_id="tok-001",
+        selected_outcome_token_id="tok-001",
+        side="SELL",
+        order_type="FAK",
+        envelope_id="signed-review-real-proof",
+        order_id="order-real-proof",
+        price=0.06,
+        size=9.5,
+        signed_order=signed_order,
+        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+    )
+    _append_order_fact(
+        trade,
+        command_id="review-real-proof",
+        order_id="order-real-proof",
+        state="PARTIALLY_MATCHED",
+        matched_size="5",
+        remaining_size="0",
+        source="REST",
+        raw_payload_json={"proof_class": "terminal_partial_order_fact"},
+    )
+    _append_trade_fact(
+        trade,
+        command_id="review-real-proof",
+        order_id="order-real-proof",
+        trade_id="trade-review-real-proof",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.06",
+    )
+    append_event(
+        trade,
+        command_id="review-real-proof",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact"
+        },
+    )
+    _insert(
+        trade,
+        command_id="review-real-other",
+        position_id="position-real-other",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="FAK",
+        size=9.5,
+        price=0.06,
+    )
+    append_event(
+        trade,
+        command_id="review-real-other",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={"reason": "operator_identity_dispute"},
+    )
+    trade.commit()
+    trade.close()
+
+    obligations = dl._canonical_live_restart_obligations(trade_db)
+    assert obligations["nonterminal_command_count"] == 1
+    assert obligations["nonterminal_command_ids"] == ("review-real-other",)
+    assert dl._nonterminal_sell_command_count(trade_db) == 1
 
 
 def test_deploy_live_post_start_parked_count_ignores_proven_terminal_fak_partial(

@@ -14067,84 +14067,20 @@ def _clear_canonical_terminal_fak_partial_exit(
     RESET: atomically preserve the partial fill and expire only its remainder.
     """
 
-    state = str(command.get("state") or "").upper()
-    if (
-        state not in {"ACKED", "POST_ACKED", "REVIEW_REQUIRED"}
-        or str(command.get("intent_kind") or "").upper() != "EXIT"
-        or str(command.get("side") or "").upper() != "SELL"
-    ):
+    order_evidence = _canonical_terminal_fak_partial_exit_order_evidence(
+        conn,
+        command=command,
+        trade_summary=trade_summary,
+    )
+    if order_evidence is None:
         return False
+    requested = order_evidence["requested"]
+    order_fact = order_evidence["order_fact"]
+    filled = order_evidence["filled"]
+    observed_at = order_evidence["observed_at"]
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
-    if state == "REVIEW_REQUIRED":
-        events = _command_events(conn, command_id)
-        latest = events[-1] if events else {}
-        if (
-            latest.get("event_type") != "REVIEW_REQUIRED"
-            or _json_dict(latest.get("payload_json")).get("reason")
-            != "partial_remainder_point_order_filled_without_full_trade_fact"
-        ):
-            return False
-    try:
-        from src.state.fill_cash_reader import _envelope_identity
 
-        pre, signed, identity_reason = _envelope_identity(
-            conn,
-            command,
-            datetime.now(timezone.utc),
-            "main",
-        )
-    except Exception:  # noqa: BLE001 - sealed identity is mandatory proof.
-        return False
-    if (
-        identity_reason is not None
-        or pre is None
-        or signed is None
-        or str(pre.get("order_type") or "").upper() != "FAK"
-        or str(signed.get("order_type") or "").upper() != "FAK"
-        or str(pre.get("side") or "").upper() != "SELL"
-        or str(signed.get("side") or "").upper() != "SELL"
-        or str(pre.get("selected_outcome_token_id") or "")
-        != str(command.get("token_id") or "")
-        or str(signed.get("selected_outcome_token_id") or "")
-        != str(command.get("token_id") or "")
-        or str(signed.get("order_id") or "") != venue_order_id
-    ):
-        return False
-    requested = _positive_decimal_or_none(command.get("size"))
-    order_fact = _latest_order_fact_for_command_order(
-        conn,
-        command_id=command_id,
-        venue_order_id=venue_order_id,
-    )
-    order_fact_payload = _json_dict(order_fact.get("raw_payload_json"))
-    matched = _positive_decimal_or_none(order_fact.get("matched_size"))
-    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
-    observed_at = str(trade_summary.get("observed_at") or "")
-    ack_payloads = [
-        _json_dict(event.get("payload_json"))
-        for event in _command_events(conn, command_id)
-        if event.get("event_type") == "SUBMIT_ACKED"
-    ]
-    if not (
-        requested is not None
-        and matched is not None
-        and filled == matched
-        and matched < requested
-        and int(trade_summary.get("count") or 0) > 0
-        and trade_summary.get("fill_prices_respect_limit") is True
-        and _parse_ts(observed_at) is not None
-        and str(order_fact.get("state") or "").upper() == "PARTIALLY_MATCHED"
-        and str(order_fact.get("source") or "").upper() in {"REST", "WS_USER"}
-        and _decimal_is_zero(order_fact.get("remaining_size"))
-        and order_fact_payload.get("proof_class") == "terminal_partial_order_fact"
-        and any(
-            str(payload.get("venue_order_id") or "") == venue_order_id
-            and str(payload.get("order_type") or "").upper() == "FAK"
-            for payload in ack_payloads
-        )
-    ):
-        return False
     if not _review_required_terminal_fak_partial_exit_projection_matches(
         conn,
         command=command,
@@ -14230,6 +14166,164 @@ def _clear_canonical_terminal_fak_partial_exit(
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         raise
     return True
+
+
+def _canonical_terminal_fak_partial_exit_order_evidence(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Read the exact order-side proof for a terminal FAK EXIT partial."""
+
+    state = str(command.get("state") or "").upper()
+    if (
+        state not in {"ACKED", "POST_ACKED", "REVIEW_REQUIRED"}
+        or str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+    ):
+        return None
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    if state == "REVIEW_REQUIRED":
+        events = _command_events(conn, command_id)
+        latest = events[-1] if events else {}
+        if (
+            latest.get("event_type") != "REVIEW_REQUIRED"
+            or _json_dict(latest.get("payload_json")).get("reason")
+            != "partial_remainder_point_order_filled_without_full_trade_fact"
+        ):
+            return None
+    try:
+        from src.state.fill_cash_reader import _envelope_identity
+
+        pre, signed, identity_reason = _envelope_identity(
+            conn,
+            command,
+            datetime.now(timezone.utc),
+            "main",
+        )
+    except Exception:  # noqa: BLE001 - sealed identity is mandatory proof.
+        return None
+    if (
+        identity_reason is not None
+        or pre is None
+        or signed is None
+        or str(pre.get("order_type") or "").upper() != "FAK"
+        or str(signed.get("order_type") or "").upper() != "FAK"
+        or str(pre.get("side") or "").upper() != "SELL"
+        or str(signed.get("side") or "").upper() != "SELL"
+        or str(pre.get("selected_outcome_token_id") or "")
+        != str(command.get("token_id") or "")
+        or str(signed.get("selected_outcome_token_id") or "")
+        != str(command.get("token_id") or "")
+        or str(signed.get("order_id") or "") != venue_order_id
+    ):
+        return None
+    requested = _positive_decimal_or_none(command.get("size"))
+    order_fact = _latest_order_fact_for_command_order(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    order_fact_payload = _json_dict(order_fact.get("raw_payload_json"))
+    matched = _positive_decimal_or_none(order_fact.get("matched_size"))
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    observed_at = str(trade_summary.get("observed_at") or "")
+    ack_payloads = [
+        _json_dict(event.get("payload_json"))
+        for event in _command_events(conn, command_id)
+        if event.get("event_type") == "SUBMIT_ACKED"
+    ]
+    if not (
+        requested is not None
+        and matched is not None
+        and filled == matched
+        and matched < requested
+        and int(trade_summary.get("count") or 0) > 0
+        and trade_summary.get("fill_prices_respect_limit") is True
+        and _parse_ts(observed_at) is not None
+        and str(order_fact.get("state") or "").upper() == "PARTIALLY_MATCHED"
+        and str(order_fact.get("source") or "").upper() in {"REST", "WS_USER"}
+        and _decimal_is_zero(order_fact.get("remaining_size"))
+        and order_fact_payload.get("proof_class") == "terminal_partial_order_fact"
+        and any(
+            str(payload.get("venue_order_id") or "") == venue_order_id
+            and str(payload.get("order_type") or "").upper() == "FAK"
+            for payload in ack_payloads
+        )
+    ):
+        return None
+    return {
+        "requested": requested,
+        "order_fact": order_fact,
+        "matched": matched,
+        "filled": filled,
+        "observed_at": observed_at,
+    }
+
+
+def _canonical_terminal_fak_partial_exit_order_proven(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Return whether the shared terminal FAK EXIT order proof is complete."""
+
+    return (
+        _canonical_terminal_fak_partial_exit_order_evidence(
+            conn,
+            command=command,
+            trade_summary=trade_summary,
+        )
+        is not None
+    )
+
+
+def canonical_terminal_fak_exit_order_proven(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    """Prove a command's terminal FAK EXIT order cannot fill again.
+
+    This is a read-only order-side proof. It deliberately excludes the
+    position residual and lifecycle phase checks required before clearing the
+    command, so deploy gates can distinguish venue-fill debt from held-position
+    monitoring obligations.
+    """
+
+    try:
+        row = conn.execute(
+            """
+            SELECT command.*, envelope.order_type AS env_order_type
+              FROM venue_commands command
+              LEFT JOIN venue_submission_envelopes envelope
+                ON envelope.envelope_id = command.envelope_id
+             WHERE command.command_id = ?
+            """,
+            (str(command_id),),
+        ).fetchone()
+        command = _dict_row(row)
+        if not command:
+            return False
+        venue_order_id = str(command.get("venue_order_id") or "")
+        if not venue_order_id:
+            return False
+        trade_summary = _confirmed_bound_trade_fact_summary(
+            conn,
+            command_id=str(command.get("command_id") or command_id),
+            venue_order_id=venue_order_id,
+            limit_price=command.get("price"),
+            side=command.get("side"),
+        )
+        return _canonical_terminal_fak_partial_exit_order_proven(
+            conn,
+            command=command,
+            trade_summary=trade_summary,
+        )
+    except Exception:  # noqa: BLE001 - deployment proof is fail-closed.
+        return False
 
 
 def _clear_review_required_terminal_fak_partial_exit(

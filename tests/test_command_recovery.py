@@ -38573,6 +38573,10 @@ def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
         observed_at="2026-04-26T00:06:00Z",
     )
 
+    assert command_recovery.canonical_terminal_fak_exit_order_proven(
+        conn, command_id
+    ) is True
+
     if initial_state in {"REVIEW_REQUIRED", "UNKNOWN_REVIEW"}:
         from src.state.venue_command_repo import append_event
         append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
@@ -38581,6 +38585,11 @@ def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
                          "partial_remainder_point_order_filled_without_full_trade_fact"
                          if initial_state == "REVIEW_REQUIRED" else "unknown_review"
                      )})
+
+    order_proven = command_recovery.canonical_terminal_fak_exit_order_proven(
+        conn, command_id
+    )
+    assert order_proven is (initial_state != "UNKNOWN_REVIEW")
 
     candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
     assert [row["command_id"] for row in candidates] == [command_id]
@@ -38778,6 +38787,11 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure, in
                      occurred_at="2026-04-26T00:08:00Z",
                      payload={"reason": "partial_remainder_point_order_filled_without_full_trade_fact"})
 
+    expected_order_proven = failure == "chain_stale"
+    assert command_recovery.canonical_terminal_fak_exit_order_proven(
+        conn, command_id
+    ) is expected_order_proven
+
     candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
     candidate_ids = {row["command_id"] for row in candidates}
     if initial_state == "REVIEW_REQUIRED" or failure in {
@@ -38792,6 +38806,41 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure, in
         assert command_id in candidate_ids
     else:
         assert command_id not in candidate_ids
+    if failure == "chain_stale":
+        command_row = next(
+            row
+            for row in candidates
+            if row["command_id"] == command_id
+        )
+        trade_summary = command_recovery._confirmed_bound_trade_fact_summary(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+            limit_price=command_row["price"],
+            side=command_row["side"],
+        )
+        events_before = conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0]
+        facts_before = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0]
+        assert command_recovery._clear_canonical_terminal_fak_partial_exit(
+            conn,
+            command=command_row,
+            trade_summary=trade_summary,
+        ) is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == events_before
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == facts_before
+
     summary = command_recovery.reconcile_matched_cancel_review_required_entries(conn)
     assert summary["advanced"] == 0
     assert _get_state(conn, command_id) == initial_state
