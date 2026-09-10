@@ -38821,6 +38821,21 @@ def test_review_deterministic_sdk_terminal_no_fill_clears_without_client_io(
         order_type=order_type,
         intent_kind="EXIT" if side == "SELL" else "ENTRY",
     )
+    if side == "SELL":
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-entry-terminal-no-fill",
+            order_id=f"order-{command_id}",
+        )
+        conn.execute(
+            """UPDATE position_current
+               SET phase = 'pending_exit', shares = 14.0, chain_shares = 14.0,
+                   cost_basis_usd = 7.0, chain_cost_basis_usd = 7.0,
+                   order_id = ?
+               WHERE position_id = 'pos-001'""",
+            (f"order-{command_id}",),
+        )
     append_event(
         conn,
         command_id=command_id,
@@ -38880,6 +38895,25 @@ def test_review_deterministic_sdk_terminal_no_fill_clears_without_client_io(
     assert mock_client.get_order.call_count == 0
     assert mock_client.get_open_orders.call_count == 0
     assert mock_client.get_trades.call_count == 0
+    if side == "SELL":
+        position = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_id FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert tuple(position)[0] in {"active", "day0_window"}
+        assert tuple(position)[1:] == (14.0, 7.0, None)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE command_id = ? AND event_type = 'EXIT_ORDER_VOIDED'",
+            (command_id,),
+        ).fetchone()[0] == 1
+        second = reconcile_unresolved_commands(conn, mock_client)
+        assert second["advanced"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE command_id = ? AND event_type = 'EXIT_ORDER_VOIDED'",
+            (command_id,),
+        ).fetchone()[0] == 1
     clear = [
         event for event in _get_events(conn, command_id)
         if event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
@@ -38973,6 +39007,21 @@ def _seed_deterministic_terminal_no_fill_for_test(
         order_type=order_type,
         intent_kind="EXIT" if side == "SELL" else "ENTRY",
     )
+    if side == "SELL":
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-entry-terminal-no-fill-helper",
+            order_id=f"order-{command_id}",
+        )
+        conn.execute(
+            """UPDATE position_current
+               SET phase = 'pending_exit', shares = 14.0, chain_shares = 14.0,
+                   cost_basis_usd = 7.0, chain_cost_basis_usd = 7.0,
+                   order_id = ?
+               WHERE position_id = 'pos-001'""",
+            (f"order-{command_id}",),
+        )
     append_event(
         conn,
         command_id=command_id,
@@ -39125,3 +39174,121 @@ def test_review_deterministic_terminal_no_fill_stays_on_unknown_error_or_conflic
     assert summary["advanced"] == 0
     assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
     assert mock_client.get_order.call_count == 0
+
+
+def test_review_deterministic_terminal_no_fill_exit_release_failure_rolls_back(
+    conn, monkeypatch
+):
+    from src.execution import command_recovery
+
+    command_id = "cmd-terminal-no-fill-release-failure"
+    _seed_deterministic_terminal_no_fill_for_test(
+        conn, command_id=command_id, side="SELL"
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_release_exit_after_terminal_no_fill",
+        lambda *args, **kwargs: False,
+    )
+    with pytest.raises(RuntimeError, match="EXIT release incomplete"):
+        command_recovery.clear_review_required_deterministic_sdk_terminal_no_fill(
+            conn, command_id, occurred_at="2026-04-26T00:02:00Z"
+        )
+    assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+    position = conn.execute(
+        "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id = 'pos-001'"
+    ).fetchone()
+    assert tuple(position) == ("pending_exit", 14.0, 7.0)
+
+
+@pytest.mark.parametrize("release_fails", [False, True])
+def test_deterministic_no_fill_buy_releases_risk_obligation_atomically(
+    conn, monkeypatch, release_fails
+):
+    from src.execution import command_recovery
+    from src.state import entry_exposure_obligation
+
+    command_id = "deterministic-buy-risk"
+    _seed_deterministic_terminal_no_fill_for_test(conn, command_id=command_id)
+    entry_exposure_obligation.open_entry_exposure_obligation(
+        conn, command_id=command_id, owner_domain="test",
+        shares=14.0, cost_basis_usd=7.0,
+    )
+    conn.commit()
+    real_resolve = entry_exposure_obligation.resolve_entry_exposure_obligation
+    if release_fails:
+        def fail_after_release(*args, **kwargs):
+            assert real_resolve(*args, **kwargs)
+            raise RuntimeError("late obligation release failure")
+
+        monkeypatch.setattr(
+            entry_exposure_obligation, "resolve_entry_exposure_obligation",
+            fail_after_release,
+        )
+        with pytest.raises(RuntimeError, match="late obligation release failure"):
+            command_recovery.clear_review_required_deterministic_sdk_terminal_no_fill(
+                conn, command_id
+            )
+    else:
+        command_recovery.clear_review_required_deterministic_sdk_terminal_no_fill(
+            conn, command_id
+        )
+        assert command_recovery.reconcile_deterministic_terminal_no_fill_reviews(
+            conn
+        )["scanned"] == 0
+    assert _get_state(conn, command_id) == (
+        "REVIEW_REQUIRED" if release_fails else "EXPIRED"
+    )
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0] == ("OPEN" if release_fails else "RESOLVED")
+
+
+@pytest.mark.parametrize("scope", ["live_tick", "full", "restart_preflight"])
+def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
+    conn, monkeypatch, tmp_path, scope
+):
+    from src.execution import command_recovery, venue_sync_contract
+
+    command_id = "scheduled-no-fill"
+    _seed_deterministic_terminal_no_fill_for_test(
+        conn, command_id=command_id, side="SELL"
+    )
+    conn.commit()
+    path = tmp_path / "scheduled-no-fill.db"
+    target = sqlite3.connect(path)
+    conn.backup(target)
+    target.close()
+    def connection_factory():
+        result = sqlite3.connect(path)
+        result.row_factory = sqlite3.Row
+        return result
+
+    class StopAtVenueRead(Exception):
+        pass
+
+    def stop_at_venue_read(*args, **kwargs):
+        with sqlite3.connect(path) as check:
+            assert check.execute(
+                "SELECT state FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0] == "EXPIRED"
+            phase, shares, cost = check.execute(
+                "SELECT phase, shares, cost_basis_usd FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+            assert phase != "pending_exit"
+            assert (shares, cost) == (14.0, 7.0)
+        raise StopAtVenueRead
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", connection_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", stop_at_venue_read)
+    monkeypatch.setattr(
+        command_recovery, "drain_screen_redecision_cancel_obligations",
+        lambda *args, **kwargs: {"cancelled": 0, "deferred": 0, "errors": 0},
+    )
+    client = MagicMock()
+    with pytest.raises(StopAtVenueRead):
+        command_recovery.reconcile_unresolved_commands(client=client, scope=scope)
+    assert client.mock_calls == []

@@ -19868,16 +19868,18 @@ def clear_review_required_deterministic_sdk_terminal_no_fill(
     proof = build_deterministic_sdk_terminal_no_fill_proof(
         conn, command_id, occurred_at=now
     )
+    command_row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    if command_row is None:
+        raise ValueError("deterministic no-fill command disappeared before append")
+    command = _dict_row(command_row)
     payload = {
         "schema_version": 1,
         "reason": "review_cleared_no_venue_exposure",
         "command_id": command_id,
-        "decision_id": str(
-            conn.execute(
-                "SELECT decision_id FROM venue_commands WHERE command_id = ?",
-                (command_id,),
-            ).fetchone()[0]
-        ),
+        "decision_id": str(command.get("decision_id") or ""),
         "proof_class": "deterministic_sdk_terminal_no_fill",
         "side_effect_boundary_crossed": True,
         "sdk_submit_attempted": True,
@@ -19896,13 +19898,52 @@ def clear_review_required_deterministic_sdk_terminal_no_fill(
         "reviewed_by": "command_recovery",
         "cleared_at": now,
     }
-    append_event(
-        conn,
-        command_id=command_id,
-        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
-        occurred_at=now,
-        payload=payload,
+    savepoint = "sp_deterministic_terminal_no_fill_" + "".join(
+        char if char.isalnum() else "_" for char in command_id
     )
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        if str(command.get("intent_kind") or "").upper() == "ENTRY":
+            from src.state.entry_exposure_obligation import (
+                resolve_entry_exposure_obligation,
+            )
+
+            resolve_entry_exposure_obligation(
+                conn, command_id=command_id, resolved_at=now
+            )
+        if str(command.get("intent_kind") or "").upper() == "EXIT":
+            position = conn.execute(
+                "SELECT city, target_date FROM position_current WHERE position_id = ?",
+                (str(command.get("position_id") or ""),),
+            ).fetchone()
+            release_command = dict(command)
+            if position is not None:
+                release_command.update(
+                    {
+                        "position_city": position[0],
+                        "position_target_date": position[1],
+                    }
+                )
+            if not _release_exit_after_terminal_no_fill(
+                conn,
+                command={**release_command, "state": CommandState.EXPIRED.value},
+                observed_at=now,
+                order_fact_id=0,
+                terminal_payload=proof,
+            ):
+                raise RuntimeError("deterministic terminal no-fill EXIT release incomplete")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
     return payload
 
 
@@ -19926,6 +19967,44 @@ def _review_required_deterministic_sdk_terminal_no_fill_recovery(
         cmd.command_id,
     )
     return "advanced"
+
+
+def _deterministic_terminal_no_fill_review_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_command_events")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        SELECT command.*
+          FROM venue_commands command
+          JOIN venue_command_events review ON review.event_id = command.last_event_id
+         WHERE command.state = 'REVIEW_REQUIRED'
+           AND review.event_type = 'REVIEW_REQUIRED'
+           AND json_extract(review.payload_json, '$.reason') =
+               'terminal_rejection_persistence_failed_after_side_effect'
+         ORDER BY command.updated_at, command.command_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def reconcile_deterministic_terminal_no_fill_reviews(conn: sqlite3.Connection) -> dict:
+    """Drain exact terminal rejection reviews before any venue read.
+
+    SCOPE: the latest typed rejection on one command. DRAIN: the bounded normal
+    recovery pass rechecks its immutable proof and atomically releases its
+    commitment. RESET: EXPIRED plus release removes the command from this query.
+    """
+    rows = _deterministic_terminal_no_fill_review_candidates(conn)
+    summary = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
+    for row in rows:
+        outcome = _review_required_deterministic_sdk_terminal_no_fill_recovery(
+            conn, VenueCommand.from_row(row)
+        )
+        summary[outcome if outcome in {"advanced", "stayed"} else "errors"] += 1
+    return summary
 
 
 def clear_review_required_typed_pre_sdk_rejection(
@@ -31614,6 +31693,12 @@ def _reconcile_passes_short_conn(
                     max(0.0, boot_deadline - time.monotonic()),
                 )
 
+        _boot_db_pass(
+            "deterministic_terminal_no_fill_reviews",
+            reconcile_deterministic_terminal_no_fill_reviews,
+            "deterministic_terminal_no_fill_reviews",
+        )
+
         # A terminal SELL underfill is current held collateral, not historical
         # maintenance. Project its exact residual before any broad ENTRY scan can
         # consume boot's finite DB turn.
@@ -31803,6 +31888,19 @@ def _reconcile_passes_short_conn(
         summary["venue_snapshot_deferred"] = True
         summary["deferred_full_sweep"] = True
         return
+
+    with open_tracked(
+        read_conn_factory, label="recovery.deterministic_terminal_no_fill_reviews:snapshot"
+    ) as conn:
+        deterministic_reviews_pending = bool(
+            _deterministic_terminal_no_fill_review_candidates(conn)
+        )
+    if deterministic_reviews_pending:
+        _db_pass(
+            "deterministic_terminal_no_fill_reviews",
+            reconcile_deterministic_terminal_no_fill_reviews,
+            "deterministic_terminal_no_fill_reviews",
+        )
 
     if _full_priority_inflight_fast_pass():
         return
