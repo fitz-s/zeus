@@ -7477,19 +7477,20 @@ def select_global_single_order(
                     "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
                 )
                 continue
-            try:
-                candidate_capital_limit = min(
-                    candidate_capital_limit,
-                    _single_order_cost(
-                        candidate.economic_cost_curve,
-                        liquidation_cap_shares,
-                    ),
-                )
-            except ValueError:
-                rejections[candidate.candidate_id] = (
-                    "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-                )
-                continue
+            if liquidation_capacity < executable_ask_depth:
+                try:
+                    candidate_capital_limit = min(
+                        candidate_capital_limit,
+                        _single_order_cost(
+                            candidate.economic_cost_curve,
+                            liquidation_cap_shares,
+                        ),
+                    )
+                except ValueError:
+                    rejections[candidate.candidate_id] = (
+                        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+                    )
+                    continue
         buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=utility_liquid_cash,
