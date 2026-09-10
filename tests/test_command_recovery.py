@@ -38485,3 +38485,298 @@ def test_scoped_entry_projection_retains_all_same_position_entry_exit_flows(conn
     assert scoped[0]["position_entry_filled_size"] == 14
     assert scoped[0]["position_exit_filled_size"] == 5
     assert _latest_unprojected_filled_entry_candidates(conn, command_id="missing") == []
+
+
+@pytest.mark.parametrize("initial_state", ("ACKED", "POST_ACKED"))
+def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
+    conn,
+    initial_state,
+):
+    from src.execution import command_recovery
+
+    position_id = "pos-acked-fak-partial"
+    command_id = f"cmd-acked-fak-partial-{initial_state.lower()}"
+    order_id = f"ord-acked-fak-partial-{initial_state.lower()}"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="FAK",
+        size=9.5,
+        price=0.06,
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id, order_type="FAK")
+    signed_order = f"signed-{command_id}".encode()
+    _ensure_envelope(
+        conn,
+        token_id="tok-001",
+        selected_outcome_token_id="tok-001",
+        side="SELL",
+        order_type="FAK",
+        envelope_id=f"signed-{command_id}",
+        order_id=order_id,
+        price=0.06,
+        size=9.5,
+        signed_order=signed_order,
+        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+    )
+    if initial_state == "POST_ACKED":
+        conn.execute(
+            "UPDATE venue_commands SET state = 'POST_ACKED' WHERE command_id = ?",
+            (command_id,),
+        )
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-entry",
+        order_id="ord-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 4.5, chain_shares = 4.5,
+               chain_state = 'synced', chain_seen_at = '2026-04-26T00:09:00Z',
+               order_id = ?, order_status = 'sell_pending_confirmation',
+               cost_basis_usd = 1.395, chain_cost_basis_usd = 1.395
+         WHERE position_id = ?
+        """,
+        (order_id, position_id),
+    )
+    _append_order_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        state="PARTIALLY_MATCHED",
+        matched_size="5",
+        remaining_size="0",
+        raw_payload_json={
+            "status": "PARTIALLY_MATCHED",
+            "order_id": order_id,
+            "proof_class": "terminal_partial_order_fact",
+            "required_predicates": {
+                "terminal_order_remainder_zero": True,
+                "canonical_trade_facts_match_terminal_order_fact": True,
+                "cumulative_fill_below_requested_size": True,
+            },
+        },
+    )
+    _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id=f"trade-{command_id}",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.06",
+        observed_at="2026-04-26T00:06:00Z",
+    )
+
+    candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
+    assert [row["command_id"] for row in candidates] == [command_id]
+    before_facts = conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    summary = command_recovery.reconcile_matched_cancel_review_required_entries(conn)
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert _get_state(conn, command_id) == "EXPIRED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0] == before_facts
+    assert [event["event_type"] for event in _get_events(conn, command_id)][-2:] == [
+        "PARTIAL_FILL_OBSERVED",
+        "EXPIRED",
+    ]
+
+    release = command_recovery.reconcile_pending_exit_terminal_order_releases(conn)
+    assert release == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    current = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, chain_shares FROM position_current "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert current["phase"] != "pending_exit"
+    assert current["shares"] == pytest.approx(4.5)
+    assert current["chain_shares"] == pytest.approx(4.5)
+    assert current["cost_basis_usd"] == pytest.approx(1.395)
+    assert command_recovery.reconcile_pending_exit_terminal_order_releases(conn) == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "non_fak",
+        "remaining_positive",
+        "full_fill",
+        "order_mismatch",
+        "token_mismatch",
+        "side_mismatch",
+        "proof_mismatch",
+        "trade_nonconfirmed",
+        "trade_sum_mismatch",
+        "price_below_limit",
+        "chain_stale",
+        "signed_hash_mismatch",
+        "signed_identity_mismatch",
+    ),
+)
+def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure):
+    from src.execution import command_recovery
+
+    position_id = f"pos-acked-fak-bad-{failure}"
+    command_id = f"cmd-acked-fak-bad-{failure}"
+    order_id = f"ord-acked-fak-bad-{failure}"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="GTC" if failure == "non_fak" else "FAK",
+        size=9.5,
+        price=0.06,
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id, order_type="FAK")
+    signed_order = f"signed-{command_id}".encode()
+    _ensure_envelope(
+        conn,
+        token_id="tok-001",
+        selected_outcome_token_id="tok-001",
+        side="SELL",
+        order_type="FAK",
+        envelope_id=f"signed-{command_id}",
+        order_id=order_id,
+        price=0.06,
+        size=9.5,
+        signed_order=signed_order,
+        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+    )
+    if failure == "signed_hash_mismatch":
+        bad_signed_order = f"bad-{command_id}".encode()
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            selected_outcome_token_id="tok-001",
+            side="SELL",
+            order_type="FAK",
+            envelope_id=f"signed-bad-{command_id}",
+            order_id=order_id,
+            price=0.06,
+            size=9.5,
+            signed_order=bad_signed_order,
+            signed_order_hash="0" * 64,
+        )
+    elif failure == "signed_identity_mismatch":
+        bad_signed_order = f"identity-{command_id}".encode()
+        _ensure_envelope(
+            conn,
+            token_id="other-token",
+            selected_outcome_token_id="other-token",
+            side="BUY",
+            order_type="FAK",
+            envelope_id=f"signed-bad-{command_id}",
+            order_id=order_id,
+            price=0.06,
+            size=9.5,
+            signed_order=bad_signed_order,
+            signed_order_hash=hashlib.sha256(bad_signed_order).hexdigest(),
+        )
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-entry",
+        order_id="ord-entry",
+    )
+    chain_seen_at = "2026-04-26T00:04:00Z" if failure == "chain_stale" else "2026-04-26T00:09:00Z"
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 4.5, chain_shares = 4.5,
+               chain_state = 'synced', chain_seen_at = ?, order_id = ?,
+               order_status = 'sell_pending_confirmation',
+               cost_basis_usd = 1.395, chain_cost_basis_usd = 1.395
+         WHERE position_id = ?
+        """,
+        (chain_seen_at, order_id, position_id),
+    )
+    fact_order_id = "different-order" if failure == "order_mismatch" else order_id
+    fact_state = "PARTIALLY_MATCHED"
+    fact_matched = "9.5" if failure == "full_fill" else "5"
+    fact_remaining = "1" if failure == "remaining_positive" else "0"
+    fact_payload = {
+        "status": fact_state,
+        "order_id": fact_order_id,
+        "proof_class": (
+            "not_terminal_partial_order_fact"
+            if failure == "proof_mismatch"
+            else "terminal_partial_order_fact"
+        ),
+    }
+    _append_order_fact(
+        conn,
+        command_id=command_id,
+        order_id=fact_order_id,
+        state=fact_state,
+        matched_size=fact_matched,
+        remaining_size=fact_remaining,
+        raw_payload_json=fact_payload,
+    )
+    trade_size = "4" if failure == "trade_sum_mismatch" else fact_matched
+    _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id=f"trade-{command_id}",
+        state="MATCHED" if failure == "trade_nonconfirmed" else "CONFIRMED",
+        filled_size=trade_size,
+        fill_price="0.05" if failure == "price_below_limit" else "0.06",
+        observed_at="2026-04-26T00:06:00Z",
+    )
+    if failure in {"token_mismatch", "side_mismatch"}:
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="other-token" if failure == "token_mismatch" else "tok-001",
+            selected_outcome_token_id=(
+                "other-token" if failure == "token_mismatch" else "tok-001"
+            ),
+            side="BUY" if failure == "side_mismatch" else "SELL",
+            order_type="FAK",
+            envelope_id=f"env-{command_id}-mismatch",
+            price=0.06,
+            size=9.5,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET envelope_id = ? WHERE command_id = ?",
+            (envelope_id, command_id),
+        )
+
+    candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
+    candidate_ids = {row["command_id"] for row in candidates}
+    if failure in {
+        "full_fill",
+        "trade_nonconfirmed",
+        "trade_sum_mismatch",
+        "chain_stale",
+        "signed_hash_mismatch",
+        "signed_identity_mismatch",
+        "price_below_limit",
+    }:
+        assert command_id in candidate_ids
+    else:
+        assert command_id not in candidate_ids
+    summary = command_recovery.reconcile_matched_cancel_review_required_entries(conn)
+    assert summary["advanced"] == 0
+    assert _get_state(conn, command_id) == "ACKED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ? "
+        "AND event_type IN ('PARTIAL_FILL_OBSERVED', 'EXPIRED')",
+        (command_id,),
+    ).fetchone()[0] == 0

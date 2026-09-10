@@ -13685,13 +13685,61 @@ def _terminal_fak_partial_exit_review_candidates(
     if not _table_exists(conn, "venue_commands"):
         return []
     rows = conn.execute(
-        """
+        "WITH terminal_fak_partial_exit_commands AS ("
+        "SELECT command_id"
+        "  FROM venue_commands"
+        " WHERE intent_kind = 'EXIT'"
+        "   AND side = 'SELL'"
+        "   AND state IN ('REVIEW_REQUIRED', 'ACKED', 'POST_ACKED')"
+        "   AND venue_order_id IS NOT NULL"
+        "   AND venue_order_id != ''"
+        "), "
+        + _canonical_order_truth_cte(
+            command_scope_cte="terminal_fak_partial_exit_commands"
+        )
+        + """
         SELECT command.*,
-               envelope.order_type AS env_order_type
+               envelope.order_type AS env_order_type,
+               envelope.side AS env_side,
+               envelope.selected_outcome_token_id AS env_token_id
           FROM venue_commands command
           LEFT JOIN venue_submission_envelopes envelope
             ON envelope.envelope_id = command.envelope_id
-         WHERE command.state = 'REVIEW_REQUIRED'
+         WHERE (
+                command.state = 'REVIEW_REQUIRED'
+                OR (
+                    command.state IN ('ACKED', 'POST_ACKED')
+                    AND UPPER(COALESCE(envelope.order_type, '')) = 'FAK'
+                    AND UPPER(COALESCE(envelope.side, '')) = 'SELL'
+                    AND COALESCE(envelope.selected_outcome_token_id, '') =
+                        COALESCE(command.token_id, '')
+                    AND EXISTS (
+                        SELECT 1
+                          FROM venue_command_events ack
+                         WHERE ack.command_id = command.command_id
+                           AND ack.event_type = 'SUBMIT_ACKED'
+                           AND json_extract(ack.payload_json, '$.venue_order_id') =
+                               command.venue_order_id
+                           AND UPPER(COALESCE(
+                               json_extract(ack.payload_json, '$.order_type'), ''
+                           )) = 'FAK'
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM canonical_order_truth fact
+                         WHERE fact.command_id = command.command_id
+                           AND fact.venue_order_id = command.venue_order_id
+                           AND UPPER(COALESCE(fact.state, '')) =
+                               'PARTIALLY_MATCHED'
+                           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+                           AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+                           AND fact.source IN ('REST', 'WS_USER')
+                           AND json_valid(fact.raw_payload_json)
+                           AND json_extract(fact.raw_payload_json, '$.proof_class') =
+                               'terminal_partial_order_fact'
+                    )
+                )
+           )
            AND command.intent_kind = 'EXIT'
            AND command.side = 'SELL'
            AND command.venue_order_id IS NOT NULL
@@ -13995,6 +14043,169 @@ def _clear_review_required_terminal_partial_entry(
                 "filled_size": _decimal_text(filled),
                 "remaining_size": "0",
                 "unfilled_size": _decimal_text(requested - filled),
+            },
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return True
+
+
+def _clear_acked_terminal_fak_partial_exit(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Terminalize an ACKED FAK partial from an existing canonical order fact."""
+
+    if (
+        str(command.get("state") or "").upper() not in {"ACKED", "POST_ACKED"}
+        or str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+    ):
+        return False
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    try:
+        from src.state.fill_cash_reader import _envelope_identity
+
+        pre, signed, identity_reason = _envelope_identity(
+            conn,
+            command,
+            datetime.now(timezone.utc),
+            "main",
+        )
+    except Exception:  # noqa: BLE001 - sealed identity is mandatory proof.
+        return False
+    if (
+        identity_reason is not None
+        or pre is None
+        or signed is None
+        or str(pre.get("order_type") or "").upper() != "FAK"
+        or str(signed.get("order_type") or "").upper() != "FAK"
+        or str(pre.get("side") or "").upper() != "SELL"
+        or str(signed.get("side") or "").upper() != "SELL"
+        or str(pre.get("selected_outcome_token_id") or "")
+        != str(command.get("token_id") or "")
+        or str(signed.get("selected_outcome_token_id") or "")
+        != str(command.get("token_id") or "")
+        or str(signed.get("order_id") or "") != venue_order_id
+    ):
+        return False
+    requested = _positive_decimal_or_none(command.get("size"))
+    order_fact = _latest_order_fact_for_command_order(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    order_fact_payload = _json_dict(order_fact.get("raw_payload_json"))
+    matched = _positive_decimal_or_none(order_fact.get("matched_size"))
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    observed_at = str(trade_summary.get("observed_at") or "")
+    ack_payloads = [
+        _json_dict(event.get("payload_json"))
+        for event in _command_events(conn, command_id)
+        if event.get("event_type") == "SUBMIT_ACKED"
+    ]
+    if not (
+        requested is not None
+        and matched is not None
+        and filled == matched
+        and matched < requested
+        and int(trade_summary.get("count") or 0) > 0
+        and trade_summary.get("fill_prices_respect_limit") is True
+        and _parse_ts(observed_at) is not None
+        and str(order_fact.get("state") or "").upper() == "PARTIALLY_MATCHED"
+        and str(order_fact.get("source") or "").upper() in {"REST", "WS_USER"}
+        and _decimal_is_zero(order_fact.get("remaining_size"))
+        and order_fact_payload.get("proof_class") == "terminal_partial_order_fact"
+        and any(
+            str(payload.get("venue_order_id") or "") == venue_order_id
+            and str(payload.get("order_type") or "").upper() == "FAK"
+            for payload in ack_payloads
+        )
+    ):
+        return False
+    if not _review_required_terminal_fak_partial_exit_projection_matches(
+        conn,
+        command=command,
+        filled=filled,
+        fill_observed_at=observed_at,
+    ):
+        return False
+    position_row = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ? LIMIT 1",
+        (str(command.get("position_id") or ""),),
+    ).fetchone()
+    position_phase = str(position_row[0] or "") if position_row is not None else ""
+    if position_phase not in {"active", "day0_window", "pending_exit"}:
+        return False
+    terminal_payload = {
+        "reason": "terminal_fak_partial_exit_confirmed",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "matched_size": _decimal_text(filled),
+        "filled_size": _decimal_text(filled),
+        "remaining_size": "0",
+        "requested_size": _decimal_text(requested),
+        "point_order_status": None,
+        "point_order": None,
+        "terminal_fak_cancel_proof": None,
+        "canonical_terminal_order_fact": {
+            "fact_id": order_fact.get("fact_id"),
+            "state": order_fact.get("state"),
+            "source": order_fact.get("source"),
+            "observed_at": order_fact.get("observed_at"),
+            "matched_size": order_fact.get("matched_size"),
+            "remaining_size": order_fact.get("remaining_size"),
+        },
+        "required_predicates": {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+            "fak_order_not_live": True,
+            "acked_exit_envelope_exact_order_token_side": True,
+            "synced_chain_residual_matches_post_fill_position": True,
+        },
+        "position_phase": position_phase,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_acked_terminal_partial_exit_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        order_fact = _latest_order_fact_for_command_order(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        )
+        if not _clear_review_required_terminal_partial(
+            conn,
+            command=command,
+            order_fact=order_fact,
+            trade_summary=trade_summary,
+            terminal_proof=terminal_payload,
+        ):
+            raise RuntimeError(
+                f"terminal ACKED FAK partial EXIT did not clear for {command_id}"
+            )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.EXPIRED.value,
+            occurred_at=observed_at,
+            payload={
+                "reason": "terminal_fak_partial_exit_remainder_expired",
+                "proof_class": "terminal_partial_order_fact",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "terminal_order_fact_id": order_fact.get("fact_id"),
+                "filled_size": _decimal_text(filled),
+                "remaining_size": "0",
+                "chain_residual_size": _decimal_text(requested - filled),
             },
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
@@ -14462,12 +14673,16 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 conn,
                 command_id=command_id,
                 venue_order_id=venue_order_id,
+                limit_price=command.get("price"),
+                side=command.get("side"),
             )
-            if _clear_review_required_terminal_fak_partial_exit(
-                conn,
-                command=command,
-                trade_summary=trade_summary,
-            ):
+            clear = (
+                _clear_acked_terminal_fak_partial_exit
+                if str(command.get("state") or "").upper()
+                in {"ACKED", "POST_ACKED"}
+                else _clear_review_required_terminal_fak_partial_exit
+            )
+            if clear(conn, command=command, trade_summary=trade_summary):
                 summary["advanced"] += 1
             else:
                 summary["stayed"] += 1
@@ -19149,6 +19364,8 @@ def _pending_exit_terminal_order_release_rows(
            AND fact.venue_order_id = cmd.venue_order_id
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
+          LEFT JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
          WHERE cmd.intent_kind = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
@@ -19173,6 +19390,44 @@ def _pending_exit_terminal_order_release_rows(
                 (
                     cmd.state IN ('CANCELLED', 'EXPIRED')
                     AND fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                )
+                OR (
+                    cmd.state = 'EXPIRED'
+                    AND fact.state = 'PARTIALLY_MATCHED'
+                    AND ABS(CAST(COALESCE(fact.remaining_size, '0') AS REAL))
+                        <= 0.000000001
+                    AND CAST(COALESCE(cmd.size, '0') AS REAL)
+                        > CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                    AND LOWER(COALESCE(pc.chain_state, '')) = 'synced'
+                    AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0
+                    AND ABS(
+                        CAST(COALESCE(pc.chain_shares, '0') AS REAL)
+                        - (
+                            CAST(COALESCE(cmd.size, '0') AS REAL)
+                            - CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                        )
+                    ) <= 0.011
+                    AND UPPER(COALESCE(env.order_type, '')) = 'FAK'
+                    AND UPPER(COALESCE(env.side, '')) = 'SELL'
+                    AND COALESCE(env.selected_outcome_token_id, '') =
+                        COALESCE(cmd.token_id, '')
+                    AND json_valid(fact.raw_payload_json)
+                    AND json_extract(fact.raw_payload_json, '$.proof_class') =
+                        'terminal_partial_order_fact'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM venue_command_events terminal
+                         WHERE terminal.command_id = cmd.command_id
+                           AND terminal.event_type = 'EXPIRED'
+                           AND json_extract(terminal.payload_json, '$.proof_class') =
+                               'terminal_partial_order_fact'
+                           AND CAST(json_extract(
+                               terminal.payload_json, '$.terminal_order_fact_id'
+                           ) AS INTEGER) = fact.fact_id
+                           AND CAST(json_extract(
+                               terminal.payload_json, '$.filled_size'
+                           ) AS REAL) = CAST(fact.matched_size AS REAL)
+                    )
                 )
                 OR (
                     cmd.state = 'FILLED'
@@ -19201,6 +19456,21 @@ def _pending_exit_terminal_order_release_rows(
                         (
                             cmd.state = 'CANCELLED'
                             AND fact.state = 'PARTIALLY_MATCHED'
+                        )
+                        OR (
+                            cmd.state = 'EXPIRED'
+                            AND fact.state = 'PARTIALLY_MATCHED'
+                            AND CAST(COALESCE(cmd.size, '0') AS REAL)
+                                > CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                            AND LOWER(COALESCE(pc.chain_state, '')) = 'synced'
+                            AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0
+                            AND UPPER(COALESCE(env.order_type, '')) = 'FAK'
+                            AND UPPER(COALESCE(env.side, '')) = 'SELL'
+                            AND COALESCE(env.selected_outcome_token_id, '') =
+                                COALESCE(cmd.token_id, '')
+                            AND json_valid(fact.raw_payload_json)
+                            AND json_extract(fact.raw_payload_json, '$.proof_class') =
+                                'terminal_partial_order_fact'
                         )
                         OR (
                             pc.order_status = 'sell_pending_confirmation'
@@ -31969,15 +32239,15 @@ def _reconcile_passes_short_conn(
             "exit_pending_projections",
         )
         _db_pass(
-            "pending_exit_terminal_order_releases",
-            reconcile_pending_exit_terminal_order_releases,
-            "pending_exit_terminal_order_releases",
-        )
-        _db_pass(
             "matched_cancel_review_required_entries",
             reconcile_matched_cancel_review_required_entries,
             "matched_cancel_review_required_entries",
             fold_stayed=False,
+        )
+        _db_pass(
+            "pending_exit_terminal_order_releases",
+            reconcile_pending_exit_terminal_order_releases,
+            "pending_exit_terminal_order_releases",
         )
         _db_pass(
             "terminal_positive_entry_projection_repair",
