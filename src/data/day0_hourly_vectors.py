@@ -2741,18 +2741,20 @@ def _persist_complete_ensemble_bundle(
     ensemble_window_starts: Mapping[str, datetime | None],
     materialization_time: datetime,
     persist_lock_blocking: bool,
-) -> int:
+) -> tuple[int, bool]:
     """Persist a complete 51-member ENS carrier for every requested date.
 
     Selection is the same strict live-authority read the deterministic bundle
     uses (all members, bounded skew, complete remaining window). An incomplete
-    carrier is logged and never persisted as a partial bundle.
+    carrier is logged and never treated as a complete bundle. Returns physical
+    writes plus whether every requested target passed strict persist readback.
     """
 
     if not ensemble_target_dates:
-        return 0
+        return 0, True
     ensemble_expected = day0_source_clock_ensemble_member_models()
     persisted = 0
+    complete = True
     for target_date in ensemble_target_dates:
         window_start = ensemble_window_starts.get(target_date)
         selected_ensemble = (
@@ -2780,32 +2782,47 @@ def _persist_complete_ensemble_bundle(
                 len(ensemble_vectors),
                 DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
             )
+            complete = False
             continue
-        persisted += persist_day0_hourly_vectors(
-            selected_ensemble,
-            target_date=target_date,
-            request_hash=ensemble_request_hash,
-            endpoint=OPENMETEO_ENSEMBLE_URL,
-            lock_blocking=persist_lock_blocking,
-        )
-        post_persist_materialization_time = _day0_utc_now()
-        if not read_freshest_day0_hourly_vectors(
-            city=name,
-            target_date=target_date,
-            now=post_persist_materialization_time,
-            expected_models=ensemble_expected,
-            require_expected=True,
-            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            remaining_window_start=window_start,
-            require_complete_remaining_window=True,
-        ):
+        try:
+            persisted += persist_day0_hourly_vectors(
+                selected_ensemble,
+                target_date=target_date,
+                request_hash=ensemble_request_hash,
+                endpoint=OPENMETEO_ENSEMBLE_URL,
+                lock_blocking=persist_lock_blocking,
+            )
+            post_persist_materialization_time = _day0_utc_now()
+            readback = read_freshest_day0_hourly_vectors(
+                city=name,
+                target_date=target_date,
+                now=post_persist_materialization_time,
+                expected_models=ensemble_expected,
+                require_expected=True,
+                max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                remaining_window_start=window_start,
+                require_complete_remaining_window=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - caller applies bounded retry debt
+            complete = False
+            logger.warning(
+                "DAY0_SOURCE_CLOCK_ENSEMBLE_PERSIST_READBACK_FAILED "
+                "city=%s target_date=%s exc=%s: %s",
+                name,
+                target_date,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        if not readback:
+            complete = False
             logger.warning(
                 "DAY0_SOURCE_CLOCK_ENSEMBLE_PERSIST_READBACK_INCOMPLETE "
                 "city=%s target_date=%s",
                 name,
                 target_date,
             )
-    return persisted
+    return persisted, complete
 
 
 def maybe_refresh_day0_hourly_vectors(
@@ -2971,7 +2988,7 @@ def maybe_refresh_day0_hourly_vectors(
                 target_date: strict_window_start(city, target_date)
                 for target_date in target_dates
             }
-            if (
+            deterministic_ready = (
                 not release_due
                 and _current_provider_bundle_already_persisted(
                     city=name,
@@ -2981,16 +2998,7 @@ def maybe_refresh_day0_hourly_vectors(
                     decision_time=decision_time,
                     remaining_window_starts=window_starts,
                 )
-            ):
-                # Process-local throttles cannot deduplicate concurrent daemon
-                # owners.  Shared DB + exact source identity is the no-fetch
-                # authority; any HWM advance or incomplete causal window falls
-                # through to the normal transport path.
-                with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
-                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
-                    _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)
-                continue
+            )
             critical_city_count = max(0, int(quota_critical_cities))
             priority_city_count = max(0, int(quota_priority_cities))
             if city_index < critical_city_count:
@@ -3028,33 +3036,17 @@ def maybe_refresh_day0_hourly_vectors(
                 if quota_lane in {"priority", "recovery"}
                 else ()
             )
-            if ensemble_target_dates:
-                ensemble_window_starts = {
-                    target_date: (
-                        window_starts.get(target_date)
-                        or strict_window_start(city, target_date)
-                    )
-                    for target_date in ensemble_target_dates
-                }
-                ensemble_run_hwm = _probe_day0_source_clock_ensemble_run_hwm(
-                    decision_time=decision_time, timeout_s=timeout_s
+            ensemble_window_starts = {
+                target_date: (
+                    window_starts.get(target_date)
+                    or strict_window_start(city, target_date)
                 )
-                if (
-                    ensemble_run_hwm is not None
-                    and _current_ensemble_bundle_already_persisted(
-                        city=name,
-                        target_dates=ensemble_target_dates,
-                        run_hwm=ensemble_run_hwm,
-                        decision_time=decision_time,
-                        remaining_window_starts=ensemble_window_starts,
-                    )
-                ):
-                    # Already have this exact provider run's 51-member bundle
-                    # persisted for every requested date -- an unconditional
-                    # re-fetch here re-reserved already-successful ensemble
-                    # keys on every incomplete-bundle retry and held-city
-                    # release_due pass (round-3 residual leak).
-                    ensemble_target_dates = ()
+                for target_date in ensemble_target_dates
+            }
+            ensemble_ready = not ensemble_target_dates
+            ensemble_incomplete = False
+            ensemble_available_models: tuple[str, ...] = ()
+            ensemble_missing_models: tuple[str, ...] = ()
             ensemble_vectors: list[Day0HourlyVector] = []
             ensemble_request_hash = ""
             with _REFRESH_LOCK:
@@ -3075,6 +3067,29 @@ def maybe_refresh_day0_hourly_vectors(
                 ):
                     skipped_throttle += 1
                     continue
+            if ensemble_target_dates:
+                ensemble_run_hwm = _probe_day0_source_clock_ensemble_run_hwm(
+                    decision_time=decision_time, timeout_s=timeout_s
+                )
+                ensemble_ready = bool(
+                    ensemble_run_hwm is not None
+                    and _current_ensemble_bundle_already_persisted(
+                        city=name,
+                        target_dates=ensemble_target_dates,
+                        run_hwm=ensemble_run_hwm,
+                        decision_time=decision_time,
+                        remaining_window_starts=ensemble_window_starts,
+                    )
+                )
+            if deterministic_ready and ensemble_ready:
+                # Process-local throttles cannot deduplicate concurrent daemon
+                # owners. Shared DB + exact current identities are the
+                # composite no-fetch authority; clear retry debt only here.
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
+                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+                    _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)
+                continue
             # The hourly builder delegates exact-run transport to the BPF
             # module, which owns a separate process-local tracker instance over
             # the same durable quota file.  Carry the selected economic lane to
@@ -3104,28 +3119,52 @@ def maybe_refresh_day0_hourly_vectors(
                         continue
                     _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
                 checked += 1
-                try:
-                    vectors, request_hash = fetch_day0_hourly_vectors(
-                        city,
-                        models=models,
-                        now=source_decision_time,
-                        timeout_s=timeout_s,
-                    )
-                except TypeError as exc:
-                    if "timeout_s" not in str(exc):
-                        raise
-                    vectors, request_hash = fetch_day0_hourly_vectors(
-                        city, models=models, now=source_decision_time
-                    )
-                materialization_time = _day0_utc_now()
-                if ensemble_target_dates:
-                    ensemble_vectors, ensemble_request_hash = (
-                        fetch_day0_source_clock_ensemble_vectors(
-                            city,
-                            now=source_decision_time,
-                            timeout_s=timeout_s,
+                vectors: list[Day0HourlyVector] = []
+                request_hash = ""
+                materialization_time: datetime | None = None
+                if not deterministic_ready:
+                    try:
+                        try:
+                            vectors, request_hash = fetch_day0_hourly_vectors(
+                                city,
+                                models=models,
+                                now=source_decision_time,
+                                timeout_s=timeout_s,
+                            )
+                        except TypeError as exc:
+                            if "timeout_s" not in str(exc):
+                                raise
+                            vectors, request_hash = fetch_day0_hourly_vectors(
+                                city, models=models, now=source_decision_time
+                            )
+                    except Exception as exc:  # noqa: BLE001 - preserve ENS sibling
+                        logger.warning(
+                            "DAY0_HOURLY_VECTORS_FETCH_FAILED city=%s exc=%s: %s",
+                            name,
+                            type(exc).__name__,
+                            exc,
                         )
-                    )
+                        vectors = []
+                        request_hash = ""
+                    materialization_time = _day0_utc_now()
+                if ensemble_target_dates and not ensemble_ready:
+                    try:
+                        ensemble_vectors, ensemble_request_hash = (
+                            fetch_day0_source_clock_ensemble_vectors(
+                                city,
+                                now=source_decision_time,
+                                timeout_s=timeout_s,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - preserve deterministic sibling
+                        logger.warning(
+                            "DAY0_SOURCE_CLOCK_ENSEMBLE_FETCH_FAILED city=%s exc=%s: %s",
+                            name,
+                            type(exc).__name__,
+                            exc,
+                        )
+                        ensemble_vectors = []
+                        ensemble_request_hash = ""
                     materialization_time = _day0_utc_now()
                     # QUOTA (round 6, 2026-09-06): persist the ENS carrier the moment it
                     # is complete. It used to be persisted only after the deterministic
@@ -3137,7 +3176,7 @@ def maybe_refresh_day0_hourly_vectors(
                     # (Los Angeles / Seattle / San Francisco / Lucknow: zero member rows
                     # ever persisted, 9-17 attempts each). The two carriers are
                     # independent data products; only their fetch shares a pass.
-                    written += _persist_complete_ensemble_bundle(
+                    ensemble_written, ensemble_complete = _persist_complete_ensemble_bundle(
                         name=name,
                         ensemble_vectors=ensemble_vectors,
                         ensemble_request_hash=ensemble_request_hash,
@@ -3146,13 +3185,71 @@ def maybe_refresh_day0_hourly_vectors(
                         materialization_time=materialization_time,
                         persist_lock_blocking=persist_lock_blocking,
                     )
+                    written += ensemble_written
+                    if not ensemble_complete:
+                        ensemble_incomplete = True
+                        ensemble_available_models = tuple(
+                            dict.fromkeys(str(vector.model) for vector in ensemble_vectors)
+                        )
+                        ensemble_missing_models = tuple(
+                            model
+                            for model in day0_source_clock_ensemble_member_models()
+                            if model not in ensemble_available_models
+                        )
+                if deterministic_ready:
+                    if ensemble_incomplete:
+                        mark_incomplete(
+                            refresh_key=refresh_key,
+                            quota_lane=quota_lane,
+                            name=name,
+                            target_dates=ensemble_target_dates,
+                            expected_models=day0_source_clock_ensemble_member_models(),
+                            available_models=ensemble_available_models,
+                            missing_models=ensemble_missing_models,
+                            reason="DAY0_SOURCE_CLOCK_ENSEMBLE_BUNDLE_INCOMPLETE",
+                        )
+                    else:
+                        with _REFRESH_LOCK:
+                            _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+                            _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)
+                    continue
             expected_models = tuple(dict.fromkeys(str(model) for model in models))
             vector_models = tuple(dict.fromkeys(str(vector.model) for vector in vectors))
             missing_models = tuple(
                 model for model in expected_models if model not in vector_models
             )
+            retry_target_dates = (
+                ensemble_target_dates if ensemble_incomplete else target_dates
+            )
+            retry_expected_models = (
+                day0_source_clock_ensemble_member_models()
+                if ensemble_incomplete
+                else expected_models
+            )
+            retry_available_models = (
+                ensemble_available_models if ensemble_incomplete else vector_models
+            )
+            retry_missing_models = (
+                ensemble_missing_models if ensemble_incomplete else missing_models
+            )
+            retry_reason = (
+                "DAY0_SOURCE_CLOCK_ENSEMBLE_BUNDLE_INCOMPLETE"
+                if ensemble_incomplete
+                else "DAY0_HOURLY_BUNDLE_INCOMPLETE"
+            )
             if not vectors or not request_hash:
-                if quota_lane in {"critical", "priority"}:
+                if ensemble_incomplete:
+                    mark_incomplete(
+                        refresh_key=refresh_key,
+                        quota_lane=quota_lane,
+                        name=name,
+                        target_dates=retry_target_dates,
+                        expected_models=retry_expected_models,
+                        available_models=retry_available_models,
+                        missing_models=retry_missing_models,
+                        reason=retry_reason,
+                    )
+                elif quota_lane in {"critical", "priority"}:
                     mark_incomplete(
                         refresh_key=refresh_key,
                         quota_lane=quota_lane,
@@ -3180,11 +3277,11 @@ def maybe_refresh_day0_hourly_vectors(
                     refresh_key=refresh_key,
                     quota_lane=quota_lane,
                     name=name,
-                    target_dates=target_dates,
-                    expected_models=expected_models,
-                    available_models=vector_models,
-                    missing_models=missing_models,
-                    reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
+                    target_dates=retry_target_dates,
+                    expected_models=retry_expected_models,
+                    available_models=retry_available_models,
+                    missing_models=retry_missing_models,
+                    reason=retry_reason,
                 )
                 continue
             trailing_hwm_models = (
@@ -3197,11 +3294,17 @@ def maybe_refresh_day0_hourly_vectors(
                     refresh_key=refresh_key,
                     quota_lane=quota_lane,
                     name=name,
-                    target_dates=target_dates,
-                    expected_models=expected_models,
-                    available_models=vector_models,
-                    missing_models=trailing_hwm_models,
-                    reason="DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED",
+                    target_dates=retry_target_dates,
+                    expected_models=retry_expected_models,
+                    available_models=retry_available_models,
+                    missing_models=(
+                        retry_missing_models if ensemble_incomplete else trailing_hwm_models
+                    ),
+                    reason=(
+                        retry_reason
+                        if ensemble_incomplete
+                        else "DAY0_PROVIDER_RUN_HWM_NOT_CAPTURED"
+                    ),
                 )
                 continue
 
@@ -3223,11 +3326,15 @@ def maybe_refresh_day0_hourly_vectors(
                         refresh_key=refresh_key,
                         quota_lane=quota_lane,
                         name=name,
-                        target_dates=target_dates,
-                        expected_models=expected_models,
-                        available_models=vector_models,
-                        missing_models=(),
-                        reason="DAY0_HOURLY_BUNDLE_REMAINING_WINDOW_INCOMPLETE",
+                        target_dates=retry_target_dates,
+                        expected_models=retry_expected_models,
+                        available_models=retry_available_models,
+                        missing_models=(retry_missing_models if ensemble_incomplete else ()),
+                        reason=(
+                            retry_reason
+                            if ensemble_incomplete
+                            else "DAY0_HOURLY_BUNDLE_REMAINING_WINDOW_INCOMPLETE"
+                        ),
                     )
                     strict_bundles.clear()
                     break
@@ -3262,14 +3369,30 @@ def maybe_refresh_day0_hourly_vectors(
                     refresh_key=refresh_key,
                     quota_lane=quota_lane,
                     name=name,
-                    target_dates=target_dates,
-                    expected_models=expected_models,
-                    available_models=vector_models,
-                    missing_models=(),
-                    reason="DAY0_HOURLY_BUNDLE_PERSIST_READBACK_INCOMPLETE",
+                    target_dates=retry_target_dates,
+                    expected_models=retry_expected_models,
+                    available_models=retry_available_models,
+                    missing_models=(retry_missing_models if ensemble_incomplete else ()),
+                    reason=(
+                        retry_reason
+                        if ensemble_incomplete
+                        else "DAY0_HOURLY_BUNDLE_PERSIST_READBACK_INCOMPLETE"
+                    ),
                 )
                 continue
             written += persisted
+            if ensemble_incomplete:
+                mark_incomplete(
+                    refresh_key=refresh_key,
+                    quota_lane=quota_lane,
+                    name=name,
+                    target_dates=retry_target_dates,
+                    expected_models=retry_expected_models,
+                    available_models=retry_available_models,
+                    missing_models=retry_missing_models,
+                    reason=retry_reason,
+                )
+                continue
             with _REFRESH_LOCK:
                 _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
                 _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)

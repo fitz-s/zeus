@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json as _json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -257,6 +258,616 @@ def _ensemble_member_vector(
         times=times, temps_c=tuple(15.0 for _ in times),
         source_run_meta_json=_json.dumps(meta),
     )
+
+
+def _strict_ensemble_member_vector(
+    city,
+    member: str,
+    run: datetime,
+    available: datetime,
+    decision_time: datetime,
+    fetch_started: datetime,
+    fetch_finished: datetime,
+) -> Day0HourlyVector:
+    vector = _ensemble_member_vector(city, member, run, available, decision_time)
+    meta = _json.loads(vector.source_run_meta_json or "{}")
+    meta.update(
+        fetch_started_at=fetch_started.isoformat(),
+        fetch_finished_at=fetch_finished.isoformat(),
+    )
+    return replace(vector, source_run_meta_json=_json.dumps(meta))
+
+
+def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deterministic hit cannot hide a missing required ENS carrier."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    members = day0.day0_source_clock_ensemble_member_models()
+    ens_vectors = [
+        _strict_ensemble_member_vector(
+            city,
+            member,
+            run,
+            available,
+            decision,
+            decision + timedelta(minutes=1),
+            decision + timedelta(minutes=3),
+        )
+        for member in members
+    ]
+    clock = iter(
+        (
+            decision + timedelta(minutes=4),
+            decision + timedelta(minutes=5),
+            decision + timedelta(minutes=6),
+        )
+    )
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+    )
+    monkeypatch.setattr(
+        day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: True
+    )
+    ens_ready = {"value": False}
+    hwm_probes = {"n": 0}
+    ens_fetches = {"n": 0}
+    persisted = {"n": 0}
+
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: hwm_probes.__setitem__("n", hwm_probes["n"] + 1)
+        or Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(
+        day0,
+        "_current_ensemble_bundle_already_persisted",
+        lambda **_kwargs: ens_ready["value"],
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda **_kwargs: pytest.fail("deterministic payload must not be re-fetched"),
+    )
+
+    def fetch_ens(*_args, **_kwargs):
+        ens_fetches["n"] += 1
+        return ens_vectors, "sha256:ens"
+
+    monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors", fetch_ens)
+
+    def persist(rows, *, endpoint=None, **_kwargs):
+        if endpoint == day0.OPENMETEO_ENSEMBLE_URL:
+            persisted["n"] += len(rows)
+            ens_ready["value"] = True
+        return len(rows)
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+    monkeypatch.setattr(
+        day0,
+        "read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: ens_vectors if persisted["n"] else [],
+    )
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    first = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    second = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+
+    assert first.vectors_written == 51
+    assert second.vectors_written == 0
+    assert ens_fetches["n"] == 1
+    assert persisted["n"] == 51
+    assert hwm_probes["n"] == 2
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+
+
+def test_ens_ready_fetches_only_missing_deterministic_and_release_due_refetches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ENS hit cannot suppress a needed deterministic fetch or release refresh."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    det_fetches = {"n": 0}
+    ens_fetches = {"n": 0}
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+    )
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=decision - timedelta(hours=2),
+            run_availability_time=decision - timedelta(minutes=30),
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: True)
+
+    def fetch_det(*_args, **_kwargs):
+        det_fetches["n"] += 1
+        return [], ""
+
+    monkeypatch.setattr(day0, "fetch_day0_hourly_vectors", fetch_det)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: ens_fetches.__setitem__("n", ens_fetches["n"] + 1)
+        or ([], ""),
+    )
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+    day0._LAST_REFRESH_MONOTONIC.clear()
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    assert stats.cities_attempted == 1
+    assert det_fetches["n"] == 1
+    assert ens_fetches["n"] == 0
+
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_critical_cities=1,
+        provider_run_hwm={
+            "ecmwf_ifs": Day0ProviderRunHwm(
+                model="ecmwf_ifs",
+                run_initialisation_time=decision - timedelta(hours=2),
+                run_availability_time=decision - timedelta(minutes=30),
+            )
+        },
+        release_due_city_dates={(city.name, target_date)},
+        return_stats=True,
+    )
+    assert stats.cities_attempted == 1
+    assert det_fetches["n"] == 2
+    assert ens_fetches["n"] == 0
+
+
+def test_ens_failure_marks_retry_and_does_not_probe_before_retry(monkeypatch) -> None:
+    """ENS strict/readback failure uses the existing bounded retry gate."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    members = day0.day0_source_clock_ensemble_member_models()
+    ens_vectors = [
+        _strict_ensemble_member_vector(
+            city, member, run, available, decision,
+            decision + timedelta(minutes=1), decision + timedelta(minutes=3),
+        )
+        for member in members
+    ]
+    counts = {"probe": 0, "fetch": 0}
+    monotonic = {"now": 100.0}
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0.time, "monotonic", lambda: monotonic["now"])
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,))
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: counts.__setitem__("probe", counts["probe"] + 1)
+        or Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda **_kwargs: pytest.fail("deterministic payload must not be fetched"),
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("fetch", counts["fetch"] + 1)
+        or (ens_vectors, "sha256:ens"),
+    )
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", lambda *_args, **_kwargs: 51)
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    first = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    second = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    assert first.incomplete_expected_bundles == 1
+    assert second.cities_skipped_throttle == 1
+    assert counts == {"probe": 1, "fetch": 1}
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC["Paris|2026-09-10"] > 100.0
+
+
+def test_complete_ens_persists_when_deterministic_fetch_fails(monkeypatch) -> None:
+    """Both missing carriers retain the complete ENS physical writes and retry debt."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    members = day0.day0_source_clock_ensemble_member_models()
+    ens_vectors = [
+        _strict_ensemble_member_vector(
+            city, member, run, available, decision,
+            decision + timedelta(minutes=1), decision + timedelta(minutes=3),
+        )
+        for member in members
+    ]
+    counts = {"det": 0, "ens": 0, "persisted": 0}
+    clock = iter(
+        (
+            decision + timedelta(minutes=4),
+            decision + timedelta(minutes=5),
+            decision + timedelta(minutes=6),
+        )
+    )
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,))
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("det", counts["det"] + 1)
+        or ([], ""),
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("ens", counts["ens"] + 1)
+        or (ens_vectors, "sha256:ens"),
+    )
+    monkeypatch.setattr(
+        day0,
+        "persist_day0_hourly_vectors",
+        lambda rows, **_kwargs: counts.__setitem__("persisted", counts["persisted"] + len(rows))
+        or len(rows),
+    )
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: ens_vectors)
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    assert counts == {"det": 1, "ens": 1, "persisted": 51}
+    assert stats.incomplete_expected_bundles == 1
+    assert stats.unavailable_bundles[0].reason == "DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE"
+
+
+def test_ens_failure_keeps_deterministic_write_and_next_due_fetches_only_ens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ENS debt must not discard a complete deterministic carrier or re-fetch it."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    det_model = "ecmwf_ifs"
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    det_vector = replace(
+        _det_vector(city, det_model, decision),
+        source_run_meta_json=_json.dumps(
+            {
+                "fetch_started_at": (decision + timedelta(minutes=1)).isoformat(),
+                "fetch_finished_at": (decision + timedelta(minutes=3)).isoformat(),
+            }
+        ),
+    )
+    members = day0.day0_source_clock_ensemble_member_models()
+    ens_vectors = [
+        _strict_ensemble_member_vector(
+            city, member, run, available, decision,
+            decision + timedelta(minutes=1), decision + timedelta(minutes=3),
+        )
+        for member in members
+    ]
+    clock = iter(
+        tuple(decision + timedelta(minutes=offset) for offset in (4, 5, 6, 7, 8, 9))
+    )
+    monotonic = {"now": 100.0}
+    counts = {"det_fetch": 0, "ens_fetch": 0, "ens_persist": 0, "det_persist": 0}
+    det_ready = {"value": False}
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    monkeypatch.setattr(day0.time, "monotonic", lambda: monotonic["now"])
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: [det_model])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+    )
+    monkeypatch.setattr(
+        day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: det_ready["value"]
+    )
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("det_fetch", counts["det_fetch"] + 1)
+        or ([det_vector], "sha256:det"),
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("ens_fetch", counts["ens_fetch"] + 1)
+        or (ens_vectors, "sha256:ens"),
+    )
+
+    def persist(rows, *, endpoint=None, **_kwargs):
+        if endpoint == day0.OPENMETEO_ENSEMBLE_URL:
+            counts["ens_persist"] += len(rows)
+        else:
+            counts["det_persist"] += len(rows)
+            if counts["det_persist"] == 2:
+                det_ready["value"] = True
+        return len(rows)
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+
+    def readback(**kwargs):
+        expected = tuple(kwargs.get("expected_models") or ())
+        if set(expected) == set(members):
+            return ens_vectors if counts["ens_persist"] >= 102 else []
+        if expected == (det_model,):
+            return [det_vector]
+        return []
+
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", readback)
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    first = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+    retry_at = day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC["Paris|2026-09-10"]
+    monotonic["now"] = retry_at
+    second = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+
+    assert first.vectors_written == 53
+    assert first.incomplete_expected_bundles == 1
+    assert second.vectors_written == 51
+    assert counts == {
+        "det_fetch": 1,
+        "ens_fetch": 2,
+        "ens_persist": 102,
+        "det_persist": 2,
+    }
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+
+
+def test_ensemble_persists_when_deterministic_fetch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deterministic transport exception cannot discard a complete ENS carrier."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    members = day0.day0_source_clock_ensemble_member_models()
+    ens_vectors = [
+        _strict_ensemble_member_vector(
+            city, member, run, available, decision,
+            decision + timedelta(minutes=1), decision + timedelta(minutes=3),
+        )
+        for member in members
+    ]
+    clock = iter(
+        tuple(decision + timedelta(minutes=offset) for offset in (4, 5, 6))
+    )
+    counts = {"det": 0, "ens": 0, "persisted": 0}
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+    )
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: False)
+
+    def fetch_det(*_args, **_kwargs):
+        counts["det"] += 1
+        raise RuntimeError("deterministic transport failure")
+
+    monkeypatch.setattr(day0, "fetch_day0_hourly_vectors", fetch_det)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("ens", counts["ens"] + 1)
+        or (ens_vectors, "sha256:ens"),
+    )
+    monkeypatch.setattr(
+        day0,
+        "persist_day0_hourly_vectors",
+        lambda rows, **_kwargs: counts.__setitem__("persisted", counts["persisted"] + len(rows))
+        or len(rows),
+    )
+    monkeypatch.setattr(
+        day0,
+        "read_freshest_day0_hourly_vectors",
+        lambda **kwargs: ens_vectors
+        if set(kwargs.get("expected_models") or ()) == set(members)
+        else [],
+    )
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+
+    assert counts == {"det": 1, "ens": 1, "persisted": 51}
+    assert stats.vectors_written == 51
+    assert stats.incomplete_expected_bundles == 1
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+
+def test_deterministic_persists_when_ensemble_fetch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ENS transport exception cannot discard a complete deterministic carrier."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.8, lon=2.3)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    det_model = "ecmwf_ifs"
+    det_vector = replace(
+        _det_vector(city, det_model, decision),
+        source_run_meta_json=_json.dumps(
+            {
+                "fetch_started_at": (decision + timedelta(minutes=1)).isoformat(),
+                "fetch_finished_at": (decision + timedelta(minutes=3)).isoformat(),
+            }
+        ),
+    )
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(minutes=30)
+    clock = iter(
+        tuple(decision + timedelta(minutes=offset) for offset in (4, 5, 6))
+    )
+    counts = {"det": 0, "ens": 0, "det_persisted": 0}
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: next(clock))
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: [det_model])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+    )
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(day0, "_current_ensemble_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda *_args, **_kwargs: counts.__setitem__("det", counts["det"] + 1)
+        or ([det_vector], "sha256:det"),
+    )
+
+    def fetch_ens(*_args, **_kwargs):
+        counts["ens"] += 1
+        raise RuntimeError("ensemble transport failure")
+
+    monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors", fetch_ens)
+
+    def persist(rows, *, endpoint=None, **_kwargs):
+        if endpoint != day0.OPENMETEO_ENSEMBLE_URL:
+            counts["det_persisted"] += len(rows)
+        return len(rows)
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+    monkeypatch.setattr(
+        day0,
+        "read_freshest_day0_hourly_vectors",
+        lambda **kwargs: [det_vector]
+        if tuple(kwargs.get("expected_models") or ()) == (det_model,)
+        else [],
+    )
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        return_stats=True,
+    )
+
+    assert counts == {"det": 1, "ens": 1, "det_persisted": 2}
+    assert stats.vectors_written == 2
+    assert stats.incomplete_expected_bundles == 1
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
 
 def test_producer_uses_completion_clock_for_deterministic_strict_materialization(
