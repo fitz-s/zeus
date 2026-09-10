@@ -37,6 +37,8 @@ from src.events.reactor import (
     OpportunityEventReactor,
     _is_explicitly_transient_money_path_reason,
     _is_executable_snapshot_refresh_reason,
+    _is_day0_entry_source_clock_reason,
+    _is_day0_hourly_refresh_reason,
     _is_transient_money_path_reason,
     _runtime_authority_retry_delay_seconds,
     _snapshot_block_retry_delay_seconds,
@@ -75,6 +77,13 @@ def test_live_health_entry_authority_is_transient():
     assert _is_transient_money_path_reason(
         "live_health_entry_authority:LIVE_SIDECAR_BOOT_BLOCKED"
     )
+
+
+def test_entry_source_clock_compound_reason_uses_hourly_transient_lane():
+    reason = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK"
+    assert _is_transient_money_path_reason(reason)
+    assert _is_day0_hourly_refresh_reason(reason)
+    assert _is_day0_entry_source_clock_reason(reason)
 
 
 def test_venue_rejected_400_is_submit_race_transient():
@@ -935,6 +944,48 @@ def test_day0_remaining_day_no_submit_queues_hourly_refresh_not_snapshot():
 
 
 # ---------------------------------------------------------------------------
+def test_day0_entry_source_clock_reason_marks_entry_purpose_for_hourly_drain():
+    conn, store = _store()
+    event = _event("snap-day0-entry-source-clock")
+    store.insert_or_ignore(event)
+    purpose_flags: list[bool] = []
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
+        )
+
+    def _hourly_refresh(*, city, target_date, metric, entry_source_clock=False):
+        purpose_flags.append(entry_source_clock)
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        day0_hourly_refresher=_hourly_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.day0_hourly_refreshes == 1
+    assert purpose_flags == [True]
+    assert _status(conn, event.event_id) == "pending"
+
+
 # RiskGuard-block requeue antibodies (2026-06-12 riskguard-storm incident):
 # transient risk_state writer gaps (daemon-restart boot windows, the
 # chain_confirmed_zero poison-row crash, dependency_db_locked) fail the gate

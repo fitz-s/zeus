@@ -440,6 +440,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
 _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
     {
         "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
         "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
         "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
@@ -18472,12 +18473,15 @@ def _build_event_bound_no_submit_receipt_core(
         )
     except ValueError as exc:
         missing_reason = str(exc)
-        if missing_reason == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
+        if missing_reason in {
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
+        }:
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
-                reason="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+                reason=missing_reason,
                 city=family.city,
                 target_date=family.target_date,
                 metric=family.metric,
@@ -46311,7 +46315,12 @@ def _day0_direct_entry_source_clock_carrier(
         conn=forecast_conn,
     )
     if len(vectors) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
-        return None
+        # SCOPE: this exact ENTRY city/date/metric. DRAIN: existing bounded
+        # hourly priority/recovery refresh. RESET: the next strict 51-member
+        # readback restores the carrier; no generic readiness is relabeled.
+        raise ValueError(
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK"
+        )
     witness = _day0_current_vector_witness(
         conn=forecast_conn,
         vectors=vectors,

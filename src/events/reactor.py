@@ -1466,6 +1466,9 @@ class OpportunityEventReactor:
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
         self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
+        self._pending_day0_entry_source_clock_refreshes: set[
+            tuple[str, str, str]
+        ] = set()
         self._claim_contention_seen = False
         # SCOPE: only an exact event_id + (claimed_at, attempt_count) generation
         # whose receipt is proven NO_SUBMIT. DRAIN: the next reactor wake under
@@ -1547,6 +1550,9 @@ class OpportunityEventReactor:
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
         self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
+        self._pending_day0_entry_source_clock_refreshes: set[
+            tuple[str, str, str]
+        ] = set()
         self._claim_contention_seen = False
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
@@ -3110,7 +3116,11 @@ class OpportunityEventReactor:
         return (city, target_date, metric)
 
     def _record_substrate_block(
-        self, event: OpportunityEvent, *, kind: str
+        self,
+        event: OpportunityEvent,
+        *,
+        kind: str,
+        entry_source_clock: bool = False,
     ) -> None:
         """ALWAYS-DECIDABLE invariant (2026-06-12): record that THIS event was blocked on a
         REFRESHABLE substrate this cycle so the post-unit-of-work drain refreshes that substrate.
@@ -3134,6 +3144,8 @@ class OpportunityEventReactor:
             return
         if family not in bucket:
             bucket.append(family)
+        if kind == "day0_hourly" and entry_source_clock:
+            self._pending_day0_entry_source_clock_refreshes.add(family)
 
     def _drain_substrate_refreshes(
         self,
@@ -3196,9 +3208,28 @@ class OpportunityEventReactor:
         # bucket.
         drain_budget = _drain_budget_seconds()
         drain_deadline = (time.monotonic() + drain_budget) if drain_budget is not None else None
+        day0_refresher = self._day0_hourly_refresher
+        if day0_refresher is not None:
+            def refresh_day0_hourly(*, city, target_date, metric):
+                family = (city, target_date, metric)
+                if family in self._pending_day0_entry_source_clock_refreshes:
+                    return day0_refresher(
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        entry_source_clock=True,
+                    )
+                return day0_refresher(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+        else:
+            refresh_day0_hourly = None
+
         self._drain_one_bucket(
             self._pending_day0_hourly_refreshes,
-            refresher=self._day0_hourly_refresher,
+            refresher=refresh_day0_hourly,
             last_at=self._family_day0_hourly_last_at,
             counter_attr="day0_hourly_refreshes",
             label="day0-hourly",
@@ -3206,6 +3237,9 @@ class OpportunityEventReactor:
             held=held,
             deadline=drain_deadline,
             cancelled=cancelled,
+        )
+        self._pending_day0_entry_source_clock_refreshes.intersection_update(
+            self._pending_day0_hourly_refreshes
         )
         self._drain_one_bucket(
             self._pending_snapshot_refreshes,
@@ -4134,7 +4168,11 @@ class OpportunityEventReactor:
                 is None
             ):
                 if _is_day0_hourly_refresh_reason(reason):
-                    self._record_substrate_block(event, kind="day0_hourly")
+                    self._record_substrate_block(
+                        event,
+                        kind="day0_hourly",
+                        entry_source_clock=_is_day0_entry_source_clock_reason(reason),
+                    )
                 elif _is_executable_snapshot_refresh_reason(reason):
                     self._record_substrate_block(event, kind="snapshot")
             # Transient: the forecast source was re-ingested after this cycle's
@@ -5384,6 +5422,18 @@ def _is_day0_hourly_refresh_reason(reason: str | None) -> bool:
         return False
     segments = [seg.strip() for seg in str(reason).split(":")]
     return "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE" in segments
+
+
+def _is_day0_entry_source_clock_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    segments = {
+        segment.strip() for segment in str(reason).split(":")
+    }
+    return {
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        "ENTRY_SOURCE_CLOCK",
+    }.issubset(segments)
 
 
 def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
@@ -11928,7 +11978,14 @@ def _edli_reactor_day0_hourly_refresher(
     if held_family_provider is None:
         held_family_provider = _edli_reactor_held_family_provider()
 
-    def _refresh(*, city, target_date, metric, **_ignored):
+    def _refresh(
+        *,
+        city,
+        target_date,
+        metric,
+        entry_source_clock: bool = False,
+        **_ignored,
+    ):
         family = (
             str(city or "").strip(),
             str(target_date or "").strip(),
@@ -11965,6 +12022,14 @@ def _edli_reactor_day0_hourly_refresher(
                         family[2],
                         exc,
                     )
+            if entry_source_clock or not held:
+                quota_critical_cities = 0
+                quota_priority_cities = 1
+                allow_priority_recovery = True
+            else:
+                quota_critical_cities = 1
+                quota_priority_cities = 0
+                allow_priority_recovery = False
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
                 decision_time=datetime.now(timezone.utc),
@@ -11976,7 +12041,9 @@ def _edli_reactor_day0_hourly_refresher(
                 # final Open-Meteo tranche. DRAIN: this one targeted complete
                 # bundle attempt. RESET: the next reactor drain re-reads held
                 # exposure, so closure immediately removes critical authority.
-                quota_critical_cities=int(held),
+                quota_critical_cities=quota_critical_cities,
+                quota_priority_cities=quota_priority_cities,
+                allow_priority_recovery=allow_priority_recovery,
                 persist_lock_blocking=False,
                 return_stats=True,
             )

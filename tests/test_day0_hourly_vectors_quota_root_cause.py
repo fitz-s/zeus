@@ -517,7 +517,10 @@ def test_ens_failure_marks_retry_and_does_not_probe_before_retry(monkeypatch) ->
     assert first.incomplete_expected_bundles == 1
     assert second.cities_skipped_throttle == 1
     assert counts == {"probe": 1, "fetch": 1}
-    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC["Paris|2026-09-10"] > 100.0
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[
+        "Paris|2026-09-10|ens=2026-09-10"
+    ] > 100.0
+    assert "Paris|2026-09-10" not in day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
 
 def test_complete_ens_persists_when_deterministic_fetch_fails(monkeypatch) -> None:
@@ -688,8 +691,26 @@ def test_ens_failure_keeps_deterministic_write_and_next_due_fetches_only_ens(
         [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
         return_stats=True,
     )
-    retry_at = day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC["Paris|2026-09-10"]
+    retry_at = day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[
+        "Paris|2026-09-10|ens=2026-09-10"
+    ]
+    retry_streak = day0._INCOMPLETE_RETRY_STREAK[
+        "Paris|2026-09-10|ens=2026-09-10"
+    ]
     monotonic["now"] = retry_at
+    critical = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0,
+        quota_critical_cities=1, quota_priority_cities=0,
+        return_stats=True,
+    )
+    assert critical.vectors_written == 0
+    assert counts == {"det_fetch": 1, "ens_fetch": 1, "ens_persist": 51, "det_persist": 2}
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[
+        "Paris|2026-09-10|ens=2026-09-10"
+    ] == retry_at
+    assert day0._INCOMPLETE_RETRY_STREAK[
+        "Paris|2026-09-10|ens=2026-09-10"
+    ] == retry_streak
     second = day0.maybe_refresh_day0_hourly_vectors(
         [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
         return_stats=True,

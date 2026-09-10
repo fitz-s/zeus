@@ -3036,6 +3036,13 @@ def maybe_refresh_day0_hourly_vectors(
                 if quota_lane in {"priority", "recovery"}
                 else ()
             )
+            if ensemble_target_dates:
+                # ENS-required entry refreshes own a distinct retry/throttle
+                # identity so deterministic-only completion cannot clear or
+                # defer their carrier debt.
+                refresh_key = (
+                    f"{refresh_key}|ens={','.join(ensemble_target_dates)}"
+                )
             ensemble_window_starts = {
                 target_date: (
                     window_starts.get(target_date)

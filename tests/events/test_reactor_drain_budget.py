@@ -314,6 +314,53 @@ def test_day0_hourly_drain_precedes_snapshot_under_shared_budget(monkeypatch):
     assert res.snapshot_refreshes >= 1
 
 
+def test_entry_source_clock_purpose_passes_flag_and_clears_after_attempt():
+    conn, store = _store()
+    observed: list[bool] = []
+
+    def _day0_refresher(*, city, target_date, metric, entry_source_clock=False):
+        observed.append(entry_source_clock)
+        return True
+
+    reactor = _reactor(store, day0_hourly_refresher=_day0_refresher)
+    family = ("Jinan", "2026-07-02", "low")
+    reactor._pending_day0_hourly_refreshes = [family]
+    reactor._pending_day0_entry_source_clock_refreshes = {family}
+
+    res = ReactorResult()
+    reactor._drain_substrate_refreshes(result=res)
+
+    assert observed == [True]
+    assert reactor._pending_day0_hourly_refreshes == []
+    assert reactor._pending_day0_entry_source_clock_refreshes == set()
+
+
+def test_entry_source_clock_purpose_retains_budget_unreached_family(monkeypatch):
+    conn, store = _store()
+    monkeypatch.setenv("ZEUS_REACTOR_DRAIN_BUDGET_SECONDS", "1")
+    clock = {"t": 0.0}
+    monkeypatch.setattr("src.events.reactor.time.monotonic", lambda: clock["t"])
+    observed: list[tuple[str, bool]] = []
+
+    def _day0_refresher(*, city, target_date, metric, entry_source_clock=False):
+        observed.append((city, entry_source_clock))
+        clock["t"] += 2.0
+        return True
+
+    reactor = _reactor(store, day0_hourly_refresher=_day0_refresher)
+    first = ("Jinan", "2026-07-02", "low")
+    second = ("Paris", "2026-07-02", "low")
+    reactor._pending_day0_hourly_refreshes = [first, second]
+    reactor._pending_day0_entry_source_clock_refreshes = {first, second}
+
+    res = ReactorResult()
+    reactor._drain_substrate_refreshes(result=res)
+
+    assert observed == [("Jinan", True)]
+    assert reactor._pending_day0_hourly_refreshes == [second]
+    assert reactor._pending_day0_entry_source_clock_refreshes == {second}
+
+
 def test_failsoft_preserved_under_budget_one_warning_no_raise(monkeypatch, caplog):
     """FAIL-SOFT preserved with the budget active: a refresher that RAISES logs ONE warning and the
     drain continues (never raises); a failed refresh still consumes its budget slot (the debounce

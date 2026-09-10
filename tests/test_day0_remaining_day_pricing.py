@@ -4008,6 +4008,62 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
     ] == run.isoformat()
 
 
+def test_direct_entry_carrier_missing_strict_members_has_distinct_refresh_reason(
+    monkeypatch,
+):
+    import src.data.day0_hourly_vectors as hv
+    import src.engine.event_reactor_adapter as era
+
+    decision_time = datetime(2026, 9, 1, 2, 30, tzinfo=UTC)
+    family = SimpleNamespace(city="Jinan", target_date="2026-09-01", metric="low")
+    observed_at = decision_time - timedelta(minutes=10)
+    monkeypatch.setattr(
+        era,
+        "_latest_day0_current_temperature_native",
+        lambda **_kwargs: (27.0, observed_at, "wu_icao_history"),
+    )
+    monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+
+    with pytest.raises(
+        ValueError,
+        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
+    ):
+        era._day0_direct_entry_source_clock_carrier(
+            forecast_conn=object(),
+            world_conn=object(),
+            family=family,
+            decision_time=decision_time,
+        )
+
+
+def test_entry_source_clock_reason_is_unavailable_but_not_cacheable():
+    import src.engine.event_reactor_adapter as era
+
+    prefix = "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:FamilyAuthorityUnavailable:"
+    ordinary = era.EventSubmissionReceipt(
+        False,
+        "event-ordinary",
+        reason=f"{prefix}DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+    )
+    generic = era.EventSubmissionReceipt(
+        False,
+        "event-generic",
+        reason=f"{prefix}GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
+    )
+    compound = era.EventSubmissionReceipt(
+        False,
+        "event-entry-clock",
+        reason=f"{prefix}DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
+    )
+
+    assert era._cacheable_global_probability_ineligible(ordinary)
+    assert not era._cacheable_global_probability_ineligible(generic)
+    assert not era._cacheable_global_probability_ineligible(compound)
+    assert era._is_global_probability_family_unavailable(
+        ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK")
+    )
+
+
 def test_direct_entry_carrier_binds_source_clock_cap_without_readiness():
     from src.engine.event_reactor_adapter import (
         _direct_day0_source_clock_bound_identity,
@@ -9263,6 +9319,8 @@ class TestRequestHashProvenance:
         assert captured["interval_s"] == 3600.0
         assert captured["max_cities"] == 1
         assert captured["quota_critical_cities"] == 0
+        assert captured["quota_priority_cities"] == 1
+        assert captured["allow_priority_recovery"] is True
         assert captured["persist_lock_blocking"] is False
 
     def test_reactor_day0_hourly_refresher_uses_critical_quota_for_held_family(
@@ -9295,6 +9353,42 @@ class TestRequestHashProvenance:
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
         assert captured["quota_critical_cities"] == 1
+        assert captured["quota_priority_cities"] == 0
+        assert captured["allow_priority_recovery"] is False
+
+    def test_reactor_entry_source_clock_uses_priority_even_when_city_is_held(
+        self, monkeypatch
+    ):
+        import src.config as config
+        import src.data.day0_hourly_vectors as hv
+        from src.events import reactor
+
+        captured = {}
+
+        def fake_refresh(cities, **kwargs):
+            captured.update(kwargs)
+            assert [city.name for city in cities] == ["Paris"]
+            return SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=1,
+                incomplete_expected_bundles=1,
+            )
+
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", fake_refresh)
+        refresh = reactor._edli_reactor_day0_hourly_refresher(
+            held_family_provider=lambda: {("Paris", "2026-06-25", "high")},
+        )
+
+        assert refresh(
+            city="Paris",
+            target_date="2026-06-25",
+            metric="low",
+            entry_source_clock=True,
+        ) is False
+        assert captured["quota_critical_cities"] == 0
+        assert captured["quota_priority_cities"] == 1
+        assert captured["allow_priority_recovery"] is True
 
     def test_day0_hourly_priority_source_puts_held_families_before_missing_authority(
         self, monkeypatch
