@@ -2106,7 +2106,7 @@ def test_global_buy_size_uses_mean_not_false_edge_sample_rate():
     assert decision.expected_terminal_wealth.probability_basis == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
-    assert decision.shares == Decimal("25")
+    assert decision.shares == Decimal("22.80")
 
 
 def test_false_edge_sample_rate_does_not_remove_buy_before_global_ranking():
@@ -2522,6 +2522,133 @@ def test_statistical_taker_buy_requires_precliff_liquidation_capacity(bid_price)
     assert decision.rejection_reasons[candidate.candidate_id] == (
         "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
     )
+
+
+def test_global_buy_precliff_cap_uses_the_smaller_bid_or_ask_depth():
+    candidate = _global_candidate(
+        candidate_id="precliff-ask-depth-cap",
+        family="precliff-ask-depth-cap-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.35", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("1000000")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="60")
+
+    assert decision.candidate is candidate
+    assert decision.shares <= Decimal("100")
+    assert decision.cost_usd <= Decimal("35")
+
+
+def test_global_buy_precliff_cap_does_not_exceed_bid_when_ask_is_deeper():
+    candidate = _global_candidate(
+        candidate_id="precliff-bid-depth-cap",
+        family="precliff-bid-depth-cap-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.35", "1000000"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("60")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="60")
+
+    assert decision.candidate is candidate
+    assert decision.shares <= Decimal("60")
+    assert decision.cost_usd <= Decimal("21")
+
+
+def test_global_buy_precliff_cap_is_symmetric_when_bid_and_ask_depth_match():
+    candidate = _global_candidate(
+        candidate_id="precliff-equal-depth-cap",
+        family="precliff-equal-depth-cap-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.35", "60"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("60")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="60")
+
+    assert decision.candidate is candidate
+    assert decision.shares <= Decimal("60")
+    assert decision.cost_usd <= Decimal("21")
+
+
+@pytest.mark.parametrize(
+    ("ask_size", "expected_candidate"),
+    (("10.009", True), ("4.999", False)),
+)
+def test_global_buy_precliff_cap_rounds_ask_depth_down_before_minimum_lot(
+    ask_size, expected_candidate
+):
+    candidate = _global_candidate(
+        candidate_id=f"precliff-fractional-depth-{ask_size}",
+        family=f"precliff-fractional-depth-family-{ask_size}",
+        side="YES",
+        q=0.80,
+        levels=(("0.35", ask_size),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="60")
+
+    if expected_candidate:
+        assert decision.candidate is candidate
+        assert decision.shares <= Decimal("10.00")
+    else:
+        assert decision.candidate is None
+        assert decision.rejection_reasons[candidate.candidate_id] == (
+            "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+        )
+
+
+def test_global_buy_precliff_cap_prices_the_full_fee_aware_ask_ladder():
+    candidate = _global_candidate(
+        candidate_id="precliff-fee-aware-depth",
+        family="precliff-fee-aware-depth-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.35", "3"), ("0.36", "7")),
+        fee="0.10",
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="60")
+
+    assert decision.candidate is candidate
+    assert decision.shares <= Decimal("10")
+    assert decision.cost_usd <= Decimal("3.90")
 
 
 def test_jinan_statistical_buy_with_floor_bid_has_no_executable_unwind():

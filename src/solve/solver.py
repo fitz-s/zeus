@@ -7463,8 +7463,16 @@ def select_global_single_order(
             liquidation_capacity = current_precliff_liquidation_capacity(
                 candidate.native_bid_levels
             )
+            executable_ask_depth = sum(
+                (
+                    Decimal(level.size)
+                    for level in candidate.economic_cost_curve.levels
+                    if Decimal(level.size).is_finite() and Decimal(level.size) > 0
+                ),
+                Decimal("0"),
+            )
             liquidation_cap_shares = (
-                liquidation_capacity / _SIZE_QUANTUM
+                min(liquidation_capacity, executable_ask_depth) / _SIZE_QUANTUM
             ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
             liquidation_min_shares = _single_order_min_marketable_shares(
                 candidate.economic_cost_curve
