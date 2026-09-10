@@ -2770,6 +2770,7 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
     """Count canonical SELL commands still able to require venue recovery."""
 
     from src.execution.command_bus import TERMINAL_STATES
+    from src.execution.exit_safety import _terminal_partial_command_proven
 
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
@@ -2780,16 +2781,22 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
             {state.value for state in TERMINAL_STATES} | {"CANCELED", "FAILED"}
         )
         placeholders = ", ".join("?" for _ in terminal_states)
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT COUNT(*)
+            SELECT command_id, UPPER(COALESCE(state, ''))
               FROM venue_commands
              WHERE UPPER(COALESCE(side, '')) = 'SELL'
                AND UPPER(COALESCE(state, '')) NOT IN ({placeholders})
+             ORDER BY command_id
             """,
             tuple(terminal_states),
-        ).fetchone()
-        return int(row[0] or 0)
+        ).fetchall()
+        return sum(
+            1
+            for command_id, state in rows
+            if state != "PARTIAL"
+            or not _terminal_partial_command_proven(conn, str(command_id))
+        )
     except sqlite3.Error as exc:
         raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE") from exc
     finally:

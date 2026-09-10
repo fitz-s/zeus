@@ -4136,6 +4136,87 @@ def _init_paused_entry_park_authority(
     return world, trade
 
 
+def _add_terminal_partial_proof_schema(trade: sqlite3.Connection) -> None:
+    """Add the canonical rows needed by the shared partial-command proof."""
+
+    trade.executescript(
+        """
+        ALTER TABLE venue_commands ADD COLUMN last_event_id TEXT;
+        ALTER TABLE venue_commands ADD COLUMN venue_order_id TEXT;
+        ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT;
+        ALTER TABLE venue_commands ADD COLUMN size TEXT;
+        CREATE TABLE venue_command_events (
+            event_id TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            order_type TEXT NOT NULL,
+            post_only INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL,
+            remaining_size TEXT,
+            matched_size TEXT
+        );
+        """
+    )
+
+
+def _insert_partial_sell_command(
+    trade: sqlite3.Connection,
+    *,
+    command_id: str = "sell-partial",
+    remaining_size: str | None = "0",
+    include_proof: bool = True,
+) -> None:
+    """Insert a PARTIAL SELL and optionally its complete terminal FAK proof."""
+
+    event_id = f"event-{command_id}"
+    order_id = f"order-{command_id}"
+    envelope_id = f"envelope-{command_id}"
+    trade.execute(
+        """
+        INSERT INTO venue_commands(
+            command_id, side, state, last_event_id, venue_order_id,
+            envelope_id, size
+        ) VALUES (?, 'SELL', 'PARTIAL', ?, ?, ?, '6')
+        """,
+        (command_id, event_id, order_id, envelope_id),
+    )
+    if not include_proof:
+        return
+    trade.execute(
+        "INSERT INTO venue_command_events VALUES (?, ?)",
+        (
+            event_id,
+            json.dumps(
+                {
+                    "reason": "terminal_partial_order_fact_corrected",
+                    "proof_class": "terminal_partial_order_fact",
+                    "command_id": command_id,
+                }
+            ),
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?, 'FAK', 0)",
+        (envelope_id,),
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_order_facts(
+            command_id, venue_order_id, local_sequence, remaining_size,
+            matched_size
+        ) VALUES (?, ?, 1, ?, '2')
+        """,
+        (command_id, order_id, remaining_size),
+    )
+
+
 def _insert_claimable_edli_entry_backlog(
     conn: sqlite3.Connection,
     *,
@@ -4458,6 +4539,67 @@ def test_deploy_live_paused_entry_backlog_rejects_nonterminal_sell_debt(
 
     assert ok is False
     assert "expected_parked=nonterminal_sell_commands=1" in detail
+
+
+@pytest.mark.parametrize(
+    ("remaining_size", "include_proof", "expected_count"),
+    (("0", True, 0), ("1", True, 1), ("0", False, 1)),
+)
+def test_deploy_live_nonterminal_sell_count_requires_terminal_fak_proof(
+    tmp_path, remaining_size, include_proof, expected_count
+):
+    dl = _load(
+        f"deploy_live_partial_sell_count_{remaining_size}_{include_proof}",
+        "deploy_live.py",
+    )
+    trade_db = tmp_path / "zeus_trades.db"
+    trade = sqlite3.connect(trade_db)
+    trade.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            side TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        """
+    )
+    _add_terminal_partial_proof_schema(trade)
+    _insert_partial_sell_command(
+        trade,
+        remaining_size=remaining_size,
+        include_proof=include_proof,
+    )
+    trade.commit()
+    trade.close()
+
+    assert dl._nonterminal_sell_command_count(trade_db) == expected_count
+
+
+def test_deploy_live_post_start_parked_count_ignores_proven_terminal_fak_partial(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_post_start_terminal_fak_partial", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _add_terminal_partial_proof_schema(trade)
+    _insert_claimable_edli_entry_backlog(world)
+    _insert_partial_sell_command(trade)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start EDLI queue expected parked" in detail
+    assert "nonterminal_sell_commands=0" in detail
 
 
 @pytest.mark.parametrize("phase", ("pending_entry", "active", "day0_window", "pending_exit"))
