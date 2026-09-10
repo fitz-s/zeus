@@ -5028,11 +5028,9 @@ def plan_family_joint_buy_targets(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
         )
-    mean_q = np.mean(
-        np.asarray(probability_witness.yes_q_samples, dtype=np.float64),
-        axis=0,
-        keepdims=True,
-    )
+    mean_q = np.asarray(
+        probability_witness.yes_point_q, dtype=np.float64
+    )[None, :]
     weights = np.ones(1, dtype=np.float64)
     try:
         direct, _u, _iterations = _ru_cvar_optimum(
@@ -6953,6 +6951,7 @@ def select_global_single_order(
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
+    buy_corrections: dict[str, PayoffQCorrection | None] = {}
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
@@ -7550,6 +7549,7 @@ def select_global_single_order(
             raw_q=payoff_probability_mean,
             witness=probability_witness,
         )
+        buy_corrections[candidate.candidate_id] = correction
         if correction is not None:
             payoff_probability_mean = correction.corrected_q
         score = _score_global_single_order_buy_expected(
@@ -7675,6 +7675,99 @@ def select_global_single_order(
             witness = probability_witnesses.get(family_key)
             if not isinstance(witness, JointOutcomeProbabilityWitness):
                 continue
+            if any(
+                buy_corrections.get(candidate.candidate_id) is not None
+                for candidate in family_candidates
+            ):
+                # Per-claim calibrated probabilities are not a MECE joint law.
+                # Keep their standalone Kelly targets and the existing family
+                # cash budget; a raw joint solve cannot overwrite either.
+                family_ids = {c.candidate_id for c in family_candidates}
+                standalone_scores = {
+                    score.candidate.candidate_id: score
+                    for score in scored
+                    if score.candidate is not None
+                    and score.candidate.candidate_id in family_ids
+                }
+                scored = [
+                    score for score in scored
+                    if score.candidate is None
+                    or score.candidate.candidate_id not in family_ids
+                ]
+                try:
+                    family_endowment = family_portfolio_endowment_resolver(family_key)
+                    if (
+                        family_endowment.family_key != family_key
+                        or family_endowment.ledger_snapshot_id
+                        != wealth_witness.ledger_snapshot_id
+                        or tuple(dict(family_endowment.payout_by_bin_usd))
+                        != witness.bin_ids
+                    ):
+                        raise ValueError("family endowment authority mismatch")
+                    remaining_budget = (
+                        multiplier * Decimal(family_endowment.portfolio_capital_usd)
+                        - Decimal(family_endowment.committed_capital_usd)
+                    )
+                except Exception:  # noqa: BLE001 - scope/drain/reset match the joint family path
+                    rejections.update({
+                        candidate_id: "FAMILY_JOINT_AUTHORITY_UNAVAILABLE"
+                        for candidate_id in family_ids
+                    })
+                    continue
+                if remaining_budget <= 0:
+                    rejections.update({
+                        candidate_id: "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
+                        for candidate_id in family_ids
+                    })
+                    continue
+                for candidate in positive_family_candidates:
+                    candidate_id = candidate.candidate_id
+                    existing = standalone_scores.get(candidate_id)
+                    if existing is not None and existing.max_spend_usd <= min(
+                        remaining_budget, family_endowment.spendable_cash_usd,
+                    ):
+                        scored.append(existing)
+                        continue
+                    endowment = buy_endowments[candidate_id]
+                    correction = buy_corrections[candidate_id]
+                    point_q = family_payoff_point_q(
+                        witness, bin_id=candidate.bin_id, side=candidate.side,
+                    )
+                    assert point_q is not None
+                    score = _score_global_single_order_buy_expected(
+                        candidate,
+                        payoff_probability_mean=(
+                            correction.corrected_q if correction is not None else point_q
+                        ),
+                        sample_count=witness.yes_q_samples.shape[0],
+                        band_alpha=witness.band_alpha,
+                        wealth_floor_usd=endowment.loss_wealth_floor_usd,
+                        wealth_ceiling_usd=endowment.win_wealth_floor_usd,
+                        spendable_cash_usd=min(
+                            wealth_witness.spendable_cash_usd,
+                            family_endowment.spendable_cash_usd,
+                        ),
+                        capital_limit_usd=min(
+                            buy_capital_limits[candidate_id], remaining_budget,
+                        ),
+                        fractional_kelly_multiplier=multiplier,
+                        current_token_shares=endowment.current_token_shares,
+                    )
+                    rejections.pop(candidate_id, None)
+                    rejected_buy_economics_by_id.pop(candidate_id, None)
+                    if score.candidate is None:
+                        rejections.update(score.rejection_reasons)
+                        if score.buy_rejection_economics is not None:
+                            rejected_buy_economics_by_id[candidate_id] = score.buy_rejection_economics
+                        continue
+                    score = replace(score, payoff_q_correction=correction)
+                    score, horizon_reason = bind_capital_horizon(
+                        score, family_key=family_key, action_mode="SETTLEMENT_LOCKED_BUY",
+                    )
+                    if score is None:
+                        return superseded_decision(candidate_id, str(horizon_reason))
+                    scored.append(score)
+                continue
             try:
                 family_endowment = family_portfolio_endowment_resolver(family_key)
                 joint_plan = plan_family_joint_buy_targets(
@@ -7741,11 +7834,7 @@ def select_global_single_order(
                 if q_samples is None or payoff_probability_mean is None:
                     rejections[candidate_id] = "FAMILY_JOINT_TARGET_PROBABILITY_MISSING"
                     continue
-                joint_correction = resolve_payoff_q_correction(
-                    candidate,
-                    raw_q=payoff_probability_mean,
-                    witness=witness,
-                )
+                joint_correction = buy_corrections[candidate_id]
                 if joint_correction is not None:
                     payoff_probability_mean = joint_correction.corrected_q
                 target_cost = _single_order_cost(

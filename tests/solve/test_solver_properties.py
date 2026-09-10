@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-02
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Last reused/audited: 2026-09-10
+# Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -6142,6 +6142,614 @@ def _correction_for(candidate, *, raw_q, corrected_q, p0=0.35):
         n_train=543,
         param_hash="param-hash-test",
     )
+
+
+def _with_precliff_depth(candidate, *, size="1000"):
+    """Give a test candidate legal downward-tick liquidation depth."""
+
+    return replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.39"), size=Decimal(size)),
+        ),
+    )
+
+
+def _family_endowment(
+    candidate,
+    *,
+    spendable_cash="100",
+    portfolio_capital="100",
+    committed_capital="0",
+    current_token_shares=(),
+):
+    witness = _global_probability_witness(candidate)
+    return S.FamilyPortfolioEndowment(
+        family_key=candidate.family_key,
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("0")) for bin_id in witness.bin_ids
+        ),
+        current_token_shares=tuple(current_token_shares),
+        wealth_floor_usd=Decimal("100"),
+        spendable_cash_usd=Decimal(spendable_cash),
+        portfolio_capital_usd=Decimal(portfolio_capital),
+        committed_capital_usd=Decimal(committed_capital),
+        ledger_snapshot_id="ledger-current",
+    )
+
+
+def _shared_two_bin_family_candidates():
+    """Build two real TAKER candidates over one current MECE family witness."""
+
+    family = "mixed-calibration-family"
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    bindings = (
+        S.OutcomeTokenBinding(
+            bin_id="a",
+            condition_id="condition-a",
+            yes_token_id="yes-a",
+            no_token_id="no-a",
+        ),
+        S.OutcomeTokenBinding(
+            bin_id="b",
+            condition_id="condition-b",
+            yes_token_id="yes-b",
+            no_token_id="no-b",
+        ),
+    )
+    samples = np.tile(np.array([0.55, 0.45]), (400, 1))
+    fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "q_version": "q-mixed-calibration",
+        "resolution_identity": "resolution-mixed-calibration",
+        "topology_identity": "topology-mixed-calibration",
+        "posterior_identity_hash": "posterior-mixed-calibration",
+        "source_truth_identity": "source-mixed-calibration",
+        "authority_certificate_hash": "certificate-mixed-calibration",
+        "band_alpha": ALPHA,
+        "band_basis": "joint_q_band_samples",
+        "yes_point_q": np.array([0.55, 0.45]),
+        "yes_q_samples": samples,
+        "captured_at_utc": captured_at,
+    }
+    witness = S.JointOutcomeProbabilityWitness(
+        **fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=S.joint_probability_witness_identity(**fields),
+    )
+    candidates = []
+    for candidate_id, bin_id, token_id in (
+        ("mixed-a", "a", "yes-a"),
+        ("mixed-b", "b", "yes-b"),
+    ):
+        curve = _global_curve(
+            side="YES",
+            token=token_id,
+            levels=(("0.40", "1000"),),
+        )
+        candidates.append(
+            S.GlobalSingleOrderCandidate(
+                candidate_id=candidate_id,
+                family_key=family,
+                bin_id=bin_id,
+                condition_id=f"condition-{bin_id}",
+                side="YES",
+                token_id=token_id,
+                probability_witness_identity=witness.witness_identity,
+                book_snapshot_id=curve.snapshot_id,
+                book_captured_at_utc=captured_at,
+                execution_curve_identity=S.executable_curve_identity(curve),
+                ledger_snapshot_id="ledger-current",
+                executable_cost_curve=curve,
+                resolution_identity=witness.resolution_identity,
+                neg_risk=False,
+                native_bid_levels=(
+                    BookLevel(price=Decimal("0.39"), size=Decimal("1000")),
+                ),
+            )
+        )
+    _GLOBAL_PROBABILITY_WITNESSES[witness.witness_identity] = witness
+    return tuple(candidates), witness
+
+
+@pytest.mark.parametrize(
+    ("raw_q", "corrected_q", "expected_shares"),
+    ((0.80, 0.55, Decimal("15.60")), (0.45, 0.70, Decimal("31.25"))),
+)
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_family_calibration_uses_one_corrected_standalone_target(
+    raw_q,
+    corrected_q,
+    expected_shares,
+    side,
+):
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id=f"family-calibrated-{side}-{raw_q}",
+            family=f"family-calibrated-{side}-{raw_q}",
+            side=side,
+            q=raw_q,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(
+        candidate,
+        raw_q=raw_q,
+        corrected_q=corrected_q,
+        p0=0.40,
+    )
+    standalone_calls = []
+    family_calls = []
+
+    def standalone_resolver(candidate, raw_q, p0, at):
+        standalone_calls.append((candidate.candidate_id, raw_q, p0, at))
+        return correction
+
+    def family_resolver(candidate, raw_q, p0, at):
+        family_calls.append((candidate.candidate_id, raw_q, p0, at))
+        return correction
+
+    standalone = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=standalone_resolver,
+    )
+    family = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(candidate),
+        payoff_q_correction_resolver=family_resolver,
+    )
+
+    assert standalone.candidate is candidate
+    assert family.candidate is candidate
+    assert standalone.shares == family.shares == expected_shares
+    assert standalone.full_kelly_target_shares == family.full_kelly_target_shares
+    assert (
+        standalone.fractional_kelly_target_shares
+        == family.fractional_kelly_target_shares
+    )
+    assert family.expected_terminal_wealth is not None
+    assert family.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        corrected_q
+    )
+    assert family.payoff_q_correction is correction
+    assert family.payoff_q_correction.as_cert_fields() == correction.as_cert_fields()
+    assert len(standalone_calls) == len(family_calls) == 1
+    assert family_calls[0][1:3] == pytest.approx((raw_q, 0.40))
+
+
+def test_calibration_changes_global_capital_winner_after_family_resolve():
+    corrected_candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="calibrated-winner-a",
+            family="calibrated-winner-a-family",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    independent_candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="independent-winner-b",
+            family="independent-winner-b-family",
+            side="YES",
+            q=0.60,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(
+        corrected_candidate,
+        raw_q=0.80,
+        corrected_q=0.55,
+        p0=0.40,
+    )
+    calls = []
+
+    def resolver(candidate, raw_q, p0, at):
+        calls.append(candidate.candidate_id)
+        return correction if candidate is corrected_candidate else None
+
+    by_family = {
+        corrected_candidate.family_key: _family_endowment(corrected_candidate),
+        independent_candidate.family_key: _family_endowment(independent_candidate),
+    }
+    decision = _global_select(
+        (corrected_candidate, independent_candidate),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=by_family.__getitem__,
+        payoff_q_correction_resolver=resolver,
+    )
+
+    assert decision.candidate is independent_candidate
+    assert len(calls) == 2
+    assert set(calls) == {
+        corrected_candidate.candidate_id,
+        independent_candidate.candidate_id,
+    }
+    evaluations = {
+        row.candidate_id: row for row in decision.candidate_evaluations
+    }
+    assert evaluations[corrected_candidate.candidate_id].shares == Decimal("15.60")
+    assert evaluations[independent_candidate.candidate_id].shares == Decimal("20.80")
+    assert [
+        row.status
+        for row in evaluations.values()
+        if row.status == "SELECTED"
+    ] == ["SELECTED"]
+
+
+def test_family_joint_sizes_from_point_q_not_sample_mean():
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="point-q-family",
+            family="point-q-family",
+            side="YES",
+            q=0.50,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    candidate = _replace_global_point_q(candidate, 0.70)
+    witness = _global_probability_witness(candidate)
+    assert float(np.mean(witness.yes_q_samples[:, 0])) == pytest.approx(0.50)
+    assert float(witness.yes_point_q[0]) == pytest.approx(0.70)
+
+    decision = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(candidate),
+    )
+
+    assert decision.candidate is candidate
+    assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
+    assert decision.full_kelly_target_shares == pytest.approx(
+        Decimal("125"), abs=Decimal("0.05")
+    )
+    assert decision.fractional_kelly_target_shares == pytest.approx(
+        Decimal("31.25"), abs=Decimal("0.05")
+    )
+    assert decision.shares == pytest.approx(Decimal("31.25"), abs=Decimal("0.05"))
+    assert decision.cost_usd == pytest.approx(Decimal("12.50"), abs=Decimal("0.05"))
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        0.70
+    )
+
+
+def test_calibrated_family_budget_uses_remaining_cash_without_double_kelly():
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="calibrated-remaining-budget",
+            family="calibrated-remaining-budget",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(candidate, raw_q=0.80, corrected_q=0.55, p0=0.40)
+    standalone = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+    constrained = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(
+            candidate,
+            committed_capital="23",
+        ),
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+
+    assert standalone.cost_usd == Decimal("6.2400")
+    assert constrained.candidate is candidate
+    assert constrained.cost_usd == Decimal("2.0000")
+    assert constrained.shares == Decimal("5.00")
+    assert constrained.full_kelly_target_shares == standalone.full_kelly_target_shares
+    assert (
+        constrained.fractional_kelly_target_shares
+        == standalone.fractional_kelly_target_shares
+    )
+    assert constrained.fractional_kelly_target_shares == Decimal("15.6250")
+    assert constrained.payoff_q_correction is correction
+
+
+@pytest.mark.parametrize("committed", ("25", "24.60"))
+def test_calibrated_family_budget_zero_or_below_minimum_rejects(committed):
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id=f"calibrated-budget-reject-{committed}",
+            family=f"calibrated-budget-reject-{committed}",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(candidate, raw_q=0.80, corrected_q=0.55, p0=0.40)
+    decision = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(
+            candidate,
+            spendable_cash="100",
+            committed_capital=committed,
+        ),
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+
+    assert decision.candidate is None
+    assert decision.cost_usd == Decimal("0")
+    assert decision.rejection_reasons[candidate.candidate_id]
+
+
+def test_calibrated_family_preserves_existing_same_token_holding():
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="calibrated-held-token",
+            family="calibrated-held-token",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(candidate, raw_q=0.80, corrected_q=0.55, p0=0.40)
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("100"),
+        win_wealth_floor_usd=Decimal("110"),
+        current_token_shares=Decimal("10"),
+        ledger_snapshot_id="ledger-current",
+    )
+    family_endowment = replace(
+        _family_endowment(
+            candidate,
+            portfolio_capital="104",
+            committed_capital="4",
+            current_token_shares=((candidate.token_id, Decimal("10")),),
+        ),
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("10") if bin_id == candidate.bin_id else Decimal("0"))
+            for bin_id in _global_probability_witness(candidate).bin_ids
+        ),
+    )
+    oracle = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        candidate_portfolio_endowment_resolver=lambda _: endowment,
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+    decision = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        candidate_portfolio_endowment_resolver=lambda _: endowment,
+        family_portfolio_endowment_resolver=lambda _: family_endowment,
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+
+    assert oracle.candidate is candidate
+    assert decision.candidate is candidate
+    assert decision.current_token_shares == Decimal("10")
+    assert decision.shares == oracle.shares
+    assert decision.full_kelly_target_shares == oracle.full_kelly_target_shares
+    assert decision.fractional_kelly_target_shares == (
+        oracle.fractional_kelly_target_shares
+    )
+    zero_holding = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+    assert decision.shares < zero_holding.shares
+
+
+def test_mixed_family_calibration_keeps_each_taker_standalone_and_one_winner():
+    candidates, witness = _shared_two_bin_family_candidates()
+    candidate_a, candidate_b = candidates
+    correction = _correction_for(
+        candidate_a,
+        raw_q=0.55,
+        corrected_q=0.65,
+        p0=0.40,
+    )
+    calls = []
+
+    def resolver(candidate, raw_q, p0, at):
+        calls.append((candidate.candidate_id, raw_q, p0, at))
+        return correction if candidate is candidate_a else None
+
+    decision = _global_select(
+        candidates,
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        probability_witnesses={witness.family_key: witness},
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(
+            candidate_a
+        ),
+        payoff_q_correction_resolver=resolver,
+    )
+    standalone_a = _global_select(
+        (candidate_a,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        probability_witnesses={witness.family_key: witness},
+        fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+    standalone_b = _global_select(
+        (candidate_b,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        probability_witnesses={witness.family_key: witness},
+        fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=lambda *_args: None,
+    )
+
+    assert decision.candidate in candidates
+    assert len([row for row in decision.candidate_evaluations if row.status == "SELECTED"]) == 1
+    assert len(calls) == 2
+    assert decision.candidate_evaluations[0].shares == standalone_a.shares
+    assert decision.candidate_evaluations[0].full_kelly_target_shares == (
+        standalone_a.full_kelly_target_shares
+    )
+    assert decision.candidate_evaluations[1].shares == standalone_b.shares
+    assert decision.candidate_evaluations[1].full_kelly_target_shares == (
+        standalone_b.full_kelly_target_shares
+    )
+    assert decision.candidate_evaluations[0].execution_mode == "TAKER_LIMIT"
+    assert decision.candidate_evaluations[1].execution_mode == "TAKER_LIMIT"
+
+
+def test_calibrated_family_rejects_mismatched_endowment_authority():
+    candidate = _with_precliff_depth(
+        _global_candidate(
+            candidate_id="calibrated-bad-endowment",
+            family="calibrated-bad-endowment",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "1000"),),
+        )
+    )
+    correction = _correction_for(candidate, raw_q=0.80, corrected_q=0.55, p0=0.40)
+    bad_endowment = replace(
+        _family_endowment(candidate),
+        ledger_snapshot_id="ledger-superseded",
+    )
+
+    decision = _global_select(
+        (candidate,),
+        floor="100",
+        ceiling="100",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: bad_endowment,
+        payoff_q_correction_resolver=lambda *_args: correction,
+    )
+
+    assert decision.candidate is None
+    assert decision.shares == Decimal("0")
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FAMILY_JOINT_AUTHORITY_UNAVAILABLE"
+    )
+
+
+def test_family_calibration_does_not_change_sell_path():
+    sell = _global_sell_candidate(
+        candidate_id="calibrated-sell-unchanged",
+        family="calibrated-sell-unchanged",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        shares="10",
+    )
+    plain = _global_select((sell,))
+    with_family_resolver = _global_select(
+        (sell,),
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(sell),
+        payoff_q_correction_resolver=lambda *_args: pytest.fail(
+            "SELL must not call the BUY calibration resolver"
+        ),
+    )
+
+    assert with_family_resolver == plain
+
+
+def test_calibrated_family_keeps_maker_and_taker_as_distinct_fixed_proposals():
+    taker = _with_precliff_depth(_global_candidate(
+        candidate_id="calibrated-mode-taker", family="calibrated-mode-family",
+        side="YES", q=0.80, levels=(("0.40", "1000"),),
+    ))
+    proposal = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels,
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker, candidate_id="calibrated-mode-maker", execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal, fill_probability=0.9,
+        fill_probability_source="current-maker-fill-v1", rest_deadline_minutes=20.0,
+        asset_epoch_identity="calibrated-mode-epoch",
+    )
+    fill = _current_maker_witness(
+        provisional, proposal=proposal, asset_epoch="calibrated-mode-epoch",
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.70"), Decimal("1"), -proposal.levels[0].price),
+            S.MakerFillOutcome(Decimal("0.20"), Decimal("0.50"), -proposal.levels[0].price),
+            S.MakerFillOutcome(Decimal("0.10"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional, maker_fill_witness=fill, fill_probability=fill.fill_probability,
+        fill_probability_source=fill.witness_identity,
+    )
+    corrections = {
+        c.candidate_id: _correction_for(
+            c, raw_q=0.80, corrected_q=0.55,
+            p0=float(c.economic_cost_curve.levels[0].price),
+        )
+        for c in (taker, maker)
+    }
+    kwargs = dict(
+        cap="100", fractional_kelly_multiplier="0.25",
+        payoff_q_correction_resolver=lambda c, *_: corrections[c.candidate_id],
+    )
+    standalone = _global_select((taker, maker), **kwargs)
+    family = _global_select(
+        (taker, maker), **kwargs,
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(taker),
+    )
+    assert family == standalone
+    assert {row.execution_mode for row in family.candidate_evaluations} == {
+        "MAKER_REST", "TAKER_LIMIT",
+    }
+    assert all(row.status in {"SCORED", "SELECTED"} for row in family.candidate_evaluations)
 
 
 def test_global_buy_sizes_on_the_corrected_probability_not_the_raw_q():
