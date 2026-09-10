@@ -3609,11 +3609,9 @@ def _append_matched_order_fill_projection(
         existing_projection is None
         and _edli_event_id_from_decision_id(str(command.get("decision_id") or ""))
     ):
-        candidates = [
-            candidate
-            for candidate in _latest_unprojected_filled_entry_candidates(conn)
-            if str(candidate.get("command_id") or "") == command_id
-        ]
+        candidates = _latest_unprojected_filled_entry_candidates(
+            conn, command_id=command_id
+        )
         if len(candidates) == 1:
             if _append_filled_entry_projection_repair(
                 conn,
@@ -4265,7 +4263,9 @@ def _clob_market_identity_for_command(
     )
 
 
-def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
+def _latest_unprojected_filled_entry_candidates(
+    conn: sqlite3.Connection, *, command_id: str | None = None
+) -> list[dict]:
     required = {
         "venue_commands",
         "venue_command_events",
@@ -4278,10 +4278,22 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
+    source_clause = "WHERE fact.source IN ('REST', 'WS_USER')"
+    params = ()
+    if command_id is not None:
+        # Net position flow needs every related entry and exit, even while the
+        # requested projection belongs to only one command.
+        source_clause += """ AND fact.command_id IN (
+            SELECT related.command_id FROM venue_commands related
+             WHERE related.position_id = (
+                 SELECT position_id FROM venue_commands WHERE command_id = ?
+             )
+        )"""
+        params = (command_id, command_id)
     sql = (
         "WITH "
         + _canonical_trade_fact_cte(
-            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+            source_clause_sql=source_clause
         )
         + ",\n"
         + _economic_trade_fact_cte()
@@ -4396,7 +4408,9 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
             ON env.envelope_id = cmd.envelope_id
           LEFT JOIN executable_market_snapshots snap
             ON snap.snapshot_id = cmd.snapshot_id
-         WHERE cmd.intent_kind = 'ENTRY'
+         WHERE cmd.intent_kind = 'ENTRY'"""
+        + (" AND cmd.command_id = ?" if command_id is not None else "")
+        + """
            AND cmd.side = 'BUY'
            AND (
                 cmd.state IN ('FILLED', 'PARTIAL')
@@ -4664,9 +4678,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
     )
-    rows = conn.execute(
-        sql
-    ).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [_dict_row(row) for row in rows]
 
 
@@ -6896,11 +6908,9 @@ def ensure_live_entry_projection_for_command(
                 "stayed": int(existing_fill is not None),
                 "errors": 0,
             }
-        candidates = [
-            candidate
-            for candidate in _latest_unprojected_filled_entry_candidates(conn)
-            if str(candidate.get("command_id") or "") == command_id
-        ]
+        candidates = _latest_unprojected_filled_entry_candidates(
+            conn, command_id=command_id
+        )
         summary = {"scanned": len(candidates), "advanced": 0, "stayed": 0, "errors": 0}
         if not candidates:
             return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}

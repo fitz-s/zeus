@@ -38454,3 +38454,34 @@ def test_fill_evidence_review_unknown_reason_or_missing_fact_stays_review_requir
     assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
     assert _get_state(conn, "cmd-fill-evidence-unknown-reason") == "REVIEW_REQUIRED"
     assert _get_state(conn, "cmd-fill-evidence-no-fact") == "REVIEW_REQUIRED"
+
+
+def test_scoped_entry_projection_retains_all_same_position_entry_exit_flows(conn):
+    from src.execution.command_recovery import _latest_unprojected_filled_entry_candidates
+    from src.state.venue_command_repo import append_event
+
+    for command_id, position_id, kind, side, shares in (
+        ("scope-entry", "scope-position", "ENTRY", "BUY", 11),
+        ("scope-topup", "scope-position", "ENTRY", "BUY", 3),
+        ("scope-exit", "scope-position", "EXIT", "SELL", 5),
+        ("unrelated-entry", "unrelated-position", "ENTRY", "BUY", 101),
+    ):
+        _insert(conn, command_id=command_id, position_id=position_id,
+                decision_id=f"decision-{command_id}", intent_kind=kind, side=side,
+                size=shares, price=0.23)
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=f"order-{command_id}")
+        _append_confirmed_trade_fact(conn, command_id=command_id, order_id=f"order-{command_id}",
+                                     trade_id=f"trade-{command_id}", filled_size=str(shares), fill_price="0.23")
+        if kind == "ENTRY":
+            append_event(conn, command_id=command_id, event_type="FILL_CONFIRMED",
+                         occurred_at="2026-04-26T00:06:00Z",
+                         payload={"venue_order_id": f"order-{command_id}"})
+
+    broad = _latest_unprojected_filled_entry_candidates(conn)
+    scoped = _latest_unprojected_filled_entry_candidates(conn, command_id="scope-entry")
+    assert scoped == [row for row in broad if row["command_id"] == "scope-entry"]
+    assert len(scoped) == 1
+    assert scoped[0]["fill_filled_size"] == 11
+    assert scoped[0]["position_entry_filled_size"] == 14
+    assert scoped[0]["position_exit_filled_size"] == 5
+    assert _latest_unprojected_filled_entry_candidates(conn, command_id="missing") == []
