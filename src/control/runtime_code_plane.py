@@ -30,6 +30,7 @@ RUNTIME_SCRIPT_FILES = frozenset(
 )
 NON_RUNTIME_CODE_FILES = frozenset(
     {
+        "architecture/script_manifest.yaml",
         "architecture/test_topology.yaml",
     }
 )

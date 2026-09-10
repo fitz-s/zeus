@@ -377,10 +377,14 @@ class TestGateRuntimeAllClear:
 
         assert is_runtime_code_path(path)
 
-    def test_deployment_freshness_dirty_test_topology_allows_live_submit(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    @pytest.mark.parametrize(
+        "registry_path",
+        ["architecture/test_topology.yaml", "architecture/script_manifest.yaml"],
+    )
+    def test_deployment_freshness_dirty_operator_registry_allows_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, registry_path: str
     ) -> None:
-        """The test registry is CI metadata, not daemon-executable runtime code."""
+        """Operator inventories do not alter the daemon's executable code plane."""
 
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
         monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
@@ -401,7 +405,7 @@ class TestGateRuntimeAllClear:
                     (),
                     {
                         "returncode": 0,
-                        "stdout": " M architecture/test_topology.yaml\n",
+                        "stdout": f" M {registry_path}\n",
                     },
                 )()
             raise AssertionError(f"unexpected command: {cmd!r}")
@@ -414,16 +418,40 @@ class TestGateRuntimeAllClear:
         monkeypatch.setattr(runtime_code_plane.subprocess, "run", _fake_git_status)
 
         assert runtime_code_plane.dirty_runtime_worktree_paths(tmp_path) == ()
-        assert not runtime_code_plane.is_runtime_code_path(
-            "architecture/test_topology.yaml"
-        )
-        assert not runtime_code_plane.is_reduce_only_exit_runtime_path(
-            "architecture/test_topology.yaml"
-        )
+        assert not runtime_code_plane.is_runtime_code_path(registry_path)
+        assert not runtime_code_plane.is_reduce_only_exit_runtime_path(registry_path)
         gate_runtime.check("live_venue_submit")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/execution/executor.py",
+            "config/settings.json",
+            "architecture/source_rationale.yaml",
+            "architecture/capabilities.yaml",
+            "architecture/db_table_ownership.yaml",
+        ],
+    )
+    def test_dirty_runtime_authority_remains_in_deployment_plane(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, path: str
+    ) -> None:
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(
+            runtime_code_plane.subprocess,
+            "run",
+            lambda *args, **kwargs: type(
+                "Proc", (), {"returncode": 0, "stdout": f" M {path}\n"}
+            )(),
+        )
+        assert runtime_code_plane.is_runtime_code_path(path)
+        assert runtime_code_plane.dirty_runtime_worktree_paths(tmp_path) == (path,)
+
+    @pytest.mark.parametrize(
+        "changed_path", ["tests/test_only.py", "architecture/script_manifest.yaml"]
+    )
     def test_deployment_freshness_non_runtime_diff_allows_live_submit(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, changed_path: str
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
         monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
@@ -438,7 +466,7 @@ class TestGateRuntimeAllClear:
 
         def _fake_git(cmd, **_kwargs):
             if list(cmd[:3]) == ["git", "diff", "--name-only"]:
-                return b"tests/test_only.py\n"
+                return f"{changed_path}\n".encode()
             return ("b" * 40).encode()
 
         monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
