@@ -58,7 +58,7 @@ import hashlib
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -1958,39 +1958,44 @@ def collect_open_ens_cycle(
         output_dir = output_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Dispatch bounded batches.  _DOWNLOAD_MAX_WORKERS is a module
-        # constant; no call-site kwarg (antibody: makes per-step parallelism
-        # category structurally module-owned, not caller-configured).
-        # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
-        # Do not submit the entire step grid at once. Each real worker owns one
-        # total deadline across requests, retries, and mirrors; the batch must
-        # wait for that bounded result instead of inventing a second timeout and
-        # abandoning a still-running HTTP thread.
+        # Keep only the configured number of steps outstanding. Refill a free
+        # slot immediately: a slow step must not idle the rest of its wave.
+        # Workers own HTTP deadlines; the collecting thread consumes every
+        # result before any SQLite write, without a second timeout.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
         # M5-COLLECTION-CLOCK: fetch_started = the real wall-clock immediately before the first
         # HTTP GET is dispatched (the batch loop below submits fetch_fn → session.get).
         _fetch_started_at = datetime.now(timezone.utc)
-        for offset in range(0, len(tasks), _DOWNLOAD_MAX_WORKERS):
-            batch = tasks[offset:offset + _DOWNLOAD_MAX_WORKERS]
-            with ThreadPoolExecutor(max_workers=len(batch)) as ex:
-                fut2step = {
-                    ex.submit(
-                        fetch_fn,
-                        cycle_date=cycle_date,
-                        cycle_hour=cycle_hour,
-                        param=p,
-                        step=s,
-                        output_dir=output_dir,
-                        mirrors=_DOWNLOAD_SOURCES,
-                    ): s
-                    for s, p in batch
-                }
-                for fut, step in fut2step.items():
+        remaining_tasks = iter(tasks)
+        with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as ex:
+            def submit_step(task):
+                step, param = task
+                return ex.submit(
+                    fetch_fn,
+                    cycle_date=cycle_date,
+                    cycle_hour=cycle_hour,
+                    param=param,
+                    step=step,
+                    output_dir=output_dir,
+                    mirrors=_DOWNLOAD_SOURCES,
+                )
+
+            pending = {}
+            for _ in range(min(_DOWNLOAD_MAX_WORKERS, len(tasks))):
+                task = next(remaining_tasks)
+                pending[submit_step(task)] = task[0]
+            while pending:
+                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in completed:
+                    step = pending.pop(fut)
                     try:
                         results[step] = fut.result()
                     except Exception as exc:  # noqa: BLE001
                         results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
+                    task = next(remaining_tasks, None)
+                    if task is not None:
+                        pending[submit_step(task)] = task[0]
 
         # M5-COLLECTION-CLOCK: fetch_finished = the real wall-clock once every batch future has
         # resolved (bytes received, timed out, or failed) — the moment the download phase ends.

@@ -20,6 +20,7 @@ functions (no SQLite writes); all DB writes occur on the main thread.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -692,6 +693,69 @@ def test_batch_does_not_abandon_worker_at_duplicate_outer_timeout(tmp_path, monk
     download = next(stage for stage in result["stages"] if "download_parallel" in stage["label"])
     assert download["status"] == "SUCCESS"
     assert download["ok_steps"] == [3]
+
+
+@pytest.mark.parametrize("track", ["mx2t6_high", "mn2t6_low"])
+@pytest.mark.parametrize("middle_raises", [False, True])
+def test_free_download_slot_advances_while_first_step_waits(
+    tmp_path, monkeypatch, track, middle_raises
+):
+    """A slow sibling cannot hold a free slot; failures still drain all steps."""
+    import src.data.ecmwf_open_data as mod
+
+    first_started = threading.Event()
+    third_started = threading.Event()
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0, "advanced": False}
+    attempted = []
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        with lock:
+            attempted.append(step)
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            if step == 3:
+                first_started.set()
+                state["advanced"] = third_started.wait(timeout=2)
+            elif step == 6:
+                assert first_started.wait(timeout=2)
+                if middle_raises:
+                    raise RuntimeError("failed middle step")
+            else:
+                third_started.set()
+            path = mod._step_cache_path(
+                output_dir, run_date=cycle_date, run_hour=cycle_hour,
+                step=step, param=param,
+            )
+            _make_fake_grib(path)
+            return "OK", path
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
+    monkeypatch.setattr(mod, "_DOWNLOAD_MAX_WORKERS", 2)
+    conn = _make_conn()
+    try:
+        result = mod.collect_open_ens_cycle(
+            track=track, run_date=RUN_DATE, run_hour=RUN_HOUR,
+            skip_extract=True, conn=conn, _fetch_impl=fetch_impl,
+            _runner=_runner_skip_extract_ingest,
+            _paths=_make_paths(mod, tmp_path), now_utc=NOW_UTC,
+        )
+    finally:
+        conn.close()
+
+    assert state["advanced"], "next step waited for the stalled wave to finish"
+    assert sorted(attempted) == [3, 6, 9]
+    assert state["active"] == 0
+    assert state["peak"] == 2
+    download = next(s for s in result["stages"] if "download_parallel" in s["label"])
+    assert download["ok_steps"] == ([3, 9] if middle_raises else [3, 6, 9])
+    if middle_raises:
+        assert result["status"] == "download_failed"
+        assert download["failed_steps"] == [6]
 
 
 def test_fetch_one_step_total_deadline_stops_retry_and_mirror_fanout(tmp_path, monkeypatch):
