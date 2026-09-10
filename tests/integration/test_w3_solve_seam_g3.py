@@ -280,7 +280,14 @@ def _explicit_sell_maker_terms(
     }
 
 
-def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison():
+@pytest.mark.parametrize("selection_revision", [
+    "global_single_order_canonical_entry_q_expected_growth_v4",
+    "global_single_order_authority_q_expected_growth_v3",
+])
+def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(monkeypatch, selection_revision):
+    # The decoder preserves a sealed revision even when the running selector
+    # uses another one. New commands receive only the current selector identity.
+    monkeypatch.setattr(global_batch_runtime, "CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION", selection_revision)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
