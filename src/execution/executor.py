@@ -5088,7 +5088,7 @@ def _run_post_submit_ack_persistence(
     deadline_ms: int,
     max_hold_ms: int,
 ) -> None:
-    """Persist ACK facts and fill event under one immediate trade transaction.
+    """Persist one post-submit ACK or terminal-rejection outcome atomically.
 
     The SDK call has already crossed the venue boundary when this helper runs.  A
     caller-owned active transaction is never committed or rolled back here: the
@@ -7822,7 +7822,8 @@ def execute_exit_order(
                 if fak_terminal_no_fill
                 else {}
             )
-            try:
+
+            def _persist_exit_terminal_rejection() -> None:
                 append_event(
                     conn,
                     command_id=command_id,
@@ -7835,10 +7836,43 @@ def execute_exit_order(
                         **final_envelope_payload,
                     },
                 )
-                conn.commit()
+
+            try:
+                _run_post_submit_ack_persistence(
+                    conn,
+                    own_conn=_own_conn,
+                    persist_fn=_persist_exit_terminal_rejection,
+                    owner="exit_post_submit_rejection_persist",
+                    what="exit_rejection_persistence",
+                    deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                )
+            except _PostSubmitCallerTransactionError as inner:
+                logger.error(
+                    "execute_exit_order: caller transaction active after SDK rejection "
+                    "(command_id=%s order_id=%s): %s",
+                    command_id,
+                    order_id,
+                    inner,
+                )
+                return _with_venue_boundary(OrderResult(
+                    trade_id=intent.trade_id,
+                    status="unknown_side_effect",
+                    reason=f"exit_rejection_persistence_requires_owned_transaction: {inner}",
+                    order_id=order_id,
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    external_order_id=order_id,
+                    command_id=command_id,
+                    venue_status=str(result.get("status") or "rejected"),
+                    idempotency_key=idem.value,
+                    command_state="SUBMITTING",
+                ), order_type=order_type, ack_received=True)
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_REJECTED (success_false) append_event failed "
+                    "execute_exit_order: SUBMIT_REJECTED (success_false) persistence failed "
                     "(command_id=%s): %s",
                     command_id, inner,
                 )
@@ -7886,7 +7920,7 @@ def execute_exit_order(
                 command_state="REJECTED",
             ), order_type=order_type, ack_received=False)
         if not order_id:
-            try:
+            def _persist_exit_missing_order_rejection() -> None:
                 append_event(
                     conn,
                     command_id=command_id,
@@ -7894,10 +7928,40 @@ def execute_exit_order(
                     occurred_at=ack_time,
                     payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
-                conn.commit()
+
+            try:
+                _run_post_submit_ack_persistence(
+                    conn,
+                    own_conn=_own_conn,
+                    persist_fn=_persist_exit_missing_order_rejection,
+                    owner="exit_post_submit_rejection_persist",
+                    what="exit_rejection_persistence",
+                    deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                )
+            except _PostSubmitCallerTransactionError as inner:
+                logger.error(
+                    "execute_exit_order: caller transaction active after SDK missing-order rejection "
+                    "(command_id=%s): %s",
+                    command_id,
+                    inner,
+                )
+                return _with_venue_boundary(OrderResult(
+                    trade_id=intent.trade_id,
+                    status="unknown_side_effect",
+                    reason=f"exit_rejection_persistence_requires_owned_transaction: {inner}",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    venue_status=str(result.get("status") or "rejected"),
+                    command_state="SUBMITTING",
+                ), order_type=order_type, ack_received=True)
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
+                    "execute_exit_order: SUBMIT_REJECTED (missing_order_id) persistence failed "
                     "(command_id=%s): %s",
                     command_id, inner,
                 )
@@ -9709,7 +9773,7 @@ def _live_order(
                 or result.get("reason")
                 or "submit_rejected"
             )
-            try:
+            def _persist_entry_terminal_rejection() -> None:
                 append_event(
                     conn,
                     command_id=command_id,
@@ -9721,18 +9785,45 @@ def _live_order(
                         **final_envelope_payload,
                     },
                 )
-                # T2 (BLOCKER-1): venue synchronously confirmed rejection
-                # (success=False) — confirmed absence, safe to release. Only
-                # reached when the SUBMIT_REJECTED append_event itself
-                # succeeded; the `except` branch below is the ambiguous
-                # persistence-failure-after-side-effect case and must NOT
-                # release (exactly BLOCKER-1's target gap).
                 _release_entry_risk_reservation(conn, command_id=command_id)
-                if _own_conn:
-                    conn.commit()
+
+            try:
+                _run_post_submit_ack_persistence(
+                    conn,
+                    own_conn=_own_conn,
+                    persist_fn=_persist_entry_terminal_rejection,
+                    owner="entry_post_submit_rejection_persist",
+                    what="entry_rejection_persistence",
+                    deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                )
+            except _PostSubmitCallerTransactionError as inner:
+                logger.error(
+                    "_live_order: caller transaction active after SDK rejection "
+                    "(command_id=%s order_id=%s): %s",
+                    command_id,
+                    order_id,
+                    inner,
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason=f"entry_rejection_persistence_requires_owned_transaction: {inner}",
+                    order_id=order_id,
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    external_order_id=order_id,
+                    venue_status=str(result.get("status") or "rejected"),
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="SUBMITTING",
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
+                )
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_REJECTED (success_false) append_event failed "
+                    "_live_order: SUBMIT_REJECTED (success_false) persistence failed "
                     "(command_id=%s): %s",
                     command_id, inner,
                 )
@@ -9782,7 +9873,7 @@ def _live_order(
                 venue_ack_time=ack_time,
             )
         if not order_id:
-            try:
+            def _persist_entry_missing_order_rejection() -> None:
                 append_event(
                     conn,
                     command_id=command_id,
@@ -9790,15 +9881,42 @@ def _live_order(
                     occurred_at=ack_time,
                     payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
-                # T2 (BLOCKER-1): treated as confirmed non-placement by this
-                # same existing SUBMIT_REJECTED classification — release only
-                # on the happy path; the `except` branch is the ambiguous case.
                 _release_entry_risk_reservation(conn, command_id=command_id)
-                if _own_conn:
-                    conn.commit()
+
+            try:
+                _run_post_submit_ack_persistence(
+                    conn,
+                    own_conn=_own_conn,
+                    persist_fn=_persist_entry_missing_order_rejection,
+                    owner="entry_post_submit_rejection_persist",
+                    what="entry_rejection_persistence",
+                    deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                )
+            except _PostSubmitCallerTransactionError as inner:
+                logger.error(
+                    "_live_order: caller transaction active after SDK missing-order rejection "
+                    "(command_id=%s): %s",
+                    command_id,
+                    inner,
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason=f"entry_rejection_persistence_requires_owned_transaction: {inner}",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    venue_status=str(result.get("status") or "rejected"),
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="SUBMITTING",
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
+                )
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
+                    "_live_order: SUBMIT_REJECTED (missing_order_id) persistence failed "
                     "(command_id=%s): %s",
                     command_id, inner,
                 )

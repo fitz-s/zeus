@@ -1,12 +1,13 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-09-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  2026-05-20 live readiness repair: wrap confirmation refresh stays behind V2 adapter boundary.
 #                  current/finite_evidence_probability_symmetry authenticated-fill reservation repair.
 #                  2026-08-10 DDL-free in-transaction BUY preflight and current WORLD/FORECAST certificate fixtures.
+#                  2026-09-10 terminal rejection persistence retry and atomic reservation release.
 """R3 Z4 collateral-ledger antibodies."""
 
 from __future__ import annotations
@@ -1604,7 +1605,11 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
         configure_global_ledger(None)
 
 
-def test_executor_buy_rejection_release_requires_successful_terminal_append(conn, monkeypatch):
+@pytest.mark.parametrize("response_mode", ["success_false", "missing_order_id"])
+@pytest.mark.parametrize("persistence_mode", ["permanent", "lock_once"])
+def test_executor_buy_rejection_release_requires_successful_terminal_append(
+    conn, monkeypatch, response_mode, persistence_mode
+):
     from src.execution.executor import _live_order
     from src.state import venue_command_repo
     from src.state.collateral_ledger import configure_global_ledger
@@ -1656,9 +1661,16 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     )
     real_append_event = venue_command_repo.append_event
 
+    terminal_attempts = 0
+
     def append_event_fails_for_terminal(conn, *, command_id, event_type, occurred_at, payload=None):
+        nonlocal terminal_attempts
         if event_type == "SUBMIT_REJECTED":
-            raise RuntimeError("terminal append failed")
+            terminal_attempts += 1
+            if persistence_mode == "lock_once" and terminal_attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+            if persistence_mode == "permanent":
+                raise RuntimeError("terminal append failed")
         return real_append_event(
             conn,
             command_id=command_id,
@@ -1667,7 +1679,10 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
             payload=payload,
         )
 
+    submit_calls = 0
+
     class FakeClient:
+
         def v2_preflight(self):
             return None
 
@@ -1678,13 +1693,17 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
             self.identity_persister = persister
 
         def place_limit_order(self, **kwargs):
-            return _fake_submit_result(
-                self.bound_envelope,
-                status="REJECTED",
-                success=False,
-                error_code="unit_rejected",
-                error_message="unit rejection",
-            )
+            nonlocal submit_calls
+            submit_calls += 1
+            if response_mode == "success_false":
+                return _fake_submit_result(
+                    self.bound_envelope,
+                    status="REJECTED",
+                    success=False,
+                    error_code="unit_rejected",
+                    error_message="unit rejection",
+                )
+            return _fake_submit_result(self.bound_envelope, status="REJECTED")
 
     monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_fails_for_terminal)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
@@ -1696,28 +1715,42 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
             conn=conn,
             decision_id="z4-buy-terminal-append-fails",
         )
-        # Contract since a4707d1be (2026-05-21, "harden side-effect and risk
-        # boundaries" #271, provenance-verified, predates this rebuild base):
-        # when the SDK call itself succeeds (venue side effect may have
-        # happened) but the SUBMIT_REJECTED journaling append then fails, the
-        # command can no longer be honestly reported "rejected" -- the venue
-        # truth is unconfirmed. _mark_post_submit_persistence_failure rolls
-        # back the failed append and durably writes REVIEW_REQUIRED instead
-        # (a recovery-owned quasi-terminal state, not TERMINAL_STATES), and
-        # _live_order returns status="unknown_side_effect".
-        assert result.status == "unknown_side_effect"
-        assert result.command_state == "REVIEW_REQUIRED"
-        assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
-        # The theme this test's name asserts: collateral release requires a
-        # SUCCESSFUL terminal append. REVIEW_REQUIRED is not in
-        # TERMINAL_STATES, so no release/conversion path fired -- the pUSD
-        # reservation committed at command-persistence time is still intact.
-        assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_000_000
+        assert submit_calls == 1
+        if persistence_mode == "lock_once":
+            assert result.status == "rejected"
+            assert result.command_state == "REJECTED"
+            assert result.reason == (
+                "unit_rejected" if response_mode == "success_false" else "missing_order_id"
+            )
+            assert terminal_attempts == 2
+            assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
+        else:
+            # If terminal persistence remains broken, the venue result cannot
+            # be reported as rejected; retain a durable recovery-owned review
+            # state and keep the BUY reservation.
+            assert result.status == "unknown_side_effect"
+            assert result.command_state == "REVIEW_REQUIRED"
+            assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
+            assert ledger.snapshot().reserved_pusd_for_buys_micro == 10_000_000
         row = conn.execute(
             "SELECT state FROM venue_commands WHERE position_id = ?",
             ("z4-buy-terminal-append-fails",),
         ).fetchone()
-        assert row[0] == "REVIEW_REQUIRED"
+        assert row[0] == ("REJECTED" if persistence_mode == "lock_once" else "REVIEW_REQUIRED")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE raw_response_json IS NOT NULL"
+        ).fetchone()[0] >= 1
+        event_types = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events WHERE command_id = "
+                "(SELECT command_id FROM venue_commands WHERE position_id = ?)",
+                ("z4-buy-terminal-append-fails",),
+            )
+        ]
+        assert ("SUBMIT_REJECTED" in event_types) is (persistence_mode == "lock_once")
+        assert ("REVIEW_REQUIRED" in event_types) is (persistence_mode == "permanent")
     finally:
         configure_global_ledger(None)
 
@@ -1777,7 +1810,11 @@ def test_executor_ack_reserves_ctf_tokens_until_terminal_release(conn, monkeypat
         configure_global_ledger(None)
 
 
-def test_executor_sell_rejection_release_requires_successful_terminal_append(conn, monkeypatch):
+@pytest.mark.parametrize("response_mode", ["success_false", "missing_order_id"])
+@pytest.mark.parametrize("persistence_mode", ["permanent", "lock_once"])
+def test_executor_sell_rejection_release_requires_successful_terminal_append(
+    conn, monkeypatch, response_mode, persistence_mode
+):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state import venue_command_repo
     from src.state.collateral_ledger import configure_global_ledger
@@ -1825,9 +1862,16 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
     )
     real_append_event = venue_command_repo.append_event
 
+    terminal_attempts = 0
+
     def append_event_fails_for_terminal(conn, *, command_id, event_type, occurred_at, payload=None):
+        nonlocal terminal_attempts
         if event_type == "SUBMIT_REJECTED":
-            raise RuntimeError("terminal append failed")
+            terminal_attempts += 1
+            if persistence_mode == "lock_once" and terminal_attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+            if persistence_mode == "permanent":
+                raise RuntimeError("terminal append failed")
         return real_append_event(
             conn,
             command_id=command_id,
@@ -1836,7 +1880,10 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
             payload=payload,
         )
 
+    submit_calls = 0
+
     class FakeClient:
+
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
@@ -1853,13 +1900,17 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
             }
 
         def place_limit_order(self, **kwargs):
-            return _fake_submit_result(
-                self.bound_envelope,
-                status="REJECTED",
-                success=False,
-                error_code="unit_rejected",
-                error_message="unit rejection",
-            )
+            nonlocal submit_calls
+            submit_calls += 1
+            if response_mode == "success_false":
+                return _fake_submit_result(
+                    self.bound_envelope,
+                    status="REJECTED",
+                    success=False,
+                    error_code="unit_rejected",
+                    error_message="unit rejection",
+                )
+            return _fake_submit_result(self.bound_envelope, status="REJECTED")
 
     monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_fails_for_terminal)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
@@ -1877,20 +1928,41 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
             conn=conn,
             decision_id="z4-sell-terminal-append-fails",
         )
-        # Same a4707d1be contract as the buy-side sibling test above: SDK
-        # succeeded, SUBMIT_REJECTED journaling failed -> REVIEW_REQUIRED +
-        # status="unknown_side_effect", never a false "rejected".
-        assert result.status == "unknown_side_effect"
-        assert result.command_state == "REVIEW_REQUIRED"
-        assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
-        # Theme preserved: no successful terminal append -> no release. The
-        # CTF reservation committed at command-persistence time is intact.
-        assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
+        assert submit_calls == 1
+        if persistence_mode == "lock_once":
+            assert result.status == "rejected"
+            assert result.command_state == "REJECTED"
+            assert result.reason == (
+                "unit_rejected" if response_mode == "success_false" else "missing_order_id"
+            )
+            assert terminal_attempts == 2
+            assert ledger.snapshot().reserved_tokens_for_sells == {}
+        else:
+            # A permanently broken terminal journal remains recovery-owned and
+            # must not release the SELL reservation.
+            assert result.status == "unknown_side_effect"
+            assert result.command_state == "REVIEW_REQUIRED"
+            assert result.reason == "terminal_rejection_persistence_failed_after_side_effect"
+            assert ledger.snapshot().reserved_tokens_for_sells[YES_TOKEN] == _ctf_units(5)
         row = conn.execute(
             "SELECT state FROM venue_commands WHERE position_id = ?",
             ("z4-sell-terminal-append-fails",),
         ).fetchone()
-        assert row[0] == "REVIEW_REQUIRED"
+        assert row[0] == ("REJECTED" if persistence_mode == "lock_once" else "REVIEW_REQUIRED")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE raw_response_json IS NOT NULL"
+        ).fetchone()[0] >= 1
+        event_types = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events WHERE command_id = "
+                "(SELECT command_id FROM venue_commands WHERE position_id = ?)",
+                ("z4-sell-terminal-append-fails",),
+            )
+        ]
+        assert ("SUBMIT_REJECTED" in event_types) is (persistence_mode == "lock_once")
+        assert ("REVIEW_REQUIRED" in event_types) is (persistence_mode == "permanent")
     finally:
         configure_global_ledger(None)
 
