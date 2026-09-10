@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-02
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Last reused/audited: 2026-09-10
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
@@ -5677,3 +5679,60 @@ def test_current_evidence_requires_current_profile_and_point_in_time_row(
     assert materializer_mod.read_current_evidence_snapshot_id(
         conn, request, metric="high"
     ) is None
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare_replacement_forecast_live", "compute_replacement_posterior_readonly"])
+@pytest.mark.parametrize("caller_transaction", [False, True])
+@pytest.mark.parametrize("computation_fails", [False, True])
+def test_readonly_materialization_keeps_source_and_witness_on_one_snapshot(
+    tmp_path, monkeypatch, entrypoint, caller_transaction, computation_fails
+):
+    from src.data import replacement_forecast_materializer as materializer
+
+    path = tmp_path / "source-snapshot.db"
+    reader = sqlite3.connect(path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.execute("CREATE TABLE vector_revisions (identity INTEGER NOT NULL)")
+    reader.execute("INSERT INTO vector_revisions VALUES (1)")
+    reader.commit()
+    reader.execute("PRAGMA query_only=ON")
+    writer = sqlite3.connect(path)
+    seen = []
+    result = object()
+    request = object()
+
+    def validate(conn, incoming):
+        assert incoming is request
+        seen.append(conn.execute("SELECT MAX(identity) FROM vector_revisions").fetchone()[0])
+        writer.execute("INSERT INTO vector_revisions VALUES (2)")
+        writer.commit()
+        return incoming, "high"
+
+    def compute(conn, incoming, **kwargs):
+        seen.append(conn.execute("SELECT MAX(identity) FROM vector_revisions").fetchone()[0])
+        if computation_fails:
+            raise ValueError("test computation interrupted")
+        return result
+
+    monkeypatch.setattr(materializer, "_validated_replacement_forecast_request", validate)
+    monkeypatch.setattr(materializer, "_day0_ledger_frontier_identity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(materializer, "_compute_posterior_payload", compute)
+    try:
+        if caller_transaction:
+            reader.execute("BEGIN")
+        call = getattr(materializer, entrypoint)
+        if computation_fails:
+            with pytest.raises(ValueError, match="test computation interrupted"):
+                call(reader, request)
+        else:
+            actual = call(reader, request)
+            assert (actual.posterior if entrypoint.startswith("prepare_") else actual) is result
+        assert seen == [1, 1]
+        assert reader.in_transaction is caller_transaction
+        if caller_transaction:
+            assert reader.execute("SELECT MAX(identity) FROM vector_revisions").fetchone()[0] == 1
+            reader.rollback()
+        assert reader.execute("SELECT MAX(identity) FROM vector_revisions").fetchone()[0] == 2
+    finally:
+        writer.close()
+        reader.close()

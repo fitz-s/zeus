@@ -24,6 +24,7 @@ import math
 import sqlite3
 import hashlib
 import numpy as np
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
@@ -7781,54 +7782,69 @@ def _validated_replacement_forecast_request(
     return request, metric
 
 
+@contextmanager
+def _materialization_read_snapshot(conn: sqlite3.Connection):
+    """Keep source selection and its probability witness on one SQLite view."""
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if owns_transaction:
+            conn.rollback()
+
+
 def prepare_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
 ) -> ReplacementForecastMaterializeResult | PreparedReplacementForecastMaterialization:
     """Compute one family without writing or requiring the SQLite writer lock."""
 
-    validated = _validated_replacement_forecast_request(conn, request)
-    if isinstance(validated, ReplacementForecastMaterializeResult):
-        return validated
-    request, metric = validated
-    try:
-        day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
-            conn, request, metric=metric
-        )
-    except sqlite3.DatabaseError:
-        return ReplacementForecastMaterializeResult(
-            status="BLOCKED",
-            reason_codes=(
-                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
-            ),
-            posterior_id=None,
-            anchor_id=None,
-            readiness_id=None,
-        )
-    try:
-        posterior = _compute_posterior_payload(
-            conn, request, metric=metric, anchor_id=-1
-        )
-    except ValueError as exc:
-        reason = str(exc)
-        if reason in {
-            "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
-            "DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING",
-        }:
+    with _materialization_read_snapshot(conn):
+
+        validated = _validated_replacement_forecast_request(conn, request)
+        if isinstance(validated, ReplacementForecastMaterializeResult):
+            return validated
+        request, metric = validated
+        try:
+            day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
+                conn, request, metric=metric
+            )
+        except sqlite3.DatabaseError:
             return ReplacementForecastMaterializeResult(
                 status="BLOCKED",
-                reason_codes=(reason,),
+                reason_codes=(
+                    "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
+                ),
                 posterior_id=None,
                 anchor_id=None,
                 readiness_id=None,
             )
-        raise
-    return PreparedReplacementForecastMaterialization(
-        request=request,
-        metric=metric,
-        posterior=posterior,
-        day0_ledger_frontier_identity=day0_ledger_frontier_identity,
-    )
+        try:
+            posterior = _compute_posterior_payload(
+                conn, request, metric=metric, anchor_id=-1
+            )
+        except ValueError as exc:
+            reason = str(exc)
+            if reason in {
+                "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
+                "DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING",
+            }:
+                return ReplacementForecastMaterializeResult(
+                    status="BLOCKED",
+                    reason_codes=(reason,),
+                    posterior_id=None,
+                    anchor_id=None,
+                    readiness_id=None,
+                )
+            raise
+        return PreparedReplacementForecastMaterialization(
+            request=request,
+            metric=metric,
+            posterior=posterior,
+            day0_ledger_frontier_identity=day0_ledger_frontier_identity,
+        )
 
 
 def compute_replacement_posterior_readonly(
@@ -7837,11 +7853,13 @@ def compute_replacement_posterior_readonly(
 ) -> _PosteriorComputeResult | None:
     """Compute the live replacement posterior without persisting any state."""
 
-    validated = _validated_replacement_forecast_request(conn, request)
-    if isinstance(validated, ReplacementForecastMaterializeResult):
-        return None
-    request, metric = validated
-    return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
+    with _materialization_read_snapshot(conn):
+
+        validated = _validated_replacement_forecast_request(conn, request)
+        if isinstance(validated, ReplacementForecastMaterializeResult):
+            return None
+        request, metric = validated
+        return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
 def _day0_enqueue_owner_witness_is_current(
