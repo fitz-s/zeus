@@ -7004,6 +7004,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # required there).
     from src.state.schema.wallet_fill_observations_schema import ensure_table as _ensure_wallet_fill_observations_table
     _ensure_wallet_fill_observations_table(conn)
+    from src.state.schema.venue_fill_cash_facts_schema import ensure_table as _ensure_venue_fill_cash_facts_table
+    _ensure_venue_fill_cash_facts_table(conn)
     # reversal_plan_tier0_2026-08-24 item 3b: append-only per-auction-candidate
     # provenance (the frozen selection-lift preregistration's data requirement).
     # Sole writer: src.engine.global_batch_runtime._persist_tier0_candidate_set,

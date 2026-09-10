@@ -3053,6 +3053,20 @@ tables:
       packet — T2 consumes total_open_obligation_usd/has_unbounded_obligation when it
       extends exposure/heat accounting to ChainOnlyFact worst case.
 
+  - name: venue_fill_cash_facts
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.venue_fill_cash_facts_schema.ensure_table"
+    pk_col: id
+    notes: >
+      Immutable finalized transaction/wallet cash evidence. Chain receipt, historical
+      collateral identity and canonical/finalized headers precede the TRADE append.
+      Proof revisions append; UNKNOWN never means zero fee, and conflicting chain
+      identities cannot become last-row-wins economics. Existing CLOB facts and
+      lifecycle remain unchanged. Writer venue_command_repo.append_fill_cash_fact;
+      reader fill_cash_reader binds signed order identity and conserved child shares.
+
   - name: wallet_fill_observations
     db: trade
     schema_class: trade_class

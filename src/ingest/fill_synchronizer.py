@@ -104,6 +104,7 @@ from src.execution.exchange_reconcile import (
 )
 from src.state.schema.fill_sync_watermarks_schema import ensure_table as ensure_watermark_table
 from src.state.schema.wallet_fill_observations_schema import ensure_table as ensure_wallet_fill_observations_table
+from src.state.schema.venue_fill_cash_facts_schema import ensure_table as ensure_fill_cash_facts_table
 from src.state.venue_command_repo import _row_factory_as, append_trade_fact
 
 logger = logging.getLogger(__name__)
@@ -132,11 +133,12 @@ def _fill_sync_schema_ready(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT name FROM sqlite_master "
         "WHERE type = 'table' AND name IN "
-        "('fill_sync_watermarks', 'wallet_fill_observations')"
+        "('fill_sync_watermarks', 'wallet_fill_observations', 'venue_fill_cash_facts')"
     ).fetchall()
     return {str(row[0]) for row in rows} == {
         "fill_sync_watermarks",
         "wallet_fill_observations",
+        "venue_fill_cash_facts",
     }
 
 
@@ -832,6 +834,7 @@ def _sync_fills_coordinated(
             ) as tx:
                 ensure_watermark_table(tx.connection)
                 ensure_wallet_fill_observations_table(tx.connection)
+                ensure_fill_cash_facts_table(tx.connection)
             reader = get_trade_connection_read_only()
         assert reader is not None
         prepared = _prepare_fill_sync(
@@ -898,7 +901,17 @@ def fill_synchronizer_cycle() -> dict[str, Any]:
     try:
         client = PolymarketClient()
         adapter = client._ensure_v2_adapter()
-        return _sync_fills_coordinated(adapter)
+        result = _sync_fills_coordinated(adapter)
+        from src.ingest.fill_cash_observer import sync_cash_proofs
+
+        try:
+            result["chain_cash"] = sync_cash_proofs(adapter)
+        except Exception as exc:
+            logger.error("fill cash synchronization failed: %s", type(exc).__name__)
+            result["chain_cash"] = {"status": "failed", "reason": type(exc).__name__}
+            result["scheduler_failed"] = True
+            result["scheduler_failure_reason"] = "fill_cash_sync_failed"
+        return result
     except Exception as exc:  # noqa: BLE001
         logger.error("fill_synchronizer cycle failed (non-fatal; next tick retries): %s", exc, exc_info=True)
         return {

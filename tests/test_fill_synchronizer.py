@@ -817,6 +817,7 @@ def test_live_sync_fetches_outside_unified_trade_transaction(tmp_path, monkeypat
     init_schema(seed)
     fill_synchronizer_mod.ensure_watermark_table(seed)
     fill_synchronizer_mod.ensure_wallet_fill_observations_table(seed)
+    fill_synchronizer_mod.ensure_fill_cash_facts_table(seed)
     _seed_command(seed, command_id="cmd-coordinated", venue_order_id="ord-coordinated")
     seed.close()
 
@@ -1229,6 +1230,7 @@ def test_live_sync_monitor_waiter_acquires_between_tranches(
     init_schema(seed)
     fill_synchronizer_mod.ensure_watermark_table(seed)
     fill_synchronizer_mod.ensure_wallet_fill_observations_table(seed)
+    fill_synchronizer_mod.ensure_fill_cash_facts_table(seed)
     _seed_command(seed, command_id="cmd-monitor", venue_order_id="ord-monitor")
     seed.close()
 

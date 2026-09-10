@@ -21,6 +21,8 @@ Derived surfaces may never become truth by being convenient.
 
 | File | What it does | Danger level |
 |------|-------------|--------------|
+| `fill_cash_reader.py` | Signed-order and exact-share binding of finalized transaction cash evidence | HIGH |
+| `schema/venue_fill_cash_facts_schema.py` | Immutable TRADE transaction/wallet cash proof observations | HIGH |
 | `db.py` | Canonical DB write/query substrate | CRITICAL — all truth flows through here |
 | `write_coordinator.py` | Declared DB-set writer lease/transaction coordinator | CRITICAL — governs future DB write serialization |
 | `schema/execution_feasibility_evidence_schema.py` | Trade quote evidence append/latest schema owner | CRITICAL — live pre-submit quote freshness seam |

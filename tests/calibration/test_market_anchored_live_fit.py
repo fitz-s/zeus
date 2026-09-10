@@ -1007,7 +1007,10 @@ def test_duplicated_claim_window_refused_though_row_count_meets_floor():
 def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size=10.0,
                               legacy=False, probability_revision="fixture-revision-v1",
                               return_forecast=False, legacy_maker=False,
-                              return_details=False, native_quote_available=True):
+                              return_details=False, native_quote_available=True,
+                              forecast_lineage=False, child_posterior_id=None,
+                              child_global_posterior_id=None,
+                              child_posterior_identity=None):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1016,7 +1019,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     world = sqlite3.connect(":memory:")
     trade = sqlite3.connect(":memory:")
     decision = NOW - timedelta(days=3)
-    parent_decision = decision - timedelta(hours=3) if legacy else decision
+    parent_decision = decision - timedelta(hours=3) if legacy or forecast_lineage else decision
     parent = build_certificate(
         certificate_type="ProbabilityEvidenceCertificate", semantic_key="fixture-parent",
         claim_type="fixture", mode="LIVE", decision_time=parent_decision,
@@ -1037,8 +1040,20 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     }
     parents = [parent]
     forecast_conn = None
+    include_forecast = legacy or forecast_lineage
+    bin_label = "Will Austin be 80°F on 2026-08-28?"
     if legacy:
         economics.update({"q_source": "replacement_0_1", "payoff_q_point": .70})
+    elif forecast_lineage:
+        raw_token_q = .70 if side == "YES" else .30
+        acting_token_q = .52 if side == "YES" else .48
+        economics["payoff_q_point"] = acting_token_q if corrected else raw_token_q
+        if corrected:
+            economics["market_anchored_correction"] = {
+                "applied": True, "q_raw": raw_token_q,
+                "q_corrected": acting_token_q, "p0": .35,
+            }
+    if include_forecast:
         forecast_payload = {
             "city": "Austin", "target_date": (decision.date()+timedelta(days=1)).isoformat(),
             "metric": metric, "temperature_metric": metric,
@@ -1053,7 +1068,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
             algorithm_id="fixture", algorithm_version="1",
         )
         parents.append(forecast_certificate)
-        for role, ctype, fields in (
+        for role, ctype, fields in ((
             ("quote_feasibility", "QuoteFeasibilityCertificate", {
                 "best_ask": .35, "condition_id": "condition", "token_id": token,
                 "selected_token_id": token, "quote_book_condition_id": "condition",
@@ -1073,7 +1088,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 "condition_id": "condition", "token_id": token,
                 "cost_source": "native_orderbook_ask", "quote_source_kind": "executable_market_snapshot_native_book",
             }),
-        ):
+        ) if legacy else ()):
             parents.append(build_certificate(
                 certificate_type=ctype, semantic_key=f"fixture-{role}", claim_type="fixture",
                 mode="LIVE", decision_time=parent_decision, source_available_at=parent_decision,
@@ -1081,10 +1096,21 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                 authority_id="fixture", authority_version="1", algorithm_id="fixture",
                 algorithm_version="1",
             ))
+    q_live = (.70 if legacy else (
+        ((.52 if side == "YES" else .48) if corrected else (.70 if side == "YES" else .30))
+        if forecast_lineage else (.52 if corrected else .70)
+    ))
     payload = {"candidate_id": "candidate", "condition_id": "condition", "token_id": token,
-               "q_live": (.70 if legacy else (.52 if corrected else .70)), "direction": "buy_yes" if side == "YES" else "buy_no", "city": "Austin", "target_date": (decision.date()+timedelta(days=1)).isoformat(),
+               "q_live": q_live, "direction": "buy_yes" if side == "YES" else "buy_no", "city": "Austin", "target_date": (decision.date()+timedelta(days=1)).isoformat(),
                "temperature_metric": metric, "probability_semantics_revision": probability_revision,
-               "qkernel_execution_economics": economics}
+               "qkernel_execution_economics": economics,
+               "bin_label": bin_label if include_forecast else None}
+    if child_posterior_id is not None:
+        payload["posterior_id"] = child_posterior_id
+    if child_posterior_identity is not None:
+        payload["posterior_identity_hash"] = child_posterior_identity
+    if child_global_posterior_id is not None:
+        economics["global_posterior_id"] = child_global_posterior_id
     if legacy:
         payload.update({"q_source": "replacement_0_1", "_edli_q_source": "replacement_0_1",
                         "bin_label": bin_label,
@@ -1092,13 +1118,14 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                         "proof_execution_mode_intent": "MAKER" if legacy_maker else "TAKER",
                         "proof_maker_limit_price": .30})
     parent_edges = ()
-    if legacy:
+    if include_forecast:
         parent_edges = tuple(
             ParentEdge(role, item.certificate_hash, item.certificate_type)
             for role, item in (
-                [("forecast_authority", parents[1]), ("quote_feasibility", parents[2]),
-                 ("executable_snapshot", parents[3]), ("candidate", parents[4]),
-                 ("cost_model", parents[5])]
+                [("forecast_authority", parents[1])]
+                + ([("quote_feasibility", parents[2]), ("executable_snapshot", parents[3]),
+                    ("candidate", parents[4]), ("cost_model", parents[5])]
+                   if legacy else [])
             )
         )
     certificate = build_certificate(
@@ -1113,7 +1140,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     for item in parents:
         ledger.insert_idempotent(item, preverified=True)
     ledger.insert_idempotent(certificate, preverified=True)
-    if legacy:
+    if include_forecast:
         # The fixture's wall clock is later than its historical training
         # cutoff; the production contract requires each parent row's actual
         # created_at to remain before that cutoff.
@@ -1125,7 +1152,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         )
     trade.executescript("""
       CREATE TABLE venue_commands(command_id TEXT, token_id TEXT, created_at TEXT,
-        venue_order_id TEXT, snapshot_id TEXT, intent_kind TEXT, side TEXT);
+        venue_order_id TEXT, snapshot_id TEXT, intent_kind TEXT, side TEXT,
+        envelope_id TEXT);
       CREATE TABLE executable_market_snapshots(snapshot_id TEXT, condition_id TEXT, yes_token_id TEXT,
         no_token_id TEXT, selected_outcome_token_id TEXT, orderbook_top_ask REAL,
         raw_orderbook_hash TEXT, captured_at TEXT, token_map_json TEXT);
@@ -1137,17 +1165,17 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
       CREATE TABLE payout_observations(id INTEGER PRIMARY KEY, condition_id TEXT, outcome_index INTEGER,
         payout_numerator INTEGER, payout_denominator INTEGER, state TEXT, source TEXT,
         block_number INTEGER, block_hash TEXT, observed_at TEXT, superseded_by INTEGER);
+      CREATE TABLE venue_submission_envelopes (
+        envelope_id TEXT PRIMARY KEY, order_type TEXT, post_only INTEGER);
     """)
-    trade.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)", ("command", token, decision.isoformat(), "order", "snapshot", "ENTRY", "BUY"))
+    default_order_type = "GTC" if legacy_maker else ("FAK" if legacy else "FOK")
+    default_post_only = 1 if legacy_maker else 0
+    trade.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)", ("command", token, decision.isoformat(), "order", "snapshot", "ENTRY", "BUY", "envelope"))
+    trade.execute("INSERT INTO venue_submission_envelopes VALUES (?,?,?)", ("envelope", default_order_type, default_post_only))
     trade.execute("INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?)", (
         "snapshot", "condition", "11", "12", token, .35, "book-hash", decision.isoformat(), json.dumps({"YES":"11","NO":"12"})))
     trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?)", ("command",certificate.certificate_hash,"ENTRY",decision.isoformat()))
-    if legacy:
-        trade.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT")
-        trade.execute("""CREATE TABLE venue_submission_envelopes (
-            envelope_id TEXT PRIMARY KEY, order_type TEXT, post_only INTEGER)""")
-        trade.execute("UPDATE venue_commands SET envelope_id='envelope'")
-        trade.execute("INSERT INTO venue_submission_envelopes VALUES ('envelope',?,?)", ("GTC" if legacy_maker else "FAK", 1 if legacy_maker else 0))
+    if include_forecast:
         forecast_conn = sqlite3.connect(":memory:")
         forecast_conn.executescript("""CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY, source_id TEXT, product_id TEXT,
@@ -1160,7 +1188,17 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
             (decision.date()+timedelta(days=1)).isoformat(), metric,
             decision.isoformat(), decision.isoformat(), decision.isoformat(),
             json.dumps({bin_label:.70}),
-            json.dumps({"probability_semantics_revision": probability_revision} if probability_revision else {}),
+            json.dumps({
+                "probability_semantics_revision": probability_revision,
+                "bayes_precision_fusion": {"current_evidence_shape": {
+                    "snapshot_id": 101, "shape_hash": "shape-hash",
+                    "semantics_revision": probability_revision,
+                }},
+            } if probability_revision else {
+                "bayes_precision_fusion": {"current_evidence_shape": {
+                    "snapshot_id": 101, "shape_hash": "shape-hash",
+                }},
+            }),
             "posterior-hash", "live", 0,
             decision.isoformat()))
     filled = decision+timedelta(seconds=2)
@@ -1196,15 +1234,332 @@ def test_canonical_fit_preserves_raw_and_yes_no_event_geometry(side, corrected):
         assert row["acting_q"] == (.52 if corrected else .70)
         assert row["confirmed_shares"] == 10  # Not 30 across lifecycle revisions.
         assert row["fill_proof_tier"] == "CLOB_CONFIRMED"
-        fit_row, = corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT", probability_revision="fixture-revision-v1")
+        fit_row, = corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT", execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1")
         assert fit_row.q_raw == pytest.approx(.70 if side=="YES" else .30)
         assert fit_row.p0 == pytest.approx(.35 if side=="YES" else .65)
         assert fit_row.y == 1 and fit_row.w == 1
-        assert corpus.fit_rows(metric="low", execution_mode="TAKER_LIMIT", probability_revision="fixture-revision-v1") == []
-        assert corpus.fit_rows(metric="high", execution_mode="MAKER_REST", probability_revision="fixture-revision-v1") == []
+        assert corpus.fit_rows(metric="low", execution_mode="TAKER_LIMIT", execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1") == []
+        assert corpus.fit_rows(metric="high", execution_mode="MAKER_REST", execution_contract="MAKER_REST", probability_revision="fixture-revision-v1") == []
     finally:
         world.close()
         trade.close()
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_canonical_fit_seals_raw_forecast_lineage_for_each_side_and_revision(side, corrected):
+    world, trade, _, forecast, certificate, parents = _canonical_corpus_fixture(
+        side=side, corrected=corrected, forecast_lineage=True,
+        return_details=True,
+    )
+    try:
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        row, = corpus.records
+        lineage = row["raw_forecast_lineage"]
+        assert row["raw_forecast_lineage_reason"] is None
+        assert lineage["forecast_certificate_hash"] == parents[1].certificate_hash
+        assert lineage["posterior_id"] == 1
+        assert lineage["posterior_identity_hash"] == "posterior-hash"
+        assert lineage["ensemble_snapshot_id"] == 101
+        assert lineage["current_evidence_shape_hash"] == "shape-hash"
+        assert lineage["probability_revision"] == "fixture-revision-v1"
+        assert row["q_raw"] == pytest.approx(.70 if side == "YES" else .30)
+        assert row["acting_q"] == pytest.approx(
+            (.52 if side == "YES" else .48) if corrected
+            else (.70 if side == "YES" else .30)
+        )
+        # The certificate hash is the immutable parent identity, not a copied
+        # posterior string; changing the parent payload must remove lineage.
+        assert certificate.certificate_hash == row["certificate_hash"]
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("mutation, expected_reason", [
+    (
+        "DELETE FROM decision_certificates WHERE certificate_type='ForecastAuthorityCertificate'",
+        "FORECAST_LINEAGE_PARENT_UNBOUND",
+    ),
+    (
+        "UPDATE forecast_posteriors SET q_json=?",
+        "FORECAST_LINEAGE_Q_UNBOUND",
+    ),
+    (
+        "UPDATE forecast_posteriors SET source_available_at=?",
+        "FORECAST_LINEAGE_CLOCK_UNBOUND",
+    ),
+    (
+        "UPDATE forecast_posteriors SET provenance_json=?",
+        "FORECAST_LINEAGE_SHAPE_UNBOUND",
+    ),
+])
+def test_canonical_fit_lineage_gaps_keep_accepted_record_and_reason(mutation, expected_reason):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        if mutation.startswith("DELETE"):
+            world.execute(mutation)
+        elif "q_json" in mutation:
+            forecast.execute(mutation, (json.dumps({"Will Austin be 80°F on 2026-08-28?": .69}),))
+        elif "source_available_at" in mutation:
+            forecast.execute(mutation, ((NOW + timedelta(hours=1)).isoformat(),))
+        else:
+            forecast.execute(mutation, (json.dumps({
+                "probability_semantics_revision": "fixture-revision-v1",
+                "bayes_precision_fusion": {},
+            }),))
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == expected_reason
+        assert row["q_raw"] == pytest.approx(.70)
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_lineage_rejects_tampered_forecast_parent_hash_without_dropping_record():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        world.execute(
+            "UPDATE decision_certificates SET payload_json='{}' "
+            "WHERE certificate_type='ForecastAuthorityCertificate'"
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == "FORECAST_LINEAGE_PARENT_UNBOUND"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_lineage_normalizes_sqlite_recorded_at_clock():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET recorded_at=?",
+            ("2026-08-24 12:00:00",),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        row, = corpus.records
+        assert row["raw_forecast_lineage_reason"] is None
+        assert row["raw_forecast_lineage"]["recorded_at"] == "2026-08-24T12:00:00+00:00"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"child_posterior_id": 2},
+    {"child_global_posterior_id": 2},
+    {"child_posterior_id": 1, "child_global_posterior_id": 2},
+    {"child_posterior_identity": "wrong-identity"},
+])
+def test_canonical_fit_lineage_rejects_child_forecast_identity_mismatch(kwargs):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True, **kwargs,
+    )
+    try:
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.unknown == {}
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == "FORECAST_LINEAGE_IDENTITY_UNBOUND"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("training_allowed", [None, 0.5, 1.5, 1])
+def test_canonical_fit_lineage_invalid_training_metadata_stays_accepted(training_allowed):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET training_allowed=?", (training_allowed,)
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == "FORECAST_LINEAGE_METADATA_UNBOUND"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_fit_lineage_rejects_shape_revision_mismatch():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET provenance_json=?",
+            (json.dumps({
+                "probability_semantics_revision": "fixture-revision-v1",
+                "bayes_precision_fusion": {"current_evidence_shape": {
+                    "snapshot_id": 101, "shape_hash": "shape-hash",
+                    "semantics_revision": "other-revision",
+                }},
+            }),),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == "FORECAST_LINEAGE_REVISION_UNBOUND"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize("snapshot_id", [True, 0, -1, 0.5, "", float("nan")])
+def test_canonical_fit_lineage_requires_positive_integer_snapshot_id(snapshot_id):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        corrected=True, forecast_lineage=True, return_forecast=True,
+    )
+    try:
+        forecast.execute(
+            "UPDATE forecast_posteriors SET provenance_json=?",
+            (json.dumps({
+                "probability_semantics_revision": "fixture-revision-v1",
+                "bayes_precision_fusion": {"current_evidence_shape": {
+                    "snapshot_id": snapshot_id, "shape_hash": "shape-hash",
+                    "semantics_revision": "fixture-revision-v1",
+                }},
+            }),),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        row, = corpus.records
+        assert row["raw_forecast_lineage"] is None
+        assert row["raw_forecast_lineage_reason"] == "FORECAST_LINEAGE_SHAPE_UNBOUND"
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+@pytest.mark.parametrize(
+    "legacy,legacy_maker,order_type,post_only,expected",
+    [
+        (False, False, "FOK", 0, "FOK_FULL_OR_ZERO"),
+        (False, False, "FAK", 0, "FAK_PARTIAL"),
+        (True, True, "GTC", 1, "MAKER_REST"),
+    ],
+)
+def test_canonical_fit_seals_execution_contract_from_same_command_envelope(
+    legacy, legacy_maker, order_type, post_only, expected,
+):
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        legacy=legacy, legacy_maker=legacy_maker, return_forecast=True,
+    )
+    try:
+        trade.execute(
+            "UPDATE venue_submission_envelopes SET order_type=?, post_only=?",
+            (order_type, post_only),
+        )
+        corpus = _read_canonical(world, trade, forecast=forecast)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        assert corpus.records[0]["execution_contract"] == expected
+        rows = corpus.fit_rows(
+            metric="high", execution_mode=corpus.records[0]["execution_mode"],
+            execution_contract=expected, probability_revision="fixture-revision-v1",
+        )
+        assert len(rows) == 1
+    finally:
+        world.close()
+        trade.close()
+        if forecast is not None:
+            forecast.close()
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("DELETE FROM venue_submission_envelopes", "EXECUTION_CONTRACT_ENVELOPE_MISSING"),
+    (
+        "UPDATE venue_submission_envelopes SET order_type='GTC', post_only=1",
+        "EXECUTION_CONTRACT_ENVELOPE_MISMATCH",
+    ),
+])
+def test_canonical_fit_missing_or_mismatched_envelope_stays_in_unknown_denominator(
+    mutation, reason,
+):
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        trade.execute(mutation)
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.command_count == 1
+        assert corpus.unknown == {reason: 1}
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize(
+    "post_only,reason",
+    [
+        (0.5, "EXECUTION_CONTRACT_ENVELOPE_INVALID"),
+        (1.5, "EXECUTION_CONTRACT_ENVELOPE_INVALID"),
+        (float("inf"), "EXECUTION_CONTRACT_ENVELOPE_INVALID"),
+        (float("nan"), "EXECUTION_CONTRACT_ENVELOPE_MISSING"),
+        ("NaN", "EXECUTION_CONTRACT_ENVELOPE_INVALID"),
+        ("other", "EXECUTION_CONTRACT_ENVELOPE_INVALID"),
+    ],
+)
+def test_canonical_fit_invalid_post_only_stays_unknown_without_lossy_coercion(post_only, reason):
+    world, trade, _ = _canonical_corpus_fixture()
+    try:
+        trade.execute(
+            "UPDATE venue_submission_envelopes SET post_only=?",
+            (post_only,),
+        )
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.command_count == 1
+        assert corpus.unknown == {reason: 1}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_contract_selection_does_not_mix_fok_and_fak():
+    records = tuple(dict(
+        metric="high", execution_mode="TAKER_LIMIT", execution_contract=contract,
+        event_key=("Austin", f"2026-08-0{index + 1}", "high"),
+        lead_bucket="day1", side="YES", p0=.4, q_raw=q, payout=1,
+        confirmed_shares=10, raw_probability_revision="fixture-revision-v1",
+    ) for index, (contract, q) in enumerate((("FOK_FULL_OR_ZERO", .6), ("FAK_PARTIAL", .7))))
+    corpus = live_fit.CanonicalFitCorpus(records, {}, 2, NOW.isoformat())
+    assert [row.q_raw for row in corpus.fit_rows(
+        metric="high", execution_mode="TAKER_LIMIT",
+        execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1",
+    )] == [.6]
+    assert [row.q_raw for row in corpus.fit_rows(
+        metric="high", execution_mode="TAKER_LIMIT",
+        execution_contract="FAK_PARTIAL", probability_revision="fixture-revision-v1",
+    )] == [.7]
+    with pytest.raises(ValueError, match="execution_contract"):
+        corpus.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="MAKER_REST", probability_revision="fixture-revision-v1",
+        )
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
@@ -1227,6 +1582,7 @@ def test_canonical_fit_recovers_legacy_replacement_raw_and_anchor(
         assert row["p0"] == pytest.approx(.30 if legacy_maker else (.35 if side == "YES" else .35))
         rows = corpus.fit_rows(
             metric="high", execution_mode=row["execution_mode"],
+            execution_contract=("MAKER_REST" if legacy_maker else "FAK_PARTIAL"),
             probability_revision="fixture-revision-v1",
         )
         assert len(rows) == 1
@@ -1263,10 +1619,11 @@ def test_canonical_fit_legacy_revision_unknown_cannot_fit_or_mix():
         assert corpus.records[0]["raw_probability_revision"] is None
         assert corpus.fit_rows(
             metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FAK_PARTIAL",
             probability_revision="fixture-revision-v1",
         ) == []
         with pytest.raises(ValueError, match="probability_revision is required"):
-            corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT", probability_revision="")
+            corpus.fit_rows(metric="high", execution_mode="TAKER_LIMIT", execution_contract="FAK_PARTIAL", probability_revision="")
     finally:
         world.close()
         trade.close()
@@ -1287,6 +1644,7 @@ def test_canonical_fit_keeps_independent_raw_when_child_revision_is_missing():
         assert corpus.records[0]["raw_probability_revision"] is None
         assert corpus.fit_rows(
             metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FAK_PARTIAL",
             probability_revision="fixture-source-v1",
         ) == []
     finally:
@@ -1465,10 +1823,10 @@ def test_canonical_fit_rejects_unbound_evidence_and_keeps_denominator(mutation, 
 
 
 def test_canonical_event_weight_preserves_shares_without_inventing_sample_size():
-    records = tuple(dict(metric="high",execution_mode="MAKER_REST",event_key=("Austin","2026-08-01","high"),
+    records = tuple(dict(metric="high",execution_mode="MAKER_REST",execution_contract="MAKER_REST",event_key=("Austin","2026-08-01","high"),
         lead_bucket="day1",side="YES",p0=.4,q_raw=.6,payout=1,confirmed_shares=shares,
         raw_probability_revision="fixture-revision-v1") for shares in (10,30))
     corpus = live_fit.CanonicalFitCorpus(records, {}, 2, NOW.isoformat())
-    rows = corpus.fit_rows(metric="high",execution_mode="MAKER_REST", probability_revision="fixture-revision-v1")
+    rows = corpus.fit_rows(metric="high",execution_mode="MAKER_REST", execution_contract="MAKER_REST", probability_revision="fixture-revision-v1")
     assert [row.w for row in rows] == [.25,.75]
     assert sum(row.w for row in rows) == 1

@@ -14,6 +14,7 @@ or lifecycle states.
 
 | File | What it does | Danger level |
 |------|-------------|--------------|
+| `fill_cash_observer.py` | Finalized receipt capture and fair retry inside the existing fill synchronizer | HIGH |
 | `forecast_live_daemon.py` | Dedicated OpenData live forecast producer scheduler | HIGH — forecast truth producer / readiness upstream |
 | `polymarket_user_channel.py` | R3 M3 Polymarket authenticated user WebSocket ingestor, gap status, and U2 fact append bridge | HIGH — live venue truth ingest |
 

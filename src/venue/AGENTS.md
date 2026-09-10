@@ -14,6 +14,7 @@ journal → `VenueSubmissionEnvelope` provenance → SDK/API side effect.
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `polymarket_v2_adapter.py` | Polymarket CLOB V2 adapter, shared adapter protocol, and SDK boundary | CRITICAL — live-money external side effects |
+| `fill_cash_proof.py` | Pure finalized receipt ABI and collateral conservation proof | HIGH |
 | `batch_submit.py` | Pure batch primitives: chunking, safe-prefix decomposition, response->request mapping. No I/O, no SDK, no DB. | LOW (pure) |
 | `__init__.py` | Package marker | LOW |
 

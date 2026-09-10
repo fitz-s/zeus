@@ -6840,3 +6840,58 @@ def list_events(conn: sqlite3.Connection, command_id: str) -> list[dict]:
             (command_id,),
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+def append_fill_cash_fact(conn: sqlite3.Connection, *, proof: dict) -> int:
+    """Append finalized receipt evidence without changing CLOB facts or lifecycle."""
+    from src.venue.fill_cash_proof import decode_fill_cash_proof
+
+    if not conn.in_transaction:
+        raise ValueError("fill cash evidence requires caller transaction")
+    content = dict(proof)
+    chain_id = content.get("chain_id")
+    if type(chain_id) is not int or chain_id != 137:
+        raise ValueError("cash proof request must identify Polygon")
+    observed_at = content.pop("observed_at")
+    stamp = datetime.datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("fill cash observation requires an aware clock")
+    decoded = content["decoded"]
+    if decoded["status"] not in ("PROVEN", "UNKNOWN") or not isinstance(decoded["reason"], str):
+        raise ValueError("invalid cash proof status")
+    if decoded["status"] == "PROVEN":
+        if type(content.get("rpc_chain_id")) is not int or content["rpc_chain_id"] != chain_id:
+            raise ValueError("cash proof must bind the RPC chain identity")
+        checked = decode_fill_cash_proof(**{key: content[key] for key in (
+            "chain_id", "tx_hash", "wallet", "receipt", "header", "finalized_header",
+            "collateral_by_exchange", "header_after")})
+        if checked != decoded:
+            raise ValueError("cash proof differs from reproduced receipt")
+    payload = json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    proof_hash = hashlib.sha256(payload.encode()).hexdigest()
+
+    def block_fields(header):
+        if not isinstance(header, dict):
+            return None, None
+        try:
+            number = int(header["number"], 16)
+        except (ValueError, KeyError, TypeError):
+            return None, None
+        return number, header.get("hash")
+
+    block_number, block_hash = block_fields(content.get("header"))
+    finalized_number, finalized_hash = block_fields(content.get("finalized_header"))
+    with _savepoint_atomic(conn):
+        conn.execute("""
+            INSERT INTO venue_fill_cash_facts (
+              chain_id, tx_hash, wallet, status, reason, block_number, block_hash,
+              finalized_number, finalized_hash, observed_at, proof_hash, proof_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(chain_id,tx_hash,wallet,proof_hash) DO NOTHING
+        """, (chain_id, content["tx_hash"], content["wallet"], decoded["status"], decoded["reason"],
+              block_number, block_hash, finalized_number, finalized_hash,
+              stamp.astimezone(datetime.timezone.utc).isoformat(), proof_hash, payload))
+        row = conn.execute("""SELECT id FROM venue_fill_cash_facts
+            WHERE chain_id=? AND tx_hash=? AND wallet=? AND proof_hash=?""",
+            (chain_id, content["tx_hash"], content["wallet"], proof_hash)).fetchone()
+    return int(row[0])

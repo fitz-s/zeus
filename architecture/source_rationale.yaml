@@ -3431,3 +3431,19 @@ files:
     zone: K2_runtime
     authority_role: regret_decompositions_schema_owner
     why: DDL owner for the derived regret decomposition table; canonical trade and settlement facts remain upstream authority.
+  src/venue/fill_cash_proof.py:
+    zone: K2_runtime
+    authority_role: finalized_fill_cash_decoder
+    why: Pure receipt ABI and wallet collateral conservation verification; never signs, submits, or infers paid fees from fee rates.
+  src/ingest/fill_cash_observer.py:
+    zone: K2_runtime
+    authority_role: finalized_fill_cash_observer
+    why: Bounded finalized receipt and historical collateral RPC capture outside writer leases, with recent-fill priority and fair historical drainage through the existing synchronizer.
+  src/state/schema/venue_fill_cash_facts_schema.py:
+    zone: K2_runtime
+    authority_role: fill_cash_schema_owner
+    why: Append-only TRADE transaction and wallet proof schema; observation identity includes finality evidence so UNKNOWN can acquire later proof without overwriting history.
+  src/state/fill_cash_reader.py:
+    zone: K2_runtime
+    authority_role: signed_order_cash_binding
+    why: Binds immutable chain cash proofs to signed order identity and exact aggregate economic fill shares before settled net-payoff measurement; preserves unknowns and point-in-time cutoffs.

@@ -3966,6 +3966,9 @@ def _json_rpc_batch_call(
     _assert_no_world_mutex_held_for_io("onchain.batch")
     if not calls:
         return []
+    allowed = {"eth_getBlockByNumber", "eth_call", "eth_chainId", "eth_getTransactionReceipt"}
+    if any(method not in allowed for method, _params in calls):
+        raise V2AdapterError("polygon rpc batch contains unsupported read method")
     payload = json.dumps(
         [
             {"jsonrpc": "2.0", "id": index, "method": method, "params": params}
@@ -4028,6 +4031,15 @@ def _json_rpc_batch_call(
                 )
         elif method == "eth_call":
             _hex_data_bytes(result, context=f"polygon rpc batch id={response_id}")
+        elif method == "eth_chainId":
+            if (not isinstance(result, str) or not result.startswith("0x") or len(result) <= 2
+                    or any(c not in "0123456789abcdefABCDEF" for c in result[2:])):
+                raise V2AdapterError(f"polygon rpc batch id={response_id} invalid chain identity")
+        elif method == "eth_getTransactionReceipt":
+            # Null is an explicitly unavailable receipt, never a zero fill.
+            # The cash decoder owns status, logs, identity and finality checks.
+            if result is not None and not isinstance(result, dict):
+                raise V2AdapterError(f"polygon rpc batch id={response_id} receipt is not an object")
         else:
             raise V2AdapterError(
                 f"polygon rpc batch unsupported method id={response_id}: {method}"

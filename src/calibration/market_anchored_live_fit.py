@@ -328,7 +328,57 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
-CANONICAL_CORPUS_REVISION = "sealed_raw_finalized_payout_event_weight_v2_legacy_provenance_bound"
+CANONICAL_CORPUS_REVISION = (
+    "sealed_raw_finalized_payout_event_weight_v3_execution_contract_bound"
+)
+
+_EXECUTION_CONTRACT_BY_MODE = {
+    "TAKER_LIMIT": frozenset({"FOK_FULL_OR_ZERO", "FAK_PARTIAL"}),
+    "MAKER_REST": frozenset({"MAKER_REST"}),
+}
+_EXECUTION_CONTRACTS = frozenset(
+    contract
+    for contracts in _EXECUTION_CONTRACT_BY_MODE.values()
+    for contract in contracts
+)
+
+
+def _execution_contract_for(
+    mode: object, order_type: object, post_only: object,
+) -> tuple[str | None, str | None]:
+    """Resolve the sealed venue envelope into a fit-policy contract."""
+
+    mode = str(mode or "").strip().upper()
+    order_type = str(order_type or "").strip().upper()
+    if mode not in _EXECUTION_CONTRACT_BY_MODE:
+        return None, "EXECUTION_CONTRACT_MODE_UNSUPPORTED"
+    if order_type == "":
+        return None, "EXECUTION_CONTRACT_ENVELOPE_MISSING"
+    if post_only is None:
+        return None, "EXECUTION_CONTRACT_ENVELOPE_MISSING"
+    if isinstance(post_only, bool):
+        post_only = int(post_only)
+    elif isinstance(post_only, int):
+        if post_only not in (0, 1):
+            return None, "EXECUTION_CONTRACT_ENVELOPE_INVALID"
+    elif isinstance(post_only, float):
+        if not math.isfinite(post_only) or post_only not in (0.0, 1.0):
+            return None, "EXECUTION_CONTRACT_ENVELOPE_INVALID"
+        post_only = int(post_only)
+    elif isinstance(post_only, str) and post_only in {"0", "1"}:
+        post_only = int(post_only)
+    else:
+        return None, "EXECUTION_CONTRACT_ENVELOPE_INVALID"
+    if mode == "TAKER_LIMIT" and post_only == 0:
+        contract = {
+            "FOK": "FOK_FULL_OR_ZERO",
+            "FAK": "FAK_PARTIAL",
+        }.get(order_type)
+        if contract is not None:
+            return contract, None
+    if mode == "MAKER_REST" and post_only == 1 and order_type in {"GTC", "GTD"}:
+        return "MAKER_REST", None
+    return None, "EXECUTION_CONTRACT_ENVELOPE_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -342,13 +392,23 @@ class CanonicalFitCorpus:
     revision: str = CANONICAL_CORPUS_REVISION
 
     def fit_rows(
-        self, *, metric: str, execution_mode: str, probability_revision: str
+        self, *, metric: str, execution_mode: str, probability_revision: str,
+        execution_contract: str,
     ) -> list[FitRow]:
         """Keep HIGH/LOW and execution policies separate; normalize each event."""
+        if metric not in {"high", "low"}:
+            raise ValueError("unsupported metric")
+        if execution_mode not in _EXECUTION_CONTRACT_BY_MODE:
+            raise ValueError("unsupported execution_mode")
         if not isinstance(probability_revision, str) or not probability_revision.strip():
             raise ValueError("probability_revision is required")
+        if execution_contract not in _EXECUTION_CONTRACTS:
+            raise ValueError("unsupported execution_contract")
+        if execution_contract not in _EXECUTION_CONTRACT_BY_MODE[execution_mode]:
+            raise ValueError("execution_contract does not match execution_mode")
         records = [r for r in self.records if r["metric"] == metric
                    and r["execution_mode"] == execution_mode
+                   and r.get("execution_contract") == execution_contract
                    and r.get("raw_probability_revision") == probability_revision
                    and r["lead_bucket"] is not None and r["payout"] in (0, 1)]
         totals: dict[tuple, float] = defaultdict(float)
@@ -516,11 +576,11 @@ def load_canonical_fit_corpus(
 
     def forecast_row_for(parent_payload, city, target, metric, decision_at):
         if not forecast_table_available:
-            return None
+            return None, "FORECAST_LINEAGE_CONNECTION_UNAVAILABLE"
         posterior_id = parent_payload.get("replacement_posterior_id", parent_payload.get("posterior_id"))
         identity = parent_payload.get("posterior_identity_hash")
         if posterior_id in (None, "") or not identity:
-            return None
+            return None, "FORECAST_LINEAGE_POSTERIOR_IDENTITY_UNBOUND"
         cache_key = (str(posterior_id), str(identity), city, target.isoformat(), metric)
         if cache_key not in forecast_cache:
             try:
@@ -548,18 +608,125 @@ def load_canonical_fit_corpus(
                 forecast_cache[cache_key] = dict(zip(names, cursor))
         result = forecast_cache[cache_key]
         if result is None:
-            return None
+            return None, "FORECAST_LINEAGE_POSTERIOR_UNBOUND"
         source_at = _parse_ts(result.get("source_available_at"))
         computed_at = _parse_ts(result.get("computed_at"))
         recorded_at = _parse_ts(result.get("recorded_at"))
         if recorded_at is None and result.get("recorded_at"):
             recorded_at = _parse_ts(str(result["recorded_at"]).replace(" ", "T") + "Z")
-        if (result.get("runtime_layer") != "live" or int(result.get("training_allowed")) != 0
-                or source_at is None or computed_at is None or source_at > decision_at
+        training_allowed = result.get("training_allowed")
+        metadata_valid = (
+            result.get("runtime_layer") == "live"
+            and type(training_allowed) is int
+            and training_allowed == 0
+        )
+        if not metadata_valid:
+            return None, "FORECAST_LINEAGE_METADATA_UNBOUND"
+        if (source_at is None or computed_at is None or source_at > decision_at
                 or computed_at > decision_at or recorded_at is None
                 or recorded_at > decision_at or recorded_at >= cutoff):
-            return None
-        return result
+            return None, "FORECAST_LINEAGE_CLOCK_UNBOUND"
+        result = dict(result)
+        result["source_available_at"] = source_at.isoformat()
+        result["computed_at"] = computed_at.isoformat()
+        result["recorded_at"] = recorded_at.isoformat()
+        return result, None
+
+    def forecast_probability_revision(row):
+        provenance = obj(row.get("provenance_json"))
+        revision = provenance.get("probability_semantics_revision")
+        if revision is None:
+            fusion = provenance.get("bayes_precision_fusion")
+            shape = fusion.get("current_evidence_shape") if isinstance(fusion, dict) else None
+            revision = shape.get("semantics_revision") if isinstance(shape, dict) else None
+        return revision if isinstance(revision, str) and revision.strip() else None
+
+    def forecast_lineage_for(
+        certificate, child_edge_rows, payload, economics, raw,
+        raw_probability_revision, side, city, target, metric, decision_at,
+    ):
+        """Return sealed raw forecast provenance without changing acceptance."""
+
+        if forecast_conn is None:
+            return None, "FORECAST_LINEAGE_CONNECTION_UNAVAILABLE"
+        forecast_parent = parent_for(
+            certificate, child_edge_rows, "forecast_authority",
+            "ForecastAuthorityCertificate", decision_at,
+        )
+        if forecast_parent is None:
+            return None, "FORECAST_LINEAGE_PARENT_UNBOUND"
+        forecast_payload = obj(forecast_parent.get("payload_json"))
+        parent_metric = forecast_payload.get("metric", forecast_payload.get("temperature_metric"))
+        if (forecast_payload.get("city") != city
+                or forecast_payload.get("target_date") != target.isoformat()
+                or parent_metric != metric):
+            return None, "FORECAST_LINEAGE_IDENTITY_UNBOUND"
+        posterior_id = forecast_payload.get(
+            "replacement_posterior_id", forecast_payload.get("posterior_id")
+        )
+        posterior_identity = forecast_payload.get("posterior_identity_hash")
+        if posterior_id in (None, "") or not isinstance(posterior_identity, str) or not posterior_identity:
+            return None, "FORECAST_LINEAGE_POSTERIOR_IDENTITY_UNBOUND"
+        child_identity = payload.get("posterior_identity_hash")
+        if (any(value not in (None, "") and str(value) != str(posterior_id)
+                for value in (payload.get("posterior_id"), economics.get("global_posterior_id")))
+                or (child_identity not in (None, "")
+                    and str(child_identity) != str(posterior_identity))):
+            return None, "FORECAST_LINEAGE_IDENTITY_UNBOUND"
+        row, row_reason = forecast_row_for(forecast_payload, city, target, metric, decision_at)
+        if row is None:
+            return None, row_reason
+        bin_label = payload.get("bin_label")
+        parent_q_map = forecast_payload.get("replacement_q")
+        if not isinstance(bin_label, str) or not bin_label or not isinstance(parent_q_map, dict):
+            return None, "FORECAST_LINEAGE_BIN_UNBOUND"
+        source_q = obj(row.get("q_json")).get(bin_label)
+        parent_q = parent_q_map.get(bin_label)
+        source_q_value = probability(source_q)
+        parent_q_value = probability(parent_q)
+        expected_raw = source_q_value if side == "YES" else (
+            1.0 - source_q_value if source_q_value is not None else None
+        )
+        if (source_q_value is None or parent_q_value is None
+                or not equal(source_q_value, parent_q_value)
+                or raw is None or not equal(expected_raw, raw)):
+            return None, "FORECAST_LINEAGE_Q_UNBOUND"
+        source_revision = forecast_probability_revision(row)
+        if (source_revision is None or not isinstance(raw_probability_revision, str)
+                or not raw_probability_revision.strip()
+                or source_revision != raw_probability_revision):
+            return None, "FORECAST_LINEAGE_REVISION_UNBOUND"
+        provenance = obj(row.get("provenance_json"))
+        fusion = provenance.get("bayes_precision_fusion")
+        shape = fusion.get("current_evidence_shape") if isinstance(fusion, dict) else None
+        if not isinstance(shape, dict):
+            return None, "FORECAST_LINEAGE_SHAPE_UNBOUND"
+        shape_revision = shape.get("semantics_revision")
+        if (not isinstance(shape_revision, str) or not shape_revision.strip()
+                or shape_revision != source_revision
+                or shape_revision != raw_probability_revision):
+            return None, "FORECAST_LINEAGE_REVISION_UNBOUND"
+        snapshot_id = shape.get("snapshot_id")
+        shape_hash = shape.get("shape_hash")
+        if (isinstance(snapshot_id, bool) or type(snapshot_id) is not int or snapshot_id <= 0
+                or not isinstance(shape_hash, str) or not shape_hash):
+            return None, "FORECAST_LINEAGE_SHAPE_UNBOUND"
+        source_at = _parse_ts(row.get("source_available_at"))
+        computed_at = _parse_ts(row.get("computed_at"))
+        recorded_at = _parse_ts(row.get("recorded_at"))
+        if source_at is None or computed_at is None or recorded_at is None:
+            return None, "FORECAST_LINEAGE_CLOCK_UNBOUND"
+        return {
+            "forecast_certificate_hash": forecast_parent.get("certificate_hash"),
+            "posterior_id": posterior_id,
+            "posterior_identity_hash": posterior_identity,
+            "source_available_at": source_at.isoformat(),
+            "computed_at": computed_at.isoformat(),
+            "recorded_at": recorded_at.isoformat(),
+            "ensemble_snapshot_id": snapshot_id,
+            "current_evidence_shape_hash": shape_hash,
+            "probability_revision": source_revision,
+        }, None
 
     def legacy_replacement_input(certificate, child_edge_rows, payload, economics,
                                  correction, side, city, target, metric, decision_at):
@@ -589,7 +756,7 @@ def load_canonical_fit_corpus(
         if (child_identity not in (None, "")
                 and str(child_identity) != str(forecast_payload.get("posterior_identity_hash"))):
             return None, None, "LEGACY_FORECAST_IDENTITY_UNBOUND"
-        row = forecast_row_for(forecast_payload, city, target, metric, decision_at)
+        row, _ = forecast_row_for(forecast_payload, city, target, metric, decision_at)
         if row is None:
             return None, None, "LEGACY_FORECAST_POSTERIOR_UNBOUND"
         try:
@@ -695,13 +862,13 @@ def load_canonical_fit_corpus(
         ).fetchall()
     }
     envelope_join = ""
-    envelope_columns = "NULL AS command_order_type, NULL AS command_post_only"
+    envelope_columns = "NULL AS command_order_type, NULL AS command_post_only, NULL AS envelope_id"
     if "venue_submission_envelopes" in trade_tables:
         envelope_join = (
             f"LEFT JOIN {trade_schema}.venue_submission_envelopes e "
             "ON e.envelope_id=c.envelope_id"
         )
-        envelope_columns = "e.order_type AS command_order_type, e.post_only AS command_post_only"
+        envelope_columns = "e.order_type AS command_order_type, e.post_only AS command_post_only, e.envelope_id"
     commands = records(trade_conn, f"""
         SELECT c.command_id, c.token_id, c.created_at, c.venue_order_id, c.snapshot_id, c.side AS order_side,
                {envelope_columns},
@@ -902,6 +1069,11 @@ def load_canonical_fit_corpus(
                 reasons.append(legacy_reason)
             else:
                 mode, p0 = legacy_mode, legacy_p0
+        execution_contract, contract_reason = _execution_contract_for(
+            mode, command.get("command_order_type"), command.get("command_post_only")
+        )
+        if contract_reason:
+            reasons.append(contract_reason)
         capture = obj(economics.get("raw_calibration_input"))
         if capture:
             captured_identity = (
@@ -983,20 +1155,36 @@ def load_canonical_fit_corpus(
             # One primary reason per command keeps the unknown denominator additive.
             unknown[reasons[0]] += 1
             continue
+        raw_forecast_lineage, raw_forecast_lineage_reason = forecast_lineage_for(
+            certificate, edges[certificate["certificate_id"]], payload, economics, raw,
+            raw_probability_revision, side, city, target, metric, decision_at,
+        )
         held = next(row for row in pair if row["outcome_index"] == outcome_index)
+        from src.state.fill_cash_reader import read_command_fill_cash
+
+        cash = read_command_fill_cash(trade_conn, command=command, fills=fills[command_id],
+                                      cutoff=cutoff, schema=trade_schema)
+        terminal_net_atoms = None
+        if cash["status"] == "PROVEN":
+            terminal_net_atoms = (cash["shares_atoms"] * int(held["payout_numerator"] == held["payout_denominator"])
+                                  + cash["collateral_delta_atoms"])
         accepted.append(dict(
             command_id=command_id, certificate_hash=certificate["certificate_hash"],
             condition_id=command["condition_id"], token_id=token, side=side,
             city=city, target_date=target.isoformat(), metric=metric,
             event_key=(city, target.isoformat(), metric), execution_mode=mode,
+            execution_contract=execution_contract,
             decision_time=decision_at.isoformat(), lead_days=(target-local_date).days,
             lead_bucket=lead_bucket_of(local_date, target), q_raw=raw, raw_source=raw_source,
             raw_probability_revision=raw_probability_revision,
+            raw_forecast_lineage=raw_forecast_lineage,
+            raw_forecast_lineage_reason=raw_forecast_lineage_reason,
             acting_q=probability(payload.get("q_live")), p0=p0, confirmed_shares=shares,
             fill_available_at=fill_available_at.isoformat(),
             payout=held["payout_numerator"] / held["payout_denominator"],
             payout_available_at=max(_parse_ts(row["observed_at"]) for row in pair).isoformat(),
             fill_proof_tier="CLOB_CONFIRMED", payout_proof_tier="FINALIZED_CHAIN_PAIR",
+            chain_cash=cash, terminal_net_payoff_atoms=terminal_net_atoms,
         ))
     return CanonicalFitCorpus(tuple(accepted), dict(unknown), len(commands), cutoff_text)
 
