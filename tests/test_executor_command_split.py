@@ -5671,6 +5671,162 @@ def test_entry_matched_human_malformed_signed_preimage_stays_partial(signed_orde
     ) == "0.01"
 
 
+def test_post_submit_ack_closure_starts_immediate_before_validation_reads(tmp_path):
+    """A post-submit read cannot be upgraded after another WAL writer commits."""
+    import src.execution.executor as executor
+
+    path = tmp_path / "post-submit-wal.db"
+    conn = sqlite3.connect(path, timeout=0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE ack_facts (kind TEXT NOT NULL)")
+    conn.commit()
+    competitor = sqlite3.connect(path, timeout=0)
+
+    # This is the old split: a deferred read snapshot becomes SQLITE_BUSY_SNAPSHOT
+    # when the writer commits before the ACK facts are appended.
+    conn.execute("SAVEPOINT old_post_submit")
+    conn.execute("SELECT COUNT(*) FROM ack_facts").fetchone()
+    competitor.execute("BEGIN IMMEDIATE")
+    competitor.execute("INSERT INTO ack_facts VALUES ('outside')")
+    competitor.commit()
+    with pytest.raises(sqlite3.OperationalError) as old_error:
+        conn.execute("INSERT INTO ack_facts VALUES ('late')")
+    assert old_error.value.sqlite_errorcode == sqlite3.SQLITE_BUSY_SNAPSHOT
+    conn.rollback()
+
+    blocked = []
+
+    def persist_ack_facts():
+        assert conn.in_transaction
+        conn.execute("SELECT COUNT(*) FROM ack_facts").fetchone()
+        try:
+            competitor.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            blocked.append((exc.sqlite_errorcode, exc.sqlite_errorname))
+        conn.executemany(
+            "INSERT INTO ack_facts VALUES (?)",
+            [("ack",), ("order",), ("trade",), ("fill",)],
+        )
+
+    executor._run_post_submit_ack_persistence(
+        conn,
+        own_conn=True,
+        persist_fn=persist_ack_facts,
+        owner="test_post_submit",
+        what="test_ack_facts",
+        deadline_ms=250,
+        max_hold_ms=500,
+    )
+
+    assert blocked == [(sqlite3.SQLITE_BUSY, "SQLITE_BUSY")]
+    assert [row[0] for row in conn.execute(
+        "SELECT kind FROM ack_facts ORDER BY rowid"
+    )] == ["outside", "ack", "order", "trade", "fill"]
+    assert conn.in_transaction is False
+    competitor.close()
+    conn.close()
+
+
+@pytest.mark.parametrize("owner", ["entry", "exit"])
+def test_post_submit_ack_closure_rolls_back_all_facts_for_both_paths(tmp_path, owner):
+    """A failed ACK closure leaves no ACK-only or facts-only residue."""
+    import src.execution.executor as executor
+
+    conn = sqlite3.connect(tmp_path / f"{owner}-rollback.db")
+    conn.execute("CREATE TABLE ack_facts (kind TEXT NOT NULL)")
+    conn.commit()
+
+    def persist_then_fail():
+        conn.executemany(
+            "INSERT INTO ack_facts VALUES (?)",
+            [("ack",), ("order",), ("trade",), ("fill",)],
+        )
+        raise RuntimeError("synthetic post-submit failure")
+
+    with pytest.raises(RuntimeError, match="synthetic post-submit failure"):
+        executor._run_post_submit_ack_persistence(
+            conn,
+            own_conn=True,
+            persist_fn=persist_then_fail,
+            owner=f"{owner}_post_submit",
+            what=f"{owner}_ack_facts",
+            deadline_ms=250,
+            max_hold_ms=500,
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM ack_facts").fetchone()[0] == 0
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_post_submit_ack_closure_preserves_caller_transaction_ownership(tmp_path):
+    """The helper must not commit or rollback a transaction it does not own."""
+    import src.execution.executor as executor
+
+    conn = sqlite3.connect(tmp_path / "caller-transaction.db")
+    conn.execute("CREATE TABLE caller_work (value TEXT NOT NULL)")
+    conn.commit()
+    conn.execute("BEGIN")
+    conn.execute("INSERT INTO caller_work VALUES ('caller-sentinel')")
+
+    called = False
+
+    def should_not_run():
+        nonlocal called
+        called = True
+
+    with pytest.raises(executor._PostSubmitCallerTransactionError):
+        executor._run_post_submit_ack_persistence(
+            conn,
+            own_conn=False,
+            persist_fn=should_not_run,
+            owner="caller_transaction",
+            what="caller_transaction",
+            deadline_ms=250,
+            max_hold_ms=500,
+        )
+
+    assert called is False
+    assert conn.in_transaction is True
+    assert conn.execute("SELECT value FROM caller_work").fetchone()[0] == "caller-sentinel"
+    conn.rollback()
+    conn.close()
+
+
+def test_post_submit_retry_logs_only_actual_sqlite_error_identity(tmp_path, monkeypatch, caplog):
+    """Lock diagnostics report SQLite's real code/name, without guessing 517."""
+    import logging
+    import src.execution.executor as executor
+
+    path = tmp_path / "retry-diagnostics.db"
+    conn = sqlite3.connect(path, timeout=0)
+    conn.execute("CREATE TABLE ack_facts (kind TEXT NOT NULL)")
+    conn.commit()
+    locker = sqlite3.connect(path, timeout=0)
+    locker.execute("BEGIN IMMEDIATE")
+
+    attempts = 0
+
+    def persist_once():
+        nonlocal attempts
+        attempts += 1
+        conn.execute("INSERT INTO ack_facts VALUES ('ack')")
+
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: locker.rollback())
+    with caplog.at_level(logging.WARNING, logger="src.execution.executor"):
+        executor._retry_persist_on_db_lock(
+            conn, persist_once, what="diagnostic_ack", attempts=2, base_sleep_s=0
+        )
+
+    assert attempts == 2
+    assert any("sqlite_errorcode=5" in record.message for record in caplog.records)
+    assert any("sqlite_errorname=SQLITE_BUSY" in record.message for record in caplog.records)
+    assert not any("sqlite_errorcode=517" in record.message for record in caplog.records)
+    assert conn.execute("SELECT COUNT(*) FROM ack_facts").fetchone()[0] == 1
+    locker.close()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Idempotency collision retry (MEDIUM-1) — both paths
 # ---------------------------------------------------------------------------
@@ -6124,3 +6280,142 @@ def test_inv30_manifest_registered():
     assert len(enforced_tests) >= 5, (
         f"INV-30 must cite at least 5 enforcing tests, found {len(enforced_tests)}"
     )
+
+
+@pytest.mark.parametrize("path", ["entry", "exit"])
+@pytest.mark.parametrize("late_failure", [False, True])
+def test_real_post_submit_path_rolls_back_final_envelope_and_fill_closure(
+    mem_conn, monkeypatch, path, late_failure
+):
+    """Durable SDK receipt survives atomic ACK/fill rollback on external paths."""
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+    from src.execution.executor import _live_order, execute_exit_order
+    from src.state.venue_command_repo import list_events
+
+    if path == "entry":
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        command_position_id = "trd-post-submit-entry-rollback"
+        def submit():
+            return _live_order(
+                trade_id=command_position_id, intent=intent, shares=5.0,
+                conn=mem_conn, decision_id="dec-post-submit-entry-rollback",
+            )
+        raw_extra = {
+            "makingAmount": "1.7",
+            "takingAmount": "5.0",
+            "tradeIDs": ["trade-post-submit-entry"],
+            "transactionsHashes": ["0xtx-post-submit-entry"],
+        }
+        expected_fill_event = "FILL_CONFIRMED"
+    else:
+        monkeypatch.setattr(
+            executor, "_assert_risk_allocator_allows_exit_submit", lambda **_kwargs: None
+        )
+        monkeypatch.setattr(
+            executor, "_select_risk_allocator_order_type", lambda *_args, **_kwargs: "FAK"
+        )
+        monkeypatch.setattr(
+            executor,
+            "_global_sell_receipt_closure_error",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            executor,
+            "_marketable_sell_certificate_error",
+            lambda *_args, **_kwargs: None,
+        )
+        intent = _make_exit_intent(
+            mem_conn,
+            trade_id="trd-post-submit-exit-rollback",
+            shares=10.0,
+            current_price=0.17,
+        )
+        object.__setattr__(intent, "submit_order_type", "FAK")
+        object.__setattr__(intent, "best_bid", 0.17)
+        object.__setattr__(intent, "exact_limit_price", 0.16)
+        command_position_id = intent.trade_id
+        def submit():
+            return execute_exit_order(
+                intent=intent, conn=mem_conn, decision_id="dec-post-submit-exit-rollback",
+            )
+        raw_extra = {
+            "makingAmount": "5.0",
+            "takingAmount": "0.85",
+            "transactionsHashes": ["0xtx-post-submit-exit"],
+        }
+        expected_fill_event = "PARTIAL_FILL_OBSERVED"
+
+    command_rows = []
+    real_insert_command = command_repo.insert_command
+
+    def capture_insert(*args, **kwargs):
+        command_rows.append(kwargs["command_id"])
+        return real_insert_command(*args, **kwargs)
+
+    real_append_event = command_repo.append_event
+
+    def fail_at_fill_event(conn, *, event_type, **kwargs):
+        if event_type == "SUBMIT_ACKED":
+            ack_tx_states.append(conn.in_transaction)
+        if late_failure and event_type == expected_fill_event:
+            raise RuntimeError("late fill closure failure")
+        return real_append_event(conn, event_type=event_type, **kwargs)
+
+    envelope_tx_states = []
+    ack_tx_states = []
+    real_insert_envelope = command_repo.insert_submission_envelope
+
+    def capture_envelope_tx(conn, envelope, **kwargs):
+        before = conn.in_transaction
+        result = real_insert_envelope(conn, envelope, **kwargs)
+        if envelope.order_id == f"ord-post-submit-{path}-rollback":
+            envelope_tx_states.append((before, conn.in_transaction))
+        return result
+
+    monkeypatch.setattr(command_repo, "append_event", fail_at_fill_event)
+    monkeypatch.setattr(command_repo, "insert_command", capture_insert)
+    monkeypatch.setattr(command_repo, "insert_submission_envelope", capture_envelope_tx)
+
+    with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        client = MagicMock()
+        MockClient.return_value = client
+        client.v2_preflight.return_value = None
+        bound = _capture_bound_submission_envelope(client)
+        client.place_limit_order.side_effect = lambda **_kwargs: _final_submit_result(
+            bound,
+            order_id=f"ord-post-submit-{path}-rollback",
+            status="matched",
+            success=True,
+            raw_extra=raw_extra,
+        )
+        result = submit()
+
+    if late_failure:
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+    else:
+        assert result.command_state == ("FILLED" if path == "entry" else "PARTIAL")
+    assert client.place_limit_order.call_count == 1
+    assert envelope_tx_states == [(False, False)]
+    assert ack_tx_states == [True]
+    command_id = command_rows[0]
+    assert mem_conn.execute(
+        "SELECT COUNT(*) FROM venue_submission_envelopes WHERE order_id = ?",
+        (f"ord-post-submit-{path}-rollback",),
+    ).fetchone()[0] == 1
+    assert mem_conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?", (command_id,)
+    ).fetchone()[0] == (0 if late_failure else 1)
+    assert mem_conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?", (command_id,)
+    ).fetchone()[0] == (0 if late_failure else 1)
+    event_types = [event["event_type"] for event in list_events(mem_conn, command_id)]
+    if late_failure:
+        assert "SUBMIT_ACKED" not in event_types
+        assert expected_fill_event not in event_types
+        assert "REVIEW_REQUIRED" in event_types
+    else:
+        assert event_types.count("SUBMIT_ACKED") == 1
+        assert event_types.count(expected_fill_event) == 1

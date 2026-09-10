@@ -5059,11 +5059,100 @@ def _retry_persist_on_db_lock(
                 conn.rollback()  # revert partial/uncommitted writes so the re-run is clean
             except Exception:
                 pass
+            sqlite_details = []
+            sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
+            sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+            if sqlite_errorcode is not None:
+                sqlite_details.append(f"sqlite_errorcode={sqlite_errorcode}")
+            if sqlite_errorname:
+                sqlite_details.append(f"sqlite_errorname={sqlite_errorname}")
+            detail_suffix = f" ({' '.join(sqlite_details)})" if sqlite_details else ""
             logger.warning(
-                "db locked persisting %s (attempt %d/%d); rolled back + retrying: %s",
-                what, attempt, attempts, exc,
+                "db locked persisting %s (attempt %d/%d); rolled back + retrying: %s%s",
+                what, attempt, attempts, exc, detail_suffix,
             )
             time.sleep(base_sleep_s * attempt)
+
+
+class _PostSubmitCallerTransactionError(RuntimeError):
+    """Post-submit persistence cannot borrow an active caller transaction."""
+
+
+def _run_post_submit_ack_persistence(
+    conn: sqlite3.Connection,
+    *,
+    own_conn: bool,
+    persist_fn,
+    owner: str,
+    what: str,
+    deadline_ms: int,
+    max_hold_ms: int,
+) -> None:
+    """Persist ACK facts and fill event under one immediate trade transaction.
+
+    The SDK call has already crossed the venue boundary when this helper runs.  A
+    caller-owned active transaction is never committed or rolled back here: the
+    executor cannot prove that it owns those writes, so it fails closed before any
+    repository validation read.  Executor-owned connections may commit a leftover
+    local transaction before starting the post-submit transaction.
+
+    SCOPE: only an active transaction on this caller-owned connection.
+    DRAIN: the caller ends its transaction; normal recovery uses the durable
+    pre-POST signed identity and venue facts on a fresh connection.
+    RESET: no active caller transaction; never retry the SDK side effect here.
+    """
+    from src.state.write_coordinator import (
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    if conn.in_transaction:
+        if not own_conn:
+            raise _PostSubmitCallerTransactionError(
+                "post-submit ACK persistence requires an executor-owned transaction"
+            )
+        conn.commit()
+
+    def persist_once() -> None:
+        try:
+            with _canonical_trade_write_lease(
+                conn,
+                owner=owner,
+                deadline_ms=deadline_ms,
+                max_hold_ms=max_hold_ms,
+                priority=WritePriority.STANDARD,
+            ) as lease:
+                if lease is None:
+                    conn.execute("BEGIN IMMEDIATE")
+                    persist_fn()
+                    conn.commit()
+                    return
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=max_hold_ms,
+                ):
+                    conn.execute("BEGIN IMMEDIATE")
+                    persist_fn()
+                    conn.commit()
+        except WriteLeaseTimeout as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Keep the existing retry policy and its sleep outside the lease.
+            raise sqlite3.OperationalError(
+                f"database is locked: post-submit writer deferred: {exc}"
+            ) from exc
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    _retry_persist_on_db_lock(conn, persist_once, what=what)
 
 
 def _mark_post_submit_persistence_failure(
@@ -8044,14 +8133,40 @@ def execute_exit_order(
                 )
             except Exception as _timing_exc:
                 logger.debug("PR6 timing update skipped (column absent on older DB): %s", _timing_exc)
-            # Exit submission uses the same durable side-effect boundary as entry:
-            # ACK/order facts must be visible even when the caller owns conn.
-            conn.commit()
 
         try:
-            _retry_persist_on_db_lock(
-                conn, _persist_exit_ack_facts, what="exit_ack_persistence"
+            _run_post_submit_ack_persistence(
+                conn,
+                own_conn=_own_conn,
+                persist_fn=_persist_exit_ack_facts,
+                owner="exit_post_submit_ack_persist",
+                what="exit_ack_persistence",
+                deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
             )
+        except _PostSubmitCallerTransactionError as inner:
+            logger.error(
+                "execute_exit_order: caller transaction active after SDK submit "
+                "(command_id=%s order_id=%s): %s",
+                command_id,
+                order_id,
+                inner,
+            )
+            return _with_venue_boundary(OrderResult(
+                trade_id=intent.trade_id,
+                status="unknown_side_effect",
+                reason=f"exit_ack_persistence_requires_owned_transaction: {inner}",
+                order_id=order_id,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                external_order_id=order_id,
+                command_id=command_id,
+                venue_status=str(result.get("status") or "placed"),
+                idempotency_key=idem.value,
+                command_state="SUBMITTING",
+            ), order_type=order_type, ack_received=True)
         except Exception as inner:
             logger.error(
                 "execute_exit_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
@@ -9985,15 +10100,40 @@ def _live_order(
                             **final_envelope_payload,
                         },
                     )
-            # P1-1: durable commit independent of _own_conn — codereview-may19-2
-            # ACK/order/trade facts must persist immediately regardless of whether
-            # the caller provided an external connection. A crash after SDK ACK
-            # but before the outer cycle commit would lose the venue order record.
-            conn.commit()
 
         try:
-            _retry_persist_on_db_lock(
-                conn, _persist_entry_ack_facts, what="entry_ack_persistence"
+            _run_post_submit_ack_persistence(
+                conn,
+                own_conn=_own_conn,
+                persist_fn=_persist_entry_ack_facts,
+                owner="entry_post_submit_ack_persist",
+                what="entry_ack_persistence",
+                deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            )
+        except _PostSubmitCallerTransactionError as inner:
+            logger.error(
+                "_live_order: caller transaction active after SDK submit "
+                "(command_id=%s order_id=%s): %s",
+                command_id,
+                order_id,
+                inner,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="unknown_side_effect",
+                reason=f"entry_ack_persistence_requires_owned_transaction: {inner}",
+                order_id=order_id,
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                external_order_id=order_id,
+                venue_status=str(result.get("status") or "placed"),
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="SUBMITTING",
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
         except Exception as inner:
             logger.error(
