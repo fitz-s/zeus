@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-03
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Last reused or audited: 2026-09-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -8,6 +8,7 @@
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
 #   §6.1/§6.3 spec. Payload shape verified live against
 #   api.open-meteo.com/v1/forecast (multi-model suffixed hourly keys).
+#   2026-09-10 source possession clock ordering for strict remaining-window reads.
 """Relationship tests for the day0 hourly-vector lane + remaining-day members.
 
 Contracts:
@@ -3364,14 +3365,30 @@ def _wellington():
     )
 
 
-def _vector(model="icon_d2", captured_at=None, temps=None, start_hour=0):
+def _vector(
+    model="icon_d2",
+    captured_at=None,
+    temps=None,
+    start_hour=0,
+    source_run_meta_json=None,
+):
+    captured_at = captured_at or datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
     times = [f"2026-06-10T{h:02d}:00" for h in range(start_hour, 24)]
     temps = temps if temps is not None else [15.0 + 0.5 * h for h in range(start_hour, 24)]
+    if source_run_meta_json is None:
+        source_run_meta_json = json.dumps(
+            {
+                "fetch_started_at": captured_at.isoformat(),
+                "fetch_finished_at": captured_at.isoformat(),
+            },
+            sort_keys=True,
+        )
     return Day0HourlyVector(
         model=model, city="Paris", target_date="2026-06-10",
         timezone_name="Europe/Paris",
-        captured_at=(captured_at or datetime(2026, 6, 10, 9, 0, tzinfo=UTC)).isoformat(),
+        captured_at=captured_at.isoformat(),
         times=tuple(times), temps_c=tuple(temps[: len(times)]),
+        source_run_meta_json=source_run_meta_json,
     )
 
 
@@ -3391,6 +3408,13 @@ def _refresh_vector(city, model: str, decision_time: datetime) -> Day0HourlyVect
         captured_at=decision_time.isoformat(),
         times=times,
         temps_c=tuple(15.0 + 0.1 * index for index in range(len(times))),
+        source_run_meta_json=json.dumps(
+            {
+                "fetch_started_at": decision_time.isoformat(),
+                "fetch_finished_at": decision_time.isoformat(),
+            },
+            sort_keys=True,
+        ),
     )
 
 
@@ -8076,6 +8100,124 @@ class TestRequestHashProvenance:
         ) == 2
         ready = read_freshest_day0_hourly_vectors(city="Paris", conn=conn, **strict)
         assert [vector.model for vector in ready] == list(expected)
+
+    def test_strict_selection_filters_unpossessed_new_capture_before_freshest(self):
+        now = datetime(2026, 6, 10, 10, 0, tzinfo=UTC)
+        window_start = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+        old_capture = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+        old = _vector(
+            captured_at=old_capture,
+            source_run_meta_json=json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T08:01:00+00:00",
+                    "fetch_finished_at": "2026-06-10T08:02:00+00:00",
+                }
+            ),
+        )
+        new = _vector(
+            captured_at=datetime(2026, 6, 10, 9, 59, tzinfo=UTC),
+            temps=[30.0] * 24,
+            source_run_meta_json=json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T10:01:00+00:00",
+                    "fetch_finished_at": "2026-06-10T10:02:00+00:00",
+                }
+            ),
+        )
+
+        selected = select_ready_day0_hourly_vectors(
+            [old, new],
+            target_date="2026-06-10",
+            now=now,
+            expected_models=["icon_d2"],
+            require_expected=True,
+            remaining_window_start=window_start,
+            require_complete_remaining_window=True,
+        )
+
+        assert [vector.captured_at for vector in selected] == [old.captured_at]
+        assert selected[0].temps_c[0] != 30.0
+
+    def test_strict_selection_accepts_exact_possession_boundaries(self):
+        now = datetime(2026, 6, 10, 10, 0, tzinfo=UTC)
+        boundary = now.isoformat()
+        vector = _vector(
+            captured_at=now,
+            source_run_meta_json=json.dumps(
+                {
+                    "fetch_started_at": boundary,
+                    "fetch_finished_at": boundary,
+                }
+            ),
+        )
+
+        selected = select_ready_day0_hourly_vectors(
+            [vector],
+            target_date="2026-06-10",
+            now=now,
+            expected_models=["icon_d2"],
+            require_expected=True,
+            remaining_window_start=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+            require_complete_remaining_window=True,
+        )
+
+        assert selected == [vector]
+
+    @pytest.mark.parametrize(
+        "source_run_meta_json",
+        [
+            "{}",
+            "{malformed",
+            "[]",
+            json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T09:01:00",
+                    "fetch_finished_at": "2026-06-10T09:02:00+00:00",
+                }
+            ),
+            json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T09:03:00+00:00",
+                    "fetch_finished_at": "2026-06-10T09:02:00+00:00",
+                }
+            ),
+            json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T09:59:00+00:00",
+                    "fetch_finished_at": "2026-06-10T10:01:00+00:00",
+                }
+            ),
+        ],
+    )
+    def test_strict_selection_skips_malformed_or_unpossessed_metadata(
+        self, source_run_meta_json
+    ):
+        now = datetime(2026, 6, 10, 10, 0, tzinfo=UTC)
+        old = _vector(
+            captured_at=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+            source_run_meta_json=json.dumps(
+                {
+                    "fetch_started_at": "2026-06-10T08:01:00+00:00",
+                    "fetch_finished_at": "2026-06-10T08:02:00+00:00",
+                }
+            ),
+        )
+        bad = _vector(
+            captured_at=datetime(2026, 6, 10, 9, 59, tzinfo=UTC),
+            source_run_meta_json=source_run_meta_json,
+        )
+
+        selected = select_ready_day0_hourly_vectors(
+            [old, bad],
+            target_date="2026-06-10",
+            now=now,
+            expected_models=["icon_d2"],
+            require_expected=True,
+            remaining_window_start=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+            require_complete_remaining_window=True,
+        )
+
+        assert [vector.captured_at for vector in selected] == [old.captured_at]
 
     def test_quota_block_stops_batch_without_fetch_or_throttle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv

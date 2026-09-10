@@ -1994,6 +1994,32 @@ def select_ready_day0_hourly_vectors(
             continue
         if age_hours > float(max_age_hours) or age_hours < 0.0:
             continue
+        if require_complete_remaining_window:
+            try:
+                source_meta = json.loads(str(vector.source_run_meta_json or ""))
+                if not isinstance(source_meta, Mapping):
+                    continue
+                fetch_started = datetime.fromisoformat(
+                    str(source_meta["fetch_started_at"]).replace("Z", "+00:00")
+                )
+                fetch_finished = datetime.fromisoformat(
+                    str(source_meta["fetch_finished_at"]).replace("Z", "+00:00")
+                )
+                if (
+                    fetch_started.tzinfo is None
+                    or fetch_started.utcoffset() is None
+                    or fetch_finished.tzinfo is None
+                    or fetch_finished.utcoffset() is None
+                ):
+                    continue
+                fetch_started = fetch_started.astimezone(UTC)
+                fetch_finished = fetch_finished.astimezone(UTC)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not (
+                captured <= fetch_started <= fetch_finished <= moment
+            ):
+                continue
         if (
             require_complete_remaining_window
             and (
