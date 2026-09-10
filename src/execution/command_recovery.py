@@ -14054,22 +14054,37 @@ def _clear_review_required_terminal_partial_entry(
     return True
 
 
-def _clear_acked_terminal_fak_partial_exit(
+def _clear_canonical_terminal_fak_partial_exit(
     conn: sqlite3.Connection,
     *,
     command: Mapping[str, object],
     trade_summary: Mapping[str, object],
 ) -> bool:
-    """Terminalize an ACKED FAK partial from an existing canonical order fact."""
+    """Expire a proven FAK remainder while retaining its confirmed partial fill.
 
+    SCOPE: ACKED/POST_ACKED or the exact missing-full-trade partial review.
+    DRAIN: sealed identity, terminal order, confirmed fill and Chain residual agree.
+    RESET: atomically preserve the partial fill and expire only its remainder.
+    """
+
+    state = str(command.get("state") or "").upper()
     if (
-        str(command.get("state") or "").upper() not in {"ACKED", "POST_ACKED"}
+        state not in {"ACKED", "POST_ACKED", "REVIEW_REQUIRED"}
         or str(command.get("intent_kind") or "").upper() != "EXIT"
         or str(command.get("side") or "").upper() != "SELL"
     ):
         return False
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
+    if state == "REVIEW_REQUIRED":
+        events = _command_events(conn, command_id)
+        latest = events[-1] if events else {}
+        if (
+            latest.get("event_type") != "REVIEW_REQUIRED"
+            or _json_dict(latest.get("payload_json")).get("reason")
+            != "partial_remainder_point_order_filled_without_full_trade_fact"
+        ):
+            return False
     try:
         from src.state.fill_cash_reader import _envelope_identity
 
@@ -14241,6 +14256,10 @@ def _clear_review_required_terminal_fak_partial_exit(
         or str(command.get("env_order_type") or "").upper() != "FAK"
     ):
         return False
+    if _clear_canonical_terminal_fak_partial_exit(
+        conn, command=command, trade_summary=trade_summary
+    ):
+        return True
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
     review_row = conn.execute(
@@ -14678,7 +14697,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 side=command.get("side"),
             )
             clear = (
-                _clear_acked_terminal_fak_partial_exit
+                _clear_canonical_terminal_fak_partial_exit
                 if str(command.get("state") or "").upper()
                 in {"ACKED", "POST_ACKED"}
                 else _clear_review_required_terminal_fak_partial_exit

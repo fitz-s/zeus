@@ -38487,7 +38487,7 @@ def test_scoped_entry_projection_retains_all_same_position_entry_exit_flows(conn
     assert _latest_unprojected_filled_entry_candidates(conn, command_id="missing") == []
 
 
-@pytest.mark.parametrize("initial_state", ("ACKED", "POST_ACKED"))
+@pytest.mark.parametrize("initial_state", ("ACKED", "POST_ACKED", "REVIEW_REQUIRED", "UNKNOWN_REVIEW"))
 def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
     conn,
     initial_state,
@@ -38573,6 +38573,15 @@ def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
         observed_at="2026-04-26T00:06:00Z",
     )
 
+    if initial_state in {"REVIEW_REQUIRED", "UNKNOWN_REVIEW"}:
+        from src.state.venue_command_repo import append_event
+        append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                     occurred_at="2026-04-26T00:08:00Z",
+                     payload={"reason": (
+                         "partial_remainder_point_order_filled_without_full_trade_fact"
+                         if initial_state == "REVIEW_REQUIRED" else "unknown_review"
+                     )})
+
     candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
     assert [row["command_id"] for row in candidates] == [command_id]
     before_facts = conn.execute(
@@ -38580,6 +38589,10 @@ def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
         (command_id,),
     ).fetchone()[0]
     summary = command_recovery.reconcile_matched_cancel_review_required_entries(conn)
+    if initial_state == "UNKNOWN_REVIEW":
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        return
     assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
     assert _get_state(conn, command_id) == "EXPIRED"
     assert conn.execute(
@@ -38628,7 +38641,8 @@ def test_acked_terminal_fak_partial_exit_recovers_without_venue_io(
         "signed_identity_mismatch",
     ),
 )
-def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure):
+@pytest.mark.parametrize("initial_state", ("ACKED", "REVIEW_REQUIRED"))
+def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure, initial_state):
     from src.execution import command_recovery
 
     position_id = f"pos-acked-fak-bad-{failure}"
@@ -38758,9 +38772,15 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure):
             (envelope_id, command_id),
         )
 
+    if initial_state == "REVIEW_REQUIRED":
+        from src.state.venue_command_repo import append_event
+        append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                     occurred_at="2026-04-26T00:08:00Z",
+                     payload={"reason": "partial_remainder_point_order_filled_without_full_trade_fact"})
+
     candidates = command_recovery._terminal_fak_partial_exit_review_candidates(conn)
     candidate_ids = {row["command_id"] for row in candidates}
-    if failure in {
+    if initial_state == "REVIEW_REQUIRED" or failure in {
         "full_fill",
         "trade_nonconfirmed",
         "trade_sum_mismatch",
@@ -38774,7 +38794,7 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure):
         assert command_id not in candidate_ids
     summary = command_recovery.reconcile_matched_cancel_review_required_entries(conn)
     assert summary["advanced"] == 0
-    assert _get_state(conn, command_id) == "ACKED"
+    assert _get_state(conn, command_id) == initial_state
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ? "
         "AND event_type IN ('PARTIAL_FILL_OBSERVED', 'EXPIRED')",
