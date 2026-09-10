@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 
 import pytest
@@ -104,7 +105,7 @@ def test_partial_rpc_result_cannot_become_zero_cash_proof():
         wallet="0x" + "12" * 20, rpc_url="unused", budget_seconds=1,
         rpc_batch=lambda *args, **kwargs: [])
     assert proofs[0]["decoded"]["status"] == "UNKNOWN"
-    assert proofs[0]["decoded"]["reason"] == "RPC_EVIDENCE_UNAVAILABLE:ValueError"
+    assert proofs[0]["decoded"]["reason"] == "receipt_invalid"
 
 
 def test_wrong_rpc_chain_is_retained_as_unknown_without_further_requests():
@@ -112,7 +113,7 @@ def test_wrong_rpc_chain_is_retained_as_unknown_without_further_requests():
 
     def rpc(url, calls, **kwargs):
         calls_seen.append(calls)
-        return ["0x1", {}, {}]
+        return ["0x1", {}]
 
     proof = collect_cash_proofs(tx_hashes=["0x" + "ab" * 32],
         wallet="0x" + "12" * 20, rpc_url="unused", budget_seconds=1, rpc_batch=rpc)[0]
@@ -261,3 +262,191 @@ def test_cash_failure_preserves_completed_clob_synchronization(monkeypatch):
     assert result["appended"] == 3
     assert result["scheduler_failure_reason"] == "fill_cash_sync_failed"
     assert result["chain_cash"]["reason"] == "TimeoutError"
+
+
+def test_rpc_collection_preserves_input_order_and_limits_chunks_and_workers(monkeypatch):
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    receipt_barrier = threading.Barrier(2)
+    seen = []
+    txs = [f"0x{i:064x}" for i in range(5)]
+
+    def rpc(url, calls, **kwargs):
+        nonlocal active, peak
+        assert 0 < kwargs["timeout_seconds"] <= 5
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            seen.append(tuple(method for method, _ in calls))
+        if calls[0][0] == "eth_getTransactionReceipt":
+            receipt_barrier.wait(timeout=1)
+        try:
+            if calls[0][0] == "eth_chainId":
+                return ["0x89", {"number": "0x20", "hash": "0x" + "22" * 32}]
+            result = []
+            for method, params in calls:
+                if method == "eth_getTransactionReceipt":
+                    result.append(None)
+                elif method == "eth_getBlockByNumber":
+                    result.append({"number": params[0], "hash": "0x" + "11" * 32})
+                else:
+                    result.append(None)
+            return result
+        finally:
+            with lock:
+                active -= 1
+
+    proofs = collect_cash_proofs(
+        tx_hashes=[txs[2], txs[0], txs[2], txs[1], txs[3], txs[4]],
+        wallet="0x" + "12" * 20, rpc_url="unused", budget_seconds=5,
+        rpc_batch=rpc, rpc_batch_items=3, rpc_workers=2,
+    )
+    assert [proof["tx_hash"] for proof in proofs] == [txs[2], txs[0], txs[1], txs[3], txs[4]]
+    assert all(len(methods) <= 3 for methods in seen)
+    assert peak <= 2
+
+
+def test_control_failure_keeps_actual_rpc_chain_and_skips_receipts(monkeypatch):
+    calls = []
+
+    def rpc(url, batch, **kwargs):
+        calls.append(batch)
+        return ["0x1", {"number": "0x20", "hash": "0x" + "22" * 32}]
+
+    proof = collect_cash_proofs(
+        tx_hashes=["0x" + "ab" * 32], wallet="0x" + "12" * 20,
+        rpc_url="unused", budget_seconds=5, rpc_batch=rpc,
+    )[0]
+    assert len(calls) == 1
+    assert proof["chain_id"] == 137
+    assert proof["rpc_chain_id"] == 1
+    assert proof["decoded"]["status"] == "UNKNOWN"
+
+
+def _cash_rpc_fixture(count=4):
+    from copy import deepcopy
+    from tests.test_fill_cash_proof import COLLATERAL, _buy_logs, _valid_receipt
+
+    receipts, headers = {}, {}
+    for i in range(count):
+        tx, block_hash, block = f"0x{i + 101:064x}", f"0x{i + 201:064x}", hex(i + 16)
+        receipt, header, _, _ = _valid_receipt(deepcopy(_buy_logs()))
+        receipt.update(transactionHash=tx, blockHash=block_hash, blockNumber=block)
+        for log in receipt["logs"]:
+            log.update(transactionHash=tx, blockHash=block_hash, blockNumber=block)
+        receipts[tx] = receipt
+        headers[block] = dict(header, hash=block_hash, number=block)
+    header_reads = {}
+
+    def respond(method, params):
+        if method == "eth_chainId":
+            return "0x89"
+        if method == "eth_getTransactionReceipt":
+            return receipts[params[0]]
+        if method == "eth_getBlockByNumber":
+            if params[0] == "finalized":
+                return {"hash": "0x" + "ee" * 32, "number": "0x100"}
+            header_reads[params[0]] = header_reads.get(params[0], 0) + 1
+            return headers[params[0]]
+        assert method == "eth_call"
+        assert params[1]["requireCanonical"] is True
+        assert params[1]["blockHash"] in {h["hash"] for h in headers.values()}
+        return (f"0x{6:064x}" if params[0]["data"] == "0x313ce567"
+                else "0x" + "0" * 24 + COLLATERAL[2:])
+
+    return receipts, headers, header_reads, respond
+
+
+@pytest.mark.parametrize("failed_stage", ["receipt", "header", "asset", "decimals", "header_after"])
+def test_failed_chunk_preserves_other_transaction_proven_cash(failed_stage):
+    from tests.test_fill_cash_proof import WALLET
+
+    receipts, _, header_reads, respond = _cash_rpc_fixture()
+    txs = list(receipts)
+    failed = False
+
+    def rpc(url, calls, **kwargs):
+        nonlocal failed
+        assert len(calls) <= 3
+        method, params = calls[0]
+        stage = None
+        if method == "eth_call":
+            stage = "decimals" if params[0]["data"] == "0x313ce567" else "asset"
+        elif method == "eth_getTransactionReceipt":
+            stage = "receipt"
+        if method == "eth_getBlockByNumber" and params[0] != "finalized":
+            stage = "header_after" if header_reads.get(params[0], 0) else "header"
+        if stage == failed_stage and not failed:
+            failed = True
+            raise TimeoutError("private endpoint token")
+        return [respond(method, params) for method, params in calls]
+
+    proofs = collect_cash_proofs(tx_hashes=txs, wallet=WALLET, rpc_url="unused",
+                                budget_seconds=10, rpc_batch=rpc, rpc_workers=1)
+    assert failed
+    assert any(p["decoded"]["status"] == "UNKNOWN" for p in proofs)
+    surviving = [p for p in proofs if p["decoded"]["status"] == "PROVEN"]
+    assert surviving
+    assert all(p["decoded"]["collateral_delta_atoms"] == -2_825_550 for p in surviving)
+    assert "private endpoint" not in json.dumps(proofs)
+
+
+def test_only_observed_exchange_is_queried_and_legacy_receipt_stays_unknown():
+    from tests.test_fill_cash_proof import EXCHANGE, WALLET
+
+    receipts, _, _, respond = _cash_rpc_fixture(2)
+    txs = list(receipts)
+    receipts[txs[0]]["logs"] = []
+    asset_requests = []
+
+    def rpc(url, calls, **kwargs):
+        for method, params in calls:
+            if method == "eth_call" and params[0]["data"] != "0x313ce567":
+                asset_requests.append(params[0]["to"])
+        return [respond(method, params) for method, params in calls]
+
+    proofs = collect_cash_proofs(tx_hashes=txs, wallet=WALLET, rpc_url="unused",
+                                budget_seconds=10, rpc_batch=rpc)
+    assert asset_requests == [EXCHANGE]
+    assert [p["decoded"]["status"] for p in proofs] == ["UNKNOWN", "PROVEN"]
+
+
+def test_global_deadline_keeps_completed_proofs_and_stops_new_rpc(monkeypatch):
+    from src.ingest import fill_cash_observer as observer
+    from tests.test_fill_cash_proof import WALLET
+
+    receipts, _, header_reads, respond = _cash_rpc_fixture(4)
+    now = [0.0]
+    monkeypatch.setattr(observer.time, "monotonic", lambda: now[0])
+    requests_after_deadline = []
+
+    def rpc(url, calls, **kwargs):
+        if now[0] >= 10:
+            requests_after_deadline.append(calls)
+        assert kwargs["timeout_seconds"] == 10 - now[0]
+        is_after = calls[0][0] == "eth_getBlockByNumber" and header_reads.get(calls[0][1][0], 0)
+        result = [respond(method, params) for method, params in calls]
+        if is_after:
+            now[0] = 11.0
+        return result
+
+    proofs = collect_cash_proofs(tx_hashes=list(receipts), wallet=WALLET, rpc_url="unused",
+                                budget_seconds=10, rpc_batch=rpc, rpc_workers=1)
+    assert not requests_after_deadline
+    assert [p["decoded"]["status"] for p in proofs] == ["PROVEN"] * 3 + ["UNKNOWN"]
+
+
+@pytest.mark.parametrize("batch_items", [1, 2, 3])
+def test_configured_wire_batch_limit_includes_control(batch_items):
+    from tests.test_fill_cash_proof import WALLET
+
+    receipts, _, _, respond = _cash_rpc_fixture(1)
+
+    def rpc(url, calls, **kwargs):
+        assert len(calls) <= batch_items
+        return [respond(method, params) for method, params in calls]
+
+    proofs = collect_cash_proofs(tx_hashes=list(receipts), wallet=WALLET, rpc_url="unused",
+                                budget_seconds=10, rpc_batch=rpc, rpc_batch_items=batch_items)
+    assert proofs[0]["decoded"]["status"] == "PROVEN"

@@ -60,6 +60,8 @@
     "_fill_synchronizer_note": "LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): continuous get_trades() poller into venue_trade_facts, independent of WS health/findings. src.ingest.fill_synchronizer.fill_synchronizer_cycle, 90s cadence.",
     "fill_cash_batch_size": 16,
     "fill_cash_rpc_budget_seconds": 12,
+    "fill_cash_rpc_batch_items": 3,
+    "fill_cash_rpc_workers": 2,
     "fill_cash_rpc_url": "https://polygon.drpc.org",
     "edli_user_channel_message_queue_path": "",
     "edli_venue_reconcile_facts_path": "",

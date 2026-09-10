@@ -10,6 +10,7 @@ import hashlib
 import math
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,89 +61,157 @@ def select_cash_batch(conn: sqlite3.Connection, *, limit: int, wallet: str) -> t
 
 
 def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
-                        budget_seconds: float, rpc_batch=None) -> list[dict[str, Any]]:
-    """Capture receipts and historical asset identity under one total RPC budget."""
+                        budget_seconds: float, rpc_batch=None,
+                        rpc_batch_items: int = 3, rpc_workers: int = 2) -> list[dict[str, Any]]:
+    """Capture receipts and historical assets under one bounded RPC budget."""
     from eth_utils import keccak
-    from src.venue.fill_cash_proof import decode_fill_cash_proof
 
     if isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds) or budget_seconds <= 0:
         raise ValueError("fill cash RPC budget must be finite and positive")
-    txs = sorted(set(str(value).lower() for value in tx_hashes))
+    if type(rpc_batch_items) is not int or not 1 <= rpc_batch_items <= 3:
+        raise ValueError("fill cash RPC batch size must be an integer in [1, 3]")
+    if type(rpc_workers) is not int or not 1 <= rpc_workers <= 2:
+        raise ValueError("fill cash RPC workers must be an integer in [1, 2]")
+    txs = list(dict.fromkeys(str(value).lower() for value in tx_hashes))
     if not txs:
         return []
+    from src.venue.fill_cash_proof import decode_fill_cash_proof
     batch = rpc_batch or _json_rpc_batch_call_hard_deadline
     deadline = time.monotonic() + budget_seconds
-    evidence: dict[str, Any] = {}
-    error = None
+    control_errors: list[str] = []
 
     def call(calls):
+        if not calls:
+            return []
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("fill cash RPC deadline")
+            raise TimeoutError("rpc deadline")
         result = batch(rpc_url, calls, timeout_seconds=remaining)
         if not isinstance(result, list) or len(result) != len(calls):
-            raise ValueError("partial fill cash RPC batch")
+            raise ValueError("partial response")
         return result
 
+    def chunks(items):
+        for start in range(0, len(items), rpc_batch_items):
+            yield items[start:start + rpc_batch_items]
+
+    rpc_chain_id = None
+    finalized_header = None
     try:
-        initial = call([("eth_chainId", []), ("eth_getBlockByNumber", ["finalized", False])]
-                       + [("eth_getTransactionReceipt", [tx]) for tx in txs])
-        evidence["chain_id"] = int(initial[0], 16)
-        if evidence["chain_id"] != 137:
-            raise ValueError("unexpected RPC chain identity")
-        evidence["finalized_header"] = initial[1]
-        evidence["receipts"] = dict(zip(txs, initial[2:]))
-        blocks = sorted({r["blockNumber"] for r in initial[2:] if isinstance(r, dict) and r.get("blockNumber")})
-        evidence["headers"] = dict(zip(blocks, call([("eth_getBlockByNumber", [b, False]) for b in blocks])))
-        asset_keys = [(b, ex) for b in blocks for ex in EXCHANGES]
+        control = [value for part in chunks([
+            ("eth_chainId", []), ("eth_getBlockByNumber", ["finalized", False])
+        ]) for value in call(part)]
+        if not isinstance(control[0], str) or not control[0].startswith("0x"):
+            raise ValueError("control identity")
+        rpc_chain_id = int(control[0], 16)
+        if rpc_chain_id != 137 or not isinstance(control[1], dict):
+            raise ValueError("control identity")
+        finalized_header = control[1]
+    except Exception as exc:  # noqa: BLE001 - safe type only
+        control_errors.append(type(exc).__name__)
+
+    def collect_group(txs):
+        errors = list(control_errors)
+
+        def mapped_calls(calls_with_keys):
+            results = {}
+            for calls, keys in calls_with_keys:
+                try:
+                    values = call(calls)
+                except Exception as exc:
+                    errors.append(type(exc).__name__)
+                    continue
+                results.update(zip(keys, values))
+            return results
+
+        receipt_results = mapped_calls([
+            ([("eth_getTransactionReceipt", [tx]) for tx in part], part)
+            for part in chunks(txs)
+        ]) if rpc_chain_id == 137 else {}
+        receipts = {tx: receipt_results.get(tx) for tx in txs}
+        blocks = list(dict.fromkeys(
+            receipt.get("blockNumber") for receipt in receipts.values()
+            if isinstance(receipt, dict) and isinstance(receipt.get("blockNumber"), str)
+        ))
+        header_results = mapped_calls([
+            ([("eth_getBlockByNumber", [block, False]) for block in part], part)
+            for part in chunks(blocks)
+        ]) if rpc_chain_id == 137 else {}
+        headers = {block: header_results.get(block) for block in blocks}
+        known_keys = []
+        for tx in txs:
+            receipt = receipts.get(tx)
+            if not isinstance(receipt, dict):
+                continue
+            block = receipt.get("blockNumber")
+            if not isinstance(block, str):
+                continue
+            logs = receipt.get("logs")
+            for log in logs if isinstance(logs, list) else []:
+                exchange = str(log.get("address", "")).lower() if isinstance(log, dict) else ""
+                if exchange in EXCHANGES and (block, exchange) not in known_keys:
+                    known_keys.append((block, exchange))
         selector = "0x" + keccak(text="getCollateral()")[:4].hex()
-        asset_calls = [("eth_call", [{"to": ex, "data": selector},
-                        {"blockHash": evidence["headers"][b]["hash"], "requireCanonical": True}])
-                       for b, ex in asset_keys]
-        addresses = call(asset_calls)
-        assets = {}
-        for key, word in zip(asset_keys, addresses):
-            if (not isinstance(word, str) or len(word) != 66 or not word.startswith("0x")
-                    or int(word[2:26], 16) != 0 or int(word, 16) == 0):
-                raise ValueError("invalid historical collateral address")
-            assets[key] = {"address": "0x" + word[-40:].lower()}
-        decimal_calls = [("eth_call", [{"to": assets[(b, ex)]["address"], "data": "0x313ce567"},
-                          {"blockHash": evidence["headers"][b]["hash"], "requireCanonical": True}])
-                         for b, ex in asset_keys]
-        decimals = call(decimal_calls)
-        for key, word in zip(asset_keys, decimals):
-            if not isinstance(word, str) or len(word) != 66 or not word.startswith("0x"):
-                raise ValueError("invalid historical collateral decimals")
-            value = int(word, 16)
-            if not 0 <= value <= 255:
-                raise ValueError("invalid historical collateral decimals")
-            assets[key]["decimals"] = value
-        evidence["assets"] = {b: {ex: assets[(b, ex)] for ex in EXCHANGES} for b in blocks}
-        evidence["headers_after"] = dict(zip(blocks, call([("eth_getBlockByNumber", [b, False]) for b in blocks])))
-    except Exception as exc:
-        # Never store an endpoint, transport exception message or credential.
-        error = "RPC_EVIDENCE_UNAVAILABLE:" + type(exc).__name__
-    observed = datetime.now(timezone.utc).isoformat()
-    proofs = []
-    for tx in txs:
-        receipt = evidence.get("receipts", {}).get(tx)
-        block = receipt.get("blockNumber") if isinstance(receipt, dict) else None
-        proof = {"revision": SOURCE, "chain_id": 137, "rpc_chain_id": evidence.get("chain_id"), "tx_hash": tx,
-                 "rpc_endpoint_hash": hashlib.sha256(rpc_url.encode()).hexdigest(),
-                 "wallet": wallet.lower(), "receipt": receipt,
-                 "header": evidence.get("headers", {}).get(block),
-                 "finalized_header": evidence.get("finalized_header"),
-                 "header_after": evidence.get("headers_after", {}).get(block),
-                 "collateral_by_exchange": evidence.get("assets", {}).get(block, {})}
-        if error:
-            decoded = {"status": "UNKNOWN", "reason": error, "events": [],
-                       "collateral_delta_atoms": None, "collateral": None, "decimals": None}
-        else:
-            decoded = decode_fill_cash_proof(**{key: proof[key] for key in (
-                "chain_id", "tx_hash", "wallet", "receipt", "header", "finalized_header",
-                "collateral_by_exchange", "header_after")})
-        proofs.append(dict(proof, decoded=decoded, observed_at=observed))
-    return proofs
+        asset_results = mapped_calls([
+            ([("eth_call", [{"to": exchange, "data": selector},
+                             {"blockHash": headers[block]["hash"], "requireCanonical": True}])
+              for block, exchange in part], part)
+            for part in chunks([key for key in known_keys if isinstance(headers.get(key[0]), dict) and headers[key[0]].get("hash")])
+        ]) if rpc_chain_id == 137 else {}
+        assets: dict[tuple[str, str], dict[str, Any]] = {}
+        for key, word in asset_results.items():
+            if (isinstance(word, str) and len(word) == 66 and word.startswith("0x")
+                    and all(c in "0123456789abcdefABCDEF" for c in word[2:])
+                    and int(word[2:26], 16) == 0 and int(word, 16) != 0):
+                assets[key] = {"address": "0x" + word[-40:].lower()}
+        decimal_results = mapped_calls([
+            ([("eth_call", [{"to": assets[key]["address"], "data": "0x313ce567"},
+                             {"blockHash": headers[key[0]]["hash"], "requireCanonical": True}])
+              for key in part], part)
+            for part in chunks(list(assets))
+        ]) if rpc_chain_id == 137 else {}
+        for key, word in decimal_results.items():
+            if (isinstance(word, str) and len(word) == 66 and word.startswith("0x")
+                    and all(c in "0123456789abcdefABCDEF" for c in word[2:])):
+                value = int(word, 16)
+                if 0 <= value <= 255:
+                    assets[key]["decimals"] = value
+        header_after_results = mapped_calls([
+            ([("eth_getBlockByNumber", [block, False]) for block in part], part)
+            for part in chunks([block for block in blocks if isinstance(headers.get(block), dict) and headers[block].get("hash")])
+        ]) if rpc_chain_id == 137 else {}
+        observed = datetime.now(timezone.utc).isoformat()
+        proofs = []
+        for tx in txs:
+            receipt = receipts.get(tx)
+            block = receipt.get("blockNumber") if isinstance(receipt, dict) else None
+            block = block if isinstance(block, str) else None
+            proof = {"revision": SOURCE, "chain_id": 137, "rpc_chain_id": rpc_chain_id, "tx_hash": tx,
+                     "rpc_endpoint_hash": hashlib.sha256(rpc_url.encode()).hexdigest(),
+                     "wallet": wallet.lower(), "receipt": receipt,
+                     "header": headers.get(block), "finalized_header": finalized_header,
+                     "header_after": header_after_results.get(block),
+                     "collateral_by_exchange": {ex: assets[(block, ex)] for b, ex in assets if b == block},
+                     "rpc_errors": sorted(set(errors))}
+            try:
+                decoded = decode_fill_cash_proof(**{key: proof[key] for key in (
+                    "chain_id", "tx_hash", "wallet", "receipt", "header", "finalized_header",
+                    "collateral_by_exchange", "header_after")})
+            except Exception as exc:  # noqa: BLE001 - safe type only
+                decoded = {"status": "UNKNOWN", "reason": "DECODER_" + type(exc).__name__, "events": [],
+                           "collateral_delta_atoms": None, "collateral": None, "decimals": None}
+            proofs.append(dict(proof, decoded=decoded, observed_at=observed))
+        return proofs
+
+    # Finish each bounded transaction group before spending its worker on the
+    # next group. A slow historical tail cannot consume every header recheck.
+    proofs_by_tx = {}
+    with ThreadPoolExecutor(max_workers=rpc_workers) as executor:
+        futures = [executor.submit(collect_group, group) for group in chunks(txs)]
+        for future in as_completed(futures):
+            for proof in future.result():
+                proofs_by_tx[proof["tx_hash"]] = proof
+    return [proofs_by_tx[tx] for tx in txs]
 
 
 def sync_cash_proofs(adapter) -> dict[str, Any]:
@@ -162,7 +231,9 @@ def sync_cash_proofs(adapter) -> dict[str, Any]:
         reader.close()
     proofs = collect_cash_proofs(tx_hashes=[row["tx_hash"] for row in rows],
         wallet=adapter.funder_address, rpc_url=config["fill_cash_rpc_url"],
-        budget_seconds=config["fill_cash_rpc_budget_seconds"])
+        budget_seconds=config["fill_cash_rpc_budget_seconds"],
+        rpc_batch_items=config["fill_cash_rpc_batch_items"],
+        rpc_workers=config["fill_cash_rpc_workers"])
     observed = datetime.now(timezone.utc).isoformat()
     coordinator = default_runtime_write_coordinator()
     with coordinator.transaction((DBIdentity.TRADE,), owner="fill_cash_observer",
