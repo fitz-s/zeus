@@ -10,7 +10,9 @@ from datetime import datetime
 
 import pytest
 
-from src.ingest.fill_cash_observer import SOURCE, collect_cash_proofs, select_cash_batch
+from src.ingest.fill_cash_observer import (
+    SOURCE, _advance_cash_cursor, collect_cash_proofs, select_cash_batch,
+)
 from src.state.schema.fill_sync_watermarks_schema import ensure_table as ensure_watermark
 from src.state.schema.venue_fill_cash_facts_schema import ensure_table
 
@@ -26,6 +28,18 @@ def database():
 def save_cursor(conn, cursor):
     conn.execute("INSERT OR REPLACE INTO fill_sync_watermarks VALUES (?,?,?,?,?)",
                  (SOURCE, "2026-09-10T00:00:00Z", cursor, "2026-09-10T00:00:00Z", "test"))
+
+
+def attempted_proofs(rows):
+    class AttemptedProof(dict):
+        pass
+
+    proofs = []
+    for row in rows:
+        proof = AttemptedProof(tx_hash=row["tx_hash"])
+        proof.receipt_requested = True
+        proofs.append(proof)
+    return proofs
 
 
 def test_missing_cash_table_requires_normal_synchronizer_bootstrap():
@@ -54,8 +68,8 @@ def test_sweep_ceiling_survives_new_tail_and_wraps():
             seen.update(row["trade_fact_id"] for row in rows)
             state = json.loads(cursor)
             assert state["ceiling"] == 8
-            assert state["after"] == (iteration + 1) * 2
-            save_cursor(conn, cursor)
+            assert state["after"] == iteration * 2
+            save_cursor(conn, _advance_cash_cursor(cursor, attempted_proofs(rows)))
             conn.execute("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
                          (9 + iteration, f"0x{9 + iteration:064x}"))
         assert set(range(1, 9)) <= seen
@@ -72,7 +86,15 @@ def test_recent_fills_do_not_wait_for_historical_sweep():
                          [(i, f"0x{i:064x}") for i in range(1, 101)])
         rows, cursor = select_cash_batch(conn, limit=4, wallet="0x" + "12" * 20)
         assert {r["trade_fact_id"] for r in rows} == {1, 2, 99, 100}
-        assert json.loads(cursor) == {"after": 2, "ceiling": 100}
+        assert json.loads(cursor) == {
+            "after": 0, "ceiling": 100,
+            "history": [{"trade_fact_id": 1, "tx_hash": f"0x{1:064x}"},
+                        {"trade_fact_id": 2, "tx_hash": f"0x{2:064x}"}],
+            "history_exhausted": False, "recent_first": True,
+        }
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(rows))) == {
+            "after": 2, "ceiling": 100, "recent_first": False,
+        }
     finally:
         conn.close()
 
@@ -98,7 +120,9 @@ def test_proven_recent_rows_do_not_consume_pending_transaction_slots():
         append_fill_cash_fact(conn, proof=proof)
         rows, cursor = select_cash_batch(conn, limit=4, wallet=WALLET.upper())
         assert {row["trade_fact_id"] for row in rows} == {1, 2, 7, 8}
-        assert json.loads(cursor) == {"after": 2, "ceiling": 10}
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(rows))) == {
+            "after": 2, "ceiling": 10, "recent_first": False,
+        }
         other_rows, _ = select_cash_batch(conn, limit=4, wallet="0x" + "12" * 20)
         assert TX in {row["tx_hash"] for row in other_rows}
     finally:
@@ -113,7 +137,9 @@ def test_transaction_refreshes_share_one_batch_slot_and_normalized_identity():
                          [(1, "old"), (2, "middle"), (3, "new"), (4, tx), (5, tx.upper())])
         rows, cursor = select_cash_batch(conn, limit=4, wallet="wallet")
         assert [row["tx_hash"] for row in rows] == [tx, "new", "old", "middle"]
-        assert json.loads(cursor) == {"after": 2, "ceiling": 5}
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(rows))) == {
+            "after": 2, "ceiling": 5, "recent_first": False,
+        }
     finally:
         conn.close()
 
@@ -124,12 +150,20 @@ def test_history_cursor_does_not_jump_over_transactions_between_refreshes():
         conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
                          [(1, "repeated"), (2, "middle"), (100, "repeated")])
         first, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
-        assert first == [{"trade_fact_id": 1, "tx_hash": "repeated"}]
-        assert json.loads(cursor) == {"after": 1, "ceiling": 100}
-        save_cursor(conn, cursor)
+        assert first == [{"trade_fact_id": 100, "tx_hash": "repeated"}]
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(first))) == {
+            "after": 0, "ceiling": 100, "recent_first": False,
+        }
+        save_cursor(conn, _advance_cash_cursor(cursor, attempted_proofs(first)))
         second, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
-        assert second == [{"trade_fact_id": 2, "tx_hash": "middle"}]
-        assert json.loads(cursor)["after"] == 2
+        assert second == [{"trade_fact_id": 1, "tx_hash": "repeated"}]
+        save_cursor(conn, _advance_cash_cursor(cursor, attempted_proofs(second)))
+        third, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        assert third == [{"trade_fact_id": 100, "tx_hash": "repeated"}]
+        save_cursor(conn, _advance_cash_cursor(cursor, attempted_proofs(third)))
+        fourth, cursor = select_cash_batch(conn, limit=1, wallet="wallet")
+        assert fourth == [{"trade_fact_id": 2, "tx_hash": "middle"}]
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(fourth)))["after"] == 2
     finally:
         conn.close()
 
@@ -141,7 +175,85 @@ def test_recent_and_history_overlap_does_not_duplicate_rpc_work():
                          [(1, "a"), (2, "b"), (3, "a")])
         rows, cursor = select_cash_batch(conn, limit=4, wallet="wallet")
         assert len(rows) == len({row["tx_hash"] for row in rows}) == 2
-        assert json.loads(cursor) == {"after": 3, "ceiling": 3}
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(rows))) == {
+            "after": 3, "ceiling": 3, "recent_first": False,
+        }
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("rpc_workers", [1, 2])
+@pytest.mark.parametrize("rpc_batch_items", [1, 2, 3])
+def test_actual_receipt_attempt_frontier_rotates_past_slow_recent_prefix(
+        monkeypatch, rpc_workers, rpc_batch_items):
+    """A deadline-spent recent lane cannot persistently skip frozen history."""
+    from src.ingest import fill_cash_observer as observer
+
+    conn = database()
+    try:
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(i, f"0x{i:064x}") for i in range(1, 17)])
+        save_cursor(conn, '{"after":0,"ceiling":16,"recent_first":true}')
+        now, phase, requested = [0.0], ["recent"], []
+        monkeypatch.setattr(observer.time, "monotonic", lambda: now[0])
+
+        def rpc(url, calls, **kwargs):
+            method = calls[0][0]
+            if method == "eth_chainId":
+                return ["0x89" if item_method == "eth_chainId"
+                        else {"number": "0x20", "hash": "0x" + "22" * 32}
+                        for item_method, _ in calls]
+            if method == "eth_getBlockByNumber":
+                return [{"number": "0x20", "hash": "0x" + "22" * 32} for _ in calls]
+            assert method == "eth_getTransactionReceipt"
+            txs = [params[0] for _, params in calls]
+            requested.extend(txs)
+            if phase[0] == "recent" and any(int(tx, 16) >= 9 for tx in txs):
+                now[0] = 13.0
+                raise TimeoutError("slow recent receipt")
+            if phase[0] == "history_failure":
+                phase[0] = "history"
+                raise RuntimeError("invalid historical receipt")
+            return [None] * len(calls)
+
+        rows, cursor = select_cash_batch(conn, limit=16, wallet="wallet")
+        proofs = collect_cash_proofs(
+            tx_hashes=[row["tx_hash"] for row in rows], wallet="wallet", rpc_url="unused",
+            budget_seconds=12, rpc_batch=rpc, rpc_batch_items=rpc_batch_items,
+            rpc_workers=rpc_workers,
+        )
+        assert requested and all(int(tx, 16) >= 9 for tx in requested)
+        next_cursor = _advance_cash_cursor(cursor, proofs)
+        assert json.loads(next_cursor) == {"after": 0, "ceiling": 16, "recent_first": False}
+
+        save_cursor(conn, next_cursor)
+        now[0], phase[0], requested[:] = 0.0, "history_failure", []
+        rows, cursor = select_cash_batch(conn, limit=16, wallet="wallet")
+        proofs = collect_cash_proofs(
+            tx_hashes=[row["tx_hash"] for row in rows], wallet="wallet", rpc_url="unused",
+            budget_seconds=12, rpc_batch=rpc, rpc_batch_items=rpc_batch_items,
+            rpc_workers=rpc_workers,
+        )
+        assert requested and all(int(tx, 16) <= 8 for tx in requested[:rpc_batch_items])
+        assert json.loads(_advance_cash_cursor(cursor, proofs))["after"] == 8
+    finally:
+        conn.close()
+
+
+def test_old_cursor_migrates_to_attempt_frontier_without_skipping_history():
+    conn = database()
+    try:
+        conn.executemany("INSERT INTO venue_trade_facts VALUES (?,?,'CONFIRMED')",
+                         [(i, str(i)) for i in range(1, 5)])
+        save_cursor(conn, '{"after":0,"ceiling":4}')
+        rows, cursor = select_cash_batch(conn, limit=2, wallet="wallet")
+        assert json.loads(cursor)["recent_first"] is True
+        assert json.loads(_advance_cash_cursor(cursor, [])) == {
+            "after": 0, "ceiling": 4, "recent_first": False,
+        }
+        assert json.loads(_advance_cash_cursor(cursor, attempted_proofs(rows))) == {
+            "after": 1, "ceiling": 4, "recent_first": False,
+        }
     finally:
         conn.close()
 
@@ -310,6 +422,7 @@ def test_append_idempotency_and_rollback_preserve_observation_and_cursor_togethe
         conn.commit()
         stored = conn.execute("SELECT proof_json,observed_at FROM venue_fill_cash_facts").fetchone()
         assert "observed_at" not in json.loads(stored[0])
+        assert "receipt_requested" not in json.loads(stored[0])
         assert stored[1] == proof[0]["observed_at"]
     finally:
         conn.close()

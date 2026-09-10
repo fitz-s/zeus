@@ -24,19 +24,29 @@ SOURCE = "polygon_finalized_fill_cash_v1"
 EXCHANGES = (POLYGON_EXCHANGE_V2_ADDRESS.lower(), POLYGON_NEG_RISK_EXCHANGE_V2_ADDRESS.lower())
 
 
+class _CollectedCashProof(dict):
+    """RPC-local attempt metadata must not become immutable chain evidence."""
+
+    __slots__ = ("receipt_requested",)
+
+
 def select_cash_batch(conn: sqlite3.Connection, *, limit: int, wallet: str) -> tuple[list[dict], str]:
-    """Freeze each sweep's ceiling so a growing tail cannot starve old failures."""
+    """Select bounded rotating recent/history lanes under one frozen ceiling."""
     if type(limit) is not int or limit < 1:
         raise ValueError("fill cash batch size must be a positive integer")
     row = conn.execute("SELECT cursor FROM fill_sync_watermarks WHERE source=?", (SOURCE,)).fetchone()
     cursor = json.loads(row[0]) if row and row[0] else {"after": 0, "ceiling": 0}
-    after, ceiling = cursor["after"], cursor["ceiling"]
+    after, ceiling = cursor.get("after"), cursor.get("ceiling")
+    recent_first = cursor.get("recent_first", True)
     if type(after) is not int or type(ceiling) is not int or not 0 <= after <= ceiling:
+        raise ValueError("invalid fill cash sweep cursor")
+    if type(recent_first) is not bool:
         raise ValueError("invalid fill cash sweep cursor")
     if after == ceiling:
         ceiling = conn.execute("SELECT COALESCE(MAX(trade_fact_id),0) FROM venue_trade_facts").fetchone()[0]
         after = 0
-    recent_limit = limit // 2
+    history_limit = limit // 2 + (1 if not recent_first and limit % 2 else 0)
+    recent_limit = limit - history_limit
     pending_filter = """
         state IN ('MATCHED','MINED','CONFIRMED') AND tx_hash IS NOT NULL
         AND NOT EXISTS (
@@ -51,24 +61,57 @@ def select_cash_batch(conn: sqlite3.Connection, *, limit: int, wallet: str) -> t
         GROUP BY LOWER(tx_hash) ORDER BY trade_fact_id DESC LIMIT ?
     """, (wallet.lower(), recent_limit))
     recent_rows = [dict(zip((c[0] for c in recent.description), row)) for row in recent.fetchall()]
-    sweep_limit = limit - len(recent_rows)
-    recent_txs = [row["tx_hash"] for row in recent_rows]
-    recent_exclusion = (
-        " AND LOWER(tx_hash) NOT IN (" + ",".join("?" for _ in recent_txs) + ")"
-        if recent_txs else ""
-    )
-    # Advance by the first pending fact of each transaction. Using its last
-    # refresh could jump over other transactions inside the frozen interval.
+    # The lane queries intentionally overlap.  Deduplication happens only when
+    # composing RPC work, while the exact historical lane remains available to
+    # advance the cursor only after an actual receipt request.
     result = conn.execute(f"""
         SELECT MIN(trade_fact_id) AS trade_fact_id, LOWER(tx_hash) AS tx_hash
         FROM venue_trade_facts
         WHERE trade_fact_id > ? AND trade_fact_id <= ?
-          AND {pending_filter} {recent_exclusion}
+          AND {pending_filter}
         GROUP BY LOWER(tx_hash) ORDER BY trade_fact_id LIMIT ?
-    """, (after, ceiling, wallet.lower(), *recent_txs, sweep_limit))
-    rows = [dict(zip((c[0] for c in result.description), row)) for row in result.fetchall()]
-    next_after = rows[-1]["trade_fact_id"] if len(rows) == sweep_limit else ceiling
-    return recent_rows + rows, json.dumps({"after": next_after, "ceiling": ceiling}, sort_keys=True)
+    """, (after, ceiling, wallet.lower(), history_limit + 1))
+    history_candidates = [dict(zip((c[0] for c in result.description), row)) for row in result.fetchall()]
+    history_rows = history_candidates[:history_limit]
+    lanes = (recent_rows, history_rows) if recent_first else (history_rows, recent_rows)
+    rows, selected_txs = [], set()
+    for lane in lanes:
+        for candidate in lane:
+            if candidate["tx_hash"] not in selected_txs:
+                selected_txs.add(candidate["tx_hash"])
+                rows.append(candidate)
+    plan = {
+        "after": after,
+        "ceiling": ceiling,
+        "history": history_rows,
+        "history_exhausted": len(history_candidates) <= history_limit,
+        "recent_first": recent_first,
+    }
+    return rows, json.dumps(plan, sort_keys=True)
+
+
+def _advance_cash_cursor(cursor: str, proofs: list[dict[str, Any]]) -> str:
+    """Advance only through the contiguous historical receipt-attempt frontier."""
+    plan = json.loads(cursor)
+    after, ceiling = plan.get("after"), plan.get("ceiling")
+    history = plan.get("history", [])
+    if (type(after) is not int or type(ceiling) is not int or not 0 <= after <= ceiling
+            or type(plan.get("recent_first")) is not bool or type(plan.get("history_exhausted")) is not bool
+            or not isinstance(history, list)):
+        raise ValueError("invalid fill cash sweep cursor")
+    attempted = {proof.get("tx_hash") for proof in proofs if getattr(proof, "receipt_requested", False)}
+    next_after = after
+    for row in history:
+        if not isinstance(row, dict) or type(row.get("trade_fact_id")) is not int or not isinstance(row.get("tx_hash"), str):
+            raise ValueError("invalid fill cash sweep cursor")
+        if row["tx_hash"] not in attempted:
+            break
+        next_after = row["trade_fact_id"]
+    else:
+        if plan["history_exhausted"]:
+            next_after = ceiling
+    return json.dumps({"after": next_after, "ceiling": ceiling,
+                       "recent_first": not plan["recent_first"]}, sort_keys=True)
 
 
 def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
@@ -124,10 +167,14 @@ def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
     def collect_group(txs):
         errors = list(control_errors)
 
-        def mapped_calls(calls_with_keys):
+        attempted_receipts: set[str] = set()
+
+        def mapped_calls(calls_with_keys, *, receipt_attempts: bool = False):
             results = {}
             for calls, keys in calls_with_keys:
                 try:
+                    if receipt_attempts and deadline - time.monotonic() > 0:
+                        attempted_receipts.update(keys)
                     values = call(calls)
                 except Exception as exc:
                     errors.append(type(exc).__name__)
@@ -138,7 +185,7 @@ def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
         receipt_results = mapped_calls([
             ([("eth_getTransactionReceipt", [tx]) for tx in part], part)
             for part in chunks(txs)
-        ]) if rpc_chain_id == 137 else {}
+        ], receipt_attempts=True) if rpc_chain_id == 137 else {}
         receipts = {tx: receipt_results.get(tx) for tx in txs}
         blocks = list(dict.fromkeys(
             receipt.get("blockNumber") for receipt in receipts.values()
@@ -211,7 +258,9 @@ def collect_cash_proofs(*, tx_hashes: list[str], wallet: str, rpc_url: str,
             except Exception as exc:  # noqa: BLE001 - safe type only
                 decoded = {"status": "UNKNOWN", "reason": "DECODER_" + type(exc).__name__, "events": [],
                            "collateral_delta_atoms": None, "collateral": None, "decimals": None}
-            proofs.append(dict(proof, decoded=decoded, observed_at=observed))
+            collected = _CollectedCashProof(proof, decoded=decoded, observed_at=observed)
+            collected.receipt_requested = tx in attempted_receipts
+            proofs.append(collected)
         return proofs
 
     # Finish each bounded transaction group before spending its worker on the
@@ -245,6 +294,7 @@ def sync_cash_proofs(adapter) -> dict[str, Any]:
         budget_seconds=config["fill_cash_rpc_budget_seconds"],
         rpc_batch_items=config["fill_cash_rpc_batch_items"],
         rpc_workers=config["fill_cash_rpc_workers"])
+    cursor = _advance_cash_cursor(cursor, proofs)
     observed = datetime.now(timezone.utc).isoformat()
     coordinator = default_runtime_write_coordinator()
     with coordinator.transaction((DBIdentity.TRADE,), owner="fill_cash_observer",
