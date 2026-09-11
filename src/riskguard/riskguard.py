@@ -3619,18 +3619,25 @@ def _command_global_receipt(
     execution_command_id: str,
     events_conn: sqlite3.Connection | None = None,
     events_table: str = "edli_live_order_events",
+    preloaded_payloads: tuple[object, ...] | None = None,
 ) -> GlobalAuctionReceiptRef:
     event_source = events_conn or conn
-    rows = event_source.execute(
-        f"SELECT pre.payload_json FROM {events_table} AS cmd "
-        f"JOIN {events_table} AS pre "
-        "ON pre.aggregate_id=cmd.aggregate_id "
-        "AND pre.event_type='PreSubmitRevalidated' "
-        "WHERE cmd.event_type='ExecutionCommandCreated' "
-        "AND json_extract(cmd.payload_json,'$.execution_command_id')=? "
-        "LIMIT 2",
-        (execution_command_id,),
-    ).fetchall()
+    if preloaded_payloads is None:
+        rows = event_source.execute(
+            f"SELECT pre.payload_json FROM {events_table} AS cmd "
+            f"JOIN {events_table} AS pre "
+            "ON pre.aggregate_id=cmd.aggregate_id "
+            "AND pre.event_type='PreSubmitRevalidated' "
+            "WHERE cmd.event_type='ExecutionCommandCreated' "
+            "AND json_extract(cmd.payload_json,'$.execution_command_id')=? "
+            "LIMIT 2",
+            (execution_command_id,),
+        ).fetchall()
+    else:
+        # An explicit empty tuple is a batch miss. It must not fall back to the
+        # old one-command scan, otherwise the batch path can still block on a
+        # full EDLI payload read after its deadline.
+        rows = [(payload,) for payload in tuple(preloaded_payloads)[:2]]
     if len(rows) != 1:
         raise ValueError("unique EDLI pre-submit receipt unavailable")
     try:
@@ -3687,28 +3694,92 @@ def _bind_live_curve_to_selection_revision(
         }
     event_source, events_table = source
 
+    # Preserve the per-position DISTINCT/decision_id ordering while separating
+    # command discovery from the EDLI payload read. The latter is batched so a
+    # large realized curve cannot issue one JSON self-join per command.
+    position_ids = list(
+        dict.fromkeys(
+            str(dict(raw).get("position_id") or "").strip()
+            for raw in raw_rows
+            if str(dict(raw).get("position_id") or "").strip()
+        )
+    )
+    commands_by_position: dict[str, list[tuple[str, str]]] = {
+        position_id: [] for position_id in position_ids
+    }
+    if position_ids:
+        for start in range(0, len(position_ids), 500):
+            chunk = position_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            command_rows = conn.execute(
+                "SELECT DISTINCT position_id,command_id,decision_id "
+                "FROM venue_commands WHERE intent_kind='ENTRY' "
+                f"AND position_id IN ({placeholders}) "
+                "ORDER BY position_id,decision_id",
+                tuple(chunk),
+            ).fetchall()
+            for command_row in command_rows:
+                position_id = str(command_row[0] or "").strip()
+                if position_id in commands_by_position:
+                    commands_by_position[position_id].append(
+                        (str(command_row[1] or ""), str(command_row[2] or ""))
+                    )
+
+    execution_command_ids: list[str] = []
+    seen_execution_command_ids: set[str] = set()
+    for commands in commands_by_position.values():
+        for _command_id, execution_command_id in commands:
+            if execution_command_id and execution_command_id not in seen_execution_command_ids:
+                seen_execution_command_ids.add(execution_command_id)
+                execution_command_ids.append(execution_command_id)
+
+    receipt_payloads: dict[str, list[object]] = {
+        execution_command_id: []
+        for execution_command_id in execution_command_ids
+    }
+    for start in range(0, len(execution_command_ids), 500):
+        chunk = execution_command_ids[start : start + 500]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        payload_rows = event_source.execute(
+            f"SELECT json_extract(cmd.payload_json,'$.execution_command_id') AS execution_command_id, "
+            f"pre.payload_json FROM {events_table} AS cmd "
+            f"JOIN {events_table} AS pre "
+            "ON pre.aggregate_id=cmd.aggregate_id "
+            "AND pre.event_type='PreSubmitRevalidated' "
+            "WHERE cmd.event_type='ExecutionCommandCreated' "
+            "AND json_extract(cmd.payload_json,'$.execution_command_id') IN ("
+            f"{placeholders})",
+            tuple(chunk),
+        )
+        for payload_row in payload_rows:
+            execution_command_id = str(payload_row[0] or "")
+            payloads = receipt_payloads.get(execution_command_id)
+            if payloads is not None and len(payloads) < 2:
+                payloads.append(payload_row[1])
+
     bound_rows: list[dict[str, object]] = []
     unbound_reasons: dict[str, int] = {}
     for raw in raw_rows:
         row = dict(raw)
         position_id = str(row.get("position_id") or "").strip()
-        commands = conn.execute(
-            "SELECT DISTINCT command_id,decision_id FROM venue_commands "
-            "WHERE position_id=? AND intent_kind='ENTRY' ORDER BY decision_id",
-            (position_id,),
-        ).fetchall()
+        commands = commands_by_position.get(position_id, [])
         try:
             if not commands:
                 raise ValueError("entry command missing")
             command_receipts = [
                 (
-                    str(command[0] or ""),
-                    str(command[1] or ""),
+                    command[0],
+                    command[1],
                     _command_global_receipt(
                         conn,
-                        execution_command_id=str(command[1] or ""),
+                        execution_command_id=command[1],
                         events_conn=event_source,
                         events_table=events_table,
+                        preloaded_payloads=tuple(
+                            receipt_payloads.get(command[1], ())
+                        ),
                     ),
                 )
                 for command in commands

@@ -6711,6 +6711,120 @@ class TestQkernelMarketRelativeAlphaEvidence:
         conn.close()
         world.close()
 
+    def test_binder_batches_edli_receipt_self_join_by_500_ids(self):
+        """Receipt payload reads are batched without changing per-position order."""
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        events_conn = sqlite3.connect(":memory:")
+        events_conn.row_factory = sqlite3.Row
+        current = riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        positions = {f"position-{index}": current for index in range(501)}
+        self._selection_binder_fixture(conn, events_conn, positions=positions)
+        statements = []
+        events_conn.set_trace_callback(statements.append)
+
+        bound = riskguard_module._bind_live_curve_to_selection_revision(
+            conn,
+            {
+                "status": "positive",
+                "curve": [
+                    {
+                        "position_id": position_id,
+                        "capital_committed_usd": 4.0,
+                        "net_realized_pnl_usd": 0.6,
+                    }
+                    for position_id in positions
+                ],
+            },
+            events_conn=events_conn,
+        )
+
+        receipt_queries = [
+            statement
+            for statement in statements
+            if "ExecutionCommandCreated" in statement and " IN (" in statement
+        ]
+        assert len(receipt_queries) == 2
+        assert all("json_extract" in statement for statement in receipt_queries)
+        assert bound["realized_position_count"] == 501
+        assert bound["unbound_position_count"] == 0
+        conn.close()
+        events_conn.close()
+
+    def test_empty_preloaded_receipts_do_not_fallback_to_single_lookup(self):
+        """A batch miss remains missing and cannot reintroduce the old scan."""
+
+        events_conn = sqlite3.connect(":memory:")
+        events_conn.row_factory = sqlite3.Row
+        events_conn.execute(
+            "CREATE TABLE edli_live_order_events "
+            "(aggregate_id TEXT,event_type TEXT,payload_json TEXT)"
+        )
+        statements = []
+        events_conn.set_trace_callback(statements.append)
+
+        with pytest.raises(ValueError, match="unique EDLI pre-submit receipt unavailable"):
+            riskguard_module._command_global_receipt(
+                events_conn,
+                execution_command_id="missing-command",
+                events_conn=events_conn,
+                preloaded_payloads=(),
+            )
+
+        assert not any("edli_live_order_events" in statement for statement in statements)
+        events_conn.close()
+
+    def test_duplicate_receipts_across_aggregates_remain_unbound(self):
+        """Two EDLI aggregates for one command still fail the unique receipt check."""
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        events_conn = sqlite3.connect(":memory:")
+        events_conn.row_factory = sqlite3.Row
+        current = riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        self._selection_binder_fixture(
+            conn,
+            events_conn,
+            positions={"position-1": current},
+        )
+        duplicate_payload = events_conn.execute(
+            "SELECT payload_json FROM edli_live_order_events "
+            "WHERE aggregate_id='aggregate-1' AND event_type='PreSubmitRevalidated'"
+        ).fetchone()[0]
+        events_conn.executemany(
+            "INSERT INTO edli_live_order_events VALUES (?,?,?)",
+            (
+                (
+                    "aggregate-duplicate",
+                    "ExecutionCommandCreated",
+                    json.dumps({"execution_command_id": "cmd-1"}),
+                ),
+                (
+                    "aggregate-duplicate",
+                    "PreSubmitRevalidated",
+                    duplicate_payload,
+                ),
+            ),
+        )
+
+        bound = riskguard_module._bind_live_curve_to_selection_revision(
+            conn,
+            {
+                "status": "positive",
+                "curve": [{"position_id": "position-1"}],
+            },
+            events_conn=events_conn,
+        )
+
+        assert bound["realized_position_count"] == 0
+        assert bound["unbound_position_count"] == 1
+        assert bound["unbound_reasons"] == {
+            "unique EDLI pre-submit receipt unavailable": 1
+        }
+        conn.close()
+        events_conn.close()
+
     def test_binder_without_world_events_stays_unbound_and_cannot_gate(self):
         """No receipt surface = excluded evidence, never a latch on raw truth."""
 
