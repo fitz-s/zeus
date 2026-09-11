@@ -1107,6 +1107,11 @@ def test_boot_fast_prioritizes_terminal_exit_residual_before_missing_entry_repai
     )
 
     assert residual_idx < missing_entry_idx
+    boot_residual_pass = source.index(
+        "_reconcile_terminal_exit_residual_priority_pass(",
+        boot_idx,
+    )
+    assert boot_residual_pass < missing_entry_idx
 
 
 def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
@@ -38849,6 +38854,404 @@ def test_acked_terminal_fak_partial_exit_bad_proof_stays_acked(conn, failure, in
         "AND event_type IN ('PARTIAL_FILL_OBSERVED', 'EXPIRED')",
         (command_id,),
     ).fetchone()[0] == 0
+
+
+def test_terminal_fak_review_priority_uses_real_db_only_canonical_route(
+    conn,
+    tmp_path,
+    monkeypatch,
+):
+    """A proof-complete REVIEW_REQUIRED terminal FAK drains in priority."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.venue_command_repo import append_event
+
+    command_id = "cmd-priority-terminal-fak-review"
+    order_id = "ord-priority-terminal-fak-review"
+    position_id = "pos-priority-terminal-fak-review"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="FAK",
+        size=9.5,
+        price=0.06,
+    )
+    _advance_to_acked(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        order_type="FAK",
+    )
+    signed_order = f"signed-{command_id}".encode()
+    _ensure_envelope(
+        conn,
+        token_id="tok-001",
+        selected_outcome_token_id="tok-001",
+        side="SELL",
+        order_type="FAK",
+        envelope_id=f"signed-{command_id}",
+        order_id=order_id,
+        price=0.06,
+        size=9.5,
+        signed_order=signed_order,
+        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-priority-entry",
+        order_id="ord-priority-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 4.5, chain_shares = 4.5,
+               chain_state = 'synced', chain_seen_at = '2026-04-26T00:09:00Z',
+               order_id = ?, order_status = 'sell_pending_confirmation',
+               cost_basis_usd = 1.395, chain_cost_basis_usd = 1.395
+         WHERE position_id = ?
+        """,
+        (order_id, position_id),
+    )
+    _append_order_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        state="PARTIALLY_MATCHED",
+        matched_size="5",
+        remaining_size="0",
+        raw_payload_json={
+            "status": "PARTIALLY_MATCHED",
+            "order_id": order_id,
+            "proof_class": "terminal_partial_order_fact",
+        },
+    )
+    _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id="trade-priority-terminal-fak-review",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.06",
+        observed_at="2026-04-26T00:06:00Z",
+    )
+    # The order proof is complete without a point_order payload.
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact"
+        },
+    )
+    assert command_recovery.canonical_terminal_fak_exit_order_proven(
+        conn, command_id
+    ) is True
+    assert command_recovery.terminal_exit_residual_projection_pending(conn) is True
+
+    db_path = tmp_path / "priority-terminal-fak-review.db"
+    disk = sqlite3.connect(db_path)
+    try:
+        conn.commit()
+        conn.backup(disk)
+    finally:
+        disk.close()
+
+    def _conn_factory():
+        fresh = sqlite3.connect(db_path)
+        fresh.row_factory = sqlite3.Row
+        return fresh
+
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _conn_factory,
+    )
+    summary = command_recovery.reconcile_terminal_exit_residual_projections_priority()
+    assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+    with _conn_factory() as verified:
+        assert _get_state(verified, command_id) == "EXPIRED"
+        assert verified.execute(
+            "SELECT COUNT(*) FROM venue_command_events "
+            "WHERE command_id = ? AND event_type = 'EXPIRED'",
+            (command_id,),
+        ).fetchone()[0] == 1
+
+
+def test_terminal_fak_priority_rotation_continues_after_chain_mismatch(monkeypatch):
+    """A blocked candidate cannot starve the next rotated terminal review."""
+    from src.execution import command_recovery
+
+    candidates = [
+        {
+            "command_id": command_id,
+            "venue_order_id": f"order-{command_id}",
+            "state": "REVIEW_REQUIRED",
+            "intent_kind": "EXIT",
+            "side": "SELL",
+        }
+        for command_id in ("chain-mismatch", "eligible")
+    ]
+    seen = []
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: [
+            row for row in candidates
+            if command_ids is None or row["command_id"] in command_ids
+        ],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_command_ids",
+        lambda _conn, *, limit, rotation_slot: tuple(
+            row["command_id"] for row in candidates
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_confirmed_bound_trade_fact_summary",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def _canonical(_conn, *, command, trade_summary):
+        seen.append(str(command["command_id"]))
+        return str(command["command_id"]) == "eligible"
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_clear_canonical_terminal_fak_partial_exit",
+        _canonical,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_clear_review_required_terminal_fak_partial_exit",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with sqlite3.connect(":memory:") as isolated:
+        summary = command_recovery._reconcile_terminal_fak_partial_exit_reviews(
+            isolated,
+            limit=4,
+            rotation_slot=0,
+        )
+    assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+    assert seen == ["chain-mismatch", "eligible"]
+
+
+def test_terminal_fak_priority_rotation_reaches_fifth_candidate(monkeypatch):
+    """Wall-clock rotation advances the bounded terminal-review window."""
+    from src.execution import command_recovery
+
+    candidates = [
+        {
+            "command_id": f"terminal-{index}",
+            "venue_order_id": f"order-terminal-{index}",
+            "state": "REVIEW_REQUIRED",
+            "intent_kind": "EXIT",
+            "side": "SELL",
+        }
+        for index in range(5)
+    ]
+    seen = []
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: [
+            row for row in candidates
+            if command_ids is None or row["command_id"] in command_ids
+        ],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_command_ids",
+        lambda _conn, *, limit, rotation_slot: tuple(
+            row["command_id"]
+            for row in (
+                candidates[(rotation_slot * limit) % len(candidates):]
+                + candidates[: (rotation_slot * limit) % len(candidates)]
+            )[:limit]
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_confirmed_bound_trade_fact_summary",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def _canonical(_conn, *, command, trade_summary):
+        seen.append(str(command["command_id"]))
+        return False
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_clear_canonical_terminal_fak_partial_exit",
+        _canonical,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_clear_review_required_terminal_fak_partial_exit",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_exit_lifecycle_alignment_repairs",
+        lambda *_args, **_kwargs: {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+
+    with sqlite3.connect(":memory:") as isolated:
+        first = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=0,
+        )
+        second = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=1,
+        )
+        third = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=2,
+        )
+    assert first["scanned"] == second["scanned"] == third["scanned"] == 2
+    assert seen[:2] == ["terminal-0", "terminal-1"]
+    assert seen[2:4] == ["terminal-2", "terminal-3"]
+    assert seen[4:] == ["terminal-0", "terminal-4"]
+
+
+def test_terminal_fak_priority_shared_quota_keeps_alignment_fair(monkeypatch):
+    """The combined priority pass remains bounded and gives both lanes a turn."""
+    from src.execution import command_recovery
+
+    calls = []
+
+    def _reviews(_conn, *, limit, rotation_slot):
+        calls.append(("review", limit, rotation_slot))
+        return {"scanned": limit, "advanced": 0, "stayed": limit, "errors": 0}
+
+    def _alignment(_conn, *, terminal_partial_limit, terminal_partial_only,
+                   terminal_residual_only):
+        calls.append(("alignment", terminal_partial_limit))
+        return {
+            "scanned": terminal_partial_limit,
+            "advanced": 0,
+            "stayed": terminal_partial_limit,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_reconcile_terminal_fak_partial_exit_reviews",
+        _reviews,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_exit_lifecycle_alignment_repairs",
+        _alignment,
+    )
+
+    with sqlite3.connect(":memory:") as isolated:
+        summary = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=8,
+        )
+        assert summary == {"scanned": 4, "advanced": 0, "stayed": 4, "errors": 0}
+        assert calls == [("review", 2, 8), ("alignment", 2)]
+
+        calls.clear()
+        summary = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=1,
+            rotation_slot=0,
+        )
+        assert summary["scanned"] == 1
+        assert calls == [("review", 1, 0)]
+
+        calls.clear()
+        summary = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=1,
+            rotation_slot=1,
+        )
+        assert summary["scanned"] == 1
+        assert calls == [("review", 0, 1), ("alignment", 1)]
+
+
+def test_terminal_exit_pending_keeps_legacy_predicate_when_new_read_unavailable():
+    """An incomplete newer schema cannot hide an existing EXPIRED residual."""
+    from src.execution import command_recovery
+
+    with sqlite3.connect(":memory:") as isolated:
+        isolated.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT, position_id TEXT, intent_kind TEXT,
+                side TEXT, state TEXT, venue_order_id TEXT
+            );
+            CREATE TABLE position_current (position_id TEXT, phase TEXT);
+            CREATE TABLE venue_trade_facts (
+                command_id TEXT, venue_order_id TEXT, state TEXT, filled_size TEXT
+            );
+            INSERT INTO venue_commands VALUES
+                ('legacy', 'position', 'EXIT', 'SELL', 'EXPIRED', 'order');
+            INSERT INTO position_current VALUES ('position', 'pending_exit');
+            INSERT INTO venue_trade_facts VALUES
+                ('legacy', 'order', 'CONFIRMED', '5');
+            """
+        )
+        assert command_recovery.terminal_exit_residual_projection_pending(isolated)
+
+
+def test_terminal_fak_priority_selector_bounds_before_proof_reads():
+    """Priority selection reads only a rotated command-id window first."""
+    from src.execution import command_recovery
+
+    with sqlite3.connect(":memory:") as isolated:
+        isolated.execute(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT, intent_kind TEXT, side TEXT, state TEXT,
+                venue_order_id TEXT, updated_at TEXT
+            )
+            """
+        )
+        isolated.executemany(
+            "INSERT INTO venue_commands VALUES (?, 'EXIT', 'SELL', 'REVIEW_REQUIRED', ?, ?)",
+            [
+                (f"terminal-{index}", f"order-{index}", f"2026-09-10T00:0{index}:00Z")
+                for index in range(6)
+            ],
+        )
+        isolated.execute(
+            """
+            INSERT INTO venue_commands VALUES
+                ('unrelated', 'ENTRY', 'BUY', 'REVIEW_REQUIRED', 'other-order', ?)
+            """,
+            ("2026-09-10T00:10:00Z",),
+        )
+        assert command_recovery._terminal_fak_partial_exit_review_command_ids(
+            isolated,
+            limit=2,
+            rotation_slot=0,
+        ) == ("terminal-0", "terminal-1")
+        assert command_recovery._terminal_fak_partial_exit_review_command_ids(
+            isolated,
+            limit=2,
+            rotation_slot=2,
+        ) == ("terminal-4", "terminal-5")
 
 
 @pytest.mark.parametrize(

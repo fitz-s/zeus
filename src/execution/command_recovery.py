@@ -13536,8 +13536,25 @@ def reconcile_exit_lifecycle_alignment_repairs(
 def terminal_exit_residual_projection_pending(conn: sqlite3.Connection) -> bool:
     """Return whether one open terminal EXIT residual merits bounded priority."""
 
-    required = {"venue_commands", "venue_trade_facts", "position_current"}
     try:
+        if not _table_exists(conn, "venue_commands"):
+            return False
+        # REVIEW_REQUIRED terminal FAK exits have no PARTIAL/EXPIRED command
+        # state yet, but their durable command shape merits a bounded priority
+        # turn. Full order proof remains in the clear path.
+        if conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands command
+             WHERE command.intent_kind = 'EXIT'
+               AND UPPER(COALESCE(command.side, '')) = 'SELL'
+               AND command.state IN ('REVIEW_REQUIRED', 'ACKED', 'POST_ACKED')
+               AND COALESCE(command.venue_order_id, '') <> ''
+             LIMIT 1
+            """
+        ).fetchone() is not None:
+            return True
+        required = {"venue_commands", "venue_trade_facts", "position_current"}
         if not all(_table_exists(conn, table) for table in required):
             return False
         return conn.execute(
@@ -13574,10 +13591,11 @@ def reconcile_terminal_exit_residual_projections_priority(
 ) -> dict:
     """Project a few exact terminal EXIT residuals without venue or selector I/O.
 
-    SCOPE=at most four open EXIT SELL command/position pairs with durable positive
-    fill facts. DRAIN=this DB-only priority turn before cancel selection or venue
-    prewarm. RESET=the existing command/token/fill/chain proof projects the
-    residual, or a bounded lock/budget defers the same exact rows to next cadence.
+    SCOPE=at most four total candidates per turn, split fairly between terminal
+    FAK reviews and existing open EXIT SELL command/position residuals. DRAIN=
+    this DB-only priority turn before cancel selection or venue prewarm. RESET=
+    the existing command/token/fill/chain proof projects the residual, or a
+    bounded lock/budget defers the same exact rows to next cadence.
     """
 
     from src.execution.venue_sync_contract import (
@@ -13604,13 +13622,9 @@ def reconcile_terminal_exit_residual_projections_priority(
     result = _run_recovery_pass_with_lock_policy(
         "terminal_exit_residual_projection_priority",
         lambda: run_db_only_pass(
-            lambda conn: reconcile_exit_lifecycle_alignment_repairs(
+            lambda conn: _reconcile_terminal_exit_residual_priority_pass(
                 conn,
-                terminal_partial_limit=(
-                    _TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES
-                ),
-                terminal_partial_only=True,
-                terminal_residual_only=True,
+                limit=_TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
             ),
             conn_factory=apply_factory,
             label="recovery.terminal_exit_residual_projection_priority",
@@ -13622,6 +13636,45 @@ def reconcile_terminal_exit_residual_projections_priority(
     )
     if result is not None:
         summary = result
+    return summary
+
+
+def _reconcile_terminal_exit_residual_priority_pass(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = _TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
+    rotation_slot: int | None = None,
+) -> dict:
+    """Drain terminal FAK reviews and residual alignment in one fair bound."""
+
+    priority_limit = max(0, int(limit))
+    if priority_limit <= 0:
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    slot = (
+        _identity_bound_rotation_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
+    )
+    if priority_limit == 1:
+        review_limit = 1 if slot % 2 == 0 else 0
+    else:
+        review_limit = (priority_limit + 1) // 2
+    summary = _reconcile_terminal_fak_partial_exit_reviews(
+        conn,
+        limit=review_limit,
+        rotation_slot=slot,
+    )
+    alignment_limit = priority_limit - summary["scanned"]
+    if alignment_limit <= 0:
+        return summary
+    alignment = reconcile_exit_lifecycle_alignment_repairs(
+        conn,
+        terminal_partial_limit=alignment_limit,
+        terminal_partial_only=True,
+        terminal_residual_only=True,
+    )
+    for key in ("scanned", "advanced", "stayed", "errors"):
+        summary[key] += alignment[key]
     return summary
 
 
@@ -13680,12 +13733,68 @@ def _terminal_partial_entry_review_candidates(
     return [_dict_row(row) for row in rows]
 
 
+def _terminal_fak_partial_exit_review_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    rotation_slot: int,
+) -> tuple[str, ...]:
+    """Select a rotated bounded command-id window before proof-heavy reads."""
+
+    candidate_limit = int(limit)
+    if candidate_limit <= 0 or not _table_exists(conn, "venue_commands"):
+        return ()
+    total = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM venue_commands
+             WHERE intent_kind = 'EXIT'
+               AND side = 'SELL'
+               AND state IN ('REVIEW_REQUIRED', 'ACKED', 'POST_ACKED')
+               AND COALESCE(venue_order_id, '') <> ''
+            """
+        ).fetchone()[0]
+        or 0
+    )
+    if total <= 0:
+        return ()
+    offset = (max(0, int(rotation_slot)) * candidate_limit) % total
+    rows = conn.execute(
+        """
+        SELECT command_id
+          FROM venue_commands
+         WHERE intent_kind = 'EXIT'
+           AND side = 'SELL'
+           AND state IN ('REVIEW_REQUIRED', 'ACKED', 'POST_ACKED')
+           AND COALESCE(venue_order_id, '') <> ''
+         ORDER BY updated_at, command_id
+         LIMIT ? OFFSET ?
+        """,
+        (candidate_limit, offset),
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows if str(row[0] or "").strip())
+
+
 def _terminal_fak_partial_exit_review_candidates(
     conn: sqlite3.Connection,
+    *,
+    command_ids: Collection[str] | None = None,
 ) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
         return []
-    rows = conn.execute(
+    ids = tuple(str(command_id) for command_id in (command_ids or ()) if str(command_id))
+    if command_ids is not None and not ids:
+        return []
+    scope_filter = ""
+    final_filter = ""
+    params: tuple[object, ...] = ()
+    if command_ids is not None:
+        placeholders = ", ".join("?" for _ in ids)
+        scope_filter = f" AND command_id IN ({placeholders})"
+        final_filter = f" AND command.command_id IN ({placeholders})"
+        params = (*ids, *ids)
+    query = (
         "WITH terminal_fak_partial_exit_commands AS ("
         "SELECT command_id"
         "  FROM venue_commands"
@@ -13694,7 +13803,8 @@ def _terminal_fak_partial_exit_review_candidates(
         "   AND state IN ('REVIEW_REQUIRED', 'ACKED', 'POST_ACKED')"
         "   AND venue_order_id IS NOT NULL"
         "   AND venue_order_id != ''"
-        "), "
+        + scope_filter
+        + "), "
         + _canonical_order_truth_cte(
             command_scope_cte="terminal_fak_partial_exit_commands"
         )
@@ -13745,9 +13855,13 @@ def _terminal_fak_partial_exit_review_candidates(
            AND command.side = 'SELL'
            AND command.venue_order_id IS NOT NULL
            AND command.venue_order_id != ''
+        """
+        + final_filter
+        + """
          ORDER BY command.updated_at, command.command_id
         """
-    ).fetchall()
+    )
+    rows = conn.execute(query, params).fetchall()
     return [_dict_row(row) for row in rows]
 
 
@@ -14736,6 +14850,81 @@ def _clear_review_required_terminal_partial(
     return True
 
 
+def _reconcile_terminal_fak_partial_exit_reviews(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    rotation_slot: int | None = None,
+) -> dict:
+    """Reconcile terminal FAK EXIT reviews with an optional fair bound."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if limit is not None:
+        candidate_limit = int(limit)
+        if candidate_limit <= 0:
+            return summary
+        slot = (
+            _identity_bound_rotation_slot()
+            if rotation_slot is None
+            else max(0, int(rotation_slot))
+        )
+        command_ids = _terminal_fak_partial_exit_review_command_ids(
+            conn,
+            limit=candidate_limit,
+            rotation_slot=slot,
+        )
+        candidates = _terminal_fak_partial_exit_review_candidates(
+            conn,
+            command_ids=command_ids,
+        )
+    else:
+        candidates = _terminal_fak_partial_exit_review_candidates(conn)
+
+    for command in candidates:
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            trade_summary = _confirmed_bound_trade_fact_summary(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+                limit_price=command.get("price"),
+                side=command.get("side"),
+            )
+            # Canonical proof is shared across ACKED, POST_ACKED and
+            # REVIEW_REQUIRED.  REVIEW_REQUIRED retains the legacy point-order
+            # or cancel-failed fallback only when canonical proof is absent.
+            advanced = _clear_canonical_terminal_fak_partial_exit(
+                conn,
+                command=command,
+                trade_summary=trade_summary,
+            )
+            if (
+                not advanced
+                and str(command.get("state") or "").upper()
+                == "REVIEW_REQUIRED"
+            ):
+                advanced = _clear_review_required_terminal_fak_partial_exit(
+                    conn,
+                    command=command,
+                    trade_summary=trade_summary,
+                )
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal FAK partial EXIT review recovery failed "
+                "for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
     """Clear REVIEW_REQUIRED commands when canonical venue facts prove a fill.
 
@@ -14778,36 +14967,9 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             )
             summary["errors"] += 1
 
-    for command in _terminal_fak_partial_exit_review_candidates(conn):
-        summary["scanned"] += 1
-        command_id = str(command.get("command_id") or "")
-        venue_order_id = str(command.get("venue_order_id") or "")
-        try:
-            trade_summary = _confirmed_bound_trade_fact_summary(
-                conn,
-                command_id=command_id,
-                venue_order_id=venue_order_id,
-                limit_price=command.get("price"),
-                side=command.get("side"),
-            )
-            clear = (
-                _clear_canonical_terminal_fak_partial_exit
-                if str(command.get("state") or "").upper()
-                in {"ACKED", "POST_ACKED"}
-                else _clear_review_required_terminal_fak_partial_exit
-            )
-            if clear(conn, command=command, trade_summary=trade_summary):
-                summary["advanced"] += 1
-            else:
-                summary["stayed"] += 1
-        except Exception as exc:
-            logger.error(
-                "recovery: terminal FAK partial EXIT review recovery failed "
-                "for command %s: %s",
-                command_id,
-                exc,
-            )
-            summary["errors"] += 1
+    terminal_summary = _reconcile_terminal_fak_partial_exit_reviews(conn)
+    for key in ("scanned", "advanced", "stayed", "errors"):
+        summary[key] += terminal_summary[key]
 
     for command in _matched_cancel_review_required_candidates(conn):
         summary["scanned"] += 1
@@ -31817,11 +31979,9 @@ def _reconcile_passes_short_conn(
         # consume boot's finite DB turn.
         _boot_db_pass(
             "terminal_exit_residual_projection_priority",
-            lambda conn: reconcile_exit_lifecycle_alignment_repairs(
+            lambda conn: _reconcile_terminal_exit_residual_priority_pass(
                 conn,
-                terminal_partial_limit=_TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
-                terminal_partial_only=True,
-                terminal_residual_only=True,
+                limit=_TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
             ),
             "terminal_exit_residual_projection_priority",
         )
