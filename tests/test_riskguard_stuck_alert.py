@@ -250,7 +250,7 @@ def test_lookback_cap_reports_capped_true(risk_conn, caplog, monkeypatch):
             risk_conn,
             level="DATA_DEGRADED",
             checked_at=_iso(started + timedelta(seconds=i)),
-            details={"storage_capacity_level": "DATA_DEGRADED"},
+            details={"portfolio_consistency_level": "DATA_DEGRADED"},
         )
 
     with caplog.at_level(logging.ERROR):
@@ -271,6 +271,13 @@ def test_cause_unavailable_fallback_for_bare_row():
         {"riskguard_degraded_reason": "dependency_db_locked"}
     )
     assert causes == ["dependency_db_locked"]
+
+
+def test_retired_resource_components_do_not_contribute_to_stuck_alerts():
+    assert riskguard_module._riskguard_row_causes({
+        "storage_capacity_level": "DATA_DEGRADED",
+        "host_power_level": "RED",
+    }) == ["cause_unavailable"]
 
 
 def test_alert_path_never_changes_computed_level_or_writes_rows(risk_conn):

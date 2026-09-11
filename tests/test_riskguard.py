@@ -48,18 +48,6 @@ from src.state.portfolio import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _stable_host_power_truth(monkeypatch):
-    monkeypatch.setattr(
-        riskguard_module,
-        "_pmset_battery_status",
-        lambda: (
-            "Now drawing from 'AC Power'\n"
-            " -InternalBattery-0 (id=1)\t80%; charging; present: true\n"
-        ),
-    )
-
-
 class TestForwardCapitalAudit:
     def test_activity_excludes_preboundary_entry_decisions(self):
         from scripts.audit_realtime_pnl import _cohort_activity
@@ -1884,6 +1872,10 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_signal_level"] == "GREEN"
         assert details["recommended_controls"] == []
         assert details["recommended_strategy_gates"] == []
+        assert "host_power_level" not in details
+        assert "storage_capacity_level" not in details
+        assert "host_power" not in details
+        assert "storage_capacity" not in details
         # Single-authority read surfaces the preserved fresh GREEN to the entry gate.
         assert riskguard_module.get_current_level() == RiskLevel.GREEN
         assert trade_conn.rollback_called is True
@@ -1935,6 +1927,8 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_signal_level"] == "DATA_DEGRADED"
         assert details["recommended_controls"] == []
         assert details["recommended_strategy_gates"] == []
+        assert "host_power_level" not in details
+        assert "storage_capacity_level" not in details
         assert riskguard_module.get_current_level() == RiskLevel.DATA_DEGRADED
 
     def test_tick_prefers_position_current_for_portfolio_truth(self, monkeypatch, tmp_path):
@@ -2851,6 +2845,10 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["recommended_controls"] == ["review_strategy_gates"]
         assert details["recommended_strategy_gates"] == ["forecast_qkernel_entry"]
+        assert "host_power_level" not in details
+        assert "storage_capacity_level" not in details
+        assert "host_power" not in details
+        assert "storage_capacity" not in details
         assert riskguard_module.get_current_level() == RiskLevel.YELLOW
 
         # The in-progress row is not itself a full metrics row and cannot extend
@@ -9935,98 +9933,20 @@ def test_unprojected_entry_fill_equity_excludes_terminal_lot_projection():
     assert riskguard_module._unprojected_entry_fill_equity_usd(conn) == 0.0
 
 
-def test_storage_capacity_blocks_entry_before_enospc(monkeypatch, tmp_path):
-    from src.engine.cycle_runner import _risk_allows_new_entries
-
-    total = 1024**4
-    free = 60 * 1024**3
-    monkeypatch.setattr(
-        riskguard_module,
-        "_disk_usage",
-        lambda _path: SimpleNamespace(total=total, used=total - free, free=free),
-    )
-
-    snapshot = riskguard_module.storage_capacity_snapshot(tmp_path)
-
-    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
-    assert snapshot["status"] == "LOW_DISK"
-    assert snapshot["reason"] == "ENTRY_RESERVE_BREACHED"
-    assert snapshot["required_free_bytes"] == int(total * 0.10)
-    level = RiskLevel(str(snapshot["level"]))
-    assert level == RiskLevel.DATA_DEGRADED
-    assert not _risk_allows_new_entries(level)
+def test_resource_probes_are_removed_from_riskguard_surface():
+    """Battery/storage probes cannot create a risk input or advisory record."""
+    assert not hasattr(riskguard_module, "host_power_runway_snapshot")
+    assert not hasattr(riskguard_module, "storage_capacity_snapshot")
+    assert not hasattr(riskguard_module, "_pmset_battery_status")
+    assert not hasattr(riskguard_module, "_disk_usage")
 
 
-def test_storage_capacity_read_failure_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        riskguard_module,
-        "_disk_usage",
-        lambda _path: (_ for _ in ()).throw(OSError("capacity unavailable")),
-    )
-
-    snapshot = riskguard_module.storage_capacity_snapshot(tmp_path)
-
-    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
-    assert snapshot["status"] == "CAPACITY_UNAVAILABLE"
-
-
-def test_host_power_runway_uses_time_to_preserve_execution_authority():
-    snapshot = riskguard_module.host_power_runway_snapshot(
-        "Now drawing from 'Battery Power'\n"
-        " -InternalBattery-0 (id=1)\t25%; discharging; 0:29 remaining present: true\n"
-    )
-
-    assert snapshot["level"] == RiskLevel.ORANGE.value
-    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_SEVERE"
-    assert snapshot["battery_percent"] == 25
-    assert snapshot["remaining_minutes"] == 29.0
-
-
-def test_host_power_runway_red_precedes_forced_low_power_hibernate():
-    snapshot = riskguard_module.host_power_runway_snapshot(
-        "Now drawing from 'Battery Power'\n"
-        " -InternalBattery-0 (id=1)\t4%; discharging; 0:18 remaining present: true\n"
-    )
-
-    assert snapshot["level"] == RiskLevel.RED.value
-    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_CRITICAL"
-
-
-def test_host_power_runway_resets_on_ac_power():
-    snapshot = riskguard_module.host_power_runway_snapshot(
-        "Now drawing from 'AC Power'\n"
-        " -InternalBattery-0 (id=1)\t4%; charging; 0:12 remaining present: true\n"
-    )
-
-    assert snapshot["level"] == RiskLevel.GREEN.value
-    assert snapshot["status"] == "AC_POWER"
-
-
-def test_host_power_runway_unreadable_truth_fails_closed(monkeypatch):
-    monkeypatch.setattr(
-        riskguard_module,
-        "_pmset_battery_status",
-        lambda: (_ for _ in ()).throw(OSError("pmset unavailable")),
-    )
-    monkeypatch.setattr(riskguard_module.sys, "platform", "darwin")
-
-    snapshot = riskguard_module.host_power_runway_snapshot()
-
-    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
-    assert snapshot["status"] == "POWER_TRUTH_UNAVAILABLE"
-
-
-def test_host_power_red_flows_through_existing_risk_authority(monkeypatch):
+def test_financial_risk_still_drives_tick_without_resource_inputs(monkeypatch):
     risk_conn = sqlite3.connect(":memory:")
     risk_conn.row_factory = sqlite3.Row
     trade_conn = sqlite3.connect(":memory:")
     trade_conn.row_factory = sqlite3.Row
 
-    monkeypatch.setattr(
-        riskguard_module,
-        "host_power_runway_snapshot",
-        lambda: {"level": RiskLevel.RED.value},
-    )
     monkeypatch.setattr(
         riskguard_module,
         "_bankroll_of_record_for_riskguard",
@@ -10035,12 +9955,7 @@ def test_host_power_red_flows_through_existing_risk_authority(monkeypatch):
     monkeypatch.setattr(
         riskguard_module,
         "_collateral_identity_level",
-        lambda _conn: RiskLevel.GREEN,
-    )
-    monkeypatch.setattr(
-        riskguard_module,
-        "storage_capacity_snapshot",
-        lambda: {"level": RiskLevel.GREEN.value},
+        lambda _conn: RiskLevel.RED,
     )
     monkeypatch.setattr(riskguard_module, "get_connection", lambda *_a, **_k: risk_conn)
     monkeypatch.setattr(
@@ -10056,10 +9971,7 @@ def test_host_power_red_flows_through_existing_risk_authority(monkeypatch):
     assert level is RiskLevel.RED
 
 
-def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
-    monkeypatch,
-    tmp_path,
-):
+def test_dependency_lock_attestation_has_no_resource_risk_fields(monkeypatch, tmp_path):
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(risk_db)
     riskguard_module.init_risk_db(conn)
@@ -10076,12 +9988,6 @@ def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
         "get_connection",
         lambda *_a, **_k: get_connection(risk_db),
     )
-    monkeypatch.setattr(
-        riskguard_module,
-        "host_power_runway_snapshot",
-        lambda: {"level": RiskLevel.RED.value},
-    )
-
     level = riskguard_module._persist_dependency_db_locked_attestation(
         sqlite3.OperationalError("database is locked")
     )
@@ -10090,6 +9996,9 @@ def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
         "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
     ).fetchone()
     details = json.loads(row["details_json"])
-    assert level is RiskLevel.RED
-    assert row["level"] == RiskLevel.RED.value
-    assert details["host_power_floor_applied"] is True
+    assert level is RiskLevel.GREEN
+    assert row["level"] == RiskLevel.GREEN.value
+    assert "host_power_level" not in details
+    assert "storage_capacity_level" not in details
+    assert "host_power" not in details
+    assert "storage_capacity" not in details

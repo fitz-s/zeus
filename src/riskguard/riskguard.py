@@ -33,9 +33,7 @@ import json
 import logging
 import math
 import os
-import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -150,17 +148,6 @@ _RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
     "unknown",
 })
 
-_STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT = 64 * 1024**3
-_STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT = 0.10
-_disk_usage = shutil.disk_usage
-
-_POWER_RUNWAY_YELLOW_MINUTES_DEFAULT = 60.0
-_POWER_RUNWAY_ORANGE_MINUTES_DEFAULT = 30.0
-_POWER_RUNWAY_RED_MINUTES_DEFAULT = 15.0
-_POWER_PERCENT_YELLOW_DEFAULT = 20
-_POWER_PERCENT_ORANGE_DEFAULT = 10
-_POWER_PERCENT_RED_DEFAULT = 5
-
 # RiskGuard's strategy-gate and health rows are auxiliary bookkeeping. They
 # must yield to money-path writers, but they still need one bounded transaction
 # so a partial refresh cannot be observed as a successful tick. SCOPE: only
@@ -169,251 +156,6 @@ _POWER_PERCENT_RED_DEFAULT = 5
 # RESET: a successful BEGIN -> DML -> COMMIT clears the skipped status.
 RISKGUARD_TRADE_WRITE_LEASE_DEADLINE_MS = 250
 RISKGUARD_TRADE_WRITE_LEASE_MAX_HOLD_MS = 500
-
-
-def _pmset_battery_status() -> str:
-    completed = subprocess.run(
-        ["pmset", "-g", "batt"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=2.0,
-    )
-    return completed.stdout
-
-
-def host_power_runway_snapshot(raw_status: str | None = None) -> dict[str, object]:
-    """Classify whether the live host can retain execution authority.
-
-    SCOPE: YELLOW blocks new entries, ORANGE permits only favorable reduction,
-    and RED activates the existing portfolio-wide reduce-only sweep. DRAIN:
-    RiskGuard re-reads macOS power truth every 60 seconds while the host is
-    awake. RESET: AC power, or Battery Power above every configured runway and
-    percentage watermark, returns GREEN on the next tick.
-    """
-
-    if raw_status is None and (get_mode() != "live" or sys.platform != "darwin"):
-        return {
-            "level": RiskLevel.GREEN.value,
-            "status": "NOT_APPLICABLE",
-            "reason": None,
-            "source": "non_live_or_non_darwin_host",
-        }
-
-    power_config = settings["riskguard"]
-    try:
-        yellow_minutes = float(
-            power_config.get(
-                "power_runway_yellow_minutes",
-                _POWER_RUNWAY_YELLOW_MINUTES_DEFAULT,
-            )
-        )
-        orange_minutes = float(
-            power_config.get(
-                "power_runway_orange_minutes",
-                _POWER_RUNWAY_ORANGE_MINUTES_DEFAULT,
-            )
-        )
-        red_minutes = float(
-            power_config.get(
-                "power_runway_red_minutes",
-                _POWER_RUNWAY_RED_MINUTES_DEFAULT,
-            )
-        )
-        yellow_percent = int(
-            power_config.get(
-                "power_percent_yellow",
-                _POWER_PERCENT_YELLOW_DEFAULT,
-            )
-        )
-        orange_percent = int(
-            power_config.get(
-                "power_percent_orange",
-                _POWER_PERCENT_ORANGE_DEFAULT,
-            )
-        )
-        red_percent = int(
-            power_config.get("power_percent_red", _POWER_PERCENT_RED_DEFAULT)
-        )
-        if not (
-            math.isfinite(yellow_minutes)
-            and math.isfinite(orange_minutes)
-            and math.isfinite(red_minutes)
-            and yellow_minutes > orange_minutes > red_minutes > 0.0
-            and 100 >= yellow_percent > orange_percent > red_percent >= 0
-        ):
-            raise ValueError("power runway watermarks are not strictly ordered")
-    except (TypeError, ValueError) as exc:
-        return {
-            "level": RiskLevel.DATA_DEGRADED.value,
-            "status": "CONFIG_INVALID",
-            "reason": f"{type(exc).__name__}:{exc}",
-            "source": "pmset",
-        }
-
-    try:
-        status = raw_status if raw_status is not None else _pmset_battery_status()
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {
-            "level": RiskLevel.DATA_DEGRADED.value,
-            "status": "POWER_TRUTH_UNAVAILABLE",
-            "reason": f"{type(exc).__name__}:{exc}",
-            "source": "pmset",
-        }
-
-    lines = [line.strip() for line in str(status).splitlines() if line.strip()]
-    source = ""
-    if lines and "'" in lines[0]:
-        source = lines[0].split("'", 2)[1].strip()
-    battery_line = next((line for line in lines[1:] if "%" in line), "")
-    try:
-        percent_text = next(
-            part.strip().removesuffix("%")
-            for part in battery_line.split(";")
-            if part.strip().endswith("%")
-        )
-        percent = int(percent_text.rsplit(None, 1)[-1])
-    except (StopIteration, TypeError, ValueError):
-        percent = None
-
-    remaining_minutes: float | None = None
-    for part in battery_line.split(";"):
-        token = part.strip()
-        if " remaining" not in token:
-            continue
-        clock = token.split(" remaining", 1)[0].strip()
-        if ":" not in clock:
-            continue
-        hours_text, minutes_text = clock.split(":", 1)
-        try:
-            remaining_minutes = int(hours_text) * 60.0 + int(minutes_text)
-        except ValueError:
-            remaining_minutes = None
-        break
-
-    if source == "AC Power":
-        return {
-            "level": RiskLevel.GREEN.value,
-            "status": "AC_POWER",
-            "reason": None,
-            "source": "pmset",
-            "power_source": source,
-            "battery_percent": percent,
-            "remaining_minutes": remaining_minutes,
-        }
-    if source != "Battery Power" or percent is None:
-        return {
-            "level": RiskLevel.DATA_DEGRADED.value,
-            "status": "POWER_TRUTH_INVALID",
-            "reason": "POWER_SOURCE_OR_PERCENT_UNREADABLE",
-            "source": "pmset",
-            "power_source": source or None,
-            "battery_percent": percent,
-            "remaining_minutes": remaining_minutes,
-        }
-
-    level = RiskLevel.GREEN
-    reason = None
-    if percent <= red_percent or (
-        remaining_minutes is not None and remaining_minutes <= red_minutes
-    ):
-        level = RiskLevel.RED
-        reason = "HOST_EXECUTION_RUNWAY_CRITICAL"
-    elif percent <= orange_percent or (
-        remaining_minutes is not None and remaining_minutes <= orange_minutes
-    ):
-        level = RiskLevel.ORANGE
-        reason = "HOST_EXECUTION_RUNWAY_SEVERE"
-    elif percent <= yellow_percent or (
-        remaining_minutes is not None and remaining_minutes <= yellow_minutes
-    ):
-        level = RiskLevel.YELLOW
-        reason = "HOST_EXECUTION_RUNWAY_LOW"
-
-    return {
-        "level": level.value,
-        "status": "BATTERY_POWER",
-        "reason": reason,
-        "source": "pmset",
-        "power_source": source,
-        "battery_percent": percent,
-        "remaining_minutes": remaining_minutes,
-        "yellow_minutes": yellow_minutes,
-        "orange_minutes": orange_minutes,
-        "red_minutes": red_minutes,
-        "yellow_percent": yellow_percent,
-        "orange_percent": orange_percent,
-        "red_percent": red_percent,
-    }
-
-
-def storage_capacity_snapshot(path=None) -> dict[str, object]:
-    """Return the live volume's entry-preserving capacity verdict.
-
-    SCOPE: DATA_DEGRADED blocks new entries only; held monitoring, cancel,
-    reduce-only SELL, reconciliation, and settlement keep running. DRAIN: an
-    operator or retention job frees the volume while the 60-second RiskGuard
-    tick keeps re-reading the same filesystem. RESET: the next successful read
-    at or above both configured watermarks returns GREEN.
-    """
-
-    capacity_config = settings["riskguard"]
-    try:
-        min_free_bytes = int(
-            capacity_config.get(
-                "storage_entry_min_free_bytes",
-                _STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT,
-            )
-        )
-        min_free_ratio = float(
-            capacity_config.get(
-                "storage_entry_min_free_ratio",
-                _STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT,
-            )
-        )
-        if min_free_bytes < 0 or not 0.0 < min_free_ratio < 1.0:
-            raise ValueError("storage entry watermarks are outside valid bounds")
-    except (TypeError, ValueError) as exc:
-        return {
-            "level": RiskLevel.DATA_DEGRADED.value,
-            "status": "CONFIG_INVALID",
-            "reason": f"{type(exc).__name__}:{exc}",
-            "path": str(path or RISK_DB_PATH.parent),
-        }
-
-    target = path or RISK_DB_PATH.parent
-    try:
-        usage = _disk_usage(target)
-    except OSError as exc:
-        return {
-            "level": RiskLevel.DATA_DEGRADED.value,
-            "status": "CAPACITY_UNAVAILABLE",
-            "reason": f"{type(exc).__name__}:{exc}",
-            "path": str(target),
-            "min_free_bytes": min_free_bytes,
-            "min_free_ratio": min_free_ratio,
-        }
-
-    ratio_required_bytes = int(usage.total * min_free_ratio)
-    required_free_bytes = max(min_free_bytes, ratio_required_bytes)
-    level = (
-        RiskLevel.GREEN
-        if usage.free >= required_free_bytes
-        else RiskLevel.DATA_DEGRADED
-    )
-    return {
-        "level": level.value,
-        "status": "READY" if level == RiskLevel.GREEN else "LOW_DISK",
-        "reason": None if level == RiskLevel.GREEN else "ENTRY_RESERVE_BREACHED",
-        "path": str(target),
-        "total_bytes": int(usage.total),
-        "used_bytes": int(usage.used),
-        "free_bytes": int(usage.free),
-        "free_ratio": float(usage.free / usage.total) if usage.total else 0.0,
-        "required_free_bytes": required_free_bytes,
-        "min_free_bytes": min_free_bytes,
-        "min_free_ratio": min_free_ratio,
-    }
 
 
 def _collateral_identity_level(zeus_conn: sqlite3.Connection) -> RiskLevel:
@@ -1377,8 +1119,6 @@ RISK_COMPONENT_ORDER: tuple[str, ...] = (
     "portfolio_consistency",
     "unresolved_exposure",
     "probability_semantics",
-    "storage_capacity",
-    "host_power",
 )
 
 
@@ -5998,8 +5738,6 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     only the metrics refresh degraded. If no full attestation is fresh, degrade
     to DATA_DEGRADED.
     """
-    host_power = host_power_runway_snapshot()
-    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     now_ts = now.isoformat()
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
@@ -6043,11 +5781,6 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "previous_full_risk_checked_at": previous_full["checked_at"],
                 "conservative_floor_applied": False,
             }
-        stored_level = level
-        level = overall_level(level, host_power_level)
-        details["host_power_level"] = host_power_level.value
-        details["host_power"] = host_power
-        details["host_power_floor_applied"] = level is not stored_level
         risk_conn.execute(
             """
             INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -6080,8 +5813,6 @@ def _persist_tick_in_progress_attestation() -> None:
     tick. Rows written here are not full metrics and are never accepted by
     _latest_fresh_full_risk_row; they expire through the normal freshness floor.
     """
-    host_power = host_power_runway_snapshot()
-    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     try:
@@ -6090,7 +5821,7 @@ def _persist_tick_in_progress_attestation() -> None:
         if previous_full is None:
             return
         previous_level = RiskLevel(str(previous_full["level"]))
-        level = overall_level(previous_level, host_power_level)
+        level = previous_level
         details = {
             **_risk_details_contract_from_full_row(previous_full),
             "status": "metrics_in_progress_previous_risk_level_preserved",
@@ -6098,9 +5829,6 @@ def _persist_tick_in_progress_attestation() -> None:
             "full_metrics_status": "in_progress_previous_fresh_level_preserved",
             "previous_full_risk_level": previous_full["level"],
             "previous_full_risk_checked_at": previous_full["checked_at"],
-            "host_power_level": host_power_level.value,
-            "host_power": host_power,
-            "host_power_floor_applied": level is not previous_level,
         }
         risk_conn.execute(
             """
@@ -6163,8 +5891,6 @@ def _tick_once() -> RiskLevel:
     # attestation row can be written), the short busy_timeout, and the WAL-leak
     # fix are all preserved.
     # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
-    host_power = host_power_runway_snapshot()
-    host_power_level = RiskLevel(str(host_power["level"]))
     bankroll_of_record = _bankroll_of_record_for_riskguard()
 
     try:
@@ -6223,9 +5949,7 @@ def _tick_once() -> RiskLevel:
             if previous_full is not None:
                 details["previous_full_risk_level"] = previous_full["level"]
                 details["previous_full_risk_checked_at"] = previous_full["checked_at"]
-            level = overall_level(RiskLevel.DATA_DEGRADED, host_power_level)
-            details["host_power_level"] = host_power_level.value
-            details["host_power"] = host_power
+            level = RiskLevel.DATA_DEGRADED
             risk_conn.execute(
                 """
                 INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -7091,9 +6815,6 @@ def _tick_once() -> RiskLevel:
         # the SAME risk lane every other "missing truth input" condition
         # already uses, single-seam.
         unresolved_exposure_level = _unresolved_exposure_data_degraded_level(zeus_conn, portfolio)
-        storage_capacity = storage_capacity_snapshot()
-        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
-
         level = overall_level(
             brier_level,
             settlement_quality_level,
@@ -7103,8 +6824,6 @@ def _tick_once() -> RiskLevel:
             portfolio_consistency_level,
             unresolved_exposure_level,
             probability_semantics_level,
-            storage_capacity_level,
-            host_power_level,
         )
 
         risk_conn.execute("""
@@ -7216,10 +6935,6 @@ def _tick_once() -> RiskLevel:
                 # T2 (quarantine excision, BLOCKER-1): unbounded obligation or
                 # unmapped-family ChainOnlyFact -> DATA_DEGRADED leg.
                 "unresolved_exposure_level": unresolved_exposure_level.value,
-                "storage_capacity_level": storage_capacity_level.value,
-                "storage_capacity": storage_capacity,
-                "host_power_level": host_power_level.value,
-                "host_power": host_power,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "trailing_loss_decision_role": "record_only",
@@ -7424,8 +7139,6 @@ def _tick_once() -> RiskLevel:
             "portfolio_consistency": portfolio_consistency_level,
             "unresolved_exposure": unresolved_exposure_level,
             "probability_semantics": probability_semantics_level,
-            "storage_capacity": storage_capacity_level,
-            "host_power": host_power_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -7456,19 +7169,6 @@ def _tick_once() -> RiskLevel:
                 f"superseded={probability_semantics_binding.get('superseded_count')} "
                 f"missing={probability_semantics_binding.get('missing_count')} "
                 f"mixed={probability_semantics_binding.get('mixed_count')}"
-            ),
-            "storage_capacity": (
-                f"status={storage_capacity.get('status')} "
-                f"reason={storage_capacity.get('reason')} "
-                f"free_bytes={storage_capacity.get('free_bytes')} "
-                f"free_ratio={storage_capacity.get('free_ratio')}"
-            ),
-            "host_power": (
-                f"status={host_power.get('status')} "
-                f"reason={host_power.get('reason')} "
-                f"power_source={host_power.get('power_source')} "
-                f"battery_percent={host_power.get('battery_percent')} "
-                f"remaining_minutes={host_power.get('remaining_minutes')}"
             ),
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)
@@ -7567,8 +7267,6 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     Connection discipline: both connections closed in finally so exceptions
     never leave dangling handles (same leak fix as tick(), 2026-05-10).
     """
-    host_power = host_power_runway_snapshot()
-    host_power_level = RiskLevel(str(host_power["level"]))
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     zeus_conn = _get_runtime_trade_connection()
     try:
@@ -7590,17 +7288,12 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         collateral_identity_level = _collateral_identity_level(zeus_conn)
-        storage_capacity = storage_capacity_snapshot()
-        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
-
         level = overall_level(
             RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
             RiskLevel.GREEN,
             RiskLevel.GREEN,
             RiskLevel.GREEN,
             collateral_identity_level,
-            storage_capacity_level,
-            host_power_level,
         )
 
         return level
@@ -7757,8 +7450,6 @@ _RISK_STATE_COMPONENT_LEVEL_KEYS = (
     "portfolio_consistency_level",
     "unresolved_exposure_level",
     "probability_semantics_level",
-    "storage_capacity_level",
-    "host_power_level",
 )
 
 
