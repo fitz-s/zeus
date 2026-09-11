@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-09-05
+# Last reused or audited: 2026-09-11
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 # Lifecycle: created=2026-05-19; last_reviewed=2026-09-05; last_reused=2026-09-05
@@ -3876,32 +3876,31 @@ def test_pending_exit_current_churn_yields_degraded(
     assert "pending_exit_release_loop" in result["failing_surfaces"]
 
 
-def test_storage_capacity_is_a_composite_health_failure(
+@pytest.mark.parametrize("probe_result", ["LOW_DISK", "PROBE_FAILED"])
+def test_storage_capacity_is_not_a_composite_health_dependency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    probe_result: str,
 ) -> None:
     import src.riskguard.riskguard as riskguard_module
 
     sd = tmp_path / "state"
     sd.mkdir()
     _setup_healthy_state(sd)
+    def retired_probe(_path):
+        pytest.fail(f"retired storage policy was consulted: {probe_result}")
+
     monkeypatch.setattr(
         riskguard_module,
         "storage_capacity_snapshot",
-        lambda _path: {
-            "level": "DATA_DEGRADED",
-            "status": "LOW_DISK",
-            "reason": "ENTRY_RESERVE_BREACHED",
-            "free_bytes": 1,
-            "required_free_bytes": 2,
-        },
+        retired_probe,
+        raising=False,
     )
 
     result = compute_composite_live_health(state_dir=sd)
 
-    assert result["surfaces"]["storage_capacity"]["ok"] is False
-    assert result["surfaces"]["storage_capacity"]["issue"] == "LOW_DISK"
-    assert "storage_capacity" in result["failing_surfaces"]
+    assert "storage_capacity" not in result["surfaces"]
+    assert "storage_capacity" not in result["failing_surfaces"]
 
 
 @pytest.mark.parametrize(
