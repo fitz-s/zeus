@@ -17,6 +17,8 @@
 <dict>
 	<key>Label</key>
 	<string>com.zeus.riskguard-live</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>

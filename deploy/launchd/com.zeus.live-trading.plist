@@ -81,6 +81,8 @@
 	<true/>
 	<key>Label</key>
 	<string>com.zeus.live-trading</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
