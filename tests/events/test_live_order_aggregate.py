@@ -4,6 +4,7 @@
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import threading
@@ -2321,6 +2322,219 @@ def test_init_schema_creates_live_order_aggregate_tables():
         ).fetchall()
     }
     assert {"edli_live_order_events", "edli_live_order_projection"} <= tables
+
+
+def test_execution_command_lookup_index_is_partial_non_unique_and_idempotent():
+    from src.state.schema.edli_live_order_events_schema import (
+        ensure_tables,
+        execution_command_index_is_current,
+    )
+
+    conn = _conn()
+    ensure_tables(conn)
+    ensure_tables(conn)
+
+    index_rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_edli_live_order_events_execution_command'"
+    ).fetchall()
+    assert len(index_rows) == 1
+    assert "WHERE event_type = 'ExecutionCommandCreated'" in index_rows[0][1]
+    assert execution_command_index_is_current(conn)
+
+    insert_sql = """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    rows = [
+        (
+            "event-a-1", "aggregate-a", 1, "ExecutionCommandCreated", None,
+            "hash-a-1", '{"execution_command_id":"cmd-alpha"}', "payload-a-1",
+            "engine_adapter", "2026-09-11T21:00:00+00:00", "2026-09-11T21:00:00+00:00", 1,
+        ),
+        (
+            "event-b-1", "aggregate-b", 1, "ExecutionCommandCreated", None,
+            "hash-b-1", '{"execution_command_id":"cmd-alpha"}', "payload-b-1",
+            "engine_adapter", "2026-09-11T21:00:01+00:00", "2026-09-11T21:00:01+00:00", 1,
+        ),
+        (
+            "event-a-2", "aggregate-a", 2, "PreSubmitRevalidated", None,
+            "hash-a-2", '{"execution_command_id":"cmd-alpha"}', "payload-a-2",
+            "engine_adapter", "2026-09-11T21:00:02+00:00", "2026-09-11T21:00:02+00:00", 1,
+        ),
+        (
+            "event-a-3", "aggregate-a", 3, "ExecutionCommandCreated", None,
+            "hash-a-3", '{"execution_command_id":"cmd-beta"}', "payload-a-3",
+            "engine_adapter", "2026-09-11T21:00:03+00:00", "2026-09-11T21:00:03+00:00", 1,
+        ),
+    ]
+    rows.extend(
+        (
+            f"event-extra-{index}", f"aggregate-extra-{index}", 1,
+            "ExecutionCommandCreated", None, f"hash-extra-{index}",
+            json.dumps({"execution_command_id": f"cmd-extra-{index}"}),
+            f"payload-extra-{index}", "engine_adapter",
+            "2026-09-11T21:01:00+00:00", "2026-09-11T21:01:00+00:00", 1,
+        )
+        for index in range(1000)
+    )
+    conn.executemany(insert_sql, rows)
+    conn.execute("ANALYZE")
+
+    equality_sql = """
+        SELECT aggregate_id, json_extract(payload_json, '$.execution_command_id')
+        FROM edli_live_order_events
+        WHERE event_type = 'ExecutionCommandCreated'
+          AND json_extract(payload_json, '$.execution_command_id') = ?
+        ORDER BY aggregate_id
+    """
+    equality_plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + equality_sql, ("cmd-alpha",)
+    ).fetchall()
+    assert any(
+        "USING INDEX idx_edli_live_order_events_execution_command" in row[3]
+        for row in equality_plan
+    )
+    equality_rows = [tuple(row) for row in conn.execute(equality_sql, ("cmd-alpha",))]
+    assert equality_rows == [("aggregate-a", "cmd-alpha"), ("aggregate-b", "cmd-alpha")]
+
+    lookup_sql = """
+        SELECT aggregate_id, json_extract(payload_json, '$.execution_command_id')
+        FROM edli_live_order_events
+        WHERE event_type = 'ExecutionCommandCreated'
+          AND json_extract(payload_json, '$.execution_command_id') IN (?, ?)
+        ORDER BY aggregate_id, 2
+    """
+    lookup_plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + lookup_sql, ("cmd-alpha", "cmd-beta")
+    ).fetchall()
+    assert any(
+        "USING INDEX idx_edli_live_order_events_execution_command" in row[3]
+        for row in lookup_plan
+    )
+    indexed_rows = [
+        tuple(row) for row in conn.execute(lookup_sql, ("cmd-alpha", "cmd-beta"))
+    ]
+    assert indexed_rows == [
+        ("aggregate-a", "cmd-alpha"),
+        ("aggregate-a", "cmd-beta"),
+        ("aggregate-b", "cmd-alpha"),
+    ]
+
+    conn.execute("DROP INDEX idx_edli_live_order_events_execution_command")
+    baseline_rows = [
+        tuple(row) for row in conn.execute(lookup_sql, ("cmd-alpha", "cmd-beta"))
+    ]
+    assert indexed_rows == baseline_rows
+    ensure_tables(conn)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_edli_live_order_events_execution_command'"
+    ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "wrong_definition",
+    [
+        """
+        CREATE INDEX idx_edli_live_order_events_execution_command
+            ON edli_live_order_events(aggregate_id)
+            WHERE event_type = 'ExecutionCommandCreated'
+        """,
+        """
+        CREATE INDEX idx_edli_live_order_events_execution_command
+            ON edli_live_order_events(
+                json_extract(payload_json, '$.execution_command_id'), aggregate_id
+            )
+            WHERE event_type = 'executioncommandcreated'
+        """,
+    ],
+)
+def test_execution_command_index_repairs_stale_same_name_definition(wrong_definition):
+    from src.state.schema.edli_live_order_events_schema import (
+        ensure_tables,
+        execution_command_index_is_current,
+    )
+
+    conn = _conn()
+    ensure_tables(conn)
+    conn.execute("DROP INDEX idx_edli_live_order_events_execution_command")
+    conn.execute(wrong_definition)
+    assert execution_command_index_is_current(conn) is False
+
+    ensure_tables(conn)
+
+    assert execution_command_index_is_current(conn)
+
+
+def test_execution_command_index_current_ensure_is_schema_noop():
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    conn = _conn()
+    ensure_tables(conn)
+    before = conn.execute(
+        "SELECT type, name, sql FROM main.sqlite_master "
+        "WHERE name = 'idx_edli_live_order_events_execution_command'"
+    ).fetchone()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        ensure_tables(conn)
+    finally:
+        conn.set_trace_callback(None)
+    after = conn.execute(
+        "SELECT type, name, sql FROM main.sqlite_master "
+        "WHERE name = 'idx_edli_live_order_events_execution_command'"
+    ).fetchone()
+
+    assert tuple(after) == tuple(before)
+    assert not any(
+        "idx_edli_live_order_events_execution_command" in statement
+        and statement.lstrip().upper().startswith(("CREATE INDEX", "DROP INDEX"))
+        for statement in statements
+    )
+
+
+def test_execution_command_index_repair_rolls_back_when_create_is_denied():
+    from src.state.schema.edli_live_order_events_schema import (
+        ensure_tables,
+        execution_command_index_is_current,
+    )
+
+    conn = _conn()
+    ensure_tables(conn)
+    conn.execute("DROP INDEX idx_edli_live_order_events_execution_command")
+    conn.execute(
+        "CREATE INDEX idx_edli_live_order_events_execution_command "
+        "ON edli_live_order_events(aggregate_id) "
+        "WHERE event_type = 'ExecutionCommandCreated'"
+    )
+
+    def deny_owned_index(action, first, _second, _database, _source):
+        if (
+            action == sqlite3.SQLITE_CREATE_INDEX
+            and first == "idx_edli_live_order_events_execution_command"
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_owned_index)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            ensure_tables(conn)
+    finally:
+        conn.set_authorizer(None)
+
+    assert execution_command_index_is_current(conn) is False
+    row = conn.execute(
+        "SELECT sql FROM main.sqlite_master "
+        "WHERE name = 'idx_edli_live_order_events_execution_command'"
+    ).fetchone()
+    assert row is not None
+    assert "ON edli_live_order_events(aggregate_id)" in row[0]
 
 
 def _pre_submit_payload(**overrides):

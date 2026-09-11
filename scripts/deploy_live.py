@@ -3329,6 +3329,10 @@ def _restart_migration_targets_current() -> tuple[bool, str]:
     """Prove process-absent migrations are already recorded in live DBs."""
 
     try:
+        from src.state.schema.edli_live_order_events_schema import (
+            execution_command_index_is_current,
+        )
+
         world_db, trade_db = _restart_runtime_db_paths()
         evidence = []
         for db_path, targets in (
@@ -3344,6 +3348,8 @@ def _restart_migration_targets_current() -> tuple[bool, str]:
                     str(row[0])
                     for row in conn.execute("SELECT name FROM _migrations_applied")
                 }
+                if db_path == world_db and not execution_command_index_is_current(conn):
+                    return False, f"restart command receipt index pending in {db_path}"
             finally:
                 conn.close()
             missing = [target for _key, target in targets if target not in applied]

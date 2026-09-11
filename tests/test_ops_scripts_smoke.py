@@ -7905,6 +7905,9 @@ def test_restart_migration_ledger_uses_primary_root_not_checkout_state(
             "INSERT INTO _migrations_applied VALUES (?, 'now')",
             [(target,) for _key, target in targets],
         )
+        if filename == "zeus-world.db":
+            from src.state.schema.edli_live_order_events_schema import ensure_tables
+            ensure_tables(conn)
         conn.commit()
         conn.close()
 
@@ -7912,6 +7915,33 @@ def test_restart_migration_ledger_uses_primary_root_not_checkout_state(
 
     assert ok is True
     assert str(primary_root / "state") in detail
+
+    world_db = primary_root / "state" / "zeus-world.db"
+    trade_db = primary_root / "state" / "zeus_trades.db"
+    with sqlite3.connect(world_db) as conn:
+        conn.execute("DROP INDEX idx_edli_live_order_events_execution_command")
+    with sqlite3.connect(trade_db) as conn:
+        ensure_tables(conn)
+    with sqlite3.connect(world_db) as conn:
+        schema_before = conn.execute("PRAGMA schema_version").fetchone()[0]
+    ok, detail = dl._restart_migration_targets_current()
+    assert ok is False
+    assert "command receipt index pending" in detail
+    with sqlite3.connect(world_db) as conn:
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == schema_before
+        dl._ensure_restart_world_schemas(conn)
+    assert dl._restart_migration_targets_current()[0] is True
+
+    with sqlite3.connect(world_db) as conn:
+        conn.execute("DROP INDEX idx_edli_live_order_events_execution_command")
+        conn.execute(
+            "CREATE INDEX idx_edli_live_order_events_execution_command "
+            "ON edli_live_order_events(event_type, aggregate_id)"
+        )
+    assert dl._restart_migration_targets_current()[0] is False
+    with sqlite3.connect(world_db) as conn:
+        dl._ensure_restart_world_schemas(conn)
+    assert dl._restart_migration_targets_current()[0] is True
 
 
 def test_restart_runtime_relative_overrides_resolve_from_live_repo(

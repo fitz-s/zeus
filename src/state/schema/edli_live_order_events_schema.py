@@ -116,6 +116,18 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_type
     ON edli_live_order_events(event_type, occurred_at)
 """
 
+CREATE_EXECUTION_COMMAND_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_execution_command
+    ON edli_live_order_events(
+        json_extract(payload_json, '$.execution_command_id'),
+        aggregate_id
+    )
+    WHERE event_type = 'ExecutionCommandCreated'
+"""
+
+_EXECUTION_COMMAND_INDEX_NAME = "idx_edli_live_order_events_execution_command"
+_EXECUTION_COMMAND_INDEX_SAVEPOINT = "edli_execution_command_index_repair"
+
 CREATE_USER_MESSAGE_DEDUP_INDEX_SQL = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_order_user_msg_hash
     ON edli_live_order_events(
@@ -178,6 +190,41 @@ def _ensure_projection_column(conn: sqlite3.Connection, column_name: str, column
         conn.execute(f"ALTER TABLE edli_live_order_projection ADD COLUMN {column_name} {column_sql}")
 
 
+def _normalized_index_sql(sql: str) -> str:
+    normalized = " ".join(str(sql or "").split())
+    prefix = "CREATE INDEX IF NOT EXISTS "
+    if normalized.startswith(prefix):
+        normalized = "CREATE INDEX " + normalized[len(prefix):]
+    return normalized
+
+
+def execution_command_index_is_current(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = ?",
+        (_EXECUTION_COMMAND_INDEX_NAME,),
+    ).fetchone()
+    return row is not None and _normalized_index_sql(row[0]) == _normalized_index_sql(
+        CREATE_EXECUTION_COMMAND_INDEX_SQL
+    )
+
+
+def _ensure_execution_command_index(conn: sqlite3.Connection) -> None:
+    if execution_command_index_is_current(conn):
+        return
+    savepoint = _EXECUTION_COMMAND_INDEX_SAVEPOINT
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        conn.execute(f"DROP INDEX IF EXISTS {_EXECUTION_COMMAND_INDEX_NAME}")
+        conn.execute(CREATE_EXECUTION_COMMAND_INDEX_SQL)
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_EVENTS_SQL)
     conn.execute(CREATE_PROJECTION_SQL)
@@ -188,6 +235,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_USER_CHANNEL_INBOX_SQL)
     conn.execute(CREATE_INDEX_SQL)
     conn.execute(CREATE_TYPE_INDEX_SQL)
+    _ensure_execution_command_index(conn)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_USER_CHANNEL_INBOX_STATUS_INDEX_SQL)
