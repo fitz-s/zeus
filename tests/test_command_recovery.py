@@ -2099,7 +2099,10 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         return conn
 
     def _project_exit(_conn, **_kwargs):
-        assert _kwargs["command_ids"] == ("cmd-current-exit",)
+        assert _kwargs["command_ids"] == (
+            "cmd-current-exit",
+            "cmd-malformed-residual",
+        )
         calls.append("recorded_exit_fill_projection_fast")
         return {"scanned": 1, "projected": 1, "stayed": 0, "errors": 0}
 
@@ -2124,6 +2127,11 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
         command_recovery,
         "_terminal_filled_exit_projection_blocker_command_ids",
         lambda _conn: ("cmd-current-exit",),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_status_repair_command_ids",
+        lambda _conn: ("cmd-malformed-residual",),
     )
     monkeypatch.setattr(
         command_recovery._exchange_reconcile,
@@ -35823,6 +35831,67 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
         "order_role": "exit",
         "terminal_exec_status": "filled",
     }
+
+
+def test_recorded_exit_status_candidates_rotate_bounded_slice(monkeypatch):
+    from src.execution import command_recovery
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, position_id TEXT, intent_kind TEXT,
+            side TEXT, venue_order_id TEXT, updated_at TEXT
+        );
+        CREATE TABLE position_current (position_id TEXT PRIMARY KEY, phase TEXT);
+        CREATE TABLE execution_fact (
+            intent_id TEXT PRIMARY KEY, command_id TEXT, position_id TEXT,
+            order_role TEXT, voided_at TEXT, filled_at TEXT, shares REAL,
+            fill_price REAL, terminal_exec_status TEXT
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY, command_id TEXT,
+            venue_order_id TEXT, state TEXT, source TEXT,
+            filled_size TEXT, fill_price TEXT
+        );
+        """
+    )
+    for suffix in ("a", "b"):
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, ?, 'EXIT', 'SELL', ?, ?)",
+            (f"cmd-status-{suffix}", f"pos-status-{suffix}", f"ord-status-{suffix}", suffix),
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES (?, 'active')",
+            (f"pos-status-{suffix}",),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?, ?, ?, 'exit', NULL, ?, 5, 0.4, 'EXPIRED')",
+            (
+                f"pos-status-{suffix}:exit:cmd-status-{suffix}",
+                f"cmd-status-{suffix}",
+                f"pos-status-{suffix}",
+                "2026-09-10T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_trade_facts VALUES (?, ?, ?, 'CONFIRMED', 'REST', '5', '0.4')",
+            (
+                1 if suffix == "a" else 2,
+                f"cmd-status-{suffix}",
+                f"ord-status-{suffix}",
+            ),
+        )
+    monkeypatch.setattr(command_recovery, "_identity_bound_rotation_slot", lambda: 0)
+    assert command_recovery._recorded_exit_fill_status_repair_command_ids(
+        conn, limit=1
+    ) == ("cmd-status-a",)
+    monkeypatch.setattr(command_recovery, "_identity_bound_rotation_slot", lambda: 1)
+    assert command_recovery._recorded_exit_fill_status_repair_command_ids(
+        conn, limit=1
+    ) == ("cmd-status-b",)
+    conn.close()
 
 
 def test_capital_blocker_excludes_completed_partial_exit_with_live_residual(conn):

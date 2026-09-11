@@ -2801,6 +2801,197 @@ def _reconcile_recorded_nonfinal_exit_command_fill_state(
     return summary
 
 
+def _repair_existing_exit_execution_fact_status(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+) -> bool | None:
+    """Normalize one existing malformed EXIT fact from final trade atoms.
+
+    This is deliberately a status-only repair.  All fill fields must already
+    equal the command-scoped canonical CONFIRMED economics; the helper never
+    creates a fact or changes position, event, cash, phase, or command state.
+    """
+    command_id = str(command.get("command_id") or "").strip()
+    position_id = str(command.get("position_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if (
+        not command_id
+        or not position_id
+        or not venue_order_id
+        or str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+    ):
+        return False
+
+    existing_rows = conn.execute(
+        """
+        SELECT *
+          FROM execution_fact
+         WHERE command_id = ?
+           AND position_id = ?
+           AND order_role = 'exit'
+           AND voided_at IS NULL
+        """,
+        (command_id, position_id),
+    ).fetchall()
+    if not existing_rows:
+        return None
+    if len(existing_rows) != 1:
+        if any(
+            str(row["terminal_exec_status"] or "").lower()
+            in {"filled", "confirmed", "partial"}
+            for row in existing_rows
+        ):
+            return None
+        return False
+    existing = dict(existing_rows[0])
+    expected_intent_id = f"{position_id}:exit:{command_id}"
+    # Status repair targets the command-scoped exit identity only.  Refuse a
+    # legacy position-scoped row rather than creating a second execution fact.
+    if str(existing.get("intent_id") or "") != expected_intent_id:
+        return False
+    existing_status = str(existing.get("terminal_exec_status") or "").lower()
+    if existing_status in {"filled", "confirmed", "partial"}:
+        return None
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if command_size is None:
+        return False
+    current_row = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if current_row is None:
+        return False
+    current = dict(current_row)
+    if not _exit_fill_identity_matches_position(
+        conn,
+        command=command,
+        position=current,
+        venue_order_payload=None,
+    ):
+        return False
+    existing_shares = _positive_decimal_or_none(existing.get("shares"))
+    existing_price = _positive_decimal_or_none(existing.get("fill_price"))
+    if (
+        existing.get("filled_at") in (None, "")
+        or existing_shares is None
+        or existing_price is None
+        or existing_price > Decimal("1")
+    ):
+        return False
+
+    # Restrict canonical and alias-deduplicated proof to this command.  Every
+    # remaining economic atom must be final CONFIRMED truth for this order;
+    # MATCHED/MINED or malformed companions make the proof fail closed.
+    economic_rows = conn.execute(
+        "WITH "
+        + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
+        SELECT *
+          FROM economic_trade_fact
+         WHERE command_id = ?
+         ORDER BY trade_fact_id
+        """,
+        (command_id, command_id),
+    ).fetchall()
+    if not economic_rows:
+        return False
+    confirmed_shares = Decimal("0")
+    confirmed_proceeds = Decimal("0")
+    for atom in economic_rows:
+        if (
+            str(atom["command_id"] or "").strip() != command_id
+            or str(atom["venue_order_id"] or "").strip() != venue_order_id
+            or str(atom["trade_id"] or "").strip() == ""
+            or str(atom["state"] or "").upper() != "CONFIRMED"
+            or str(atom["source"] or "").upper() not in {"REST", "WS_USER"}
+        ):
+            return False
+        shares = _positive_decimal_or_none(atom["filled_size"])
+        price = _positive_decimal_or_none(atom["fill_price"])
+        if shares is None or price is None or price > Decimal("1"):
+            return False
+        confirmed_shares += shares
+        confirmed_proceeds += shares * price
+    if confirmed_shares <= Decimal("0") or confirmed_proceeds <= Decimal("0"):
+        return False
+    if confirmed_shares > command_size:
+        return False
+    confirmed_vwap = confirmed_proceeds / confirmed_shares
+    if (
+        not _same_decimal_value(existing_shares, confirmed_shares)
+        or not _same_decimal_value_with_abs_tolerance(
+            existing_price,
+            confirmed_vwap,
+            tolerance=_TRADE_PRICE_WIRE_ABS_TOLERANCE,
+        )
+    ):
+        return False
+
+    if confirmed_shares == command_size:
+        economic_status = "filled"
+    elif confirmed_shares < command_size:
+        economic_status = "partial"
+    else:  # defensive; the overfill check above is the authority
+        return False
+
+    from src.state.owner_routed_write import require_owner_main
+
+    savepoint = f"sp_exit_status_repair_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        require_owner_main(conn, "execution_fact")
+        updated_count = conn.execute(
+            """
+            UPDATE execution_fact
+               SET terminal_exec_status = ?
+             WHERE intent_id = ?
+               AND command_id = ?
+               AND position_id = ?
+               AND order_role = 'exit'
+            """,
+            (economic_status, expected_intent_id, command_id, position_id),
+        ).rowcount
+        if updated_count != 1:
+            raise RuntimeError("status repair updated an unexpected fact count")
+        updated = conn.execute(
+            "SELECT * FROM execution_fact WHERE intent_id = ?",
+            (expected_intent_id,),
+        )
+        updated = updated.fetchone()
+        if updated is None:
+            raise RuntimeError("status repair did not retain execution fact")
+        preserved_columns = (
+            "position_id",
+            "decision_id",
+            "order_role",
+            "strategy_key",
+            "posted_at",
+            "filled_at",
+            "voided_at",
+            "submitted_price",
+            "fill_price",
+            "shares",
+            "fill_quality",
+            "latency_seconds",
+            "venue_status",
+            "command_id",
+        )
+        if any(updated[column] != existing.get(column) for column in preserved_columns):
+            raise RuntimeError("status repair changed non-status execution fields")
+        if str(updated["terminal_exec_status"] or "").lower() != economic_status:
+            raise RuntimeError("status repair did not persist economic status")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    return True
+
+
 def _reconcile_recorded_exit_fill_projections(
     conn: sqlite3.Connection,
     *,
@@ -2830,9 +3021,17 @@ def _reconcile_recorded_exit_fill_projections(
     )
     if command_ids is not None and not exact_command_ids:
         return summary
+    canonical_source_clause_sql = ""
+    canonical_source_params: tuple[str, ...] = ()
     command_filter_sql = ""
     command_filter_params: tuple[str, ...] = ()
     if exact_command_ids:
+        canonical_source_clause_sql = (
+            "WHERE fact.command_id IN ("
+            + ",".join("?" for _ in exact_command_ids)
+            + ")"
+        )
+        canonical_source_params = exact_command_ids
         command_filter_sql = (
             " AND cmd.command_id IN ("
             + ",".join("?" for _ in exact_command_ids)
@@ -2840,7 +3039,11 @@ def _reconcile_recorded_exit_fill_projections(
         )
         command_filter_params = exact_command_ids
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH "
+        + _canonical_trade_fact_cte(
+            source_clause_sql=canonical_source_clause_sql
+        )
+        + """
         SELECT
             tf.*,
             cmd.snapshot_id AS cmd_snapshot_id,
@@ -2889,7 +3092,7 @@ def _reconcile_recorded_exit_fill_projections(
         """ + command_filter_sql + """
          ORDER BY tf.observed_at, tf.trade_fact_id
         """,
-        command_filter_params,
+        canonical_source_params + command_filter_params,
     ).fetchall()
     latest_by_command: dict[str, sqlite3.Row] = {}
     for row in rows:
@@ -2901,6 +3104,21 @@ def _reconcile_recorded_exit_fill_projections(
             command = _command_from_prefixed_trade_fact_row(fact)
             command_size = _positive_decimal_or_none(command.get("size"))
             if command_size is None:
+                summary["stayed"] += 1
+                continue
+            status_repair = _repair_existing_exit_execution_fact_status(
+                conn,
+                command=command,
+            )
+            if status_repair is True:
+                # Status normalization is intentionally terminal for this
+                # command: do not fall through into projection/event/cash IO.
+                summary["projected"] += 1
+                continue
+            if status_repair is False:
+                # A malformed existing fact was a candidate, but its complete
+                # proof did not pass.  Keep it fail-closed; the normal
+                # projection path must not turn invalid evidence into a write.
                 summary["stayed"] += 1
                 continue
             fill_economics = _exit_fill_economics_for_command(

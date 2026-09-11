@@ -260,6 +260,8 @@ def _recorded_exit_fill_projection_candidates(conn: sqlite3.Connection) -> bool:
     # leave one missing fact freezing every unrelated family indefinitely.
     if _terminal_filled_exit_projection_blocker_count(conn) > 0:
         return True
+    if _recorded_exit_fill_status_repair_command_ids(conn):
+        return True
     return conn.execute(
         """
         SELECT 1
@@ -286,6 +288,76 @@ def _recorded_exit_fill_projection_candidates(conn: sqlite3.Connection) -> bool:
          LIMIT 1
         """
     ).fetchone() is not None
+
+
+def _recorded_exit_fill_status_repair_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+) -> tuple[str, ...]:
+    """Return a bounded slice of malformed, command-scoped EXIT facts.
+
+    This is only a cheap candidate read.  The reconciliation writer performs
+    the complete canonical CONFIRMED atom and identity proof before changing
+    an execution fact, so a candidate here is never treated as proof.
+    """
+    required = (
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "execution_fact",
+    )
+    if not all(_table_exists(conn, table) for table in required):
+        return ()
+    candidate_limit = max(0, int(limit))
+    if candidate_limit <= 0:
+        return ()
+    candidate_sql = """
+        SELECT DISTINCT command.command_id
+          FROM venue_commands command
+          JOIN position_current position
+            ON position.position_id = command.position_id
+          JOIN execution_fact execution
+            ON execution.command_id = command.command_id
+           AND execution.position_id = command.position_id
+           AND execution.order_role = 'exit'
+           AND execution.voided_at IS NULL
+          JOIN venue_trade_facts fact
+            ON fact.command_id = command.command_id
+           AND fact.venue_order_id = command.venue_order_id
+         WHERE UPPER(COALESCE(command.intent_kind, '')) = 'EXIT'
+           AND UPPER(COALESCE(command.side, '')) = 'SELL'
+           AND COALESCE(TRIM(command.venue_order_id), '') != ''
+           AND position.phase IN (
+                 'active', 'day0_window', 'pending_exit', 'economically_closed'
+           )
+           AND execution.filled_at IS NOT NULL
+           AND CAST(COALESCE(execution.shares, '0') AS REAL) > 0
+           AND CAST(COALESCE(execution.fill_price, '0') AS REAL) > 0
+           AND LOWER(COALESCE(execution.terminal_exec_status, ''))
+               NOT IN ('filled', 'confirmed', 'partial')
+           AND UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+           AND UPPER(COALESCE(fact.source, '')) IN ('REST', 'WS_USER')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+    """
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM (" + candidate_sql + ") candidates"
+        ).fetchone()[0]
+        or 0
+    )
+    if total <= 0:
+        return ()
+    offset = (
+        _identity_bound_rotation_slot() * candidate_limit
+    ) % total
+    rows = conn.execute(
+        candidate_sql
+        + " ORDER BY command.updated_at, command.command_id LIMIT ? OFFSET ?",
+        (candidate_limit, offset),
+    ).fetchall()
+    return tuple(str(row[0] or "").strip() for row in rows if str(row[0] or "").strip())
 
 
 def _identity_bound_rotation_slot() -> int:
@@ -31176,6 +31248,15 @@ def _reconcile_passes_short_conn(
             )
             exit_fill_projection_command_ids = (
                 _terminal_filled_exit_projection_blocker_command_ids(conn)
+            )
+            exit_fill_status_repair_command_ids = (
+                _recorded_exit_fill_status_repair_command_ids(conn)
+            )
+            exit_fill_projection_command_ids = tuple(
+                dict.fromkeys(
+                    exit_fill_projection_command_ids
+                    + exit_fill_status_repair_command_ids
+                )
             )
             exit_fill_projection_open = bool(exit_fill_projection_command_ids) or (
                 _recorded_exit_fill_projection_candidates(conn)

@@ -6902,6 +6902,303 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     assert conn.total_changes == changes_before_repeat
 
 
+@pytest.mark.parametrize(
+    ("venue_status", "terminal_size", "expected_status", "existing_latency"),
+    [
+        ("PARTIAL,TERMINAL_FAK", "4", "partial", None),
+        ("EXPIRED", "10", "filled", 7.25),
+    ],
+)
+def test_recorded_exit_fact_status_repair_is_status_only(
+    conn, venue_status, terminal_size, expected_status, existing_latency
+):
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    position_id = f"pos-status-repair-{expected_status}"
+    command_id = f"cmd-status-repair-{expected_status}"
+    order_id = f"ord-status-repair-{expected_status}"
+    token = f"status-repair-token-{expected_status}"
+    seed_position_baseline(conn, position_id=position_id, order_id=f"{order_id}-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active', token_id = ?, order_id = ?,
+               order_status = 'sell_pending_confirmation', shares = 10,
+               chain_shares = 10, cost_basis_usd = 2, entry_price = 0.2,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, f"{order_id}-entry", NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.4,
+        state="ACKED",
+        order_type="FAK",
+        post_only=False,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'EXPIRED' WHERE command_id = ?",
+        (command_id,),
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id=f"trade-status-repair-{expected_status}",
+        size=terminal_size,
+        fill_price="0.40",
+        state="CONFIRMED",
+    )
+    from src.state.db import log_execution_fact
+
+    intent_id = f"{position_id}:exit:{command_id}"
+    log_execution_fact(
+        conn,
+        intent_id=intent_id,
+        position_id=position_id,
+        command_id=command_id,
+        order_role="exit",
+        filled_at=NOW.isoformat(),
+        fill_price=0.4,
+        shares=float(terminal_size),
+        venue_status=venue_status,
+        terminal_exec_status=venue_status,
+        latency_seconds=existing_latency,
+    )
+    before_position = dict(
+        conn.execute(
+            "SELECT phase, shares, chain_shares, realized_pnl_usd FROM position_current "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    )
+    before_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+
+    summary = reconcile_recorded_exit_fill_projections(
+        conn, observed_at=NOW, command_ids=(command_id,)
+    )
+
+    assert summary == {"scanned": 1, "projected": 1, "stayed": 0, "errors": 0}
+    repaired = conn.execute(
+        "SELECT venue_status, terminal_exec_status, shares, fill_price, filled_at, "
+        "latency_seconds "
+        "FROM execution_fact WHERE intent_id = ?",
+        (intent_id,),
+    ).fetchone()
+    assert dict(repaired) == {
+        "venue_status": venue_status,
+        "terminal_exec_status": expected_status,
+        "shares": float(terminal_size),
+        "fill_price": 0.4,
+        "filled_at": NOW.isoformat(),
+        "latency_seconds": existing_latency,
+    }
+    assert dict(
+        conn.execute(
+            "SELECT phase, shares, chain_shares, realized_pnl_usd FROM position_current "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    ) == before_position
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?", (position_id,)
+    ).fetchone()[0] == before_events
+
+    changes_before_repeat = conn.total_changes
+    repeat = reconcile_recorded_exit_fill_projections(
+        conn, observed_at=NOW, command_ids=(command_id,)
+    )
+    assert repeat == {"scanned": 1, "projected": 0, "stayed": 1, "errors": 0}
+    assert conn.total_changes == changes_before_repeat
+
+    conn.execute(
+        "UPDATE execution_fact SET terminal_exec_status = ? WHERE intent_id = ?",
+        (venue_status, intent_id),
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER fail_status_repair BEFORE UPDATE OF terminal_exec_status
+        ON execution_fact
+        WHEN OLD.intent_id = '"""
+        + intent_id
+        + "'"
+        " BEGIN SELECT RAISE(ABORT, 'injected status-repair failure'); END"
+    )
+    failed = reconcile_recorded_exit_fill_projections(
+        conn, observed_at=NOW, command_ids=(command_id,)
+    )
+    assert failed == {"scanned": 1, "projected": 0, "stayed": 0, "errors": 1}
+    assert conn.execute(
+        "SELECT terminal_exec_status FROM execution_fact WHERE intent_id = ?",
+        (intent_id,),
+    ).fetchone()[0] == venue_status
+    conn.execute("DROP TRIGGER fail_status_repair")
+
+
+def test_recorded_exit_fact_status_repair_rejects_nonfinal_or_mismatched_proof(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    position_id = "pos-status-repair-invalid"
+    command_id = "cmd-status-repair-invalid"
+    order_id = "ord-status-repair-invalid"
+    token = "status-repair-invalid-token"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-status-repair-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active', token_id = ?, shares = 10, chain_shares = 10,
+               cost_basis_usd = 2, entry_price = 0.2, updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.4,
+        order_type="FAK",
+        post_only=False,
+    )
+    from src.state.db import log_execution_fact
+
+    intent_id = f"{position_id}:exit:{command_id}"
+    log_execution_fact(
+        conn,
+        intent_id=intent_id,
+        position_id=position_id,
+        command_id=command_id,
+        order_role="exit",
+        filled_at=NOW.isoformat(),
+        fill_price=0.4,
+        shares=10,
+        venue_status="EXPIRED",
+        terminal_exec_status="EXPIRED",
+    )
+    # A CONFIRMED atom for the wrong venue order must not authorize the status
+    # repair, and the absence of a same-order final atom keeps this command out
+    # of the public proof query entirely.
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id="ord-status-repair-wrong-order",
+        token_id=token,
+        trade_id="trade-status-repair-wrong-order",
+        size="10",
+        fill_price="0.40",
+        state="CONFIRMED",
+    )
+    before = dict(
+        conn.execute(
+            "SELECT venue_status, terminal_exec_status, shares, fill_price FROM execution_fact "
+            "WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+    )
+    summary = reconcile_recorded_exit_fill_projections(
+        conn, observed_at=NOW, command_ids=(command_id,)
+    )
+    assert summary == {"scanned": 1, "projected": 0, "stayed": 1, "errors": 0}
+    assert dict(
+        conn.execute(
+            "SELECT venue_status, terminal_exec_status, shares, fill_price FROM execution_fact "
+            "WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+    ) == before
+
+
+def test_recorded_exit_fact_status_repair_rejects_mixed_confirmed_and_matched_atoms(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    position_id = "pos-status-repair-mixed"
+    command_id = "cmd-status-repair-mixed"
+    order_id = "ord-status-repair-mixed"
+    token = "status-repair-mixed-token"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-status-repair-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active', token_id = ?, shares = 10, chain_shares = 10,
+               cost_basis_usd = 2, entry_price = 0.2, updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.4,
+        order_type="FAK",
+        post_only=False,
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id="trade-status-repair-mixed-confirmed",
+        size="5",
+        fill_price="0.40",
+        state="CONFIRMED",
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id="trade-status-repair-mixed-matched",
+        size="5",
+        fill_price="0.40",
+        state="MATCHED",
+    )
+    from src.state.db import log_execution_fact
+
+    intent_id = f"{position_id}:exit:{command_id}"
+    log_execution_fact(
+        conn,
+        intent_id=intent_id,
+        position_id=position_id,
+        command_id=command_id,
+        order_role="exit",
+        filled_at=NOW.isoformat(),
+        fill_price=0.4,
+        shares=10,
+        venue_status="EXPIRED",
+        terminal_exec_status="EXPIRED",
+    )
+    before = conn.total_changes
+    summary = reconcile_recorded_exit_fill_projections(
+        conn, observed_at=NOW, command_ids=(command_id,)
+    )
+    assert summary == {"scanned": 1, "projected": 0, "stayed": 1, "errors": 0}
+    assert conn.total_changes == before
+    assert conn.execute(
+        "SELECT terminal_exec_status FROM execution_fact WHERE intent_id = ?",
+        (intent_id,),
+    ).fetchone()[0] == "EXPIRED"
+
+
 def test_confirmed_taker_sell_uses_exact_complementary_maker_leg_proceeds(conn):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_trade_fact as append
