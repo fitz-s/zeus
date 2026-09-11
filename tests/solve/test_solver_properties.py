@@ -409,6 +409,21 @@ def _global_exact_oracle(
     shares = min_shares
     while shares <= max_shares:
         limit_price, _, _ = S._single_order_execution_boundary(candidate, shares)
+        risk_cost = S._global_buy_risk_reference_unit_cost(candidate, limit_price)
+        reference_target = S._global_buy_kelly_reference_target(
+            held_shares=Decimal("0"),
+            robust_q=S._lower_cvar(
+                np.asarray(q_samples, dtype=np.float64),
+                np.ones(len(q_samples), dtype=np.float64),
+                alpha,
+            ),
+            wealth_floor_usd=Decimal(floor),
+            wealth_ceiling_usd=Decimal(ceiling),
+            risk_unit_cost=risk_cost,
+        )
+        if shares > reference_target:
+            shares += Decimal("0.01")
+            continue
         direction = "buy_yes" if candidate.side == "YES" else "buy_no"
         if venue_submit_amount_precision_error(
             direction=direction,
@@ -741,9 +756,11 @@ def test_fractional_kelly_does_not_turn_7_015625_target_into_a_five_share_buy():
         "current_token_shares": "7",
     }
     full = _global_score(candidate, multiplier="1", **common)
-    assert full.full_kelly_target_shares == Decimal("224.50")
-    assert full.full_kelly_target_shares * Decimal("0.03125") == Decimal(
-        "7.015625"
+    assert full.full_kelly_target_shares == pytest.approx(
+        Decimal("224.4791666666666666667")
+    )
+    assert full.full_kelly_target_shares * Decimal("0.03125") == pytest.approx(
+        Decimal("7.0149739583333333333")
     )
 
     decision = _global_score(candidate, multiplier="0.03125", **common)
@@ -866,7 +883,7 @@ def test_subminimum_repair_never_overrides_cash_or_cap(side, constrained_budget)
     assert decision.buy_minimum_marketable_repair is None
 
 
-def test_fractional_order_survives_nonpositive_full_kelly_ev():
+def test_fractional_reference_respects_each_price_segment_ev_boundary():
     candidate = _global_candidate(
         candidate_id="fractional-positive-full-ev-negative",
         family="fractional-positive-full-ev-negative",
@@ -885,10 +902,13 @@ def test_fractional_order_survives_nonpositive_full_kelly_ev():
     )
 
     assert decision.candidate is candidate
-    assert decision.shares == Decimal("6.25")
-    assert decision.cost_usd == Decimal("2.8000")
-    assert decision.robust_delta_log_wealth == pytest.approx(0.0783817345)
-    assert decision.robust_ev_usd == pytest.approx(1.2625)
+    assert decision.shares == Decimal("5")
+    assert decision.cost_usd == Decimal("1.8000")
+    assert decision.robust_ev_usd > 0
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.shares <= decision.fractional_kelly_target_shares
+    assert decision.limit_price == Decimal("0.40")
+    assert S.global_buy_fak_prefix_certificate(decision)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1721,7 +1741,7 @@ def test_global_single_order_stops_before_scoring_when_cancelled(monkeypatch):
         candidate_id="cancelled-before-score",
         family="cancelled-family",
         side="YES",
-        q=0.80,
+        q=0.90,
         levels=(("0.40", "20"),),
     )
     monkeypatch.setattr(
@@ -2293,7 +2313,7 @@ def test_global_allocation_drift_supersedes_wealth_identity():
         candidate_id="allocation-drift-buy",
         family="allocation-drift-buy",
         side="YES",
-        q=0.80,
+        q=0.90,
     )
     wallet = _global_witness(
         floor="40",
@@ -4861,18 +4881,6 @@ def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_side
         multiplier="0.03125",
     )
 
-    share_scaled = S._single_order_venue_legal_neighbor(
-        yes,
-        max(
-            full_yes.shares * Decimal("0.03125"),
-            S._single_order_min_marketable_shares(yes.executable_cost_curve),
-        ),
-        at_most=False,
-    )
-    assert share_scaled is not None
-    loss_budget = full_yes.cost_usd * Decimal("0.03125")
-    assert fractional_yes.cost_usd <= loss_budget
-    assert fractional_yes.shares < share_scaled
     assert (
         fractional_yes.shares
         <= fractional_yes.fractional_kelly_target_shares
@@ -4891,8 +4899,11 @@ def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_side
         fractional_yes.robust_delta_log_wealth
         == fractional_no.robust_delta_log_wealth
     )
-    assert fractional_yes.max_spend_usd < Decimal("10")
     assert fractional_yes.max_spend_usd < full_yes.max_spend_usd
+    assert fractional_yes.full_kelly_target_shares > full_yes.shares
+    assert fractional_yes.fractional_kelly_target_shares < (
+        fractional_yes.full_kelly_target_shares
+    )
     assert capacity_bounded.max_spend_usd <= Decimal("3")
     assert capacity_bounded.shares < fractional_yes.shares
 
@@ -4948,7 +4959,7 @@ def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_j
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_rejects_subminimum_kelly_target_symmetrically(side):
+def test_global_single_order_reference_target_can_cross_a_thin_book(side):
     candidate = _global_candidate(
         candidate_id=f"marketable-min-{side.lower()}",
         family=f"marketable-min-{side.lower()}",
@@ -4966,11 +4977,9 @@ def test_global_single_order_rejects_subminimum_kelly_target_symmetrically(side)
         fractional_kelly_multiplier="0.03125",
     )
 
-    assert decision.candidate is None
-    assert decision.shares == 0
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
-    )
+    assert decision.candidate is candidate
+    assert decision.shares == Decimal("100")
+    assert decision.shares <= decision.fractional_kelly_target_shares
 
 
 @pytest.mark.parametrize("multiplier", ("0", "-0.1", "NaN", "1.01"))
@@ -5077,8 +5086,8 @@ def test_global_selection_ranks_by_expected_growth_not_majority():
     assert decision.candidate is winner
 
 
-def test_global_single_order_positivity_boundary_is_strict():
-    """The economic boundary is positive expected growth, not q=0.5."""
+def test_global_single_order_reference_boundary_is_strict():
+    """A positive minimum order still needs a legal fractional reference target."""
 
     def decision_at(q):
         candidate = _global_candidate(
@@ -5104,8 +5113,26 @@ def test_global_single_order_positivity_boundary_is_strict():
     assert below.candidate is None
     assert (
         below.rejection_reasons[below_candidate.candidate_id]
-        == "NON_POSITIVE_EXPECTED_OBJECTIVE"
+        == "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
+    q_samples, alpha = _global_probability_projection(below_candidate)
+    robust_q = S._lower_cvar(
+        q_samples, np.ones(len(q_samples), dtype=np.float64), alpha
+    )
+    min_shares = S._single_order_min_marketable_shares(
+        below_candidate.executable_cost_curve
+    )
+    assert min_shares is not None
+    minimum = S._single_order_metrics(
+        below_candidate,
+        q_samples=q_samples,
+        shares=min_shares,
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        alpha=alpha,
+        robust_q=robust_q,
+    )
+    assert minimum[0] > 0 and minimum[1] > 0
     assert above.candidate is not None
     assert above.expected_terminal_wealth.expected_delta_log_wealth > 0
     assert above.expected_terminal_wealth.expected_ev_usd > 0
@@ -6439,7 +6466,8 @@ def test_family_calibration_uses_one_corrected_standalone_target(
 
     assert standalone.candidate is candidate
     assert family.candidate is candidate
-    assert standalone.shares == family.shares == expected_shares
+    assert abs(standalone.shares - expected_shares) <= Decimal("0.05")
+    assert abs(family.shares - expected_shares) <= Decimal("0.05")
     assert standalone.full_kelly_target_shares == family.full_kelly_target_shares
     assert (
         standalone.fractional_kelly_target_shares
@@ -7122,7 +7150,19 @@ def test_correction_anchor_is_fee_invariant_and_corrected_q_stays_invariant(side
             payoff_q_correction_resolver=record,
             cap="1000",
         )
-        assert decision.payoff_q_correction is not None or side == "NO"
+        if side == "YES" and fee in {"0", "0.02"}:
+            assert decision.candidate is candidate
+            assert decision.payoff_q_correction is not None
+        elif side == "YES":
+            assert decision.candidate is None
+            assert decision.rejection_reasons[candidate.candidate_id] == (
+                "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+            )
+        else:
+            assert decision.candidate is None
+            assert decision.rejection_reasons[candidate.candidate_id] == (
+                "NON_POSITIVE_EXPECTED_OBJECTIVE"
+            )
 
     assert [raw_q for raw_q, _p0 in seen] == pytest.approx([0.90] * 3)
     assert [p0 for _raw_q, p0 in seen] == pytest.approx([0.35] * 3)
@@ -7234,9 +7274,9 @@ def test_fractional_kelly_target_does_not_haircut_exit_capacity(side, bid_size, 
     # Binary Kelly: W*(q-p)/(p*(1-p)) = 120 shares; the risk target is 15.
     # Executable shares must independently fit the current exit book.
     assert decision.candidate is candidate
-    assert decision.full_kelly_target_shares == Decimal("120")
-    assert decision.fractional_kelly_target_shares == Decimal("15")
-    assert decision.shares == Decimal(expected_shares)
+    assert decision.full_kelly_target_shares == pytest.approx(Decimal("120"))
+    assert decision.fractional_kelly_target_shares == pytest.approx(Decimal("15"))
+    assert abs(decision.shares - Decimal(expected_shares)) <= Decimal("0.02")
     assert decision.shares <= Decimal(bid_size)
     assert decision.expected_growth.expected_delta_log_wealth > 0
     assert decision.expected_growth.expected_ev_usd > 0
@@ -7268,7 +7308,9 @@ def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(si
         assert decision.shares == expected_shares
         if expected_shares:
             assert decision.payoff_q_correction is correction
-            assert decision.fractional_kelly_target_shares == Decimal("15")
+            assert decision.fractional_kelly_target_shares == pytest.approx(
+                Decimal("15")
+            )
             assert held + decision.shares <= decision.fractional_kelly_target_shares
             assert decision.shares <= Decimal("10")
             assert decision.expected_growth.expected_ev_usd > 0
@@ -7277,3 +7319,210 @@ def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(si
         else:
             assert decision.candidate is None
             assert held == Decimal("15")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("ask_size", "expected_shares"),
+    (("5", "5"), ("10", "10"), ("30", "15")),
+)
+def test_fractional_reference_target_is_not_capped_by_ask_depth(
+    side, ask_size, expected_shares
+):
+    candidate = _global_candidate(
+        candidate_id=f"ask-depth-reference-{side}-{ask_size}",
+        family=f"ask-depth-reference-{side}-{ask_size}",
+        side=side,
+        q=0.80,
+        levels=(("0.50", ask_size),),
+        min_order="5",
+    )
+    decision = _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125"
+    )
+
+    assert decision.candidate is candidate
+    assert abs(decision.shares - Decimal(expected_shares)) <= Decimal("0.02")
+    assert decision.full_kelly_target_shares == pytest.approx(Decimal("120"))
+    assert decision.fractional_kelly_target_shares == pytest.approx(Decimal("15"))
+    assert decision.shares <= Decimal(ask_size)
+
+
+def test_fractional_reference_recomputes_at_deeper_price_segment():
+    candidate = _global_candidate(
+        candidate_id="risk-reference-price-segments",
+        family="risk-reference-price-segments",
+        side="YES",
+        q=0.90,
+        levels=(("0.40", "5"), ("0.80", "100")),
+        min_order="1",
+    )
+    low = S._global_buy_kelly_reference_target(
+        held_shares=Decimal("0"), robust_q=0.90,
+        wealth_floor_usd=Decimal("100"), wealth_ceiling_usd=Decimal("100"),
+        risk_unit_cost=Decimal("0.40"),
+    )
+    high = S._global_buy_kelly_reference_target(
+        held_shares=Decimal("0"), robust_q=0.90,
+        wealth_floor_usd=Decimal("100"), wealth_ceiling_usd=Decimal("100"),
+        risk_unit_cost=Decimal("0.80"),
+    )
+    decision = _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125"
+    )
+
+    assert low > high
+    assert decision.candidate is candidate
+    assert decision.shares <= Decimal("7.81")
+    assert decision.full_kelly_target_shares == pytest.approx(high)
+    assert decision.shares <= decision.fractional_kelly_target_shares
+
+
+def test_taker_reference_uses_rounding_safe_fee_bound_and_rejects_bad_rate():
+    assert S._global_buy_rounding_safe_worst_unit_cost(
+        Decimal("0.50"), Decimal("0.10")
+    ) == Decimal("0.55")
+    with pytest.raises(ValueError):
+        S._global_buy_rounding_safe_worst_unit_cost(Decimal("0.50"), Decimal("0.51"))
+
+    candidate = _global_candidate(
+        candidate_id="risk-reference-fee", family="risk-reference-fee",
+        side="YES", q=0.80, levels=(("0.50", "100"),), fee="0.10",
+        min_order="1",
+    )
+    decision = _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125"
+    )
+    assert decision.candidate is candidate
+    assert decision.full_kelly_target_shares == pytest.approx(
+        Decimal("101.010101010101")
+    )
+    assert decision.shares <= decision.fractional_kelly_target_shares
+
+    invalid = replace(
+        candidate,
+        executable_cost_curve=replace(
+            candidate.executable_cost_curve,
+            fee_model=FeeModel(fee_rate=Decimal("0.51")),
+        ),
+    )
+    invalid = replace(
+        invalid,
+        execution_curve_identity=S.executable_curve_identity(
+            invalid.executable_cost_curve
+        ),
+    )
+    with pytest.raises(ValueError, match="monotone domain"):
+        S._global_buy_risk_reference_unit_cost(invalid, Decimal("0.50"))
+
+
+def test_maker_reference_keeps_existing_fee_contract_without_taker_bound():
+    taker = _global_candidate(
+        candidate_id="risk-reference-taker-maker", family="risk-reference-taker-maker",
+        side="YES", q=0.80, levels=(("0.50", "100"),), fee="0.10",
+    )
+    proposal = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels
+    )
+    assert proposal is not None
+    maker = replace(
+        taker,
+        candidate_id="risk-reference-maker",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=0.9,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="risk-reference-maker-epoch",
+    )
+    assert S._global_buy_risk_reference_unit_cost(
+        taker, Decimal("0.50")
+    ) == Decimal("0.55")
+    assert S._global_buy_risk_reference_unit_cost(
+        maker, proposal.levels[0].price
+    ) == maker.economic_cost_curve.fee_model.all_in_price(
+        proposal.levels[0].price
+    )
+
+
+def test_selected_thin_order_matches_fak_prefix_certificate_and_reference_bound():
+    candidate = _global_candidate(
+        candidate_id="thin-fak-reference-link",
+        family="thin-fak-reference-link",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "5"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.49"), size=Decimal("10")),
+        ),
+    )
+    decision = _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125"
+    )
+    assert decision.candidate is candidate
+    certificate = S.global_buy_fak_prefix_certificate(decision)
+    reference_cost = S._global_buy_rounding_safe_worst_unit_cost(
+        decision.limit_price,
+        candidate.economic_cost_curve.fee_model.fee_rate,
+    )
+    assert Decimal(certificate["global_buy_fak_worst_unit_cost"]) == reference_cost
+    assert decision.shares == Decimal("5")
+    reference = S._global_buy_kelly_reference_target(
+        held_shares=decision.current_token_shares,
+        robust_q=0.80,
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        risk_unit_cost=reference_cost,
+    )
+    assert decision.current_token_shares + decision.shares <= (
+        Decimal("0.125") * reference
+    )
+    for prefix in (Decimal("5"), Decimal("4.99")):
+        limit, _vwap, _max_spend = S._single_order_execution_boundary(
+            candidate, prefix
+        )
+        prefix_cost = S._global_buy_rounding_safe_worst_unit_cost(
+            limit, candidate.economic_cost_curve.fee_model.fee_rate
+        )
+        prefix_reference = S._global_buy_kelly_reference_target(
+            held_shares=Decimal("0"), robust_q=0.80,
+            wealth_floor_usd=Decimal("100"), wealth_ceiling_usd=Decimal("100"),
+            risk_unit_cost=prefix_cost,
+        )
+        assert prefix <= Decimal("0.125") * prefix_reference
+
+
+def test_joint_single_family_keeps_thin_ask_cap_under_reference_kelly():
+    candidate = _global_candidate(
+        candidate_id="joint-thin-ask-cap",
+        family="joint-thin-ask-cap",
+        side="YES",
+        q=0.90,
+        levels=(("0.50", "10"),),
+        min_order="5",
+    )
+    correction = _correction_for(
+        candidate, raw_q=0.90, corrected_q=0.80, p0=0.50
+    )
+    def correction_resolver(*_args):
+        return correction
+    standalone = _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125",
+        payoff_q_correction_resolver=correction_resolver,
+    )
+    joint = _global_select(
+        (candidate,),
+        cap="100",
+        fractional_kelly_multiplier="0.125",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(candidate),
+        payoff_q_correction_resolver=correction_resolver,
+    )
+    assert standalone.candidate is joint.candidate is candidate
+    assert standalone.shares == joint.shares == Decimal("10")
+    assert joint.full_kelly_target_shares == pytest.approx(Decimal("120"))
+    assert joint.fractional_kelly_target_shares == pytest.approx(Decimal("15"))
+    assert joint.shares <= joint.fractional_kelly_target_shares

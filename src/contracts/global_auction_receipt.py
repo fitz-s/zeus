@@ -17,7 +17,7 @@ GLOBAL_AUCTION_RECEIPT_SUPPORTED_SCHEMA_VERSIONS = frozenset({21, 22})
 # comparison, or sizing laws.  This identity is shared by the auction writer,
 # decision certificate, shadow grader, and RiskGuard cohorting boundary.
 CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
-    "global_single_order_canonical_entry_q_expected_growth_v4"
+    "global_single_order_calibrated_q_capacity_independent_kelly_v5"
 )
 GLOBAL_AUCTION_RECEIPT_MODES = frozenset(
     {

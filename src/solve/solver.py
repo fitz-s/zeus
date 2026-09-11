@@ -5361,6 +5361,142 @@ def _buy_rejection_economics(
         return None
 
 
+def _global_buy_rounding_safe_worst_unit_cost(
+    limit_price: Decimal,
+    fee_rate: Decimal,
+) -> Decimal:
+    """Return the rounding-safe fee-inclusive bound for a taker BUY prefix."""
+
+    limit = Decimal(limit_price)
+    rate = Decimal(fee_rate)
+    if (
+        not limit.is_finite()
+        or not rate.is_finite()
+        or not Decimal("0") < limit < Decimal("1")
+        or not Decimal("0") <= rate <= Decimal("0.5")
+    ):
+        raise ValueError("taker BUY fee bound is outside its monotone domain")
+    return limit + Decimal("2") * rate * limit * (Decimal("1") - limit)
+
+
+def _global_buy_risk_reference_unit_cost(
+    candidate: GlobalSingleOrderCandidate,
+    limit_price: Decimal,
+) -> Decimal:
+    """Return the risk-reference cost for one fixed order's final level.
+
+    Taker proposals use the shared, already proved fragment-rounding bound;
+    this does not change their submitted FOK_LIMIT/FOK order semantics. Passive
+    proposals retain their current fee/fill economics and do not inherit the
+    taker bound.
+    """
+
+    fee_model = candidate.economic_cost_curve.fee_model
+    if candidate.execution_mode == "TAKER_LIMIT":
+        return _global_buy_rounding_safe_worst_unit_cost(
+            limit_price,
+            Decimal(fee_model.fee_rate),
+        )
+    return fee_model.all_in_price(Decimal(limit_price))
+
+
+def _global_buy_kelly_reference_target(
+    *,
+    held_shares: Decimal,
+    robust_q: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    risk_unit_cost: Decimal,
+) -> Decimal:
+    """Return mathematical ``T(a)`` for a fixed order's final level.
+
+    The reference may exceed visible book depth; it is an identity/certificate
+    target only. Actual order size remains bounded by the current executable
+    curve and all existing venue, cash, risk, and objective checks.
+    """
+
+    one = Decimal("1")
+    q = Decimal(str(robust_q))
+    held = Decimal(held_shares)
+    floor = Decimal(wealth_floor_usd)
+    ceiling = Decimal(wealth_ceiling_usd)
+    unit_cost = Decimal(risk_unit_cost)
+    if (
+        not q.is_finite()
+        or not Decimal("0") <= q <= one
+        or not held.is_finite()
+        or held < 0
+        or not floor.is_finite()
+        or not ceiling.is_finite()
+        or floor <= 0
+        or ceiling <= 0
+        or not unit_cost.is_finite()
+        or not Decimal("0") < unit_cost < one
+    ):
+        raise ValueError("fractional Kelly reference inputs are invalid")
+    unconstrained_additional = (
+        q * floor / unit_cost
+        - (one - q) * ceiling / (one - unit_cost)
+    )
+    target = held + max(Decimal("0"), unconstrained_additional)
+    if not target.is_finite() or target < held:
+        raise ValueError("fractional Kelly reference target is invalid")
+    return target
+
+
+def _global_buy_rounding_safe_prefix_metrics(
+    *,
+    q: float,
+    loss_q: float | None = None,
+    shares: Decimal,
+    unit_cost: Decimal,
+    loss_baseline: Decimal,
+    win_baseline: Decimal,
+) -> tuple[float, float]:
+    """Return conservative worst-prefix expected log growth and EV."""
+
+    probability = Decimal(str(q))
+    loss_probability = (
+        Decimal(str(loss_q)) if loss_q is not None else Decimal("1") - probability
+    )
+    size = Decimal(shares)
+    cost = Decimal(unit_cost) * size
+    loss_after = Decimal(loss_baseline) - cost
+    win_after = Decimal(win_baseline) - cost + size
+    if (
+        not probability.is_finite()
+        or not Decimal("0") <= probability <= Decimal("1")
+        or not loss_probability.is_finite()
+        or not Decimal("0") <= loss_probability <= Decimal("1")
+        or not math.isclose(
+            float(probability + loss_probability), 1.0,
+            rel_tol=0.0, abs_tol=1e-12,
+        )
+        or not all(
+            value.is_finite()
+            for value in (
+                size,
+                unit_cost,
+                loss_baseline,
+                win_baseline,
+                loss_after,
+                win_after,
+            )
+        )
+        or size <= 0
+        or not Decimal("0") < unit_cost < Decimal("1")
+        or loss_baseline <= 0
+        or win_baseline <= 0
+        or min(loss_after, win_after) <= 0
+    ):
+        raise ValueError("BUY prefix wealth bound is invalid")
+    delta_log_wealth = float(loss_probability) * math.log(
+        float(loss_after / loss_baseline)
+    ) + float(probability) * math.log(float(win_after / win_baseline))
+    expected_value = float((probability - unit_cost) * size)
+    return delta_log_wealth, expected_value
+
+
 def _score_global_single_order(
     candidate: GlobalSingleOrderCandidate,
     *,
@@ -5375,15 +5511,13 @@ def _score_global_single_order(
     current_token_shares: Decimal = Decimal("0"),
     settlement_locked_exact_payoff: bool = False,
 ) -> GlobalSingleOrderDecision:
-    """Find the executable fractional-Kelly optimum for one candidate.
+    """Rank real fixed orders within a capacity-independent Kelly risk target.
 
-    The current book and terminal-wealth objective identify the additional shares
-    that reach the full-Kelly final holding from the reconciled current holding.
-    The operator-owned multiplier applies to that FINAL holding, not independently
-    to every auction epoch. Current exit capacity constrains the executable order,
-    not the economic Kelly target. Every legal increment must fit the remaining
-    fractional target, exit depth, cash and allocator capacity, with positive
-    objective and fill-prefix economics.
+    The selected order's worst unit cost defines the mathematical full-holding
+    reference T(a); it does not imply that T(a) shares are available to trade.
+    Each actual increment fits κ*T(a)-current holdings, observed depth, cash,
+    allocator capacity, venue rules and positive execution-prefix economics.
+    The same holdings consume the target on every subsequent decision.
     """
 
     multiplier = Decimal(fractional_kelly_multiplier)
@@ -5402,13 +5536,6 @@ def _score_global_single_order(
     capacity_max_shares = _single_order_max_shares(
         candidate.economic_cost_curve,
         spend_limit_usd=spend_limit,
-    )
-    optimization_limit = (
-        spend_limit if multiplier == Decimal("1") else affordability_limit
-    )
-    raw_max_shares = _single_order_max_shares(
-        candidate.economic_cost_curve,
-        spend_limit_usd=optimization_limit,
     )
     raw_min_shares = _single_order_min_marketable_shares(
         candidate.economic_cost_curve
@@ -5440,11 +5567,7 @@ def _score_global_single_order(
         )
     if requires_liquidation_capacity:
         capacity_max_shares = min(capacity_max_shares, liquidation_cap_shares)
-    if (
-        raw_min_shares is None
-        or raw_max_shares < raw_min_shares
-        or capacity_max_shares < raw_min_shares
-    ):
+    if raw_min_shares is None or capacity_max_shares < raw_min_shares:
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -5497,7 +5620,25 @@ def _score_global_single_order(
             no_trade_reason=reason,
             rejection_reasons={candidate.candidate_id: reason},
         )
-    if robust_q <= float(minimum_unit_cost):
+    minimum_order_positive = True
+    try:
+        minimum_du, minimum_ev, _minimum_efficiency, _minimum_cost = (
+            _single_order_metrics(
+                candidate,
+                q_samples=q_samples,
+                shares=legal_min_shares,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                alpha=band_alpha,
+                robust_q=robust_q,
+            )
+        )
+        minimum_order_positive = (
+            minimum_du > 0.0 and minimum_ev > _ROBUST_EV_EPS_USD
+        )
+    except ValueError:
+        minimum_order_positive = False
+    if robust_q <= float(minimum_unit_cost) or not minimum_order_positive:
         reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
         full_target = held_shares
         fractional_target = full_target * multiplier
@@ -5526,13 +5667,14 @@ def _score_global_single_order(
             rejection_reasons={candidate.candidate_id: reason},
         )
 
+    actual_max_shares = capacity_max_shares
     raw_probes = _single_order_stationary_probes(
         candidate.economic_cost_curve,
         robust_q=Decimal(str(robust_q)),
         wealth_floor_usd=wealth_floor_usd,
         wealth_ceiling_usd=wealth_ceiling_usd,
         min_shares=raw_min_shares,
-        max_shares=raw_max_shares,
+        max_shares=actual_max_shares,
     )
     probes: set[Decimal] = set()
     for raw_probe in raw_probes:
@@ -5540,19 +5682,92 @@ def _score_global_single_order(
             legal = venue_legal_neighbor(raw_probe, at_most=at_most)
             if legal is not None:
                 probes.add(legal)
-    full_best: tuple[
+
+    # The finite ask ladder bounds the order x, but it must not define the
+    # reference Kelly target.  For every price segment, T(a) is constant in
+    # the segment and the only new candidate is the venue-legal neighbour of
+    # its fractional-reference boundary.
+    first_reference_target: Decimal | None = None
+    risk_target_below_minimum = False
+    risk_target_reached = False
+    level_start = Decimal("0")
+    cost_start = Decimal("0")
+    for level in candidate.economic_cost_curve.levels:
+        level_end = level_start + level.size
+        segment_lo = max(raw_min_shares, level_start)
+        segment_hi = min(actual_max_shares, level_end)
+        exact_unit_cost = candidate.economic_cost_curve.fee_model.all_in_price(
+            level.price
+        )
+        if segment_lo <= segment_hi:
+            ev_slope = Decimal(str(robust_q)) - exact_unit_cost
+            ev_intercept = cost_start - exact_unit_cost * level_start
+            if ev_slope != 0:
+                ev_boundary = ev_intercept / ev_slope
+                if segment_lo <= ev_boundary <= segment_hi:
+                    for at_most in (True, False):
+                        legal = venue_legal_neighbor(ev_boundary, at_most=at_most)
+                        if legal is not None:
+                            probes.add(legal)
+            try:
+                risk_unit_cost = _global_buy_risk_reference_unit_cost(
+                    candidate,
+                    level.price,
+                )
+                reference_target = _global_buy_kelly_reference_target(
+                    held_shares=held_shares,
+                    robust_q=robust_q,
+                    wealth_floor_usd=wealth_floor_usd,
+                    wealth_ceiling_usd=wealth_ceiling_usd,
+                    risk_unit_cost=risk_unit_cost,
+                )
+            except (ArithmeticError, ValueError):
+                # SCOPE: this candidate and its current cost curve. DRAIN: the
+                # next fresh q/fee/book decision. RESET: finite valid inputs.
+                reason = "RISK_REFERENCE_UNAVAILABLE"
+                return GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason=reason,
+                    rejection_reasons={candidate.candidate_id: reason},
+                )
+            if first_reference_target is None:
+                first_reference_target = reference_target
+            fractional_target = reference_target * multiplier
+            risk_cap = fractional_target - held_shares
+            if fractional_target <= held_shares:
+                risk_target_reached = True
+            elif risk_cap < legal_min_shares:
+                risk_target_below_minimum = True
+            if segment_lo <= risk_cap <= segment_hi:
+                for at_most in (True, False):
+                    legal = venue_legal_neighbor(risk_cap, at_most=at_most)
+                    if legal is not None:
+                        probes.add(legal)
+        if level_end >= actual_max_shares:
+            break
+        cost_start += level.size * exact_unit_cost
+        level_start = level_end
+
+    best: tuple[
         float,
         float,
         float,
+        Decimal,
+        Decimal,
         Decimal,
         Decimal,
         Decimal,
         Decimal,
         Decimal,
     ] | None = None
-    full_price_band_rejected = False
+    price_band_rejected = False
     for shares in sorted(probes):
-        if shares < raw_min_shares or shares > raw_max_shares:
+        if shares < raw_min_shares or shares > actual_max_shares:
             continue
         try:
             robust_du, robust_ev, efficiency, cost = _single_order_metrics(
@@ -5567,203 +5782,70 @@ def _score_global_single_order(
             limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
                 candidate, shares
             )
-        except ValueError:
-            continue
-        if not (
-            _live_unit_price_in_band(limit_price)
-            and _live_unit_price_in_band(expected_fill_price)
-        ):
-            full_price_band_rejected = True
-            continue
-        if max_spend > optimization_limit:
-            continue
-        if full_best is None or robust_du > full_best[0] + 1e-15 or (
-            math.isclose(robust_du, full_best[0], rel_tol=0.0, abs_tol=1e-15)
-            and (cost, -efficiency, candidate.candidate_id)
-            < (full_best[3], -full_best[2], candidate.candidate_id)
-        ):
-            full_best = (
-                robust_du,
-                robust_ev,
-                efficiency,
-                cost,
-                shares,
+            risk_unit_cost = _global_buy_risk_reference_unit_cost(
+                candidate,
                 limit_price,
-                expected_fill_price,
-                max_spend,
             )
-
-    if full_best is None and full_price_band_rejected:
-        reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            rejection_reasons={candidate.candidate_id: reason},
-        )
-    if full_best is None or full_best[0] <= 0.0:
-        reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
-        probe_shares = full_best[4] if full_best is not None else legal_min_shares
-        full_target = held_shares
-        fractional_target = full_target * multiplier
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            buy_rejection_economics=_buy_rejection_economics(
-                candidate,
-                reason=reason,
+            reference_target = _global_buy_kelly_reference_target(
+                held_shares=held_shares,
                 robust_q=robust_q,
-                q_samples=q_samples,
-                band_alpha=band_alpha,
                 wealth_floor_usd=wealth_floor_usd,
                 wealth_ceiling_usd=wealth_ceiling_usd,
-                current_token_shares=held_shares,
-                full_kelly_target_shares=full_target,
-                fractional_kelly_target_shares=fractional_target,
-                probe_kind="BEST_EXECUTABLE",
-                probe_shares=probe_shares,
-            ),
-            rejection_reasons={candidate.candidate_id: reason},
-        )
-
-    full_kelly_target_shares = held_shares + full_best[4]
-    fractional_kelly_target_shares = full_kelly_target_shares * multiplier
-    remaining_target_shares = fractional_kelly_target_shares - held_shares
-    if remaining_target_shares <= 0:
-        reason = "FRACTIONAL_KELLY_TARGET_REACHED"
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            buy_rejection_economics=_buy_rejection_economics(
-                candidate,
-                reason=reason,
-                robust_q=robust_q,
-                q_samples=q_samples,
-                band_alpha=band_alpha,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-                current_token_shares=held_shares,
-                full_kelly_target_shares=full_kelly_target_shares,
-                fractional_kelly_target_shares=fractional_kelly_target_shares,
-                probe_kind="MINIMUM_MARKETABLE",
-                probe_shares=legal_min_shares,
-            ),
-            rejection_reasons={candidate.candidate_id: reason},
-        )
-    fractional_legal_max = venue_legal_neighbor(
-        remaining_target_shares,
-        at_most=True,
-    )
-    if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
-        # Fractional Kelly is a hard terminal-holding budget.  A venue minimum
-        # is executable only when a legal order fits within the remaining target;
-        # it cannot create an extra minimum-lot exception.
-        reason = "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            buy_rejection_economics=_buy_rejection_economics(
-                candidate,
-                reason=reason,
-                robust_q=robust_q,
-                q_samples=q_samples,
-                band_alpha=band_alpha,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-                current_token_shares=held_shares,
-                full_kelly_target_shares=full_kelly_target_shares,
-                fractional_kelly_target_shares=fractional_kelly_target_shares,
-                probe_kind="MINIMUM_MARKETABLE",
-                probe_shares=legal_min_shares,
-            ),
-            rejection_reasons={candidate.candidate_id: reason},
-        )
-    fractional_max_shares = min(
-        capacity_max_shares,
-        fractional_legal_max,
-    )
-    if fractional_max_shares < legal_min_shares:
-        projected_probes: set[Decimal] = set()
-    else:
-        fractional_raw_probes = _single_order_stationary_probes(
-            candidate.economic_cost_curve,
-            robust_q=Decimal(str(robust_q)),
-            wealth_floor_usd=wealth_floor_usd,
-            wealth_ceiling_usd=wealth_ceiling_usd,
-            min_shares=legal_min_shares,
-            max_shares=fractional_max_shares,
-        )
-        projected_probes = set()
-        for raw_probe in fractional_raw_probes:
-            for at_most in (True, False):
-                legal = venue_legal_neighbor(raw_probe, at_most=at_most)
-                if legal is not None:
-                    projected_probes.add(legal)
-
-    best = None
-    projected_price_band_rejected = False
-    for shares in sorted(projected_probes):
-        if shares < legal_min_shares or shares > fractional_max_shares:
+                risk_unit_cost=risk_unit_cost,
+            )
+        except (ArithmeticError, ValueError):
             continue
-        try:
-            robust_du, robust_ev, efficiency, cost = _single_order_metrics(
-                candidate,
-                q_samples=q_samples,
-                shares=shares,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-                alpha=band_alpha,
-                robust_q=robust_q,
-            )
-            limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
-                candidate, shares
-            )
-        except ValueError:
+        fractional_target = reference_target * multiplier
+        if held_shares + shares > fractional_target:
             continue
+        # EV is an independent admission condition.  Do not let a positive
+        # log-growth point with negative expected value win merely because the
+        # EV boundary was not one of the stationary probes.
+        if robust_ev <= _ROBUST_EV_EPS_USD:
+            continue
+        # SCOPE: this fixed taker size. DRAIN: consider the other legal sizes
+        # and the next fresh epoch. RESET: positive current prefix economics.
+        if candidate.execution_mode == "TAKER_LIMIT":
+            try:
+                prefix_du, prefix_ev = _global_buy_rounding_safe_prefix_metrics(
+                    q=robust_q,
+                    shares=shares,
+                    unit_cost=risk_unit_cost,
+                    loss_baseline=wealth_floor_usd,
+                    win_baseline=wealth_ceiling_usd,
+                )
+            except (ArithmeticError, ValueError):
+                continue
+            if prefix_du <= 0.0 or prefix_ev <= _ROBUST_EV_EPS_USD:
+                continue
         if not (
             _live_unit_price_in_band(limit_price)
             and _live_unit_price_in_band(expected_fill_price)
         ):
-            projected_price_band_rejected = True
+            price_band_rejected = True
             continue
         if max_spend > spend_limit:
             continue
+        item = (
+            robust_du,
+            robust_ev,
+            efficiency,
+            cost,
+            shares,
+            limit_price,
+            expected_fill_price,
+            max_spend,
+            reference_target,
+            fractional_target,
+        )
         if best is None or robust_du > best[0] + 1e-15 or (
             math.isclose(robust_du, best[0], rel_tol=0.0, abs_tol=1e-15)
             and (cost, -efficiency, candidate.candidate_id)
             < (best[3], -best[2], candidate.candidate_id)
         ):
-            best = (
-                robust_du,
-                robust_ev,
-                efficiency,
-                cost,
-                shares,
-                limit_price,
-                expected_fill_price,
-                max_spend,
-            )
+            best = item
 
-    if best is None and projected_price_band_rejected:
+    if best is None and price_band_rejected:
         reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
         return GlobalSingleOrderDecision(
             candidate=None,
@@ -5775,10 +5857,21 @@ def _score_global_single_order(
             no_trade_reason=reason,
             rejection_reasons={candidate.candidate_id: reason},
         )
-    if best is None or not (
-        best[0] > 0.0 and best[1] > _ROBUST_EV_EPS_USD
-    ):
+    reference_target = (
+        best[8]
+        if best is not None
+        else first_reference_target if first_reference_target is not None else held_shares
+    )
+    fractional_target = reference_target * multiplier
+    if best is None and risk_target_reached:
+        reason = "FRACTIONAL_KELLY_TARGET_REACHED"
+    elif best is None and risk_target_below_minimum:
+        reason = "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+    elif best is None or best[0] <= 0.0 or best[1] <= _ROBUST_EV_EPS_USD:
         reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
+    else:
+        reason = None
+    if reason is not None:
         probe_shares = best[4] if best is not None else legal_min_shares
         return GlobalSingleOrderDecision(
             candidate=None,
@@ -5788,22 +5881,36 @@ def _score_global_single_order(
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
             no_trade_reason=reason,
-            buy_rejection_economics=_buy_rejection_economics(
-                candidate,
-                reason=reason,
-                robust_q=robust_q,
-                q_samples=q_samples,
-                band_alpha=band_alpha,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-                current_token_shares=held_shares,
-                full_kelly_target_shares=full_kelly_target_shares,
-                fractional_kelly_target_shares=fractional_kelly_target_shares,
-                probe_kind="BEST_EXECUTABLE",
-                probe_shares=probe_shares,
+            buy_rejection_economics=(
+                _buy_rejection_economics(
+                    candidate,
+                    reason=reason,
+                    robust_q=robust_q,
+                    q_samples=q_samples,
+                    band_alpha=band_alpha,
+                    wealth_floor_usd=wealth_floor_usd,
+                    wealth_ceiling_usd=wealth_ceiling_usd,
+                    current_token_shares=held_shares,
+                    full_kelly_target_shares=reference_target,
+                    fractional_kelly_target_shares=fractional_target,
+                    probe_kind=(
+                        "MINIMUM_MARKETABLE"
+                        if best is None
+                        else "BEST_EXECUTABLE"
+                    ),
+                    probe_shares=probe_shares,
+                )
+                if reason
+                in {
+                    "FRACTIONAL_KELLY_TARGET_REACHED",
+                    "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
+                    "NON_POSITIVE_ROBUST_OBJECTIVE",
+                }
+                else None
             ),
             rejection_reasons={candidate.candidate_id: reason},
         )
+
     (
         robust_du,
         robust_ev,
@@ -5813,6 +5920,8 @@ def _score_global_single_order(
         limit_price,
         expected_fill_price,
         max_spend,
+        full_kelly_target_shares,
+        fractional_kelly_target_shares,
     ) = best
     return GlobalSingleOrderDecision(
         candidate=candidate,
@@ -6077,8 +6186,8 @@ def global_buy_fak_prefix_certificate(
     ):
         raise ValueError("buy FAK prefix fee rate is outside the monotone joint bound")
     max_fee_shape = limit * (Decimal("1") - limit)
-    worst_fee_per_share = Decimal("2") * fee_rate * max_fee_shape
-    unit_cost = limit + worst_fee_per_share
+    unit_cost = _global_buy_rounding_safe_worst_unit_cost(limit, fee_rate)
+    worst_fee_per_share = unit_cost - limit
     full_cost = unit_cost * shares
     win_q = Decimal(
         str(
@@ -6117,12 +6226,17 @@ def global_buy_fak_prefix_certificate(
         or min(loss_baseline, win_baseline, loss_after, win_after) <= 0
     ):
         raise ValueError("buy FAK prefix wealth bound is invalid")
-    delta_log_wealth = float(loss_q) * math.log(
-        float(loss_after / loss_baseline)
-    ) + float(
-        win_q
-    ) * math.log(float(win_after / win_baseline))
-    ev = float(win_q * shares - full_cost)
+    try:
+        delta_log_wealth, ev = _global_buy_rounding_safe_prefix_metrics(
+            q=float(win_q),
+            loss_q=float(loss_q),
+            shares=shares,
+            unit_cost=unit_cost,
+            loss_baseline=loss_baseline,
+            win_baseline=win_baseline,
+        )
+    except ValueError as exc:
+        raise ValueError("buy FAK prefix wealth bound is invalid") from exc
     if (
         not math.isfinite(delta_log_wealth)
         or delta_log_wealth <= 0
@@ -7866,8 +7980,8 @@ def select_global_single_order(
                     wealth_ceiling_usd=candidate_endowment.win_wealth_floor_usd,
                     spendable_cash_usd=wealth_witness.spendable_cash_usd,
                     capital_limit_usd=target_cost,
-                    fractional_kelly_multiplier=Decimal("1"),
-                    current_token_shares=Decimal("0"),
+                    fractional_kelly_multiplier=multiplier,
+                    current_token_shares=target.current_token_shares,
                     settlement_locked_exact_payoff=False,
                 )
                 if fixed.candidate is None:
@@ -7899,12 +8013,6 @@ def select_global_single_order(
                     replace(
                         fixed,
                         current_token_shares=target.current_token_shares,
-                        full_kelly_target_shares=(
-                            target.full_kelly_target_shares
-                        ),
-                        fractional_kelly_target_shares=(
-                            target.fractional_kelly_target_shares
-                        ),
                         buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
                         payoff_q_correction=joint_correction,
                     )

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-02
+# Last reused/audited: 2026-09-11
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -281,6 +281,7 @@ def _explicit_sell_maker_terms(
 
 
 @pytest.mark.parametrize("selection_revision", [
+    "global_single_order_calibrated_q_capacity_independent_kelly_v5",
     "global_single_order_canonical_entry_q_expected_growth_v4",
     "global_single_order_authority_q_expected_growth_v3",
 ])
@@ -17305,6 +17306,10 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
                 else Decimal("0.07")
             ),
             shares=Decimal("20"),
+            # Risk-reference targets are not executable quantity. JIT must
+            # validate the actual 20-share order against the fresh depth.
+            full_kelly_target_shares=Decimal("1000"),
+            fractional_kelly_target_shares=Decimal("125"),
             capital_action_mode=(
                 "CONTINGENT_MAKER_REST_BUY"
                 if execution_mode == "MAKER_REST"
