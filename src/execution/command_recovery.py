@@ -294,6 +294,7 @@ def _recorded_exit_fill_status_repair_command_ids(
     conn: sqlite3.Connection,
     *,
     limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+    rotation_slot: int | None = None,
 ) -> tuple[str, ...]:
     """Return a bounded slice of malformed, command-scoped EXIT facts.
 
@@ -349,9 +350,12 @@ def _recorded_exit_fill_status_repair_command_ids(
     )
     if total <= 0:
         return ()
-    offset = (
-        _identity_bound_rotation_slot() * candidate_limit
-    ) % total
+    slot = (
+        _identity_bound_rotation_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
+    )
+    offset = (slot * candidate_limit) % total
     rows = conn.execute(
         candidate_sql
         + " ORDER BY command.updated_at, command.command_id LIMIT ? OFFSET ?",
@@ -13608,13 +13612,14 @@ def reconcile_exit_lifecycle_alignment_repairs(
 def terminal_exit_residual_projection_pending(conn: sqlite3.Connection) -> bool:
     """Return whether one open terminal EXIT residual merits bounded priority."""
 
+    review_due = False
     try:
         if not _table_exists(conn, "venue_commands"):
             return False
         # REVIEW_REQUIRED terminal FAK exits have no PARTIAL/EXPIRED command
         # state yet, but their durable command shape merits a bounded priority
         # turn. Full order proof remains in the clear path.
-        if conn.execute(
+        review_due = conn.execute(
             """
             SELECT 1
               FROM venue_commands command
@@ -13624,50 +13629,65 @@ def terminal_exit_residual_projection_pending(conn: sqlite3.Connection) -> bool:
                AND COALESCE(command.venue_order_id, '') <> ''
              LIMIT 1
             """
-        ).fetchone() is not None:
-            return True
-        required = {"venue_commands", "venue_trade_facts", "position_current"}
-        if not all(_table_exists(conn, table) for table in required):
-            return False
-        return conn.execute(
-            """
-            SELECT 1
-              FROM venue_commands command
-              JOIN position_current position
-                ON position.position_id = command.position_id
-             WHERE command.intent_kind = 'EXIT'
-               AND UPPER(COALESCE(command.side, '')) = 'SELL'
-               AND command.state IN ('EXPIRED', 'PARTIAL')
-               AND COALESCE(command.venue_order_id, '') <> ''
-               AND position.phase IN ('active', 'day0_window', 'pending_exit')
-               AND EXISTS (
-                    SELECT 1
-                      FROM venue_trade_facts fact
-                     WHERE fact.command_id = command.command_id
-                       AND LOWER(COALESCE(fact.venue_order_id, '')) =
-                           LOWER(COALESCE(command.venue_order_id, ''))
-                       AND UPPER(COALESCE(fact.state, '')) IN
-                           ('MATCHED', 'MINED', 'CONFIRMED')
-                       AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-               )
-             LIMIT 1
-            """
         ).fetchone() is not None
-    except Exception:  # noqa: BLE001 - a missing read never blocks scheduler work.
-        return False
+    except Exception:  # noqa: BLE001 - continue to independent residual reads.
+        review_due = False
+
+    residual_due = False
+    try:
+        required = {"venue_commands", "venue_trade_facts", "position_current"}
+        if all(_table_exists(conn, table) for table in required):
+            residual_due = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_commands command
+                  JOIN position_current position
+                    ON position.position_id = command.position_id
+                 WHERE command.intent_kind = 'EXIT'
+                   AND UPPER(COALESCE(command.side, '')) = 'SELL'
+                   AND command.state IN ('EXPIRED', 'PARTIAL')
+                   AND COALESCE(command.venue_order_id, '') <> ''
+                   AND position.phase IN ('active', 'day0_window', 'pending_exit')
+                   AND EXISTS (
+                        SELECT 1
+                          FROM venue_trade_facts fact
+                         WHERE fact.command_id = command.command_id
+                           AND LOWER(COALESCE(fact.venue_order_id, '')) =
+                               LOWER(COALESCE(command.venue_order_id, ''))
+                           AND UPPER(COALESCE(fact.state, '')) IN
+                               ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                   )
+                 LIMIT 1
+                """
+            ).fetchone() is not None
+    except Exception:  # noqa: BLE001 - continue to independent status reads.
+        residual_due = False
+
+    if review_due or residual_due:
+        return True
+    status_due = False
+    try:
+        status_due = bool(
+            _recorded_exit_fill_status_repair_command_ids(conn, limit=1)
+        )
+    except Exception:  # noqa: BLE001 - status read cannot hide legacy debt.
+        status_due = False
+    return review_due or residual_due or status_due
 
 
 def reconcile_terminal_exit_residual_projections_priority(
     *,
     deadline_monotonic: float | None = None,
 ) -> dict:
-    """Project a few exact terminal EXIT residuals without venue or selector I/O.
+    """Drain bounded status, terminal-review, and residual EXIT work.
 
-    SCOPE=at most four total candidates per turn, split fairly between terminal
-    FAK reviews and existing open EXIT SELL command/position residuals. DRAIN=
-    this DB-only priority turn before cancel selection or venue prewarm. RESET=
-    the existing command/token/fill/chain proof projects the residual, or a
-    bounded lock/budget defers the same exact rows to next cadence.
+    SCOPE=at most four total candidates per turn across status-only execution
+    fact repair, terminal FAK review, and residual alignment. DRAIN=this DB-only
+    priority turn before cancel selection or venue prewarm. RESET=correct status
+    removes the status candidate, or existing command/token/fill/chain proof
+    advances review/alignment; bounded lock/budget defers exact rows to the next
+    cadence.
     """
 
     from src.execution.venue_sync_contract import (
@@ -13717,7 +13737,7 @@ def _reconcile_terminal_exit_residual_priority_pass(
     limit: int = _TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
     rotation_slot: int | None = None,
 ) -> dict:
-    """Drain terminal FAK reviews and residual alignment in one fair bound."""
+    """Drain status-only facts, terminal reviews, and residual alignment fairly."""
 
     priority_limit = max(0, int(limit))
     if priority_limit <= 0:
@@ -13727,15 +13747,77 @@ def _reconcile_terminal_exit_residual_priority_pass(
         if rotation_slot is None
         else max(0, int(rotation_slot))
     )
-    if priority_limit == 1:
+    if priority_limit > 1:
+        status_limit = max(1, priority_limit // 2)
+    else:
+        status_limit = 1 if slot % 3 == 0 else 0
+    status_query_failed = False
+    status_command_ids: tuple[str, ...] = ()
+    if status_limit:
+        try:
+            status_command_ids = _recorded_exit_fill_status_repair_command_ids(
+                conn,
+                limit=status_limit,
+                rotation_slot=slot,
+            )
+        except Exception as exc:  # noqa: BLE001 - legacy lanes still drain.
+            logger.warning(
+                "recovery: terminal EXIT status-repair candidate read failed: %s",
+                exc,
+            )
+            status_query_failed = True
+    status_scanned = 0
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if status_query_failed:
+        summary["errors"] = 1
+    for status_command_id in status_command_ids:
+        try:
+            command_row = conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = ? LIMIT 1",
+                (status_command_id,),
+            ).fetchone()
+            if command_row is None:
+                status_result = {"projected": 0, "stayed": 1, "errors": 0}
+            else:
+                repaired = _exchange_reconcile._repair_existing_exit_execution_fact_status(
+                    conn,
+                    command=_dict_row(command_row),
+                )
+                status_result = {
+                    "projected": 1 if repaired is True else 0,
+                    "stayed": 1 if repaired is not True else 0,
+                    "errors": 0,
+                }
+        except Exception as exc:  # noqa: BLE001 - consume bounded slot.
+            logger.error(
+                "recovery: terminal EXIT status repair failed for command %s: %s",
+                status_command_id,
+                exc,
+            )
+            status_result = {"projected": 0, "stayed": 0, "errors": 1}
+        # Each selected command consumes its slot even when strict proof rejects
+        # it or the writer reports an error, so an invalid prefix cannot starve
+        # later rotated candidates.
+        status_scanned += 1
+        summary["scanned"] += 1
+        summary["advanced"] += int(status_result.get("projected", 0) or 0)
+        summary["errors"] += int(status_result.get("errors", 0) or 0)
+        if not status_result.get("projected") and not status_result.get("errors"):
+            summary["stayed"] += 1
+    remaining_limit = priority_limit - status_scanned
+    if remaining_limit <= 0:
+        return summary
+    if remaining_limit == 1:
         review_limit = 1 if slot % 2 == 0 else 0
     else:
-        review_limit = (priority_limit + 1) // 2
-    summary = _reconcile_terminal_fak_partial_exit_reviews(
+        review_limit = (remaining_limit + 1) // 2
+    review_summary = _reconcile_terminal_fak_partial_exit_reviews(
         conn,
         limit=review_limit,
         rotation_slot=slot,
     )
+    for key in ("scanned", "advanced", "stayed", "errors"):
+        summary[key] += review_summary[key]
     alignment_limit = priority_limit - summary["scanned"]
     if alignment_limit <= 0:
         return summary

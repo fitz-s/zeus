@@ -39051,6 +39051,124 @@ def test_terminal_fak_review_priority_uses_real_db_only_canonical_route(
         ).fetchone()[0] == 1
 
 
+def test_terminal_priority_public_route_repairs_existing_status_only(
+    conn, tmp_path, monkeypatch
+):
+    """The scheduler-owned DB-only priority route drains status debt in place."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import log_execution_fact
+
+    command_id = "cmd-status-priority-public"
+    position_id = "pos-status-priority-public"
+    order_id = "ord-status-priority-public"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        intent_kind="EXIT",
+        side="SELL",
+        size=4.0,
+        price=0.4,
+        token_id="tok-001",
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-status-priority-entry",
+        order_id="ord-status-priority-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', token_id = 'tok-001',
+               direction = 'buy_yes', shares = 4, chain_shares = 4,
+               chain_state = 'synced', chain_seen_at = '2026-09-10T00:00:00Z',
+               cost_basis_usd = 1.6, chain_cost_basis_usd = 1.6,
+               order_status = 'sell_pending_confirmation'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id="trade-status-priority-public",
+        state="CONFIRMED",
+        filled_size="2",
+        fill_price="0.4",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'REVIEW_REQUIRED' WHERE command_id = ?",
+        (command_id,),
+    )
+    intent_id = f"{position_id}:exit:{command_id}"
+    log_execution_fact(
+        conn,
+        intent_id=intent_id,
+        position_id=position_id,
+        command_id=command_id,
+        order_role="exit",
+        filled_at="2026-09-10T00:00:01Z",
+        fill_price=0.4,
+        shares=2.0,
+        venue_status="PARTIAL,TERMINAL_FAK",
+        terminal_exec_status="PARTIAL,TERMINAL_FAK",
+    )
+    before_position = dict(
+        conn.execute(
+            "SELECT phase, shares, chain_shares, cost_basis_usd, realized_pnl_usd "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    )
+    before_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.commit()
+
+    db_path = tmp_path / "status-priority-public.db"
+    disk = sqlite3.connect(db_path)
+    try:
+        conn.backup(disk)
+    finally:
+        disk.close()
+
+    def _conn_factory():
+        fresh = sqlite3.connect(db_path)
+        fresh.row_factory = sqlite3.Row
+        return fresh
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    assert command_recovery.terminal_exit_residual_projection_pending(conn) is True
+    summary = command_recovery.reconcile_terminal_exit_residual_projections_priority()
+    assert summary["scanned"] <= 4
+    assert summary["advanced"] == 1
+    with _conn_factory() as verified:
+        fact = verified.execute(
+            "SELECT terminal_exec_status, venue_status FROM execution_fact "
+            "WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+        assert dict(fact) == {
+            "terminal_exec_status": "partial",
+            "venue_status": "PARTIAL,TERMINAL_FAK",
+        }
+        assert dict(
+            verified.execute(
+                "SELECT phase, shares, chain_shares, cost_basis_usd, realized_pnl_usd "
+                "FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        ) == before_position
+        assert verified.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()[0] == before_events
+
+
 def test_terminal_fak_priority_rotation_continues_after_chain_mismatch(monkeypatch):
     """A blocked candidate cannot starve the next rotated terminal review."""
     from src.execution import command_recovery
@@ -39259,9 +39377,88 @@ def test_terminal_fak_priority_shared_quota_keeps_alignment_fair(monkeypatch):
         assert calls == [("review", 0, 1), ("alignment", 1)]
 
 
-def test_terminal_exit_pending_keeps_legacy_predicate_when_new_read_unavailable():
+def test_terminal_priority_status_quota_rotates_with_review_and_alignment(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    calls = []
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_status_repair_command_ids",
+        lambda _conn, *, limit, rotation_slot: tuple(
+            f"status-{index}" for index in range(limit)
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery._exchange_reconcile,
+        "_repair_existing_exit_execution_fact_status",
+        lambda _conn, *, command: calls.append(("status", command["command_id"])) or True,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_reconcile_terminal_fak_partial_exit_reviews",
+        lambda _conn, *, limit, rotation_slot: calls.append(
+            ("review", limit, rotation_slot)
+        )
+        or {"scanned": limit, "advanced": 0, "stayed": limit, "errors": 0},
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_exit_lifecycle_alignment_repairs",
+        lambda _conn, *, terminal_partial_limit, terminal_partial_only,
+        terminal_residual_only: calls.append(("alignment", terminal_partial_limit))
+        or {
+            "scanned": terminal_partial_limit,
+            "advanced": 0,
+            "stayed": terminal_partial_limit,
+            "errors": 0,
+        },
+    )
+
+    class _Conn:
+        def execute(self, _sql, params=()):
+            class _Result:
+                def fetchone(self):
+                    return {"command_id": params[0]}
+
+            return _Result()
+
+    conn = _Conn()
+    slot0 = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+        conn, limit=1, rotation_slot=0
+    )
+    assert slot0 == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert calls == [("status", "status-0")]
+
+    calls.clear()
+    slot1 = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+        conn, limit=1, rotation_slot=1
+    )
+    assert slot1 == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert calls == [("review", 0, 1), ("alignment", 1)]
+
+    calls.clear()
+    slot2 = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+        conn, limit=1, rotation_slot=2
+    )
+    assert slot2 == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert calls == [("review", 1, 2)]
+
+
+def test_terminal_exit_pending_keeps_legacy_predicate_when_new_read_unavailable(
+    monkeypatch,
+):
     """An incomplete newer schema cannot hide an existing EXPIRED residual."""
     from src.execution import command_recovery
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_status_repair_command_ids",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("new status query unavailable")
+        ),
+    )
 
     with sqlite3.connect(":memory:") as isolated:
         isolated.executescript(
