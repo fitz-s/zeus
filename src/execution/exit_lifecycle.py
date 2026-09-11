@@ -9740,6 +9740,16 @@ def _log_partial_exit_execution_fact(
 ) -> None:
     from src.state.db import log_execution_fact
 
+    raw_status = status or "PARTIAL"
+    status_parts = {part.strip().upper() for part in raw_status.split(",")}
+    # Remainder terminality does not erase this already-applied partial fill.
+    # Unconfirmed trade states retain their distinct authority.
+    terminal_status = (
+        "partial"
+        if status_parts.intersection({"PARTIAL", *VOID_STATUSES})
+        and not status_parts.intersection(NON_TERMINAL_TRADE_STATUSES)
+        else raw_status
+    )
     log_execution_fact(
         conn,
         intent_id=f"{getattr(position, 'trade_id', '')}:exit",
@@ -9754,8 +9764,8 @@ def _log_partial_exit_execution_fact(
         filled_at=_utcnow().isoformat(),
         fill_price=float(Decimal(str(fill_price))),
         shares=float(Decimal(str(filled_shares))),
-        venue_status=status or "PARTIAL",
-        terminal_exec_status=status or "PARTIAL",
+        venue_status=raw_status,
+        terminal_exec_status=terminal_status,
         clear_voided_at=True,
         command_id=_exit_command_id_for_order(conn, position, order_id),
         decision_law_id="predicted_bin_ev_v1",
@@ -10814,7 +10824,7 @@ def _complete_intentional_position_reduction(
             position,
             status=status,
             fill_price=fill_price_decimal,
-            filled_shares=newly_filled,
+            filled_shares=total_filled,
             order_id=order_id,
         )
     if newly_filled > Decimal("1e-9"):

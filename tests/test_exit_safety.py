@@ -2806,6 +2806,44 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn, monkeyp
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.3")
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("PARTIAL,TERMINAL_FAK", "partial"),
+        ("EXPIRED", "partial"),
+        ("CONFIRMED", "CONFIRMED"),
+        ("MATCHED", "MATCHED"),
+        ("MINED", "MINED"),
+        ("PARTIALLY_MATCHED", "PARTIALLY_MATCHED"),
+        ("CONFIRMED,MATCHED", "CONFIRMED,MATCHED"),
+        ("MINED,PARTIAL", "MINED,PARTIAL"),
+    ],
+)
+def test_partial_execution_fact_separates_fill_from_remainder(conn, status, expected):
+    from types import SimpleNamespace
+    from src.execution import exit_lifecycle
+
+    position = SimpleNamespace(trade_id="pos-partial-status", strategy_key="center_buy")
+    for suffix in ("a", "b"):
+        _insert_exit_command(
+            conn, command_id=f"cmd-partial-status-{suffix}",
+            position_id=position.trade_id, venue_order_id=f"ord-partial-status-{suffix}",
+        )
+    for suffix, shares, price in (("a", "2", "0.5"), ("b", "3", "0.6")):
+        exit_lifecycle._log_partial_exit_execution_fact(
+            conn, position, status=status, filled_shares=shares,
+            fill_price=price, order_id=f"ord-partial-status-{suffix}",
+        )
+    facts = _execution_facts(conn, position.trade_id)
+    assert len(facts) == 2
+    assert [(f["command_id"], f["shares"], f["fill_price"]) for f in facts] == [
+        ("cmd-partial-status-a", 2.0, 0.5),
+        ("cmd-partial-status-b", 3.0, 0.6),
+    ]
+    assert all(f["terminal_exec_status"] == expected for f in facts)
+    assert all(f["venue_status"] == status for f in facts)
+
+
 def test_status_prefix_multi_fill_growth_is_exactly_once_on_replay(conn):
     """A command-wide status prefix must not be re-consumed per trade id."""
     from src.engine.lifecycle_events import build_position_current_projection
@@ -2820,6 +2858,10 @@ def test_status_prefix_multi_fill_growth_is_exactly_once_on_replay(conn):
 
     position_id = "pos-status-multi-fill-growth"
     order_id = "ord-status-multi-fill-growth"
+    _insert_exit_command(
+        conn, command_id="cmd-status", position_id=position_id,
+        size=2.0, price=0.49, venue_order_id=order_id,
+    )
     position = Position(
         trade_id=position_id,
         market_id="mkt-status-multi-fill-growth",
@@ -2925,6 +2967,11 @@ def test_status_prefix_multi_fill_growth_is_exactly_once_on_replay(conn):
         intent_holding_shares=Decimal("10"),
     ) == Decimal("0.2")
     assert position.shares == pytest.approx(9.2)
+    fact = _execution_facts(conn, position_id)[0]
+    assert fact["command_id"] == "cmd-status"
+    assert fact["shares"] == pytest.approx(0.8)
+    assert fact["fill_price"] == pytest.approx(0.65)
+    assert fact["terminal_exec_status"] == "CONFIRMED"
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.44")
     assert recorded_partial_exit_fill_cursors(conn, position_id)[grown_b.identity] == (
         Decimal("0.4"),
@@ -2952,6 +2999,7 @@ def test_status_prefix_multi_fill_growth_is_exactly_once_on_replay(conn):
         (position_id,),
     ).fetchone()[0] == economics_count
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.44")
+    assert dict(_execution_facts(conn, position_id)[0]) == dict(fact)
 
 
 def test_status_first_projection_failure_leaves_local_and_canonical_unchanged(
