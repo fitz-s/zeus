@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-10
+# Last reused/audited: 2026-09-11
 # Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
@@ -7210,3 +7210,70 @@ def test_fee_inclusive_near_breakeven_rejects_both_sides(side):
     assert rejected.rejection_reasons[fee.candidate_id] == (
         "NON_POSITIVE_EXPECTED_OBJECTIVE"
     )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("bid_size, expected_shares", (("4", None), ("5", "5"), ("10", "10"), ("30", "15")))
+def test_fractional_kelly_target_does_not_haircut_exit_capacity(side, bid_size, expected_shares):
+    candidate = _global_candidate(
+        candidate_id="fractional-exit-capacity",
+        family="fractional-exit-capacity-family",
+        side=side,
+        q=0.80,
+        levels=(("0.50", "1000"),),
+        min_order="5",
+    )
+    candidate = replace(candidate, native_bid_levels=(
+        BookLevel(price=Decimal("0.49"), size=Decimal(bid_size)),
+    ))
+    decision = _global_select((candidate,), cap="100", fractional_kelly_multiplier="0.125")
+    if expected_shares is None:
+        assert decision.candidate is None
+        assert decision.rejection_reasons[candidate.candidate_id] == "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+        return
+    # Binary Kelly: W*(q-p)/(p*(1-p)) = 120 shares; the risk target is 15.
+    # Executable shares must independently fit the current exit book.
+    assert decision.candidate is candidate
+    assert decision.full_kelly_target_shares == Decimal("120")
+    assert decision.fractional_kelly_target_shares == Decimal("15")
+    assert decision.shares == Decimal(expected_shares)
+    assert decision.shares <= Decimal(bid_size)
+    assert decision.expected_growth.expected_delta_log_wealth > 0
+    assert decision.expected_growth.expected_ev_usd > 0
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(side):
+    candidate = _global_candidate(
+        candidate_id="calibrated-exit-capacity",
+        family="calibrated-exit-capacity-family", side=side,
+        q=0.95, levels=(("0.50", "1000"),), min_order="5",
+    )
+    candidate = replace(candidate, native_bid_levels=(
+        BookLevel(price=Decimal("0.49"), size=Decimal("10")),
+    ))
+    correction = _correction_for(candidate, raw_q=0.95, corrected_q=0.80, p0=0.50)
+    held, cash = Decimal("0"), Decimal("100")
+    for expected_shares in (Decimal("10"), Decimal("5"), Decimal("0")):
+        endowment = S.CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=cash, win_wealth_floor_usd=cash + held,
+            current_token_shares=held, ledger_snapshot_id="ledger-current",
+        )
+        decision = _global_select(
+            (candidate,), cap="100", floor=str(cash), ceiling=str(cash + held), cash=str(cash),
+            fractional_kelly_multiplier="0.125",
+            candidate_portfolio_endowment_resolver=lambda _: endowment,
+            payoff_q_correction_resolver=lambda *_: correction,
+        )
+        assert decision.shares == expected_shares
+        if expected_shares:
+            assert decision.payoff_q_correction is correction
+            assert decision.fractional_kelly_target_shares == Decimal("15")
+            assert held + decision.shares <= decision.fractional_kelly_target_shares
+            assert decision.shares <= Decimal("10")
+            assert decision.expected_growth.expected_ev_usd > 0
+            held += decision.shares
+            cash -= decision.cost_usd
+        else:
+            assert decision.candidate is None
+            assert held == Decimal("15")

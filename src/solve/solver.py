@@ -5380,10 +5380,10 @@ def _score_global_single_order(
     The current book and terminal-wealth objective identify the additional shares
     that reach the full-Kelly final holding from the reconciled current holding.
     The operator-owned multiplier applies to that FINAL holding, not independently
-    to every auction epoch.  The continuous target is repaired onto the venue grid:
-    when it is positive but subminimum, exactly one minimum marketable increment may
-    be promoted only if that discrete order remains below full Kelly and independently
-    proves positive robust log wealth, EV, affordability, and allocator capacity.
+    to every auction epoch. Current exit capacity constrains the executable order,
+    not the economic Kelly target. Every legal increment must fit the remaining
+    fractional target, exit depth, cash and allocator capacity, with positive
+    objective and fill-prefix economics.
     """
 
     multiplier = Decimal(fractional_kelly_multiplier)
@@ -5440,7 +5440,6 @@ def _score_global_single_order(
         )
     if requires_liquidation_capacity:
         capacity_max_shares = min(capacity_max_shares, liquidation_cap_shares)
-        raw_max_shares = min(raw_max_shares, liquidation_cap_shares)
     if (
         raw_min_shares is None
         or raw_max_shares < raw_min_shares
