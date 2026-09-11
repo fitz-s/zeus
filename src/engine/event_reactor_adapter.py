@@ -17969,7 +17969,9 @@ def _current_global_actuation_prepared_family(
                 decision_time=revalidation_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 required_condition_id=required_condition_id,
-                allow_partial_deterministic=False,
+                allow_partial_deterministic=isinstance(
+                    selected, DeterministicBinPayoffWitness
+                ),
                 allow_unobserved_day0_replacement=True,
                 allow_provisional_day0_replacement=True,
                 probability_use=_CurrentProbabilityUse.HELD_MONITOR,
@@ -38584,6 +38586,180 @@ def _direct_day0_source_clock_bound_identity(
     return carrier_identity, bound_identity
 
 
+def _prepare_current_day0_exact_family(
+    event: OpportunityEvent,
+    *,
+    family: object,
+    observation_conn: sqlite3.Connection,
+    settlement_fact: Mapping[str, object] | None,
+    physical_fact: Mapping[str, object] | None,
+    decision_time: datetime,
+    max_age: timedelta,
+    required_condition_id: str | None,
+    day0_payload_out: dict[str, object] | None,
+    cache_metadata_out: dict[str, object] | None,
+):
+    """Price only observation-proved bins, independently of forecast readiness."""
+
+    from src.engine.qkernel_spine_bridge import (
+        PreparedGlobalFamily,
+        _event_resolution_identity,
+        build_forecast_case,
+        build_outcome_space,
+        sell_action_authority_identity,
+    )
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        assert_absorbing_day0_payload_authority,
+        day0_evidence_finality,
+    )
+    from src.solve.solver import OutcomeTokenBinding
+
+    city = runtime_cities_by_name().get(str(family.city))
+    if (
+        event.event_type != "DAY0_EXTREME_UPDATED"
+        or city is None
+        or settlement_fact is None
+        or str(family.target_date)
+        != decision_time.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        or day0_evidence_finality(
+            {"settlement_source": settlement_fact.get("observation_source")}
+        )
+        not in DAY0_ABSORBING_FINALITIES
+        or _day0_physical_frontier_supersedes_settlement(
+            metric=str(family.metric),
+            physical_fact=physical_fact,
+            settlement_fact=settlement_fact,
+        )
+    ):
+        return None
+    try:
+        observed_at = datetime.fromisoformat(
+            str(settlement_fact.get("observation_time") or "").replace("Z", "+00:00")
+        )
+        available_at = datetime.fromisoformat(
+            str(settlement_fact.get("observation_available_at") or "").replace(
+                "Z", "+00:00"
+            )
+        )
+    except ValueError as exc:
+        raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID") from exc
+    if (
+        observed_at.tzinfo is None
+        or available_at.tzinfo is None
+        or not observed_at <= available_at <= decision_time
+        or observed_at.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        != str(family.target_date)
+    ):
+        raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID")
+    base_identity = stable_hash(
+        {
+            "authority": "day0_settlement_observation",
+            "family_key": family.family_id,
+            "fact": {
+                key: settlement_fact.get(key)
+                for key in (
+                    "observation_source",
+                    "station_id",
+                    "unit",
+                    "observation_time",
+                    "observation_available_at",
+                    "observed_extreme_native",
+                    "sample_count",
+                    "raw_payload_sha256",
+                )
+            },
+        }
+    )
+    case = build_forecast_case(
+        family, source_cycle_time_utc=observed_at.astimezone(UTC)
+    )
+    omega = build_outcome_space(family, case)
+    current_payload = _global_day0_execution_payload(
+        event,
+        family=family,
+        resolution=omega.resolution,
+        conditioning=None,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        posterior_id=None,
+        probability_base_identity=base_identity,
+        current_day0_facts=(settlement_fact, physical_fact),
+    )
+    assert_absorbing_day0_payload_authority(current_payload)
+    payload = {**_payload(event), **current_payload}
+    exact_payoffs = _day0_deterministic_bin_payoffs(
+        omega=omega,
+        family=family,
+        payload=payload,
+    )
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=outcome.bin_id,
+            condition_id=candidate.condition_id,
+            yes_token_id=candidate.yes_token_id,
+            no_token_id=candidate.no_token_id,
+        )
+        for candidate, outcome in zip(family.candidates, omega.bins, strict=True)
+    )
+    known_bins = {bin_id for bin_id, _ in exact_payoffs}
+    known_conditions = sorted(
+        binding.condition_id for binding in bindings if binding.bin_id in known_bins
+    )
+    if not exact_payoffs or (
+        required_condition_id is not None
+        and required_condition_id not in known_conditions
+    ):
+        return None
+    witness, _ = _build_day0_deterministic_witness(
+        event=event,
+        family=family,
+        omega=omega,
+        bindings=bindings,
+        exact_yes_payoffs=exact_payoffs,
+        payload=payload,
+        current_day0_payload=current_payload,
+        day0_base_identity=base_identity,
+        source_cycle=observed_at,
+        source_available_at=available_at.isoformat(),
+        resolution_identity=_event_resolution_identity(omega.resolution),
+        max_age=max_age,
+        decision_time=decision_time,
+        day0_payload_out=day0_payload_out,
+    )
+    if day0_payload_out is not None:
+        day0_payload_out.update(current_payload)
+    if cache_metadata_out is not None:
+        cache_metadata_out["deterministic_condition_ids_json"] = json.dumps(
+            known_conditions,
+            separators=(",", ":"),
+        )
+    reason = "day0_deterministic_bin_payoff"
+    return PreparedGlobalFamily(
+        decision_id=stable_hash(
+            {
+                "authority_certificate_hash": witness.authority_certificate_hash,
+                "witness_identity": witness.witness_identity,
+            }
+        ),
+        probability_witness=witness,
+        candidate_seeds=(),
+        day0_exit_authority_status="mature",
+        day0_exit_authority_reason=reason,
+        sell_action_authority_identity=sell_action_authority_identity(
+            family_key=family.family_id,
+            probability_witness_identity=witness.witness_identity,
+            status="mature",
+            reason=reason,
+        ),
+        day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+            event_type=event.event_type,
+            payload=payload,
+            family=family,
+        ),
+    )
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -38672,6 +38848,17 @@ def _prepare_current_global_probability_family(
             pinned_complete_bundle=pinned_bundle,
         )
 
+    def _prepare_exact_family():
+        if not allow_partial_deterministic:
+            return None
+        return _prepare_current_day0_exact_family(
+            event, family=family, observation_conn=day0_observation_conn,
+            settlement_fact=settlement_day0_fact, physical_fact=physical_day0_fact,
+            decision_time=decision_time, max_age=max_age,
+            required_condition_id=required_condition_id,
+            day0_payload_out=day0_payload_out, cache_metadata_out=cache_metadata_out,
+        )
+
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
@@ -38683,6 +38870,14 @@ def _prepare_current_global_probability_family(
     if not isinstance(_force_day0_redecision_fallback, bool):
         raise ValueError("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
+    if allow_partial_deterministic is None:
+        allow_partial_deterministic = (
+            required_condition_id is not None or not entry_authority
+        )
+    elif not isinstance(allow_partial_deterministic, bool):
+        raise ValueError("GLOBAL_PARTIAL_DETERMINISTIC_POLICY_INVALID")
+    if required_condition_id is not None:
+        required_condition_id = str(required_condition_id).strip()
     if pinned_complete_bundle is not None and entry_authority:
         raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN")
     if pinned_complete_bundle is not None and probability_use not in {
@@ -38935,6 +39130,12 @@ def _prepare_current_global_probability_family(
                             hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
                         )
                     )
+        # A selected exact action and its immediate held belief must reproduce
+        # the same witness kind when forecast readiness changes meanwhile.
+        if required_condition_id and allow_partial_deterministic:
+            exact_family = _prepare_exact_family()
+            if exact_family is not None:
+                return exact_family
         held_day0_redecision_fallback_eligible = False
         if final_daily_observation is None:
             physical_only_current_day_redecision = bool(
@@ -39121,6 +39322,9 @@ def _prepare_current_global_probability_family(
                 decision_time=decision_time,
             )
             if readiness is None:
+                exact_family = _prepare_exact_family()
+                if exact_family is not None:
+                    return exact_family
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
                 if (
@@ -39182,6 +39386,16 @@ def _prepare_current_global_probability_family(
                     authority_purpose=bundle_authority_purpose,
                 )
             if result is not None and (not result.ok or result.bundle is None):
+                if result.reason_code in {
+                    "REPLACEMENT_READINESS_NOT_READY",
+                    "REPLACEMENT_POSTERIOR_MISSING",
+                    "REPLACEMENT_LIVE_READINESS_EXPIRED",
+                    "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
+                    "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
+                }:
+                    exact_family = _prepare_exact_family()
+                    if exact_family is not None:
+                        return exact_family
                 if held_day0_redecision_fallback_eligible:
                     return _prepare_held_day0_fallback()
                 raise ValueError(
@@ -39655,10 +39869,6 @@ def _prepare_current_global_probability_family(
         if len(required_bindings) != 1:
             raise ValueError("GLOBAL_REQUIRED_CONDITION_BINDING_INVALID")
         required_bin_id = required_bindings[0].bin_id
-    if allow_partial_deterministic is None:
-        allow_partial_deterministic = required_bin_id is not None
-    elif not isinstance(allow_partial_deterministic, bool):
-        raise ValueError("GLOBAL_PARTIAL_DETERMINISTIC_POLICY_INVALID")
     resolution_identity = _event_resolution_identity(omega.resolution)
     probability_authority = "replacement_current_global_probability_v1"
     components = None
@@ -39839,6 +40049,10 @@ def _prepare_current_global_probability_family(
                         entry_authority=entry_authority,
                     )
                 except ValueError as exc:
+                    if str(exc) == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
+                        exact_family = _prepare_exact_family()
+                        if exact_family is not None:
+                            return exact_family
                     if (
                         str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
                         or not held_day0_current_bundle_pin_eligible

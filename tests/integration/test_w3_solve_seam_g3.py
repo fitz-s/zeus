@@ -7429,6 +7429,654 @@ def _global_day0_scope_event(*, city: str, source_run_id: str):
     )
 
 
+def _day0_partial_exact_fixture(
+    *,
+    metric: str = "high",
+    settlement_source: str = "ogimet_metar_ltfm",
+    station_id: str = "LTFM",
+    unit: str = "C",
+    observed: float = 30.0,
+    target_date: str = "2026-07-11",
+    decision_at: _dt.datetime | None = None,
+    two_bins: bool = False,
+):
+    """Build only the current market/observation surfaces used by Day0 ENTRY."""
+
+    decision_at = decision_at or _dt.datetime(
+        2026, 7, 11, 12, 0, tzinfo=_dt.timezone.utc
+    )
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL, target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL, condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL, market_slug TEXT, range_label TEXT,
+            range_low REAL, range_high REAL
+        )
+        """
+    )
+    bins = (
+        ("c0", "29C or below", None, 29.0),
+        ("c1", "30C", 30.0, 30.0),
+        ("c2", "31C or above", 31.0, None),
+    )
+    if two_bins:
+        bins = (
+            ("c0", "30C or below", None, 30.0),
+            ("c1", "31C or above", 31.0, None),
+        )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        tuple(
+            (
+                "Istanbul",
+                target_date,
+                metric,
+                condition_id,
+                f"yes-{condition_id}",
+                f"istanbul-{condition_id}",
+                label,
+                low,
+                high,
+            )
+            for condition_id, label, low, high in bins
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.row_factory = sqlite3.Row
+    observations.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            local_timestamp TEXT, utc_timestamp TEXT, time_basis TEXT,
+            running_max REAL, running_min REAL, temp_unit TEXT,
+            imported_at TEXT, authority TEXT, causality_status TEXT,
+            source_role TEXT, training_allowed INTEGER, raw_response TEXT
+        )
+        """
+    )
+    event = _global_scope_event(
+        city="Istanbul",
+        source_run_id="run-istanbul-day0",
+        city_timezone="Europe/Istanbul",
+    )
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "target_date": target_date,
+            "metric": metric,
+            "station_id": station_id,
+            "settlement_source": settlement_source,
+            "settlement_unit": unit,
+            "observation_time": "2026-07-11T09:00:00+00:00",
+            "observation_available_at": "2026-07-11T09:05:00+00:00",
+            "raw_value": observed,
+            "rounded_value": int(round(observed)),
+            "high_so_far": observed if metric == "high" else None,
+            "low_so_far": observed if metric == "low" else None,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"Istanbul|{target_date}|{metric}|{station_id}",
+        source="global-auction-current-day0-scope",
+        observed_at=payload["observation_time"],
+        available_at=payload["observation_available_at"],
+        received_at=payload["observation_available_at"],
+        payload=payload,
+        causal_snapshot_id=str(payload["snapshot_id"]),
+    )
+    fact = {
+        "observation_source": settlement_source,
+        "observation_time": payload["observation_time"],
+        "observation_available_at": payload["observation_available_at"],
+        "observed_extreme_native": observed,
+        "sample_count": 5,
+        "station_id": station_id,
+        "unit": unit,
+        "raw_payload_sha256": "a" * 64,
+    }
+    city = SimpleNamespace(
+        timezone="Europe/Istanbul",
+        settlement_unit="C",
+        settlement_source_type="noaa",
+        wu_station="LTFM",
+    )
+    return SimpleNamespace(
+        event=event,
+        forecast=forecast,
+        observations=observations,
+        fact=fact,
+        city=city,
+        decision_at=decision_at,
+        bins=bins,
+    )
+
+
+def _patch_day0_exact_runtime(monkeypatch, fixture):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: fixture.fact,
+    )
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_a, **_k: pytest.fail("bundle reader must not run on missing readiness"),
+    )
+
+
+def _day0_ready_bundle(fixture):
+    probabilities = [0.2, 0.5, 0.3][: len(fixture.bins)]
+    return SimpleNamespace(
+        posterior_id=31,
+        posterior_identity_hash="posterior-day0-statistical",
+        dependency_hash="dependency-day0-statistical",
+        posterior_config_hash="config-day0-statistical",
+        source_cycle_time="2026-07-11T00:00:00+00:00",
+        source_available_at="2026-07-11T06:00:00+00:00",
+        q={condition_id: probability for (condition_id, *_), probability in zip(fixture.bins, probabilities, strict=True)},
+        provenance_json={
+            "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
+            "q_bootstrap_samples_basis": "global_simplex_v1",
+            "q_bootstrap_samples_by_bin": {
+                condition_id: [probability] * 400
+                for (condition_id, *_), probability in zip(fixture.bins, probabilities, strict=True)
+            },
+            "bin_topology": [
+                {"bin_id": condition_id, "lower_c": low, "upper_c": high}
+                for condition_id, _label, low, high in fixture.bins
+            ],
+        },
+    )
+
+
+def test_day0_entry_partial_exact_witness_from_missing_readiness(monkeypatch):
+    fixture = _day0_partial_exact_fixture()
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    payload: dict[str, object] = {}
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+            day0_payload_out=payload,
+        )
+        witness = prepared.probability_witness
+        assert isinstance(witness, DeterministicBinPayoffWitness)
+        c0_bin = next(binding.bin_id for binding in witness.bindings if binding.condition_id == "c0")
+        c1_bin = next(binding.bin_id for binding in witness.bindings if binding.condition_id == "c1")
+        assert witness.exact_yes_payoff(c0_bin) == 0
+        yes_samples = family_payoff_q_samples(witness, bin_id=c0_bin, side="YES")
+        no_samples = family_payoff_q_samples(witness, bin_id=c0_bin, side="NO")
+        assert yes_samples is not None and yes_samples.size > 0
+        assert no_samples is not None and no_samples.size == yes_samples.size
+        assert np.all(yes_samples == 0.0)
+        assert np.all(no_samples == 1.0)
+        assert family_payoff_q_samples(witness, bin_id=c1_bin, side="YES") is None
+        assert family_payoff_q_samples(witness, bin_id=c1_bin, side="NO") is None
+        assert payload["probability_authority"] == "day0_deterministic_bin_payoff_v1"
+        assert payload["_edli_day0_exact_yes_payoffs"] == {c0_bin: 0}
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_low_partial_exact_proves_dead_yes_and_live_no_while_sibling_stays_unknown(
+    monkeypatch,
+):
+    fixture = _day0_partial_exact_fixture(metric="low")
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        )
+        witness = prepared.probability_witness
+        assert isinstance(witness, DeterministicBinPayoffWitness)
+        c0_bin = next(binding.bin_id for binding in witness.bindings if binding.condition_id == "c0")
+        c1_bin = next(binding.bin_id for binding in witness.bindings if binding.condition_id == "c1")
+        c2_bin = next(binding.bin_id for binding in witness.bindings if binding.condition_id == "c2")
+        assert witness.exact_yes_payoff(c0_bin) is None
+        assert witness.exact_yes_payoff(c2_bin) == 0
+        assert family_payoff_q_samples(witness, bin_id=c0_bin, side="NO") is None
+        assert family_payoff_q_samples(witness, bin_id=c2_bin, side="NO") is not None
+        assert family_payoff_q_samples(witness, bin_id=c1_bin, side="YES") is None
+        assert family_payoff_q_samples(witness, bin_id=c1_bin, side="NO") is None
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavailable(
+    monkeypatch,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    bundle = _day0_ready_bundle(fixture)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
+    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
+        "metric": "high", "source": "ogimet_metar_ltfm",
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
+    })
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+        ),
+    )
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        )
+        assert isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_exact_source_truth_identity_excludes_event_carrier_id(monkeypatch):
+    fixture = _day0_partial_exact_fixture()
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    second_event = replace(fixture.event, event_id="different-carrier-event-id")
+    try:
+        first = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        ).probability_witness
+        second = era._prepare_current_global_probability_family(
+            second_event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        ).probability_witness
+        assert isinstance(first, DeterministicBinPayoffWitness)
+        assert isinstance(second, DeterministicBinPayoffWitness)
+        assert first.q_version == second.q_version
+        assert first.source_truth_identity == second.source_truth_identity
+        assert first.authority_certificate_hash != second.authority_certificate_hash
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+@pytest.mark.parametrize(
+    "blocked_reason",
+    (
+        "REPLACEMENT_READINESS_NOT_READY",
+        "REPLACEMENT_POSTERIOR_MISSING",
+        "REPLACEMENT_LIVE_READINESS_EXPIRED",
+        "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
+        "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
+    ),
+)
+def test_day0_entry_partial_exact_allows_only_typed_bundle_blocks(
+    monkeypatch, blocked_reason,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_a, **_k: SimpleNamespace(ok=False, bundle=None, reason_code=blocked_reason),
+    )
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        )
+        assert isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_entry_partial_exact_rejects_invalid_bundle_block(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_a, **_k: SimpleNamespace(ok=False, bundle=None, reason_code="REPLACEMENT_INVALID_SCHEMA"),
+    )
+    try:
+        with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_INVALID_SCHEMA"):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_entry_partial_exact_is_rebuilt_for_jit_even_when_forecast_ready(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    bundle_reads = []
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_a, **_k: bundle_reads.append(True) or SimpleNamespace(
+            ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY"
+            ),
+        )
+    monkeypatch.setattr(
+        era,
+        "_rehydrate_held_pinned_bundle_for_actuation",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "_rebind_current_actuation_probability_tokens",
+        lambda witness, *_a, **_k: witness,
+    )
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            required_condition_id="c0",
+            allow_partial_deterministic=True,
+        )
+        assert isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+        c0_bin = next(
+            binding.bin_id
+            for binding in prepared.probability_witness.bindings
+            if binding.condition_id == "c0"
+        )
+        assert prepared.probability_witness.exact_yes_payoff(c0_bin) == 0
+        assert bundle_reads == []
+
+        selected = prepared.probability_witness
+        candidate = _global_test_buy_candidate(
+            family_key=selected.family_key,
+            probability_witness_identity=selected.witness_identity,
+            book_identity="day0-jit",
+            price="0.40",
+            captured_at=fixture.decision_at,
+            bin_id=c0_bin,
+            condition_id="c0",
+            token_id=next(
+                binding.yes_token_id
+                for binding in selected.bindings
+                if binding.condition_id == "c0"
+            ),
+        )
+        rebound, rebound_payload = era._current_global_actuation_prepared_family(
+            fixture.event,
+            global_actuation=SimpleNamespace(
+                probability_witness=selected,
+                decision=SimpleNamespace(candidate=candidate),
+            ),
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+        )
+        assert isinstance(rebound.probability_witness, DeterministicBinPayoffWitness)
+        assert rebound.probability_witness.witness_identity == selected.witness_identity
+        assert rebound_payload["_edli_day0_q_mode"] == "deterministic_bin_payoff"
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_entry_unknown_required_bin_is_invalid_before_forecast_fallback(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY"))
+    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
+        "metric": "high", "source": "ogimet_metar_ltfm",
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
+    })
+    monkeypatch.setattr(era, "_day0_remaining_global_probability_components", lambda *_a, **_k: (
+        np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float),
+        np.asarray([0.2, 0.5, 0.3], dtype=float),
+        era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    ))
+    try:
+        with pytest.raises(ValueError, match="GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                required_condition_id="unknown-condition",
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    fixture = _day0_partial_exact_fixture()
+    bundle = _day0_ready_bundle(fixture)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
+    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
+        "metric": "high", "source": "ogimet_metar_ltfm",
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
+    })
+    monkeypatch.setattr(era, "_day0_remaining_global_probability_components", lambda *_a, **k: (
+        np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float),
+        np.asarray([0.2, 0.5, 0.3], dtype=float),
+        era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    ))
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event,
+            forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True,
+        )
+        assert not isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+        assert prepared.probability_witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    (
+        ("wu_icao_history", "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"),
+        ("hko_hourly_accumulator", "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"),
+        ("proxy_station_feed", "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"),
+        ("wrong_source", "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"),
+    ),
+)
+def test_day0_unqualified_sources_cannot_create_exact_entry_authority(
+    monkeypatch, source, expected,
+):
+    fixture = _day0_partial_exact_fixture(settlement_source=source)
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    try:
+        with pytest.raises(ValueError, match=expected):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    (
+        ({"unit": "F"}, "GLOBAL_DAY0_CONDITIONING_UNIT_MISMATCH"),
+        ({"station_id": "KXXX"}, "GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH"),
+        ({"decision_at": _dt.datetime(2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc)}, "GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID"),
+        ({"target_date": "2026-07-10"}, "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"),
+    ),
+)
+def test_day0_invalid_fact_identity_time_or_local_day_cannot_create_exact_authority(
+    monkeypatch, kwargs, expected,
+):
+    fixture = _day0_partial_exact_fixture(**kwargs)
+    if "decision_at" in kwargs:
+        fixture.fact["observation_available_at"] = "2026-07-11T11:00:00+00:00"
+    if "target_date" in kwargs:
+        fixture.fact["observation_time"] = "2026-07-10T09:00:00+00:00"
+        fixture.fact["observation_available_at"] = "2026-07-10T09:05:00+00:00"
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    try:
+        with pytest.raises(ValueError, match=expected):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+def test_day0_invalid_hash_and_missing_exact_bin_cannot_create_exact_authority(monkeypatch):
+    fixture = _day0_partial_exact_fixture()
+    fixture.fact["raw_payload_sha256"] = "not-a-sha256"
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    try:
+        with pytest.raises(ValueError, match="GLOBAL_DAY0_RAW_PROVENANCE_MISSING"):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+    fixture = _day0_partial_exact_fixture(two_bins=True)
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    try:
+        with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
+            era._prepare_current_global_probability_family(
+                fixture.event,
+                forecast_conn=fixture.forecast,
+                topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30),
+                allow_partial_deterministic=True,
+            )
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
 @pytest.mark.parametrize(
     "bootstrap_basis",
     (
