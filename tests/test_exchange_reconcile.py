@@ -6972,6 +6972,8 @@ def test_recorded_exit_fact_status_repair_is_status_only(
         venue_status=venue_status,
         terminal_exec_status=venue_status,
         latency_seconds=existing_latency,
+        posterior_id=17,
+        decision_law_id="law-original",
     )
     before_position = dict(
         conn.execute(
@@ -7026,24 +7028,29 @@ def test_recorded_exit_fact_status_repair_is_status_only(
         "UPDATE execution_fact SET terminal_exec_status = ? WHERE intent_id = ?",
         (venue_status, intent_id),
     )
+    before_failed_write = dict(
+        conn.execute("SELECT * FROM execution_fact WHERE intent_id = ?", (intent_id,)).fetchone()
+    )
     conn.execute(
-        """
-        CREATE TRIGGER fail_status_repair BEFORE UPDATE OF terminal_exec_status
+        f"""
+        CREATE TRIGGER tamper_status_repair AFTER UPDATE OF terminal_exec_status
         ON execution_fact
-        WHEN OLD.intent_id = '"""
-        + intent_id
-        + "'"
-        " BEGIN SELECT RAISE(ABORT, 'injected status-repair failure'); END"
+        WHEN NEW.intent_id = '{intent_id}'
+        BEGIN
+            UPDATE execution_fact
+               SET posterior_id = 999, decision_law_id = 'law-tampered'
+             WHERE intent_id = '{intent_id}';
+        END
+        """
     )
     failed = reconcile_recorded_exit_fill_projections(
         conn, observed_at=NOW, command_ids=(command_id,)
     )
     assert failed == {"scanned": 1, "projected": 0, "stayed": 0, "errors": 1}
-    assert conn.execute(
-        "SELECT terminal_exec_status FROM execution_fact WHERE intent_id = ?",
-        (intent_id,),
-    ).fetchone()[0] == venue_status
-    conn.execute("DROP TRIGGER fail_status_repair")
+    assert dict(
+        conn.execute("SELECT * FROM execution_fact WHERE intent_id = ?", (intent_id,)).fetchone()
+    ) == before_failed_write
+    conn.execute("DROP TRIGGER tamper_status_repair")
 
 
 def test_recorded_exit_fact_status_repair_rejects_nonfinal_or_mismatched_proof(conn):

@@ -2964,23 +2964,11 @@ def _repair_existing_exit_execution_fact_status(
         updated = updated.fetchone()
         if updated is None:
             raise RuntimeError("status repair did not retain execution fact")
-        preserved_columns = (
-            "position_id",
-            "decision_id",
-            "order_role",
-            "strategy_key",
-            "posted_at",
-            "filled_at",
-            "voided_at",
-            "submitted_price",
-            "fill_price",
-            "shares",
-            "fill_quality",
-            "latency_seconds",
-            "venue_status",
-            "command_id",
-        )
-        if any(updated[column] != existing.get(column) for column in preserved_columns):
+        if set(updated.keys()) != set(existing.keys()) or any(
+            column != "terminal_exec_status"
+            and updated[column] != existing.get(column)
+            for column in updated.keys()
+        ):
             raise RuntimeError("status repair changed non-status execution fields")
         if str(updated["terminal_exec_status"] or "").lower() != economic_status:
             raise RuntimeError("status repair did not persist economic status")
