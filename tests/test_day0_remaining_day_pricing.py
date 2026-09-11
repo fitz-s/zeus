@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-10
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Last reused or audited: 2026-09-11
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-11; last_reused=2026-09-11
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -169,6 +169,593 @@ def test_day0_causal_bundle_binds_vector_and_observation_context() -> None:
         expected["carrier_vector_identity"]
     )
     assert validation.receipt()["actual_bundle_identity"] == actual["bundle_identity"]
+
+
+def _capture_equivalence_fixture(*, changed_payload: bool = False, changed_run: bool = False):
+    import src.data.day0_hourly_vectors as hourly
+
+    conn = _conn()
+    hourly._ensure_schema(conn)
+    times = [f"2026-06-10T{hour:02d}:00" for hour in range(24)]
+    temps = [18.0 + hour * 0.1 for hour in range(24)]
+    cycle = "2026-06-10T00:00:00+00:00"
+    endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+
+    def insert(vector_id: str, captured: str, request_hash: str, *, current: bool = False):
+        row_temps = list(temps)
+        if current and changed_payload:
+            row_temps[8] += 1.0
+        run_id = "openmeteo:icon_d2:2026-06-10T00:00:00+00:00"
+        if current and changed_run:
+            run_id = "openmeteo:icon_d2:2026-06-10T01:00:00+00:00"
+        fetch_finished = (
+            "2026-06-10T10:01:00+00:00"
+            if current
+            else "2026-06-10T09:01:00+00:00"
+        )
+        meta = {
+            "source_run_id": f"day0_hourly:{request_hash}",
+            "provider_run_id": run_id,
+            "provider_source_cycle_time_utc": cycle,
+            "provider_source_available_at_utc": "2026-06-10T08:00:00+00:00",
+            "provider_source_modified_at_utc": "2026-06-10T08:05:00+00:00",
+            "source_run_authority": "run_pinned_single_runs",
+            "endpoint_mode": "single_runs",
+            "model": "icon_d2",
+            "model_api_id": "icon_d2",
+            "provider": "openmeteo",
+            "endpoint": endpoint,
+            "request_params_json": json.dumps(
+                {"city": "Paris", "models": ["icon_d2"], "run": cycle},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "request_hash": request_hash,
+            "fetch_started_at": (
+                "2026-06-10T10:00:00+00:00"
+                if current
+                else "2026-06-10T09:00:00+00:00"
+            ),
+            "fetch_finished_at": fetch_finished,
+        }
+        conn.execute(
+            """
+            INSERT INTO day0_hourly_vectors (
+                vector_id, model, city, target_date, timezone_name, captured_at,
+                provider, endpoint, request_hash, times_json, temps_c_json,
+                source_run_meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                vector_id,
+                "icon_d2",
+                "Paris",
+                "2026-06-10",
+                "Europe/Paris",
+                "2026-06-10T10:00:00+00:00"
+                if current
+                else "2026-06-10T09:00:00+00:00",
+                "openmeteo",
+                endpoint,
+                request_hash,
+                json.dumps(times),
+                json.dumps(row_temps),
+                json.dumps(meta, sort_keys=True),
+            ),
+        )
+        return meta
+
+    old_meta = insert("old-vector", "2026-06-10T09:00:00+00:00", "sha256:old")
+    new_meta = insert(
+        "new-vector", "2026-06-10T10:00:00+00:00", "sha256:new", current=True
+    )
+    conn.commit()
+
+    def witness(vector_id: str, captured: str, request_hash: str, meta: dict[str, object]):
+        return {
+            "vector_id": vector_id,
+            "vector_ids_by_model": {"icon_d2": vector_id},
+            "expected_models": ["icon_d2"],
+            "actual_models": ["icon_d2"],
+            "capture_times_by_model_utc": {"icon_d2": captured},
+            "provider_by_model": {"icon_d2": "openmeteo"},
+            "endpoint_by_model": {"icon_d2": endpoint},
+            "request_hash_by_model": {"icon_d2": request_hash},
+            "source_run_id_by_model": {"icon_d2": meta["source_run_id"]},
+            "provider_run_id_by_model": {"icon_d2": meta["provider_run_id"]},
+            "model_api_id_by_model": {"icon_d2": "icon_d2"},
+            "provider_source_cycle_time_by_model_utc": {
+                "icon_d2": meta["provider_source_cycle_time_utc"]
+            },
+            "provider_source_available_at_by_model_utc": {
+                "icon_d2": meta["provider_source_available_at_utc"]
+            },
+            "provider_source_modified_at_by_model_utc": {
+                "icon_d2": meta["provider_source_modified_at_utc"]
+            },
+            "fetch_started_times_by_model_utc": {
+                "icon_d2": meta["fetch_started_at"]
+            },
+            "fetch_finished_times_by_model_utc": {
+                "icon_d2": meta["fetch_finished_at"]
+            },
+            "source_run_authority_by_model": {
+                "icon_d2": meta["source_run_authority"]
+            },
+            "endpoint_mode_by_model": {"icon_d2": meta["endpoint_mode"]},
+            "target_end_utc": "2026-06-10T22:00:00+00:00",
+            "city": "Paris",
+            "target_date": "2026-06-10",
+            "metric": "high",
+            "causal_as_of_utc": "2026-06-10T09:05:00+00:00",
+        }
+
+    old_witness = witness(
+        "old-vector", "2026-06-10T09:00:00+00:00", "sha256:old", old_meta
+    )
+    new_witness = witness(
+        "new-vector", "2026-06-10T10:00:00+00:00", "sha256:new", new_meta
+    )
+    common = {
+        "city": "Paris",
+        "target_date": "2026-06-10",
+        "metric": "high",
+        "observation_context": {
+            "source": "aviationweather_metar",
+            "observation_time": "2026-06-10T08:00:00+00:00",
+            "observed_extreme_c": 18.0,
+            "sample_count": None,
+            "unit": "C",
+        },
+        "cutoff_utc": "2026-06-10T09:05:00+00:00",
+    }
+    expected = build_day0_causal_evidence_bundle(
+        **common, vector_witness=old_witness
+    )
+    actual = build_day0_causal_evidence_bundle(
+        **common, vector_witness=new_witness
+    )
+    current_vector = Day0HourlyVector(
+        model="icon_d2",
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        captured_at="2026-06-10T10:00:00+00:00",
+        times=tuple(times),
+        temps_c=tuple(
+            value + (1.0 if changed_payload and index == 8 else 0.0)
+            for index, value in enumerate(temps)
+        ),
+        source_run_meta_json=json.dumps(new_meta, sort_keys=True),
+    )
+    return (
+        conn,
+        expected,
+        actual,
+        new_witness,
+        [current_vector],
+        datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+    )
+
+
+def test_day0_v1_capture_equivalence_uses_canonical_payload_and_preserves_old_bundle():
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture()
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is True
+    assert proof["original_cutoff_utc"] == "2026-06-10T09:05:00+00:00"
+    assert "captured_at" in proof["allowed_differences"]
+
+
+@pytest.mark.parametrize("changed_payload, changed_run", [(True, False), (False, True)])
+def test_day0_v1_capture_equivalence_rejects_payload_or_issue_change(
+    changed_payload: bool, changed_run: bool
+):
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(
+        changed_payload=changed_payload, changed_run=changed_run
+    )
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is False
+    assert proof["reason"] in {
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH",
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH",
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PROVIDER_BINDING_INVALID",
+    }
+
+
+def test_day0_v1_capture_equivalence_preserves_ordinary_entry_bundle(
+    monkeypatch,
+):
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        _actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture()
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *args, **kwargs: True,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+    result = era._validate_day0_causal_bundle_successor(
+        conn=conn,
+        payload=payload,
+        family=SimpleNamespace(
+            city="Paris", target_date="2026-06-10", metric="high"
+        ),
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        vector_witness=current_witness,
+        vectors=current_vectors,
+    )
+    assert result["bundle_identity"] == expected["bundle_identity"]
+    receipt = payload["_edli_day0_causal_evidence_bundle_validation"]
+    assert receipt["actual_bundle_identity"] == expected["bundle_identity"]
+    assert receipt["capture_equivalence"]["ok"] is True
+
+
+
+
+@pytest.mark.parametrize("changed_payload", [False, True])
+def test_day0_v1_capture_equivalence_runs_through_entry_members_seam(
+    monkeypatch, changed_payload
+):
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(changed_payload=changed_payload)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ("icon_d2",),
+    )
+    monkeypatch.setattr(
+        era,
+        "_pinned_station_extreme_providers_c",
+        lambda **_kwargs: (),
+    )
+    successor_queries = []
+
+    def successor(_conn, **kwargs):
+        successor_queries.append(kwargs["bundle_identity"])
+        return True
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        successor,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+    }
+    members = era._day0_remaining_day_members(
+        payload=payload,
+        family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+        unit="C",
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        forecast_conn=conn,
+        entry_authority=True,
+    )
+    if changed_payload:
+        assert members is None
+        assert successor_queries == [actual["bundle_identity"]]
+    else:
+        assert members is not None
+        assert successor_queries == [expected["bundle_identity"]]
+        assert payload["_edli_day0_remaining_vector_witness"] == expected[
+            "carrier_vector_witness"
+        ]
+        assert payload["_edli_day0_causal_evidence_bundle_validation"][
+            "capture_equivalence"
+        ]["ok"] is True
+
+
+def test_day0_v1_capture_equivalence_requires_original_successor_visibility(
+    monkeypatch,
+):
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        _actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture()
+    successor_queries = []
+
+    def successor(_conn, **kwargs):
+        successor_queries.append(kwargs["bundle_identity"])
+        return False
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        successor,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=conn,
+            payload=payload,
+            family=SimpleNamespace(
+                city="Paris", target_date="2026-06-10", metric="high"
+            ),
+            decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+            vector_witness=current_witness,
+            vectors=current_vectors,
+        )
+    assert successor_queries == [expected["bundle_identity"]]
+    assert payload["_edli_day0_causal_evidence_bundle_successor_materialized"] is False
+
+
+@pytest.mark.parametrize("defect", ["missing_original", "stale", "future_fetch", "provider", "unknown_metadata_type", "models", "scope", "tampered_bundle"])
+def test_recapture_canonical_equivalence_rejects_invalid_evidence(defect):
+    from dataclasses import replace
+    import src.data.day0_hourly_vectors as hourly
+
+    conn, expected, actual, witness, vectors, window = _capture_equivalence_fixture()
+    moment = datetime(2026, 6, 10, 11, 0, tzinfo=UTC)
+    city = "Paris"
+    original_id = expected["carrier_vector_ids_by_model"]["icon_d2"]
+    current_id = actual["carrier_vector_ids_by_model"]["icon_d2"]
+    if defect == "missing_original":
+        conn.execute("DELETE FROM day0_hourly_vectors WHERE vector_id = ?", (original_id,))
+    elif defect == "stale":
+        moment = moment + timedelta(hours=4)
+    elif defect == "models":
+        witness = dict(witness, expected_models=[])
+        vectors = []
+    elif defect == "scope":
+        city = "London"
+    elif defect == "tampered_bundle":
+        expected = dict(expected, bundle_identity="tampered")
+    elif defect == "provider":
+        conn.execute("UPDATE day0_hourly_vectors SET provider = ? WHERE vector_id = ?", ("different_provider", current_id))
+        witness = dict(witness, provider_by_model={"icon_d2": "different_provider"})
+    else:
+        meta = json.loads(conn.execute("SELECT source_run_meta_json FROM day0_hourly_vectors WHERE vector_id = ?", (current_id,)).fetchone()[0])
+        if defect == "future_fetch":
+            meta["fetch_finished_at"] = (moment + timedelta(seconds=1)).isoformat()
+            witness = dict(witness, fetch_finished_times_by_model_utc={"icon_d2": meta["fetch_finished_at"]})
+        else:
+            original_meta = json.loads(conn.execute("SELECT source_run_meta_json FROM day0_hourly_vectors WHERE vector_id = ?", (original_id,)).fetchone()[0])
+            original_meta["unknown_semantics"] = True
+            meta["unknown_semantics"] = 1
+            conn.execute("UPDATE day0_hourly_vectors SET source_run_meta_json = ? WHERE vector_id = ?", (json.dumps(original_meta), original_id))
+        conn.execute("UPDATE day0_hourly_vectors SET source_run_meta_json = ? WHERE vector_id = ?", (json.dumps(meta), current_id))
+        vectors = [replace(vector, source_run_meta_json=json.dumps(meta)) for vector in vectors]
+    actual = build_day0_causal_evidence_bundle(
+        city="Paris", target_date="2026-06-10", metric="high",
+        observation_context=actual["observation_context"], cutoff_utc=actual["cutoff_utc"],
+        vector_witness=witness,
+    )
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected, actual=actual, current_witness=witness, conn=conn,
+        city=city, target_date="2026-06-10", timezone_name="Europe/Paris",
+        decision_time_utc=moment, current_vectors=vectors, remaining_window_start_utc=window,
+    )
+    assert proof["ok"] is False
+    conn.close()
+
+
+
+
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("entry_authority,original_visible", [(True, True), (False, True), (True, False)])
+def test_recapture_outer_caller_uses_committed_original_without_new_successor(
+    monkeypatch, entry_authority, original_visible, metric
+):
+    import src.data.replacement_forecast_bundle_reader as reader
+    import src.engine.event_reactor_adapter as era
+
+    conn, expected, actual, _witness, _vectors, _window = _capture_equivalence_fixture()
+    def for_metric(bundle):
+        witness = dict(bundle["carrier_vector_witness"], metric=metric)
+        return build_day0_causal_evidence_bundle(
+            city="Paris", target_date="2026-06-10", metric=metric,
+            observation_context=bundle["observation_context"],
+            cutoff_utc=bundle["cutoff_utc"], vector_witness=witness,
+        )
+    expected, actual = for_metric(expected), for_metric(actual)
+    conn.execute("""CREATE TABLE forecast_posteriors (
+        posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
+        source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
+        runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
+        posterior_identity_hash TEXT, provenance_json TEXT
+    )""")
+    if original_visible:
+        conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            1, "Paris", "2026-06-10", metric, reader.SOURCE_ID, reader.PRODUCT_ID,
+            reader._data_version_for_metric(metric), 0, reader.LIVE_RUNTIME_LAYER,
+            "2026-06-10T09:00:00+00:00", expected["cutoff_utc"], "sealed-original-posterior",
+            json.dumps({"day0_causal_evidence_bundle": expected}),
+        ))
+    moment = datetime(2026, 6, 10, 11, 0, tzinfo=UTC)
+    assert reader.day0_causal_bundle_successor_materialized(
+        conn, city="Paris", target_date="2026-06-10", temperature_metric=metric,
+        bundle_identity=actual["bundle_identity"], decision_time=moment,
+    ) is False
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr("src.data.day0_hourly_vectors.day0_hourly_models_for_city", lambda _city: ("icon_d2",))
+    monkeypatch.setattr(era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ())
+    payload = {"_edli_day0_causal_evidence_bundle": expected, "metric": metric,
+               "settlement_unit": "C", "settlement_source": "aviationweather_metar",
+               "observation_time": "2026-06-10T08:00:00+00:00", ("high_so_far" if metric == "high" else "low_so_far"): 18.0, "rounded_value": 18.0}
+    if not entry_authority:
+        payload["_edli_day0_redecision_authority_scope"] = "held_exposure_current_bundle_day0_only_v1"
+    members = era._day0_remaining_day_members(
+        payload=payload, family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric=metric),
+        unit="C", decision_time=moment, forecast_conn=conn, entry_authority=entry_authority,
+    )
+    assert (members is not None) is original_visible
+    if original_visible:
+        assert payload["_edli_day0_causal_evidence_bundle"] == expected
+        assert payload["_edli_day0_causal_evidence_bundle_validation"]["capture_equivalence"]["ok"] is True
+        assert payload["_edli_day0_remaining_vector_witness"] == expected["carrier_vector_witness"]
+    conn.close()
+
+
+@pytest.mark.parametrize("failure", ["missing_connection", "config_unavailable"])
+def test_recapture_unavailable_dependencies_preserve_mismatch(monkeypatch, failure):
+    import src.engine.event_reactor_adapter as era
+
+    conn, expected, _actual, witness, vectors, window = _capture_equivalence_fixture()
+    config_calls = []
+    def unavailable():
+        config_calls.append(True)
+        raise FileNotFoundError("unavailable city configuration")
+    monkeypatch.setattr(era, "runtime_cities_by_name", unavailable)
+    payload = {"_edli_day0_causal_evidence_bundle": expected,
+               "_edli_day0_remaining_window_start_utc": window.isoformat()}
+    with pytest.raises(ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"):
+        era._validate_day0_causal_bundle_successor(
+            conn=None if failure == "missing_connection" else conn, payload=payload,
+            family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+            decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC), vector_witness=witness, vectors=vectors,
+        )
+    assert bool(config_calls) is (failure == "config_unavailable")
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_recapture_real_members_preserve_q_and_samples_but_observations_reprice(monkeypatch, metric):
+    import src.data.replacement_forecast_bundle_reader as reader
+    import src.engine.event_reactor_adapter as era
+
+    conn, original, recaptured, _witness, _vectors, _window = _capture_equivalence_fixture()
+    original = build_day0_causal_evidence_bundle(
+        city="Paris", target_date="2026-06-10", metric=metric,
+        observation_context=original["observation_context"], cutoff_utc=original["cutoff_utc"],
+        vector_witness=dict(original["carrier_vector_witness"], metric=metric),
+    )
+    conn.execute("""CREATE TABLE forecast_posteriors (
+        posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
+        source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
+        runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
+        posterior_identity_hash TEXT, provenance_json TEXT
+    )""")
+    conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        1, "Paris", "2026-06-10", metric, reader.SOURCE_ID, reader.PRODUCT_ID,
+        reader._data_version_for_metric(metric), 0, reader.LIVE_RUNTIME_LAYER,
+        "2026-06-10T09:00:00+00:00", original["cutoff_utc"], "original-identity",
+        json.dumps({"day0_causal_evidence_bundle": original}),
+    ))
+    new_id = recaptured["carrier_vector_ids_by_model"]["icon_d2"]
+    new_row = conn.execute("SELECT * FROM day0_hourly_vectors WHERE vector_id = ?", (new_id,)).fetchone()
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE vector_id = ?", (new_id,))
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+    monkeypatch.setattr("src.data.day0_hourly_vectors.day0_hourly_models_for_city", lambda _city: ("icon_d2",))
+    monkeypatch.setattr(era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ())
+    bins = [Bin(low=None, high=17, label="17 or below", unit="C"),
+            Bin(low=18, high=18, label="18", unit="C"),
+            Bin(low=19, high=None, label="19 or above", unit="C")]
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric=metric,
+                             family_id=f"Paris|2026-06-10|{metric}", event_type="DAY0_EXTREME_UPDATED", bins=bins)
+    family.candidates = [SimpleNamespace(condition_id=f"condition-{i}", bin=b,
+                                        yes_token_id=f"yes-{i}", no_token_id=f"no-{i}") for i,b in enumerate(bins)]
+    costs = {(f"condition-{i}", side): (None, EP(0.5, "ask", fee_deducted=True, currency="probability_units"), 0.5, None, None)
+             for i in range(3) for side in ("buy_yes", "buy_no")}
+    snapshot = {"settlement_unit": "C", "temperature_metric": metric, "members_json": "[18,18,18]",
+                "members_precision": 1.0, "source_id": "test", "issue_time": "2026-06-10T06:00:00+00:00",
+                "dataset_id": "test_v1", "data_version": "test_v1"}
+    def analyze(observed):
+        payload = {"_edli_day0_causal_evidence_bundle": original, "metric": metric,
+                   "settlement_unit": "C", "observation_time": "2026-06-10T08:00:00+00:00",
+                   "rounded_value": observed, ("high_so_far" if metric == "high" else "low_so_far"): observed}
+        analysis = era._market_analysis_from_event_snapshot(
+            calibration_conn=None, hourly_vector_conn=conn, snapshot=snapshot, family=family,
+            native_costs=costs, payload=payload, decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+            entry_authority=True,
+        )
+        return analysis.p_posterior, analysis.forecast_yes_probability_sample_matrix(64), payload
+    first_q, first_samples, first_payload = analyze(18.0)
+    conn.execute("INSERT INTO day0_hourly_vectors VALUES (" + ",".join("?" for _ in new_row) + ")", tuple(new_row))
+    repeated_q, repeated_samples, repeated_payload = analyze(18.0)
+    changed_q, changed_samples, changed_payload = analyze(20.0 if metric == "high" else 16.0)
+    assert np.array_equal(first_q, repeated_q)
+    assert np.array_equal(first_samples, repeated_samples)
+    assert not np.array_equal(repeated_q, changed_q)
+    assert not np.array_equal(repeated_samples, changed_samples)
+    assert "capture_equivalence" not in first_payload["_edli_day0_causal_evidence_bundle_validation"]
+    for payload in (repeated_payload, changed_payload):
+        assert payload["_edli_day0_causal_evidence_bundle"] == original
+        assert payload["_edli_day0_causal_evidence_bundle_validation"]["capture_equivalence"]["ok"] is True
+    conn.close()
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])

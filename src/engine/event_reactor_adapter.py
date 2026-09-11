@@ -46144,15 +46144,14 @@ def _validate_day0_causal_bundle_successor(
     family: object,
     decision_time: datetime,
     vector_witness: Mapping[str, object],
+    vectors: object = (),
 ) -> Mapping[str, object]:
-    """Require the current vectors and posterior to name one committed bundle.
+    """Bind forecast content to a committed posterior without capture churn.
 
-    A newer vector row is not a license to rebind an older posterior.  The
-    materializer writes a successor posterior carrying the same bundle
-    identity; until that row exists both event-bound inference and held
-    monitoring remain fail-closed.  The validation receipt is deliberately
-    kept on the threaded payload before raising so rejection evidence survives
-    the caller's no-trade path.
+    A repeated capture of the same issued content preserves the original
+    certificate. Current observation authority and q reconstruction remain
+    owned by the caller; a substantive forecast change still needs a successor
+    or the existing held-position current redecision path.
     """
 
     receipt_key = "_edli_day0_causal_evidence_bundle_validation"
@@ -46259,6 +46258,94 @@ def _validate_day0_causal_bundle_successor(
 
     payload[receipt_key] = receipt
     if not validation.ok:
+        capture_equivalence: dict[str, object] = {
+            "ok": False,
+            "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_NOT_ATTEMPTED",
+        }
+        try:
+            from src.data.day0_hourly_vectors import (
+                prove_day0_causal_capture_equivalence,
+            )
+
+            if conn is None:
+                raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SCOPE_INVALID")
+            city_obj = runtime_cities_by_name().get(str(family.city))
+            remaining_window_start = datetime.fromisoformat(
+                str(payload.get("_edli_day0_remaining_window_start_utc") or "").replace(
+                    "Z", "+00:00"
+                )
+            )
+            if city_obj is None or remaining_window_start.tzinfo is None:
+                raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SCOPE_INVALID")
+            capture_equivalence = prove_day0_causal_capture_equivalence(
+                expected=expected,
+                actual=actual,
+                current_witness=vector_witness,
+                conn=conn,
+                city=str(family.city),
+                target_date=str(family.target_date),
+                timezone_name=str(getattr(city_obj, "timezone", "") or ""),
+                decision_time_utc=decision_time,
+                current_vectors=vectors,
+                remaining_window_start_utc=remaining_window_start,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            capture_equivalence = {
+                "ok": False,
+                "reason": str(exc) or "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_REJECTED",
+            }
+        if capture_equivalence.get("ok") is True:
+            # The current capture is only an equivalence proof.  Preserve the
+            # original q, cutoff, provenance, and bundle identity; never make
+            # the later capture appear available at the original PIT cutoff.
+            equivalent_receipt = {
+                "reason": None,
+                "expected_bundle_identity": str(expected["bundle_identity"]),
+                "actual_bundle_identity": str(expected["bundle_identity"]),
+                "expected_carrier_vector_identity": str(
+                    expected["carrier_vector_identity"]
+                ),
+                "actual_carrier_vector_identity": str(
+                    expected["carrier_vector_identity"]
+                ),
+                "expected_carrier_vector_hash": str(
+                    expected["carrier_vector_hash"]
+                ),
+                "actual_carrier_vector_hash": str(
+                    expected["carrier_vector_hash"]
+                ),
+                "capture_equivalence": capture_equivalence,
+            }
+            successor = False
+            try:
+                from src.data.replacement_forecast_bundle_reader import (
+                    day0_causal_bundle_successor_materialized,
+                )
+
+                successor = bool(
+                    conn is not None
+                    and day0_causal_bundle_successor_materialized(
+                        conn,
+                        city=str(family.city),
+                        target_date=str(family.target_date),
+                        temperature_metric=str(family.metric),
+                        bundle_identity=str(expected["bundle_identity"]),
+                        decision_time=decision_time,
+                    )
+                )
+            except (TypeError, ValueError, sqlite3.Error):
+                successor = False
+            payload[receipt_key] = equivalent_receipt
+            payload[successor_key] = successor
+            if successor:
+                payload["_edli_day0_causal_evidence_bundle"] = dict(expected)
+                return expected
+            error = ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH")
+            setattr(error, "day0_causal_bundle_validation_receipt", equivalent_receipt)
+            raise error
+        receipt_with_capture = dict(receipt)
+        receipt_with_capture["capture_equivalence"] = capture_equivalence
+        payload[receipt_key] = receipt_with_capture
         # Probe only the current successor identity.  A positive probe cannot
         # legalize this invocation's old q: the caller must re-read the
         # successor bundle on the next bounded cycle.
@@ -46818,6 +46905,7 @@ def _day0_remaining_day_members(
                     family=family,
                     decision_time=decision_time,
                     vector_witness=current_vector_witness,
+                    vectors=vectors,
                 )
             except ValueError as exc:
                 held_bundle_scope = (

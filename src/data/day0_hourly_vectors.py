@@ -486,6 +486,404 @@ def validate_day0_causal_evidence_bundle(
     )
 
 
+_DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
+    {
+        "fetch_started_at",
+        "fetch_finished_at",
+        "request_hash",
+        "source_run_id",
+    }
+)
+
+
+def _day0_parse_aware_clock(value: object, *, field_name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _day0_normalize_vector_request_semantics(key: str, value: object) -> object:
+    """Canonicalize request semantics without coercing unknown metadata strings."""
+
+    if key == "request_params_json" and isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+    return _day0_canonical_json(value)
+
+
+def _day0_canonical_vector_row_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    vector_id: str,
+    model: str,
+    city: str,
+    target_date: str,
+    timezone_name: str,
+    witness: Mapping[str, object],
+    decision_bound_utc: datetime,
+) -> dict[str, object]:
+    """Read and validate one canonical vector row for equivalence proof.
+
+    The row payload is the authority.  Witness hashes/identities are only checked
+    against the row's fields; they never supply the content being compared.
+    """
+
+    row = conn.execute(
+        """
+        SELECT vector_id, model, city, target_date, timezone_name, captured_at,
+               provider, endpoint, request_hash, times_json, temps_c_json,
+               source_run_meta_json
+          FROM day0_hourly_vectors
+         WHERE vector_id = ?
+         LIMIT 1
+        """,
+        (str(vector_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_ROW_MISSING")
+    if (
+        str(row[0] or "") != str(vector_id)
+        or str(row[1] or "") != model
+        or str(row[2] or "") != city
+        or str(row[3] or "") != target_date
+        or str(row[4] or "") != timezone_name
+    ):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_SCOPE_MISMATCH")
+    try:
+        raw_times = json.loads(row[9])
+        raw_temps = json.loads(row[10])
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_PAYLOAD_INVALID") from exc
+    if (
+        not isinstance(raw_times, list)
+        or not isinstance(raw_temps, list)
+        or not raw_times
+        or len(raw_times) != len(raw_temps)
+        or any(not isinstance(value, str) or not value.strip() for value in raw_times)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in raw_temps
+        )
+    ):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_PAYLOAD_INVALID")
+    times = tuple(raw_times)
+    temps = tuple(float(value) for value in raw_temps)
+    try:
+        meta = json.loads(str(row[11] or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID") from exc
+    if not isinstance(meta, Mapping):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID")
+
+    capture = _day0_parse_aware_clock(row[5], field_name="captured_at")
+    fetch_started = _day0_parse_aware_clock(
+        meta.get("fetch_started_at"), field_name="fetch_started_at"
+    )
+    fetch_finished = _day0_parse_aware_clock(
+        meta.get("fetch_finished_at"), field_name="fetch_finished_at"
+    )
+    provider_cycle = _day0_parse_aware_clock(
+        meta.get("provider_source_cycle_time_utc"),
+        field_name="provider_source_cycle_time_utc",
+    )
+    provider_available = _day0_parse_aware_clock(
+        meta.get("provider_source_available_at_utc"),
+        field_name="provider_source_available_at_utc",
+    )
+    provider_modified = _day0_parse_aware_clock(
+        meta.get("provider_source_modified_at_utc"),
+        field_name="provider_source_modified_at_utc",
+    )
+    if not (
+        capture <= fetch_started <= fetch_finished <= decision_bound_utc
+        and provider_cycle <= provider_available <= fetch_finished
+        and provider_modified <= fetch_finished
+        and provider_cycle <= decision_bound_utc
+        and provider_available <= decision_bound_utc
+        and provider_modified <= decision_bound_utc
+    ):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CLOCK_INVALID")
+
+    provider_identity = _provider_run_identity_from_meta(
+        meta,
+        expected_model=model,
+    )
+    if provider_identity is None:
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PROVIDER_IDENTITY_INVALID")
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        SINGLE_RUNS_FORECAST_URL,
+        STANDARD_FORECAST_URL,
+    )
+
+    model_api_id = str(meta.get("model_api_id") or "").strip()
+    provider = str(meta.get("provider") or "").strip()
+    endpoint = str(row[7] or "").strip()
+    authority = str(meta.get("source_run_authority") or "").strip()
+    endpoint_mode = str(meta.get("endpoint_mode") or "").strip()
+    expected_endpoint_mode = {
+        "run_pinned_single_runs": "single_runs",
+        "provider_meta_declared": "standard_meta_stamped",
+    }.get(authority)
+    expected_endpoint = {
+        "single_runs": SINGLE_RUNS_FORECAST_URL,
+        "standard_meta_stamped": STANDARD_FORECAST_URL,
+    }.get(endpoint_mode)
+    expected_model_api_id = str(OPENMETEO_MODEL_IDS.get(model, model)).strip()
+    provider_run_id = str(meta.get("provider_run_id") or "").strip()
+    if (
+        provider != "openmeteo"
+        or str(row[6] or "").strip() != provider
+        or not endpoint
+        or str(meta.get("endpoint") or "").strip() != endpoint
+        or not model_api_id
+        or model_api_id != expected_model_api_id
+        or not provider_run_id
+        or provider_run_id
+        != f"openmeteo:{model_api_id}:{provider_identity[0].isoformat()}"
+        or authority not in {"run_pinned_single_runs", "provider_meta_declared"}
+        or endpoint_mode not in {"single_runs", "standard_meta_stamped"}
+        or endpoint_mode != expected_endpoint_mode
+        or endpoint != expected_endpoint
+    ):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PROVIDER_BINDING_INVALID")
+
+    mapping_values = {
+        "provider_by_model": str(row[6] or ""),
+        "endpoint_by_model": str(row[7] or ""),
+        "request_hash_by_model": str(row[8] or ""),
+        "source_run_id_by_model": str(meta.get("source_run_id") or ""),
+        "provider_run_id_by_model": str(meta.get("provider_run_id") or ""),
+        "model_api_id_by_model": str(meta.get("model_api_id") or ""),
+        "provider_source_cycle_time_by_model_utc": provider_cycle.isoformat(),
+        "provider_source_available_at_by_model_utc": provider_available.isoformat(),
+        "provider_source_modified_at_by_model_utc": provider_modified.isoformat(),
+        "fetch_started_times_by_model_utc": fetch_started.isoformat(),
+        "fetch_finished_times_by_model_utc": fetch_finished.isoformat(),
+        "source_run_authority_by_model": str(meta.get("source_run_authority") or ""),
+        "endpoint_mode_by_model": str(meta.get("endpoint_mode") or ""),
+    }
+    for field, expected in mapping_values.items():
+        mapping = witness.get(field)
+        if not isinstance(mapping, Mapping) or str(mapping.get(model) or "") != expected:
+            raise ValueError(f"DAY0_CAUSAL_CAPTURE_EQUIVALENCE_{field.upper()}_MISMATCH")
+    capture_mapping = witness.get("capture_times_by_model_utc")
+    if not isinstance(capture_mapping, Mapping) or str(capture_mapping.get(model) or "") != str(row[5]):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CAPTURE_CLOCK_MISMATCH")
+
+    request_hash = str(row[8] or "").strip()
+    source_run_id = str(meta.get("source_run_id") or "").strip()
+    if (
+        not request_hash
+        or not source_run_id
+        or str(meta.get("request_hash") or "").strip() != request_hash
+        or source_run_id != f"day0_hourly:{request_hash}"
+    ):
+        raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_REQUEST_BINDING_INVALID")
+
+    semantic_meta = {
+        str(key): _day0_normalize_vector_request_semantics(str(key), value)
+        for key, value in meta.items()
+        if str(key) not in _DAY0_CAPTURE_EQUIVALENCE_ONLY_META
+    }
+    return {
+        "model": model,
+        "city": city,
+        "target_date": target_date,
+        "timezone_name": timezone_name,
+        "times": times,
+        "temps_c": temps,
+        "semantic_meta": semantic_meta,
+        "capture": capture.isoformat(),
+        "fetch_started": fetch_started.isoformat(),
+        "fetch_finished": fetch_finished.isoformat(),
+        "request_hash": request_hash,
+        "source_run_id": source_run_id,
+    }
+
+
+def prove_day0_causal_capture_equivalence(
+    *,
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+    current_witness: Mapping[str, object],
+    conn: sqlite3.Connection,
+    city: str,
+    target_date: str,
+    timezone_name: str,
+    decision_time_utc: datetime,
+    current_vectors: Iterable[Day0HourlyVector],
+    remaining_window_start_utc: datetime,
+) -> dict[str, object]:
+    """Prove a v1 capture-only change without rebinding the original bundle.
+
+    Both bundles must be self-consistent first.  The expected rows are checked
+    against the original cutoff, while current rows are checked against the
+    current decision/target-end bound.  Only capture/fetch clocks and their
+    derived request/source-run IDs may differ; every payload and semantic
+    metadata field comes from the canonical rows.
+    """
+
+    try:
+        if (
+            decision_time_utc.tzinfo is None
+            or decision_time_utc.utcoffset() is None
+            or remaining_window_start_utc.tzinfo is None
+            or remaining_window_start_utc.utcoffset() is None
+        ):
+            return {
+                "ok": False,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CLOCK_NOT_AWARE",
+            }
+        expected_self = validate_day0_causal_evidence_bundle(
+            expected=expected, actual=expected
+        )
+        actual_self = validate_day0_causal_evidence_bundle(
+            expected=actual, actual=actual
+        )
+        if not expected_self.ok or not actual_self.ok:
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_BUNDLE_INVALID"}
+        if expected.get("city") != city or expected.get("target_date") != target_date:
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CONTEXT_MISMATCH"}
+        if any(
+            expected.get(field) != actual.get(field)
+            for field in ("city", "target_date", "metric", "observation_context", "cutoff_utc")
+        ):
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CONTEXT_MISMATCH"}
+        expected_witness = expected["carrier_vector_witness"]
+        actual_witness = actual["carrier_vector_witness"]
+        if not isinstance(expected_witness, Mapping) or not isinstance(actual_witness, Mapping):
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_WITNESS_INVALID"}
+        expected_ids = expected_witness.get("vector_ids_by_model")
+        current_ids = current_witness.get("vector_ids_by_model")
+        actual_ids = actual_witness.get("vector_ids_by_model")
+        if not isinstance(expected_ids, Mapping) or not isinstance(current_ids, Mapping) or not isinstance(actual_ids, Mapping):
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_IDS_INVALID"}
+        if dict(actual_ids) != dict(current_ids) or set(expected_ids) != set(current_ids):
+            return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_VECTOR_SCOPE_MISMATCH"}
+        cutoff = _day0_parse_aware_clock(
+            expected["cutoff_utc"], field_name="bundle_cutoff_utc"
+        )
+        decision = decision_time_utc.astimezone(UTC)
+        remaining_window_start = remaining_window_start_utc.astimezone(UTC)
+        if remaining_window_start > decision:
+            return {
+                "ok": False,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_REMAINING_WINDOW_AFTER_DECISION",
+            }
+        if cutoff > decision:
+            return {
+                "ok": False,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CUTOFF_AFTER_DECISION",
+            }
+        local_target = date.fromisoformat(str(target_date)[:10])
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            datetime_time.min,
+            tzinfo=ZoneInfo(timezone_name),
+        ).astimezone(UTC)
+        for witness in (expected_witness, actual_witness):
+            if str(witness.get("target_end_utc") or "") != target_end.isoformat():
+                return {
+                    "ok": False,
+                    "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_TARGET_END_MISMATCH",
+                }
+        current_bound = min(decision, target_end)
+        expected_models = tuple(
+            str(model).strip()
+            for model in (current_witness.get("expected_models") or ())
+            if str(model).strip()
+        )
+        ready_vectors = select_ready_day0_hourly_vectors(
+            current_vectors,
+            target_date=target_date,
+            now=current_bound,
+            expected_models=expected_models,
+            require_expected=True,
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=remaining_window_start,
+            require_complete_remaining_window=True,
+        )
+        ready_capture_by_model = {
+            str(vector.model): str(vector.captured_at)
+            for vector in ready_vectors
+        }
+        current_capture_by_model = current_witness.get(
+            "capture_times_by_model_utc"
+        )
+        if (
+            not expected_models
+            or set(expected_models) != set(current_ids)
+            or set(ready_capture_by_model) != set(expected_models)
+            or not isinstance(current_capture_by_model, Mapping)
+            or any(
+                ready_capture_by_model.get(model)
+                != str(current_capture_by_model.get(model) or "")
+                for model in expected_models
+            )
+        ):
+            return {
+                "ok": False,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CURRENT_BUNDLE_NOT_READY",
+            }
+        expected_rows = {
+            model: _day0_canonical_vector_row_snapshot(
+                conn,
+                vector_id=str(vector_id),
+                model=str(model),
+                city=city,
+                target_date=target_date,
+                timezone_name=timezone_name,
+                witness=expected_witness,
+                decision_bound_utc=cutoff,
+            )
+            for model, vector_id in expected_ids.items()
+        }
+        current_rows = {
+            model: _day0_canonical_vector_row_snapshot(
+                conn,
+                vector_id=str(vector_id),
+                model=str(model),
+                city=city,
+                target_date=target_date,
+                timezone_name=timezone_name,
+                witness=current_witness,
+                decision_bound_utc=current_bound,
+            )
+            for model, vector_id in current_ids.items()
+        }
+        for model in expected_rows:
+            expected_row = expected_rows[model]
+            current_row = current_rows[model]
+            if (
+                expected_row["model"], expected_row["city"], expected_row["target_date"], expected_row["timezone_name"]
+            ) != (
+                current_row["model"], current_row["city"], current_row["target_date"], current_row["timezone_name"]
+            ) or expected_row["times"] != current_row["times"] or expected_row["temps_c"] != current_row["temps_c"]:
+                return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH", "model": model}
+            if _day0_json_hash(expected_row["semantic_meta"]) != _day0_json_hash(current_row["semantic_meta"]):
+                return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH", "model": model}
+        return {
+            "ok": True,
+            "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENT",
+            "expected_vector_ids_by_model": dict(expected_ids),
+            "current_vector_ids_by_model": dict(current_ids),
+            "allowed_differences": sorted(_DAY0_CAPTURE_EQUIVALENCE_ONLY_META | {"captured_at"}),
+            "original_cutoff_utc": cutoff.isoformat(),
+            "current_bound_utc": current_bound.isoformat(),
+        }
+    except (AttributeError, KeyError, TypeError, ValueError, sqlite3.Error) as exc:
+        return {"ok": False, "reason": str(exc) or "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_REJECTED"}
+
+
 def day0_remaining_carrier_identity_inputs(
     *,
     city: str,
