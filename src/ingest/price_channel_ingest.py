@@ -160,6 +160,16 @@ _market_channel_universe_reload_connections: set[object] = set()
 _market_channel_universe_refresh_debt: dict[str, object] | None = None
 
 
+class PriceChannelWriteDeferred(TimeoutError):
+    """A write deferred before acquiring the shared WORLD mutex."""
+
+    stage = "world_mutex_pre_acquire"
+
+    def __init__(self, *, owner: str, message: str) -> None:
+        self.owner = str(owner)
+        super().__init__(message)
+
+
 class _CanonicalHeldScopeUnavailable(RuntimeError):
     """The held monitor scope cannot be read safely from canonical TRADE truth."""
 
@@ -1337,9 +1347,12 @@ class _PriceChannelWriteGate:
                 mutex = _world_write_mutex()
                 remaining = max(0.0, deadline - time.monotonic())
                 if not mutex.acquire(timeout=remaining):
-                    raise TimeoutError(
-                        f"{self._owner} deferred: WORLD writer busy for "
-                        f"{self._deadline_ms}ms"
+                    raise PriceChannelWriteDeferred(
+                        owner=self._owner,
+                        message=(
+                            f"{self._owner} deferred: WORLD writer busy for "
+                            f"{self._deadline_ms}ms"
+                        ),
                     )
                 stack.callback(mutex.release)
             remaining_ms = (

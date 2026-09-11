@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-09-11
 # Authority basis: 2026-06-09 ws-boot-latch deadlock incident. Three requirements formed
 #   a cycle that latched submits FOREVER after any daemon restart with a resting order:
 #   (1) the pong clean-boot transition (not_configured -> AUTHED) demanded an EMPTY local
@@ -21,6 +21,7 @@ Cross-module invariant (polymarket_user_channel -> ws_gap_guard -> exchange_reco
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -464,3 +465,311 @@ def test_unresolved_finding_keeps_sweep_from_clearing(conn) -> None:
     )
     assert result["status"] == "blocked"
     assert ws_gap_guard.summary(now=NOW + timedelta(seconds=6))["entry"]["allow_submit"] is False
+
+
+def test_price_channel_write_deferred_is_only_emitted_before_world_mutex_acquire(
+    monkeypatch,
+):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    class _BusyMutex:
+        def acquire(self, *, timeout):
+            assert timeout >= 0
+            return False
+
+        def release(self):
+            raise AssertionError("busy mutex must not be released")
+
+    monkeypatch.setattr(
+        market_channel_ingestor, "_world_write_mutex", lambda: _BusyMutex()
+    )
+    with pytest.raises(lane.PriceChannelWriteDeferred) as caught:
+        lane._PriceChannelWriteGate(
+            owner="price_channel_user_inbox",
+            scope="world",
+            deadline_ms=1,
+        ).__enter__()
+    assert caught.value.owner == "price_channel_user_inbox"
+    assert caught.value.stage == "world_mutex_pre_acquire"
+
+    class _LeaseTimeoutCoordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **_kwargs):
+            raise TimeoutError("lease timeout")
+            yield
+
+    class _FreeMutex:
+        def acquire(self, *, timeout):
+            assert timeout >= 0
+            return True
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(market_channel_ingestor, "_world_write_mutex", lambda: _FreeMutex())
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _LeaseTimeoutCoordinator(),
+    )
+    with pytest.raises(TimeoutError, match="lease timeout"):
+        lane._PriceChannelWriteGate(
+            owner="price_channel_user_inbox",
+            scope="world",
+            deadline_ms=1,
+        ).__enter__()
+
+
+def test_user_reconcile_pre_acquire_deferral_preserves_prior_scheduler_success(
+    monkeypatch, tmp_path
+):
+    import src.config as config
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    health_path = tmp_path / "scheduler_jobs_health.json"
+    prior = {
+        "edli_user_channel_reconcile": {
+            "status": "OK",
+            "last_success_at": "2026-09-11T22:00:00+00:00",
+            "business_liveness": {
+                "daemon_pid": 123,
+                "heartbeat_generation": "generation-old",
+                "heartbeat_receipt": "receipt-old",
+            },
+        }
+    }
+    health_path.write_text(json.dumps(prior))
+    monkeypatch.setattr(config, "state_path", lambda _filename: health_path)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", health_path)
+    deferred = lane.PriceChannelWriteDeferred(
+        owner="price_channel_user_inbox",
+        message="user inbox deferred",
+    )
+    promoted = []
+    monkeypatch.setattr(
+        daemon, "_promote_price_channel_heartbeat_ready", lambda: promoted.append(True)
+    )
+    result = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: (_ for _ in ()).throw(deferred)
+    )()
+
+    assert result is None
+    assert json.loads(health_path.read_text()) == prior
+    assert promoted == []
+
+
+def test_real_failure_revokes_prior_m5_and_deferral_cannot_restore_it(
+    conn, monkeypatch, tmp_path
+):
+    """A typed pre-acquire deferral preserves an already revoked M5 proof."""
+
+    import src.config as config
+    from src.control import ws_gap_guard
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    live_now = datetime.now(timezone.utc)
+    health_path = tmp_path / "scheduler_jobs_health.json"
+    monkeypatch.setattr(config, "state_path", lambda _filename: tmp_path / _filename)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", health_path)
+    _write_current_sidecar_authority(
+        tmp_path, now=live_now, m5_success_at=live_now
+    )
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is True
+
+    failed = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: (_ for _ in ()).throw(RuntimeError("real reconcile failure"))
+    )()
+    assert failed is None
+    failed_health = json.loads(health_path.read_text())[
+        "edli_user_channel_reconcile"
+    ]
+    assert failed_health["status"] == "FAILED"
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+
+    deferred = lane.PriceChannelWriteDeferred(
+        owner="price_channel_user_inbox", message="pre-acquire"
+    )
+    assert daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: (_ for _ in ()).throw(deferred)
+    )() is None
+    assert json.loads(health_path.read_text())["edli_user_channel_reconcile"] == (
+        failed_health
+    )
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+
+
+@pytest.mark.parametrize("evidence", ("absent", "stale", "wrong_generation"))
+def test_pre_acquire_deferral_does_not_create_sidecar_authority(
+    conn, monkeypatch, tmp_path, evidence
+):
+    import src.config as config
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    live_now = datetime.now(timezone.utc)
+    health_path = tmp_path / "scheduler_jobs_health.json"
+    monkeypatch.setattr(config, "state_path", lambda _filename: tmp_path / _filename)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", health_path)
+    if evidence == "absent":
+        (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+            json.dumps(
+                {
+                    "daemon": "price-channel-ingest",
+                    "status": "READY",
+                    "ready": True,
+                    "alive_at": live_now.isoformat(),
+                    "pid": 123,
+                    "generation": "generation-current",
+                }
+            )
+        )
+    elif evidence == "stale":
+        old = live_now - timedelta(
+            seconds=ws_gap_guard.DURABLE_SIDECAR_STALE_AFTER_SECONDS + 1
+        )
+        _write_current_sidecar_authority(tmp_path, now=live_now, m5_success_at=old)
+    else:
+        _write_current_sidecar_authority(
+            tmp_path,
+            now=live_now,
+            m5_success_at=live_now,
+            m5_generation="generation-prior",
+        )
+
+    deferred = lane.PriceChannelWriteDeferred(
+        owner="price_channel_user_inbox", message="pre-acquire"
+    )
+    assert daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: (_ for _ in ()).throw(deferred)
+    )() is None
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+
+
+@pytest.mark.parametrize(
+    ("owner", "job_name"),
+    (
+        ("price_channel_venue_reconcile", "edli_user_channel_reconcile"),
+        ("price_channel_user_inbox", "edli_market_channel_ingestor"),
+    ),
+)
+def test_only_user_reconcile_pre_acquire_deferral_is_silent(
+    monkeypatch, owner, job_name
+):
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    writes = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, **kwargs: writes.append({"job_name": job, **kwargs}),
+    )
+    deferred = lane.PriceChannelWriteDeferred(owner=owner, message="deferred")
+    result = daemon._scheduler_job(job_name)(
+        lambda: (_ for _ in ()).throw(deferred)
+    )()
+
+    assert result is None
+    assert writes == [{"job_name": job_name, "failed": True, "reason": "deferred"}]
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        TimeoutError("plain timeout"),
+        sqlite3.OperationalError("database is locked"),
+        OSError("open failed"),
+        RuntimeError("commit failed"),
+        ValueError("reconcile failed"),
+    ),
+)
+def test_user_reconcile_real_failures_remain_scheduler_failed(monkeypatch, error):
+    from src.ingest import price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, **kwargs: writes.append({"job_name": job, **kwargs}),
+    )
+    result = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: (_ for _ in ()).throw(error)
+    )()
+
+    assert result is None
+    assert writes == [
+        {
+            "job_name": "edli_user_channel_reconcile",
+            "failed": True,
+            "reason": str(error),
+        }
+    ]
+
+
+def test_scheduler_failed_result_remains_failed(monkeypatch):
+    from src.ingest import price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, **kwargs: writes.append({"job_name": job, **kwargs}),
+    )
+    result = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lambda: {
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "business failure",
+        }
+    )()
+
+    assert result["scheduler_failed"] is True
+    assert writes == [
+        {
+            "job_name": "edli_user_channel_reconcile",
+            "failed": True,
+            "reason": "business failure",
+            "extra": {
+                "scheduler_failed": True,
+                "scheduler_failure_reason": "business failure",
+            },
+        }
+    ]
+
+
+def test_price_channel_deferred_marker_is_constructed_only_at_mutex_gate():
+    import ast
+    from pathlib import Path
+
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "ingest"
+        / "price_channel_ingest.py"
+    )
+    tree = ast.parse(source_path.read_text())
+    raises = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "PriceChannelWriteDeferred"
+    ]
+    assert len(raises) == 1
+    gate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "_PriceChannelWriteGate"
+    )
+    assert raises[0] in ast.walk(gate)

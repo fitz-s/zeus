@@ -336,6 +336,23 @@ def _scheduler_job(job_name: str):
                         pass
                 return result
             except Exception as exc:  # noqa: BLE001
+                try:
+                    from src.ingest.price_channel_ingest import PriceChannelWriteDeferred
+                except Exception:  # noqa: BLE001 - preserve generic failure handling
+                    PriceChannelWriteDeferred = None
+                if (
+                    job_name == "edli_user_channel_reconcile"
+                    and PriceChannelWriteDeferred is not None
+                    and isinstance(exc, PriceChannelWriteDeferred)
+                    and exc.owner == "price_channel_user_inbox"
+                    and exc.stage == "world_mutex_pre_acquire"
+                ):
+                    logger.info(
+                        "%s deferred before WORLD mutex acquisition: %s",
+                        job_name,
+                        exc,
+                    )
+                    return None
                 logger.error("%s failed: %s", job_name, exc, exc_info=True)
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
