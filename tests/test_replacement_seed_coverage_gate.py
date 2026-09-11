@@ -851,7 +851,9 @@ def test_global_frozen_artifact_prime_uses_product_cycle_partition() -> None:
     assert cycle == datetime(2026, 6, 7, 6, tzinfo=UTC)
     assert any(
         "PRODUCT_ID" in statement.upper()
-        and "SOURCE_CYCLE_TIME = '2026-06-07T06:00:00+00:00'" in statement.upper()
+        and "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in statement.upper()
+        and "JSON_EXTRACT(ARTIFACT_METADATA_JSON, '$.CITY')" in statement.upper()
+        and "SOURCE_CYCLE_TIME <=" in statement.upper()
         for statement in traced
     )
     assert not any("JOIN REQUESTED" in statement.upper() for statement in traced)
@@ -920,7 +922,9 @@ def test_scalar_frozen_artifact_hwm_uses_product_cycle_partition() -> None:
     assert cycle == datetime(2026, 6, 7, 6, tzinfo=UTC)
     assert any(
         "PRODUCT_ID" in statement.upper()
-        and "SOURCE_CYCLE_TIME = '2026-06-07T06:00:00+00:00'" in statement.upper()
+        and "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in statement.upper()
+        and "JSON_EXTRACT(ARTIFACT_METADATA_JSON, '$.CITY')" in statement.upper()
+        and "SOURCE_CYCLE_TIME <=" in statement.upper()
         for statement in traced
     )
     assert not any("JOIN REQUESTED" in statement.upper() for statement in traced)
@@ -992,17 +996,19 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
         if "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
         and "ARTIFACT_METADATA_JSON" in statement.upper()
     ]
-    cycle_queries = [
+    family_queries = [
         statement.upper()
         for statement in traced
-        if "SELECT MAX(SOURCE_CYCLE_TIME)" in statement.upper()
+        if "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in statement.upper()
     ]
-    assert cycle_queries
-    assert all("GROUP BY SOURCE_CYCLE_TIME" not in statement for statement in cycle_queries)
-    assert all("DATETIME(CAPTURED_AT)" not in statement for statement in cycle_queries)
+    assert family_queries
+    assert all("GROUP BY SOURCE_CYCLE_TIME" not in statement for statement in family_queries)
+    assert all("SOURCE_CYCLE_TIME <=" in statement for statement in family_queries)
+    assert all("DATETIME(SOURCE_CYCLE_TIME) <=" in statement for statement in family_queries)
+    assert all("DATETIME(CAPTURED_AT) <=" in statement for statement in family_queries)
     assert all(
-        "DATETIME(SOURCE_AVAILABLE_AT)" not in statement
-        for statement in cycle_queries
+        "DATETIME(SOURCE_AVAILABLE_AT) <=" in statement
+        for statement in family_queries
     )
     assert payload_queries
-    assert all("SOURCE_CYCLE_TIME =" in statement for statement in payload_queries)
+    assert all("SOURCE_CYCLE_TIME <=" in statement for statement in payload_queries)

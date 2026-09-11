@@ -168,6 +168,25 @@ def test_cycle_hwm_seeks_each_family_back_to_latest_causal_product_cycle(
         ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX idx_raw_forecast_artifacts_product_family_cycle
+        ON raw_forecast_artifacts(
+            source_id,
+            product_id,
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.city') AS TEXT)
+             END),
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.target_date') AS TEXT)
+             END),
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.metric') AS TEXT)
+             END),
+            source_cycle_time
+        )
+        """
+    )
     newest = ("Shanghai", "2026-08-12", "high")
     older = ("Tokyo", "2026-08-12", "high")
     missing = ("Seoul", "2026-08-12", "high")
@@ -195,20 +214,32 @@ def test_cycle_hwm_seeks_each_family_back_to_latest_causal_product_cycle(
     plan = conn.execute(
         """
         EXPLAIN QUERY PLAN
-        SELECT MAX(source_cycle_time)
+        SELECT source_cycle_time
           FROM raw_forecast_artifacts
          WHERE source_id = ?
            AND product_id = ?
+           AND (CASE WHEN json_valid(artifact_metadata_json)
+                     THEN CAST(json_extract(artifact_metadata_json, '$.city') AS TEXT)
+                END) = ?
+           AND (CASE WHEN json_valid(artifact_metadata_json)
+                     THEN CAST(json_extract(artifact_metadata_json, '$.target_date') AS TEXT)
+                END) = ?
+           AND (CASE WHEN json_valid(artifact_metadata_json)
+                     THEN CAST(json_extract(artifact_metadata_json, '$.metric') AS TEXT)
+                END) = ?
            AND source_cycle_time <= ?
         """,
         (
             OPENMETEO_ANCHOR_SOURCE_ID,
             OPENMETEO_ANCHOR_PRODUCT_ID,
+            newest[0],
+            newest[1],
+            newest[2],
             "2026-08-11T13:00:00+00:00",
         ),
     ).fetchall()
     assert any(
-        "idx_raw_forecast_artifacts_product_cycle" in str(row[-1])
+        "idx_raw_forecast_artifacts_product_family_cycle" in str(row[-1])
         for row in plan
     )
     traced: list[str] = []
@@ -248,13 +279,13 @@ def test_cycle_hwm_seeks_each_family_back_to_latest_causal_product_cycle(
         for statement in traced
         if "RAW_FORECAST_ARTIFACTS" in statement.upper()
     ]
-    cycle_probes = [
-        sql for sql in hwm_statements if "SELECT MAX(SOURCE_CYCLE_TIME)" in sql
+    family_queries = [
+        sql for sql in hwm_statements if "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in sql
     ]
-    assert len(cycle_probes) == 3  # 12:00, 06:00, then exhausted for missing.
-    assert "SOURCE_CYCLE_TIME <=" in cycle_probes[0]
-    assert all("SOURCE_CYCLE_TIME <" in sql for sql in cycle_probes[1:])
-    assert all("DATETIME(SOURCE_CYCLE_TIME)" not in sql for sql in cycle_probes)
+    assert len(family_queries) == 3  # one indexed cursor per requested family.
+    assert all("SOURCE_CYCLE_TIME <=" in sql for sql in family_queries)
+    assert all("DATETIME(SOURCE_CYCLE_TIME) <=" in sql for sql in family_queries)
+    assert all("JSON_VALID(ARTIFACT_METADATA_JSON)" in sql for sql in family_queries)
     assert not any("GROUP BY SOURCE_CYCLE_TIME" in sql for sql in hwm_statements)
     assert not any("2026-08-11T14:00:00+00:00" in sql for sql in hwm_statements)
 
@@ -262,12 +293,105 @@ def test_cycle_hwm_seeks_each_family_back_to_latest_causal_product_cycle(
         newest: datetime(2026, 8, 11, 12, tzinfo=UTC),
         older: datetime(2026, 8, 11, 6, tzinfo=UTC),
     }
-    complete_probes = [
-        " ".join(statement.upper().split())
+    complete_family_queries = [
+        statement
         for statement in complete_traced
-        if "SELECT MAX(SOURCE_CYCLE_TIME)" in statement.upper()
+        if "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in statement.upper()
     ]
-    assert len(complete_probes) == 2
+    assert len(complete_family_queries) == 2
+
+
+def test_cycle_hwm_missing_family_is_bounded_with_many_unrelated_cycles() -> None:
+    class StepBudgetConnection(sqlite3.Connection):
+        vm_steps = 0
+
+        def set_progress_handler(self, callback, instructions):
+            if callback is not None:
+                original = callback
+
+                def count_steps():
+                    self.vm_steps += instructions
+                    return original()
+
+                callback = count_steps
+            return super().set_progress_handler(callback, instructions)
+
+    conn = sqlite3.connect(":memory:", factory=StepBudgetConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_path TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_raw_forecast_artifacts_product_family_cycle
+        ON raw_forecast_artifacts(
+            source_id,
+            product_id,
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.city') AS TEXT)
+             END),
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.target_date') AS TEXT)
+             END),
+            (CASE WHEN json_valid(artifact_metadata_json)
+                  THEN CAST(json_extract(artifact_metadata_json, '$.metric') AS TEXT)
+             END),
+            source_cycle_time
+        )
+        """
+    )
+    unrelated = {
+        "city": "Unrelated",
+        "target_date": "2026-08-12",
+        "metric": "high",
+    }
+    rows = []
+    for minute in range(4_000):
+        cycle = datetime(2026, 8, 8, tzinfo=UTC) + timedelta(minutes=minute)
+        cycle_iso = cycle.isoformat()
+        rows.append(
+            (
+                OPENMETEO_ANCHOR_SOURCE_ID,
+                OPENMETEO_ANCHOR_PRODUCT_ID,
+                cycle_iso,
+                cycle_iso,
+                cycle_iso,
+                "",
+                json.dumps(unrelated),
+            )
+        )
+    conn.executemany(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+    missing = ("Absent", "2026-08-12", "high")
+    conn.execute("BEGIN")
+    try:
+        snapshot = freeze_replacement_artifact_hwm(
+            conn,
+            requests=(missing,),
+            decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+            sql_timeout_seconds=5.0,
+        )
+    finally:
+        conn.rollback()
+    conn.close()
+
+    assert missing not in snapshot.artifact_cycles
+    assert snapshot.artifact_cycles == {}
+    assert conn.vm_steps < 10_000
 
 
 def test_cycle_hwm_reuses_unchanged_payload_coverage_and_rechecks_rewrite(

@@ -473,6 +473,23 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_raw_forecast_artifacts_product_cycle
             ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_forecast_artifacts_product_family_cycle
+            ON raw_forecast_artifacts(
+                source_id,
+                product_id,
+                (CASE WHEN json_valid(artifact_metadata_json)
+                      THEN CAST(json_extract(artifact_metadata_json, '$.city') AS TEXT)
+                 END),
+                (CASE WHEN json_valid(artifact_metadata_json)
+                      THEN CAST(json_extract(artifact_metadata_json, '$.target_date') AS TEXT)
+                 END),
+                (CASE WHEN json_valid(artifact_metadata_json)
+                      THEN CAST(json_extract(artifact_metadata_json, '$.metric') AS TEXT)
+                 END),
+                source_cycle_time
+            )
+    """)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS deterministic_forecast_anchors (

@@ -125,6 +125,31 @@ def _raise_hwm_deadline_elapsed(*, basis: str) -> None:
     )
 
 
+@dataclass
+class _HwmProgressController:
+    """Keep one SQL deadline across a streaming cursor."""
+
+    conn: sqlite3.Connection
+    callback: Callable[[], int]
+    enabled: bool = True
+    installed: bool = False
+
+    def install(self) -> None:
+        if not self.enabled:
+            return
+        self.conn.set_progress_handler(self.callback, 1_000)
+        self.installed = True
+
+    def suspend(self) -> None:
+        if self.enabled and self.installed:
+            self.conn.set_progress_handler(None, 0)
+            self.installed = False
+
+    def resume(self) -> None:
+        if self.enabled and not self.installed:
+            self.install()
+
+
 @contextmanager
 def _bounded_hwm_sql(
     conn: sqlite3.Connection,
@@ -134,7 +159,7 @@ def _bounded_hwm_sql(
     """Bound one SQL statement on a dedicated HWM read connection."""
 
     if deadline_monotonic is None and sql_timeout_seconds is None:
-        yield
+        yield _HwmProgressController(conn, lambda: 0, enabled=False)
         return
     started = time.monotonic()
     outer_deadline = (
@@ -168,16 +193,15 @@ def _bounded_hwm_sql(
             )
         )
 
-    handler_installed = False
+    progress = _HwmProgressController(conn, deadline_elapsed)
     try:
         lock_wait_seconds = min(1.0, remaining)
         conn.execute(
             "PRAGMA busy_timeout = "
             f"{max(0, int(lock_wait_seconds * 1000))}"
         )
-        conn.set_progress_handler(lambda: int(deadline_elapsed()), 1_000)
-        handler_installed = True
-        yield
+        progress.install()
+        yield progress
         if deadline_elapsed():
             _raise_hwm_deadline_elapsed(
                 basis="raw_artifact_input_hwm_sql_deadline",
@@ -191,8 +215,7 @@ def _bounded_hwm_sql(
         )
     finally:
         try:
-            if handler_installed:
-                conn.set_progress_handler(None, 0)
+            progress.suspend()
         finally:
             conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout_ms}")
 
@@ -942,102 +965,103 @@ def _batch_product_cycle_artifact_cycles(
     deadline_monotonic: float | None = None,
     sql_timeout_seconds: float | None = None,
 ) -> dict[tuple[str, str, str], datetime]:
-    """Resolve requested HWMs from newest product-cycle partitions first."""
+    """Resolve each requested family through the product-family cycle index."""
 
-    select_path = "artifact_path" if "artifact_path" in columns else "NULL"
+    select_path = "artifact.artifact_path" if "artifact_path" in columns else "NULL"
     cycles: dict[tuple[str, str, str], datetime] = {}
-    cycle_ceiling = decision_iso
-    inclusive_ceiling = True
-    while True:
-        remaining = requests.difference(cycles)
-        if not remaining:
-            break
-        comparison = "<=" if inclusive_ceiling else "<"
-        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
-            cycle_row = conn.execute(
-                f"""
-                SELECT MAX(source_cycle_time) AS source_cycle_time
-                  FROM {table_ref}
-                 WHERE source_id = ?
-                   AND product_id = ?
-                   AND source_cycle_time {comparison} ?
-                """,
-                (
-                    OPENMETEO_ANCHOR_SOURCE_ID,
-                    OPENMETEO_ANCHOR_PRODUCT_ID,
-                    cycle_ceiling,
-                ),
-            ).fetchone()
-        if cycle_row is None:
-            break
+    for requested_key in sorted(requests):
+        if requested_key in cycles:
+            continue
+        city, target_date, metric = requested_key
+        cursor: sqlite3.Cursor | None = None
+        params = (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            city,
+            target_date,
+            metric,
+            decision_iso,
+            decision_iso,
+            decision_iso,
+            decision_iso,
+        )
+        query = f"""
+            SELECT CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_extract(artifact_metadata_json, '$.city')
+               END AS artifact_city,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_extract(artifact_metadata_json, '$.target_date')
+               END AS artifact_target_date,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_extract(artifact_metadata_json, '$.metric')
+               END AS artifact_metric,
+               source_cycle_time,
+               {select_path} AS artifact_path,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_type(artifact_metadata_json)
+               END AS metadata_type,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_type(
+                        artifact_metadata_json,
+                        '$.openmeteo_payload_json'
+                    )
+               END AS payload_path_type,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_extract(
+                        artifact_metadata_json,
+                        '$.openmeteo_payload_json'
+                    )
+               END AS payload_path,
+               artifact_metadata_json
+          FROM {table_ref} AS artifact
+         WHERE artifact.source_id = ?
+           AND artifact.product_id = ?
+           AND (CASE WHEN json_valid(artifact.artifact_metadata_json)
+                     THEN CAST(json_extract(artifact.artifact_metadata_json, '$.city') AS TEXT)
+                END) = ?
+           AND (CASE WHEN json_valid(artifact.artifact_metadata_json)
+                     THEN CAST(json_extract(artifact.artifact_metadata_json, '$.target_date') AS TEXT)
+                END) = ?
+           AND (CASE WHEN json_valid(artifact.artifact_metadata_json)
+                     THEN CAST(json_extract(artifact.artifact_metadata_json, '$.metric') AS TEXT)
+                END) = ?
+           AND artifact.source_cycle_time <= ?
+           AND datetime(source_cycle_time) <= datetime(?)
+           AND datetime(captured_at) <= datetime(?)
+           AND datetime(source_available_at) <= datetime(?)
+         ORDER BY source_cycle_time DESC,
+                  datetime(captured_at) DESC,
+                  datetime(source_available_at) DESC
+        """
         try:
-            source_cycle = cycle_row["source_cycle_time"]
-        except Exception:  # noqa: BLE001 - tuple row compatibility
-            source_cycle = cycle_row[0]
-        if source_cycle in (None, ""):
+            with _bounded_hwm_sql(
+                conn, deadline_monotonic, sql_timeout_seconds
+            ) as sql_scope:
+                cursor = conn.execute(query, params)
+                while requested_key not in cycles:
+                    row = cursor.fetchone()
+                    if row is None:
+                        break
+                    sql_scope.suspend()
+                    try:
+                        cycles.update(
+                            _artifact_cycles_from_rows(
+                                (row,),
+                                columns=columns,
+                                requested_keys=frozenset((requested_key,)),
+                            )
+                        )
+                    finally:
+                        sql_scope.resume()
+                    _require_hwm_deadline(
+                        deadline_monotonic,
+                        basis="raw_artifact_input_hwm_payload_validation_deadline",
+                    )
+        finally:
+            if cursor is not None:
+                cursor.close()
+        if len(cycles) == len(requests):
             break
-        cycle_ceiling = str(source_cycle)
-        inclusive_ceiling = False
-        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
-            rows = conn.execute(
-                f"""
-                SELECT CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_extract(artifact_metadata_json, '$.city')
-                   END AS artifact_city,
-                   CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_extract(artifact_metadata_json, '$.target_date')
-                   END AS artifact_target_date,
-                   CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_extract(artifact_metadata_json, '$.metric')
-                   END AS artifact_metric,
-                   source_cycle_time,
-                   {select_path} AS artifact_path,
-                   CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_type(artifact_metadata_json)
-                   END AS metadata_type,
-                   CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_type(
-                            artifact_metadata_json,
-                            '$.openmeteo_payload_json'
-                        )
-                   END AS payload_path_type,
-                   CASE WHEN json_valid(artifact_metadata_json)
-                        THEN json_extract(
-                            artifact_metadata_json,
-                            '$.openmeteo_payload_json'
-                        )
-                   END AS payload_path,
-                   artifact_metadata_json
-              FROM {table_ref}
-             WHERE source_id = ?
-               AND product_id = ?
-               AND source_cycle_time = ?
-               AND datetime(source_cycle_time) <= datetime(?)
-               AND datetime(captured_at) <= datetime(?)
-               AND datetime(source_available_at) <= datetime(?)
-                 ORDER BY datetime(captured_at) DESC,
-                          datetime(source_available_at) DESC
-                """,
-                (
-                    OPENMETEO_ANCHOR_SOURCE_ID,
-                    OPENMETEO_ANCHOR_PRODUCT_ID,
-                    source_cycle,
-                    decision_iso,
-                    decision_iso,
-                    decision_iso,
-                ),
-            ).fetchall()
-        cycles.update(
-            _artifact_cycles_from_rows(
-                rows,
-                columns=columns,
-                requested_keys=frozenset(remaining),
-            )
-        )
-        _require_hwm_deadline(
-            deadline_monotonic,
-            basis="raw_artifact_input_hwm_payload_validation_deadline",
-        )
     return cycles
 
 
