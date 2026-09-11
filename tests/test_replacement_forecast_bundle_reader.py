@@ -350,6 +350,10 @@ def test_cycle_hwm_missing_family_is_bounded_with_many_unrelated_cycles() -> Non
         )
         """
     )
+    conn.execute(
+        "CREATE INDEX idx_raw_forecast_artifacts_product_cycle "
+        "ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)"
+    )
     unrelated = {
         "city": "Unrelated",
         "target_date": "2026-08-12",
@@ -376,6 +380,14 @@ def test_cycle_hwm_missing_family_is_bounded_with_many_unrelated_cycles() -> Non
     )
     conn.commit()
 
+    selects = 0
+
+    def count_selects(statement):
+        nonlocal selects
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects += 1
+
+    conn.set_trace_callback(count_selects)
     missing = ("Absent", "2026-08-12", "high")
     conn.execute("BEGIN")
     try:
@@ -391,7 +403,8 @@ def test_cycle_hwm_missing_family_is_bounded_with_many_unrelated_cycles() -> Non
 
     assert missing not in snapshot.artifact_cycles
     assert snapshot.artifact_cycles == {}
-    assert conn.vm_steps < 10_000
+    assert conn.vm_steps < 10_000, (conn.vm_steps, selects)
+    assert selects < 20
 
 
 def test_cycle_hwm_reuses_unchanged_payload_coverage_and_rechecks_rewrite(
