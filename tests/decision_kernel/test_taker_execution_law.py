@@ -519,6 +519,67 @@ def test_global_exact_taker_preserves_deep_limit_and_exact_share_count():
     assert final_intent.payload["global_exact_order"] is True
 
 
+def _current_pre_submit_payload(final_intent, executable, *, min_order_size=5.0):
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        _pre_submit_revalidation_payload_from_final_intent,
+    )
+
+    witness = PreSubmitAuthorityWitness(
+        quote_seen_at=NOW.isoformat(), book_hash="book-current",
+        current_best_bid=0.40, current_best_ask=0.50,
+        tick_size=0.01, min_order_size=min_order_size, neg_risk=False,
+        heartbeat_status="OK", user_ws_status="OK",
+        venue_connectivity_status="OK", balance_allowance_status="OK",
+        book_authority_id="clob_jit_book", book_captured_at=NOW.isoformat(),
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at=NOW.isoformat(), user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at=NOW.isoformat(),
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at=NOW.isoformat(),
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at=NOW.isoformat(), checked_at=NOW.isoformat(),
+    )
+    return _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent, executable_snapshot=executable,
+        decision_time=NOW, authority_witness=witness,
+    )
+
+
+@pytest.mark.parametrize(
+    ("time_in_force", "post_only", "size", "minimum", "expected"),
+    (
+        ("FOK", False, 2.2, 5.0, True),
+        ("FAK", False, 2.2, 5.0, True),
+        ("GTC", True, 2.2, 5.0, False),
+        ("GTD", True, 2.2, 5.0, False),
+        (None, None, 2.2, 5.0, False),
+        ("FOK", True, 2.2, 5.0, False),
+        ("FAK", False, 0.0, 5.0, False),
+        ("FAK", False, -1.0, 5.0, False),
+        ("FAK", False, 2.2, 0.0, False),
+        ("FAK", False, 2.2, float("nan"), False),
+        ("GTC", True, 5.0, 5.0, True),
+    ),
+)
+def test_current_pre_submit_size_binds_actual_mode_and_raw_minimum(
+    time_in_force, post_only, size, minimum, expected
+):
+    from types import SimpleNamespace
+
+    _, executable, final_intent = _taker_chain()
+    final = SimpleNamespace(
+        certificate_hash=final_intent.certificate_hash,
+        payload={**final_intent.payload, "time_in_force": time_in_force,
+                 "post_only": post_only, "size": size},
+    )
+    projected = _current_pre_submit_payload(final, executable, min_order_size=minimum)
+    assert projected["size_ok"] is expected
+    if math.isfinite(minimum):
+        assert projected["min_order_size"] == minimum
+    assert projected["size"] == size
+
+
 @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
 @pytest.mark.parametrize(
     ("time_in_force", "order_type"),
@@ -573,6 +634,12 @@ def test_subminimum_exact_taker_buy_survives_full_certificate_chain(
     )
     verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
 
+    # The actual reactor projection must authorize this size too; a fixture
+    # hardcoding size_ok=True cannot prove the production pre-submit seam.
+    current_pre_submit = _current_pre_submit_payload(final_intent, executable)
+    assert current_pre_submit["size_ok"] is True
+    assert current_pre_submit["min_order_size"] == 5.0
+
     from tests.decision_kernel.test_execution_command_certificate import _pre_submit_cert
 
     pre_submit = _pre_submit_cert(
@@ -581,7 +648,8 @@ def test_subminimum_exact_taker_buy_survives_full_certificate_chain(
         command_payload={
             "limit_price": 0.50,
             "size": 2.0,
-            "min_order_size": 5.0,
+            "size_ok": current_pre_submit["size_ok"],
+            "min_order_size": current_pre_submit["min_order_size"],
             "tick_size": 0.01,
             "order_type": order_type,
             "time_in_force": time_in_force,

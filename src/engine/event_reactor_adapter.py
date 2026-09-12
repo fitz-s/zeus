@@ -196,7 +196,10 @@ from src.contracts.global_auction_receipt import (
     GlobalSellReceiptClosure,
 )
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.venue_submission_envelope import (
+    assert_live_order_size,
+    assert_live_order_unit_price,
+)
 from src.contracts.executable_cost_curve import (
     BidBookLevel,
     BookLevel,
@@ -24895,6 +24898,17 @@ def _pre_submit_revalidation_payload_from_final_intent(
         current_best_ask=current_best_ask,
     )
     expected_edge = _pre_submit_expected_edge(payload, limit_price=limit_price)
+    try:
+        assert_live_order_size(
+            payload.get("size"),
+            min_order_size,
+            order_type=payload.get("time_in_force"),
+            post_only=payload.get("post_only"),
+        )
+    except ValueError:
+        size_ok = False
+    else:
+        size_ok = True
     return {
         "event_id": payload["event_id"],
         "event_type": payload.get("event_type"),
@@ -24994,7 +25008,7 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "tick_size": tick_size,
         "tick_aligned": _is_price_tick_aligned(limit_price, tick_size),
         "min_order_size": min_order_size,
-        "size_ok": _float_or_default(payload.get("size"), 0.0) >= min_order_size,
+        "size_ok": size_ok,
         "neg_risk": authority_witness.neg_risk,
         "heartbeat_status": authority_witness.heartbeat_status,
         "user_ws_status": authority_witness.user_ws_status,
