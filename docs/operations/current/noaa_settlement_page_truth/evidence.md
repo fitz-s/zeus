@@ -165,13 +165,16 @@ not carry such a phantom.
 
 ## Live backfill dry-run
 
-Run from the packet worktree against a scoped row export of `observations` and
-`settlements` for NYC, Houston and Denver (nine days, built by copying the rows
-themselves, not the database):
+Run from the packet worktree against a fixture pair built from the live DBs'
+`sqlite_master`, then filled by a scoped export of the nine relevant
+`observations` rows and 18 `settlements` rows (the rows themselves, never the
+database file — a hook blocks whole-DB copies, and the live forecasts file is
+large):
 
 ```
 $ python3 scripts/backfill_noaa_wrh.py --city NYC --city Houston --city Denver \
-    --start 2026-09-09 --end 2026-09-11 --db <scoped-copy>.db
+    --start 2026-09-09 --end 2026-09-11 \
+    --db <forecasts-fixture>.db --world-db <world-fixture>.db
 === noaa_wrh backfill 2026-09-09..2026-09-11 apply=False ===
 Denver 2026-09-09 view=hourly n=24/24: HIGH ogimet=82 page=82 (raw 81.86 @ 2026-09-09T16:58:00-0600) bin[82.0,83.0] unchanged (in) | LOW ogimet=57 page=57 (raw 57.20 @ 2026-09-09T06:58:00-0600) bin[56.0,57.0] unchanged (in)
 Denver 2026-09-10 view=hourly n=23/23: HIGH ogimet=90 page=89 (raw 88.88 @ 2026-09-10T16:58:00-0600) bin[88.0,89.0] OUT->in FIXES | LOW ogimet=55 page=55 (raw 54.86 @ 2026-09-10T02:58:00-0600) bin[54.0,55.0] unchanged (in)
@@ -199,6 +202,12 @@ NYC 2026-09-11 view=hourly n=24/24: HIGH ogimet=81 page=80 (raw 80.06 @ 2026-09-
 Every containment change is `OUT->in FIXES`; there is no `in->OUT REGRESSES`
 line. The expected values hold: NYC 2026-09-11 reads high 80 and low 72, Houston
 2026-09-11 high reads 94, Denver 2026-09-11 high reads 89.
+
+An `--apply` run of the same command for Houston 2026-09-11 alone wrote
+`observations` row `noaa_wrh_khou` (93.92 / 78.08 degF, VERIFIED,
+`data_source_version='noaa_wrh_timeseries_v1'`) into the FORECASTS fixture and its
+`data_coverage` WRITTEN row into the WORLD fixture, confirming the two-file
+SAVEPOINT lands on the right side of the K1 split in both directions.
 
 NYC 2026-09-11's high deserves a note because it is the one value that reads
 lower than the brief's expectation. The hourly view gives 80 (raw 80.06 at the
@@ -235,6 +244,65 @@ both before and after with none against `scripts/backfill_noaa_wrh.py`, and
 `--core-claims` and `--fatal-misreads` fail identically before and after (a
 missing `_locator_exists` attribute and an unknown `docs_taxonomy` task class,
 both pre-existing in the checkout).
+
+## Which database the settlement product lives in
+
+`observations`, `settlements` and `settlement_outcomes` are forecast-class after
+the K1 split. Measured 2026-09-12 on the live files:
+
+| Table | zeus-forecasts.db | zeus-world.db |
+|---|---|---|
+| observations | 52,355 rows, max target_date 2026-09-12 | 0 rows |
+| settlements | 13,445 rows, max target_date 2026-09-12 | 0 rows |
+
+`architecture/db_table_ownership.yaml` declares both world copies
+`legacy_archived` ("Authoritative copy is on forecasts.db"). Anything that writes
+the world copy is a silent no-op that still reports success.
+
+Two consequences, both handled:
+
+- `scripts/backfill_noaa_wrh.py` opens forecasts as MAIN with world ATTACHed,
+  through the same `get_forecasts_connection_with_world` helper the live daily
+  tick uses. The ATTACH is not optional: `_write_atom_with_coverage` writes the
+  observation (forecast-class) and its `data_coverage` row (world-class) in one
+  SAVEPOINT, and a single-file connection cannot service that. A file also cannot
+  ATTACH itself, so `--db` requires `--world-db`. The script never calls the world
+  schema initialiser. A test asserts the helper by name and asserts that
+  `init_schema`, `get_world_connection` and `ZEUS_WORLD_DB_PATH` appear nowhere in
+  it, so this cannot silently regress.
+- `scripts/rebuild_settlements.py` has the same defect and is **not** in the
+  operator sequence. Its NOAA source-precedence logic is correct and tested, but
+  unreachable on a default run because `main()` opens the world DB. That is a
+  pre-existing defect in that script, recorded in its docstring and in PLAN.md
+  rather than fixed here.
+
+## Operator sequence proven end to end
+
+`tests/test_noaa_wrh_settlement_product.py::test_operator_sequence_heals_houston_through_the_ingest_truth_writer`
+runs steps 3 and 4 of PLAN.md against a fixture pair built from the live DBs'
+`sqlite_master` (per the live-migration-blindspot rule: the captured DDL preserves
+the quoted `CREATE TABLE "settlements"` form that past ALTERs left behind, and all
+six authority/integrity triggers on `settlements` and `settlement_outcomes`, which
+hand-written DDL would drop). Seeded with the Ogimet row settling 93 against the
+chain's 94-95 bin and a DISPUTED settlement, the sequence produces:
+
+| Field | Before | After |
+|---|---|---|
+| settlements.authority | DISPUTED | VERIFIED |
+| settlements.settlement_value | 93.0 | 94.0 |
+| settlements.data_version | ogimet_metar | noaa_wrh_timeseries_v1 |
+| settlement_outcomes.authority | absent | VERIFIED |
+
+Gamma is stubbed so the test makes no network call; everything below the
+paginator is the real write path. No new entry point was needed on the truth
+writer: `_stable_settlement_truth_matches` compares `data_version`, so an
+already-VERIFIED row is re-resolved as soon as a higher-ranked `noaa_wrh_`
+observation appears.
+
+The assertion was mutation-checked rather than assumed: inverting
+`_NOAA_SETTLEMENT_SOURCE_PREFIXES` so Ogimet outranks the page row makes this test
+and the precedence test fail with `VERIFIED` becoming `DISPUTED`, and restoring
+the order makes them pass again.
 
 ## What this evidence does not prove
 

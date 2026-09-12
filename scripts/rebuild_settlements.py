@@ -10,6 +10,17 @@ This repair helper is intentionally narrow: it writes only high-track settlement
 rows derived from observations that are already authority='VERIFIED'. It does
 not fetch external data, infer provider validity, or authorize live deployment.
 Callers own transaction boundaries; dry-run is the default for CLI use.
+
+KNOWN DEFECT (recorded 2026-09-12, not fixed here): ``main()`` opens the WORLD
+DB, but ``observations`` and ``settlements`` are forecast-class after the K1
+split — the world copies are ``legacy_archived`` ghosts holding zero rows
+(``architecture/db_table_ownership.yaml``; verified live). So a default CLI run
+reads nothing and rewrites a table no settlement reader consults. Pass ``--db``
+pointed at the forecasts file to make it act on real rows, or use the ingest
+truth writer (``src/ingest/harvester_truth_writer.py``), which is what the
+NOAA page-truth packet's operator sequence uses. The NOAA source-precedence
+logic below is correct and exercised by tests; it is simply unreachable on a
+default run.
 """
 
 from __future__ import annotations

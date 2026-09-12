@@ -35,7 +35,6 @@ from src.data.noaa_wrh_timeseries import (
     request_url_without_token,
     rows_from_payload,
 )
-from src.state.db import init_schema
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "noaa_wrh"
 
@@ -289,11 +288,23 @@ def test_page_view_warnings_fire_on_a_bad_value_and_a_non_noaa_city():
 # ---------------------------------------------------------------------------
 
 
-def _observations_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+def _attached(db_path: Path, world_path: Path) -> sqlite3.Connection:
+    """Open a forecasts file with world ATTACHed, as every writer here does.
+
+    The observation and its world-class data_coverage row land in one SAVEPOINT,
+    so a single-file connection cannot service the write at all. A file also
+    cannot ATTACH itself, which is why the fixture is always a pair.
+    """
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
     return conn
+
+
+def _observations_conn(tmp_path: Path) -> sqlite3.Connection:
+    """A forecasts connection on the live settlement schema, world ATTACHed."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    return _attached(*_live_schema_db_pair(tmp_path))
 
 
 def _insert_observation(
@@ -326,7 +337,7 @@ def _insert_observation(
     "module_path",
     ["src.execution.harvester", "src.ingest.harvester_truth_writer"],
 )
-def test_settlement_lookup_prefers_the_page_row_over_the_ogimet_row(module_path):
+def test_settlement_lookup_prefers_the_page_row_over_the_ogimet_row(module_path, tmp_path):
     """Both harvester copies must route to the page product, in either row order.
 
     The ingest-side writer is a verbatim copy of the live one, so a precedence
@@ -339,7 +350,7 @@ def test_settlement_lookup_prefers_the_page_row_over_the_ogimet_row(module_path)
     city = cities_by_name["NYC"]
 
     for order in (("noaa_wrh_klga", "ogimet_metar_klga"), ("ogimet_metar_klga", "noaa_wrh_klga")):
-        conn = _observations_conn()
+        conn = _observations_conn(tmp_path / f"order_{'_'.join(order)}")
         values = {"noaa_wrh_klga": (80.0, 72.0), "ogimet_metar_klga": (80.6, 71.6)}
         for source in order:
             high, low = values[source]
@@ -362,12 +373,12 @@ def test_settlement_lookup_prefers_the_page_row_over_the_ogimet_row(module_path)
     "module_path",
     ["src.execution.harvester", "src.ingest.harvester_truth_writer"],
 )
-def test_ogimet_row_still_settles_when_no_page_row_exists(module_path):
+def test_ogimet_row_still_settles_when_no_page_row_exists(module_path, tmp_path):
     """The page feed can refuse or find no rows; the mirror must still settle."""
     import importlib
 
     module = importlib.import_module(module_path)
-    conn = _observations_conn()
+    conn = _observations_conn(tmp_path)
     _insert_observation(
         conn, city="NYC", target_date="2026-09-11", source="ogimet_metar_klga",
         station_id="KLGA", high=80.6, low=71.6,
@@ -401,12 +412,39 @@ def test_page_source_is_settlement_family_valid_for_noaa_only(module_path):
 # ---------------------------------------------------------------------------
 
 
-def _temp_world_db(tmp_path: Path) -> Path:
-    """A schema-complete DB carrying the rows the dry-run compares against."""
-    db_path = tmp_path / "wrh-backfill.db"
+def _live_schema() -> dict[str, list[str]]:
+    """DDL captured verbatim from the live DBs' sqlite_master.
+
+    Hand-written DDL would miss what live history put there: three of the four
+    forecasts tables are recorded as `CREATE TABLE "name"` (quoted, the residue
+    of past ALTERs), and `settlements` and `settlement_outcomes` carry six
+    triggers that gate authority transitions and VERIFIED-row integrity. A
+    fixture built from the schema initialiser alone would let a write pass that
+    the live DB rejects.
+    """
+    return json.loads((FIXTURE_DIR / "live_settlement_schema.json").read_text())
+
+
+def _live_schema_db_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Build an empty (forecasts, world) pair with the live settlement schema."""
+    schema = _live_schema()
+    paths = {}
+    for label, filename in (("forecasts", "zeus-forecasts.db"), ("world", "zeus-world.db")):
+        path = tmp_path / filename
+        conn = sqlite3.connect(path)
+        for statement in schema[label]:
+            conn.execute(statement)
+        conn.commit()
+        conn.close()
+        paths[label] = path
+    return paths["forecasts"], paths["world"]
+
+
+def _temp_forecasts_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A live-schema pair carrying the rows the dry-run compares against."""
+    db_path, world_path = _live_schema_db_pair(tmp_path)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
     for city, station, target_date, high, low in (
         ("NYC", "KLGA", "2026-09-11", 80.6, 71.6),
         ("Houston", "KHOU", "2026-09-11", 93.2, 78.8),
@@ -431,7 +469,7 @@ def _temp_world_db(tmp_path: Path) -> Path:
         )
     conn.commit()
     conn.close()
-    return db_path
+    return db_path, world_path
 
 
 def _load_backfill_module():
@@ -443,9 +481,8 @@ def _load_backfill_module():
 def test_backfill_dry_run_reports_containment_changes_without_writing(tmp_path):
     """The dry-run must name the label change, not just the value change."""
     module = _load_backfill_module()
-    db_path = _temp_world_db(tmp_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    db_path, world_path = _temp_forecasts_pair(tmp_path)
+    conn = _attached(db_path, world_path)
 
     summary = module.backfill(
         conn,
@@ -475,9 +512,8 @@ def test_backfill_dry_run_reports_containment_changes_without_writing(tmp_path):
 
 def test_backfill_apply_writes_page_rows_that_settlement_then_prefers(tmp_path):
     module = _load_backfill_module()
-    db_path = _temp_world_db(tmp_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    db_path, world_path = _temp_forecasts_pair(tmp_path)
+    conn = _attached(db_path, world_path)
 
     summary = module.backfill(
         conn,
@@ -517,8 +553,7 @@ def test_backfill_apply_writes_page_rows_that_settlement_then_prefers(tmp_path):
 
 def test_backfill_rejects_a_non_noaa_city_and_an_oversized_chunk(tmp_path):
     module = _load_backfill_module()
-    conn = sqlite3.connect(_temp_world_db(tmp_path))
-    conn.row_factory = sqlite3.Row
+    conn = _attached(*_temp_forecasts_pair(tmp_path))
     with pytest.raises(ValueError, match="not NOAA-settled"):
         module.backfill(
             conn, start=date(2026, 9, 11), end=date(2026, 9, 11),
@@ -529,6 +564,136 @@ def test_backfill_rejects_a_non_noaa_city_and_an_oversized_chunk(tmp_path):
             conn, start=date(2026, 9, 11), end=date(2026, 9, 11),
             chunk_days=MAX_REQUEST_WINDOW_DAYS + 1, fixture_dir=FIXTURE_DIR,
         )
+    conn.close()
+
+
+def test_backfill_writes_the_forecasts_db_not_the_world_ghost():
+    """The CLI must target the forecasts DB; the world copy is an empty ghost.
+
+    `observations` is forecast-class post-K1 (architecture/db_table_ownership.yaml
+    marks the world copy `legacy_archived`), so a run against world would write
+    rows no settlement reader ever looks at — a silent no-op that still prints a
+    success summary. This pins the connection helper by name rather than trusting
+    the summary.
+    """
+    module = _load_backfill_module()
+    source = (REPO_ROOT / "scripts" / "backfill_noaa_wrh.py").read_text()
+
+    assert "get_forecasts_connection_with_world" in source
+    assert hasattr(module, "get_forecasts_connection_with_world")
+    # The world schema initialiser must never run against a forecasts file, and
+    # the world connection helper must not appear at all.
+    assert "init_schema" not in source
+    assert "get_world_connection" not in source
+    assert "ZEUS_WORLD_DB_PATH" not in source
+
+
+def test_backfill_requires_db_and_world_db_together():
+    """A forecasts file alone cannot service the world-class coverage write."""
+    module = _load_backfill_module()
+    assert module.main(
+        ["--start", "2026-09-11", "--end", "2026-09-11", "--db", "/tmp/x.db"]
+    ) == 2
+
+
+# ---------------------------------------------------------------------------
+# Operator sequence, end to end
+# ---------------------------------------------------------------------------
+
+
+def test_operator_sequence_heals_houston_through_the_ingest_truth_writer(
+    tmp_path, monkeypatch,
+):
+    """Backfill then the ingest truth writer flips Houston 2026-09-11 to VERIFIED.
+
+    This is the packet's landing sequence on a live-schema fixture: the Ogimet
+    row settles 93 against the chain's 94-95 bin (DISPUTED), the page row settles
+    94, and re-running the truth writer must rewrite settlements AND
+    settlement_outcomes to VERIFIED with the page's data_version. Gamma is stubbed
+    so the test makes no network call; everything below the paginator is the real
+    write path, including SettlementSemantics and the live triggers.
+    """
+    from src.ingest import harvester_truth_writer as tw
+
+    db_path, world_path = _live_schema_db_pair(tmp_path)
+    conn = _attached(db_path, world_path)
+
+    # Pre-state: the wrong value, disputed against the chain's bin.
+    _insert_observation(
+        conn, city="Houston", target_date="2026-09-11",
+        source="ogimet_metar_khou", station_id="KHOU", high=93.2, low=78.8,
+    )
+    conn.execute(
+        """INSERT INTO settlements
+           (city, target_date, temperature_metric, settlement_value, pm_bin_lo,
+            pm_bin_hi, winning_bin, authority, unit, data_version)
+           VALUES ('Houston', '2026-09-11', 'high', 93.0, 94.0, 95.0, '93°F',
+                   'DISPUTED', 'F', 'ogimet_metar')""",
+    )
+    conn.commit()
+
+    # Step 1: the page product lands as a second observation row.
+    backfill = _load_backfill_module()
+    summary = backfill.backfill(
+        conn, start=date(2026, 9, 11), end=date(2026, 9, 11),
+        city_filter=["Houston"], apply_writes=True, fixture_dir=FIXTURE_DIR,
+    )
+    assert summary["days_written"] == 1
+
+    # Step 2: the ingest truth writer re-resolves the settled row. Gamma is
+    # stubbed with the event the chain actually resolved for that cell.
+    event = {
+        "slug": "highest-temperature-in-houston-on-september-11-2026",
+        "title": "Highest temperature in Houston on September 11?",
+        "markets": [
+            {
+                "question": "Will the high temperature in Houston be 94-95°F?",
+                "conditionId": "cond-94-95",
+                "clobTokenIds": '["yes-94", "no-94"]',
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+                "umaResolutionStatus": "resolved",
+                "closed": True,
+            },
+            {
+                "question": "Will the high temperature in Houston be 92-93°F?",
+                "conditionId": "cond-92-93",
+                "clobTokenIds": '["yes-92", "no-92"]',
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0", "1"]',
+                "umaResolutionStatus": "resolved",
+                "closed": True,
+            },
+        ],
+    }
+    monkeypatch.setattr(tw, "_fetch_open_settling_markets", lambda: [event])
+
+    result = tw.write_settlement_truth_for_open_markets(conn)
+    assert result["errors"] == 0
+    assert result["markets_resolved"] == 1
+
+    settled = conn.execute(
+        """SELECT settlement_value, authority, data_version, winning_bin,
+                  pm_bin_lo, pm_bin_hi
+             FROM settlements
+            WHERE city = 'Houston' AND target_date = '2026-09-11'
+              AND temperature_metric = 'high'"""
+    ).fetchone()
+    assert settled["authority"] == "VERIFIED"
+    assert settled["settlement_value"] == 94.0
+    assert (settled["pm_bin_lo"], settled["pm_bin_hi"]) == (94.0, 95.0)
+    assert settled["data_version"] == "noaa_wrh_timeseries_v1"
+
+    outcome = conn.execute(
+        """SELECT settlement_value, authority, settlement_unit
+             FROM settlement_outcomes
+            WHERE city = 'Houston' AND target_date = '2026-09-11'
+              AND temperature_metric = 'high'"""
+    ).fetchone()
+    assert outcome is not None
+    assert outcome["authority"] == "VERIFIED"
+    assert outcome["settlement_value"] == 94.0
+    assert outcome["settlement_unit"] == "F"
     conn.close()
 
 

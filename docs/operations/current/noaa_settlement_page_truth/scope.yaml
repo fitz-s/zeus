@@ -24,6 +24,7 @@ in_scope:
 - tests/test_noaa_wrh_settlement_product.py
 - tests/fixtures/noaa_wrh/**
 - tests/test_market_scanner_provenance.py
+- src/ingest/harvester_truth_writer.py
 allow_companions: []
 out_of_scope:
 - state/zeus-world.db
@@ -32,6 +33,9 @@ out_of_scope:
 - state/zeus-forecasts.db-*
 - src/data/ogimet_hourly_client.py
 - src/contracts/settlement_semantics.py
+# scripts/rebuild_settlements.py's world-DB targeting is a pre-existing defect
+# recorded in its docstring and PLAN.md, deliberately not fixed in this packet.
+- scripts/rebuild_settlements.py::main_db_targeting
 live_side_effects_allowed: false
 supersedes: null
 tests:

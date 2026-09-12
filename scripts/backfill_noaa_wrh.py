@@ -26,14 +26,28 @@ Usage
 -----
     python3 scripts/backfill_noaa_wrh.py --start 2026-08-23 --end 2026-09-11
     python3 scripts/backfill_noaa_wrh.py --start 2026-09-09 --end 2026-09-11 \
-        --city NYC --city Houston --db /tmp/copy.db --apply
+        --city NYC --city Houston --apply
 
 ``--fixture-dir`` reads saved ``syn_<STID>.json`` response bodies instead of
 fetching, for offline replay and tests.
+
+Database targeting (K1 split — get this wrong and the run is a silent no-op)
+---------------------------------------------------------------------------
+``observations`` is forecast-class: the authoritative copy lives on
+``state/zeus-forecasts.db`` and the ``world`` copy is a ``legacy_archived``
+ghost (``architecture/db_table_ownership.yaml``; verified 2026-09-12, forecasts
+52,355 rows against world 0). ``data_coverage`` and
+``daily_observation_revisions`` are world-class, and the shared
+``_write_atom_with_coverage`` sink writes an observation and its coverage row in
+one SAVEPOINT. So this script opens forecasts as MAIN with world ATTACHed,
+exactly as the live daily tick does, and never calls the world schema
+initialiser. ``--db`` names a forecasts DB file and needs ``--world-db``
+alongside it; both must already carry their schema.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import sqlite3
@@ -68,8 +82,7 @@ from src.data.noaa_wrh_timeseries import (  # noqa: E402
     token_fetched_at,
 )
 from src.data.ingestion_guard import IngestionRejected  # noqa: E402
-from src.state.db import ZEUS_WORLD_DB_PATH, get_world_connection, init_schema  # noqa: E402
-from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+from src.state.db import get_forecasts_connection_with_world  # noqa: E402
 
 SCRIPT_ID = "scripts/backfill_noaa_wrh.py"
 
@@ -384,6 +397,30 @@ def _fmt(value: Optional[float]) -> str:
     return "--" if value is None else f"{value:.0f}"
 
 
+@contextlib.contextmanager
+def _open_target(db: Optional[str], world_db: Optional[str]):
+    """Yield a forecasts-MAIN connection with world ATTACHed as ``world``.
+
+    Without ``--db`` this is the canonical live pair, opened through the same
+    helper the daily tick uses so the writer locks are taken on both files in
+    canonical order. With ``--db`` it is an explicit pair of files, connected but
+    never schema-initialised: the world initialiser would create ghost
+    forecast-class tables on whatever file it was pointed at.
+    """
+    if db is None:
+        with get_forecasts_connection_with_world(write_class="bulk") as conn:
+            conn.row_factory = sqlite3.Row
+            yield conn
+        return
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+        yield conn
+    finally:
+        conn.close()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -394,7 +431,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--city", action="append", dest="cities", default=None,
         help="Restrict to this city; repeatable",
     )
-    parser.add_argument("--db", default=None, help="DB path override")
+    parser.add_argument(
+        "--db", default=None,
+        help="Forecasts DB file to write (schema must already exist); "
+             "requires --world-db",
+    )
+    parser.add_argument(
+        "--world-db", default=None,
+        help="World DB file to ATTACH as 'world' when --db is given",
+    )
     parser.add_argument(
         "--apply", action="store_true",
         help="Write observations rows; without it the run only reports",
@@ -420,41 +465,39 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     fixture_dir = Path(args.fixture_dir) if args.fixture_dir else None
-    lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
-    with db_writer_lock(lock_path, WriteClass.BULK):
-        if args.db:
-            conn = sqlite3.connect(args.db)
-            conn.row_factory = sqlite3.Row
-        else:
-            conn = get_world_connection(write_class="bulk")
+    if bool(args.db) != bool(args.world_db):
+        print(
+            "ERROR: --db and --world-db must be given together; observations is "
+            "forecast-class and its coverage row is world-class.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"=== noaa_wrh backfill {start}..{end} apply={args.apply} ===")
+    with _open_target(args.db, args.world_db) as conn:
         try:
-            init_schema(conn)
-            print(f"=== noaa_wrh backfill {start}..{end} apply={args.apply} ===")
-            try:
-                summary = backfill(
-                    conn,
-                    start=start,
-                    end=end,
-                    city_filter=args.cities,
-                    apply_writes=args.apply,
-                    chunk_days=args.chunk_days,
-                    fixture_dir=fixture_dir,
-                )
-            except (ValueError, WrhError) as exc:
-                print(f"ERROR: {exc}", file=sys.stderr)
-                return 1
-            for line in summary.pop("lines"):
-                print(line)
-            print(json.dumps(summary, indent=2, sort_keys=True))
-            if summary["refused_at"]:
-                print(
-                    "Synoptic refused the request; resume with a later --start "
-                    "once the per-IP quota window has passed.",
-                    file=sys.stderr,
-                )
-                return 1
-        finally:
-            conn.close()
+            summary = backfill(
+                conn,
+                start=start,
+                end=end,
+                city_filter=args.cities,
+                apply_writes=args.apply,
+                chunk_days=args.chunk_days,
+                fixture_dir=fixture_dir,
+            )
+        except (ValueError, WrhError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        for line in summary.pop("lines"):
+            print(line)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        if summary["refused_at"]:
+            print(
+                "Synoptic refused the request; resume with a later --start "
+                "once the per-IP quota window has passed.",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

@@ -73,7 +73,11 @@ _See sibling scope.yaml for machine-readable scope._
 
 ## Post-landing operator sequence
 
-Run in this order. Each step's output is the precondition for the next.
+Run in this order. Each step's output is the precondition for the next. Every
+step below acts on `state/zeus-forecasts.db`, which is where `observations`,
+`settlements` and `settlement_outcomes` are authoritative after the K1 split; the
+`world` copies of those tables are `legacy_archived` ghosts holding zero rows
+(verified 2026-09-12). A tool that writes the world copy is a silent no-op.
 
 1. `python3 deploy/deploy_live.py restart all` — the daily tick, both harvester
    copies and the scanner all changed, so a sidecar-only restart would leave
@@ -84,10 +88,22 @@ Run in this order. Each step's output is the precondition for the next.
 3. `python3 scripts/backfill_noaa_wrh.py --start 2026-08-23 --end <today> --apply`.
    If it stops with a refused token, resume with a later `--start` once the
    per-IP quota window has passed rather than retrying immediately.
-4. `python3 scripts/rebuild_settlements.py --start-date 2026-08-23 --apply` to
-   re-derive `settlements` from the now-preferred page rows.
-5. `python3 scripts/drain_settlement_disputes.py` to close the DISPUTED backlog
-   the wrong values created.
+4. `python3 -m scripts.backfill_harvester_settlements --days 30` to re-resolve
+   settlement truth from the now-preferred page rows. This runs the ingest truth
+   writer (`src/ingest/harvester_truth_writer.py::write_settlement_truth_for_open_markets`)
+   on the forecasts DB, which rewrites `settlements`, `settlement_outcomes` and
+   `market_events` through `SettlementSemantics`. No new entry point was needed:
+   `_stable_settlement_truth_matches` compares `data_version`, so an
+   already-VERIFIED row is re-resolved as soon as a higher-ranked `noaa_wrh_`
+   observation appears. The live hourly ingest tick does the same work on its own
+   30-day window, so this step only shortens the wait.
+5. `python3 scripts/drain_settlement_disputes.py` to close any DISPUTED backlog
+   the wrong values left behind, grading from venue resolution.
 6. Verify in `state/zeus-forecasts.db`: Houston 2026-09-11 high and Denver
    2026-09-11 high are VERIFIED and in-bin, with
    `data_version='noaa_wrh_timeseries_v1'`.
+
+Do **not** use `scripts/rebuild_settlements.py` for step 4. It opens the world DB
+and writes the ghost `settlements` table, so it cannot change what the settlement
+readers see. That is a pre-existing defect in that script, out of this packet's
+scope; it is recorded here so the next operator does not reach for it.
