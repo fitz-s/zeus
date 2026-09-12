@@ -1111,6 +1111,13 @@ def load_canonical_fit_corpus(
         a, b = probability(a), probability(b)
         return a is not None and b is not None and abs(a - b) <= 1e-12
 
+    def canonical_hash(value):
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
     forecast_table_available = False
     if forecast_conn is not None:
         try:
@@ -1708,6 +1715,7 @@ def load_canonical_fit_corpus(
         if contract_reason:
             reasons.append(contract_reason)
         capture = obj(economics.get("raw_calibration_input"))
+        typed_exact_reason = None
         if capture:
             captured_identity = (
                 capture.get("schema_version") == 1
@@ -1749,6 +1757,41 @@ def load_canonical_fit_corpus(
                 p0 = probability(capture.get("p0_held"))
             else:
                 p0 = None
+            exact_fields = {
+                key for key in capture
+                if isinstance(key, str) and key.startswith("exact_")
+            }
+            typed_exact_marker = (
+                "probability_input_kind" in capture or bool(exact_fields)
+            )
+            if typed_exact_marker:
+                complete = (
+                    capture.get("probability_input_kind") == "TYPED_EXACT_PAYOFF"
+                    and exact_fields == {
+                        "exact_payoff_content_identity",
+                        "exact_payoff_witness_identity",
+                        "exact_payoff",
+                    }
+                    and canonical_hash(capture.get("exact_payoff_content_identity"))
+                    and canonical_hash(capture.get("exact_payoff_witness_identity"))
+                    and type(capture.get("exact_payoff")) is int
+                    and capture.get("exact_payoff") in (0, 1)
+                    and correction.get("applied") is False
+                    and captured_identity
+                    and equal(capture.get("exact_payoff"), capture.get("raw_q_held"))
+                    and equal(capture.get("exact_payoff"), raw)
+                )
+                typed_exact_reason = (
+                    "TYPED_EXACT_PAYOFF_NOT_STATISTICAL_INPUT"
+                    if complete
+                    else "INVALID_TYPED_EXACT_PAYOFF_CAPTURE"
+                )
+        if typed_exact_reason:
+            # Exact payoff witnesses are evidence for the known token only;
+            # they must never become Bernoulli fit rows.  Put this first so
+            # command accounting records the typed classification even if a
+            # separate endpoint proof is also unavailable.
+            reasons.insert(0, typed_exact_reason)
         if p0 is None or (correction.get("applied") is True and not equal(correction.get("p0"), p0)):
             reasons.append("DECISION_ANCHOR_UNBOUND")
         pair = payouts[command["condition_id"]]

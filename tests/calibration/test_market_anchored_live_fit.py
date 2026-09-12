@@ -1219,7 +1219,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                               include_calibration_policy=True, calibration_policy_payload=None,
                               correction_lead_bucket="day1", correction_alpha_lead=None,
                               unused_large_parent=False, extra_legacy_anchor_edges=False,
-                              correction_extra_fields=None):
+                              correction_extra_fields=None, raw_calibration_input_extra_fields=None,
+                              uncorrected_raw_q=None):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1355,6 +1356,38 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         ((.52 if side == "YES" else .48) if corrected else (.70 if side == "YES" else .30))
         if forecast_lineage else (.52 if corrected else .70)
     ))
+    if uncorrected_raw_q is not None and not corrected:
+        q_live = float(uncorrected_raw_q) if side == "YES" else 1.0 - float(uncorrected_raw_q)
+        economics["payoff_q_point"] = q_live
+    if raw_calibration_input_extra_fields is not None:
+        economics.update({
+            "global_family_key": "family",
+            "global_bin_id": "bin",
+            "global_probability_witness_identity": "witness",
+            "sample_hash": "sample",
+        })
+        capture = {
+            "schema_version": 1,
+            "capture_basis": "GLOBAL_CERTIFICATE_INPUT",
+            "p0_basis": "GROSS_NATIVE_TOKEN_PRICE",
+            "condition_id": "condition",
+            "token_id": token,
+            "side": side,
+            "candidate_id": "candidate",
+            "family_key": "family",
+            "bin_id": "bin",
+            "probability_witness_identity": "witness",
+            "sample_hash": "sample",
+            "economic_curve_identity": "curve-hash",
+            "execution_mode": economics["global_execution_mode"],
+            "correction_applied": economics["market_anchored_correction"].get("applied"),
+            "book_snapshot_id": "snapshot",
+            "book_hash": "book-hash",
+            "raw_q_held": corrected_payload["q_raw"] if corrected else economics["payoff_q_point"],
+            "p0_held": .35,
+        }
+        capture.update(raw_calibration_input_extra_fields)
+        economics["raw_calibration_input"] = capture
     payload = {"candidate_id": "candidate", "condition_id": "condition", "token_id": token,
                "q_live": q_live, "direction": "buy_yes" if side == "YES" else "buy_no", "city": "Austin", "target_date": (decision.date()+timedelta(days=1)).isoformat(),
                "temperature_metric": metric, "probability_semantics_revision": probability_revision,
@@ -1497,6 +1530,90 @@ def test_canonical_fit_preserves_raw_and_yes_no_event_geometry(side, corrected):
         assert fit_row.y == 1 and fit_row.w == 1
         assert corpus.fit_rows(metric="low", execution_mode="TAKER_LIMIT", execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1") == []
         assert corpus.fit_rows(metric="high", execution_mode="MAKER_REST", execution_contract="MAKER_REST", probability_revision="fixture-revision-v1") == []
+    finally:
+        world.close()
+        trade.close()
+
+
+def _typed_exact_capture_fields(*, payoff=1, content_hash="a" * 64,
+                                witness_hash="b" * 64):
+    return {
+        "probability_input_kind": "TYPED_EXACT_PAYOFF",
+        "exact_payoff_content_identity": content_hash,
+        "exact_payoff_witness_identity": witness_hash,
+        "exact_payoff": payoff,
+    }
+
+
+def test_canonical_fit_excludes_typed_exact_payoff_and_keeps_denominator():
+    world, trade, _ = _canonical_corpus_fixture(
+        corrected=False,
+        raw_calibration_input_extra_fields=_typed_exact_capture_fields(),
+        uncorrected_raw_q=1.0,
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FOK_FULL_OR_ZERO",
+            probability_revision="fixture-revision-v1",
+        ) == []
+        assert corpus.command_count == len(corpus.command_accounting) == 1
+        assert corpus.unknown == {"TYPED_EXACT_PAYOFF_NOT_STATISTICAL_INPUT": 1}
+        assert corpus.command_accounting[0]["calibration_evidence_reason"] == (
+            "TYPED_EXACT_PAYOFF_NOT_STATISTICAL_INPUT"
+        )
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        {"probability_input_kind": "TYPED_EXACT_PAYOFF",
+         "exact_payoff_witness_identity": "b" * 64, "exact_payoff": 1},
+        _typed_exact_capture_fields(payoff=0),
+    ],
+)
+def test_canonical_fit_rejects_invalid_typed_exact_capture(marker):
+    world, trade, _ = _canonical_corpus_fixture(
+        corrected=False, raw_calibration_input_extra_fields=marker,
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.command_count == len(corpus.command_accounting) == 1
+        assert corpus.unknown == {"INVALID_TYPED_EXACT_PAYOFF_CAPTURE": 1}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_rejects_typed_exact_capture_when_correction_applied():
+    world, trade, _ = _canonical_corpus_fixture(
+        corrected=True,
+        raw_calibration_input_extra_fields=_typed_exact_capture_fields(),
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.records == ()
+        assert corpus.unknown == {"INVALID_TYPED_EXACT_PAYOFF_CAPTURE": 1}
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_canonical_fit_does_not_exclude_unmarked_probability_one():
+    world, trade, _ = _canonical_corpus_fixture(
+        corrected=False, uncorrected_raw_q=1.0,
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.unknown == {}
+        assert len(corpus.records) == 1
+        assert corpus.records[0]["q_raw"] == 1.0
     finally:
         world.close()
         trade.close()
