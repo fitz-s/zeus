@@ -5210,10 +5210,18 @@ def test_global_select_admits_gtc_maker_minimum_with_real_fill_witness():
         fill_probability_source=maker_witness.witness_identity,
         maker_fill_witness=maker_witness,
     )
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("100"),
+        win_wealth_floor_usd=Decimal("106"),
+        current_token_shares=Decimal("6"),
+        ledger_snapshot_id="ledger-current",
+    )
     decision = _global_select(
         (maker,),
-        cash="1.045",
+        cash="100",
         cap="1.045",
+        fractional_kelly_multiplier="0.125",
+        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
         resolution_hours_by_family={maker.family_key: 24.0},
     )
     assert decision.candidate is maker
