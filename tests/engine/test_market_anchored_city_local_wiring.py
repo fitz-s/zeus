@@ -5,6 +5,7 @@
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 import sqlite3
 import threading
@@ -715,6 +716,277 @@ def test_entry_resolver_borrows_all_handles_and_passes_deadline_and_scope(monkey
     with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
         resolver(SimpleNamespace(family_key="one", side="YES", execution_mode="TAKER_LIMIT"), .8, .4, now)
     assert seen == {"connections": (world, trade, forecast), "scope": scope, "now": now, "deadline": 123.0}
+
+
+def test_entry_resolver_records_each_consulted_fit_artifact(monkeypatch):
+    artifact = _artifact(snapshot=(("Tokyo", "Asia/Tokyo"),))
+    policy = CalibrationPolicySpec(
+        algorithm_revision="test-algorithm-v1",
+        input_revision="test-input-v1",
+        metric_pooling="unfiltered_attribution_claims",
+        lead_calendar_revision="city_local_target_date_v1",
+        lambda_=1.0,
+        min_train_weight=20,
+        beta_bounds=(0.0, 0.12),
+        logit_clip=3.0,
+        probability_clip=(0.005, 0.995),
+        refit_seconds=21600.0,
+    )
+
+    class Provider:
+        calibration_policy = policy
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def artifact(self, **kwargs):
+            return artifact
+
+    monkeypatch.setattr(
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
+        Provider,
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")},
+    )
+    audit: dict[str, object] = {}
+    scope = CalibrationFitScope(
+        "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-raw-v3"
+    )
+    resolver = _entry_resolver(
+        object(),
+        target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        calibration_scope_resolver=lambda candidate, prepared: scope,
+        market_anchored_fit_artifact_audit=audit,
+    )
+
+    correction = resolver(
+        SimpleNamespace(
+            family_key="one",
+            side="YES",
+            bin_id="bin",
+            token_id="token",
+            execution_mode="TAKER_LIMIT",
+            action="BUY",
+        ),
+        0.9,
+        0.35,
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    scope_identity = scope.as_payload()["scope_hash"]
+    assert correction is not None
+    assert audit["revision"] == "canonical_entry_fit_artifact_audit_v1"
+    assert audit["unavailable_scopes"] == {}
+    entry = audit["consulted_scopes"][f"{scope_identity}:{artifact.param_hash}"]
+    assert entry["status"] == "AVAILABLE"
+    assert entry["scope"] == scope.as_payload()
+    assert entry["param_hash"] == artifact.param_hash
+    assert entry["artifact"] == asdict(artifact)
+    assert entry["policy"] == policy.as_payload()
+
+
+@pytest.mark.parametrize("same_parameters", [False, True])
+def test_entry_resolver_keeps_same_scope_refit_artifacts_without_changing_correction(
+    monkeypatch, same_parameters,
+):
+    from src.contracts.payoff_q_correction import CanonicalTrainingManifest
+
+    scope = CalibrationFitScope(
+        "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-raw-v3"
+    )
+    base_artifact = _artifact(snapshot=(("Tokyo", "Asia/Tokyo"),))
+    manifests = tuple(
+        CanonicalTrainingManifest.build(
+            scope_hash=scope.as_payload()["scope_hash"], corpus_revision="fixture-v1",
+            training_cutoff=base_artifact.training_cutoff,
+            row_count=base_artifact.n_train, event_count=base_artifact.n_train,
+            weight_sum=float(base_artifact.n_train),
+            max_fill_available_at="2025-12-30T00:00:00Z",
+            max_label_available_at="2025-12-31T00:00:00Z", input_hash=char * 64,
+        ) for char in ("a", "b")
+    )
+    artifacts = tuple(
+        replace(base_artifact, param_hash=param_hash, training_manifest=manifest)
+        for param_hash, manifest in zip(
+            ("param-old", "param-old" if same_parameters else "param-new"), manifests,
+        )
+    )
+    calls = 0
+    asdict_calls = 0
+    original_asdict = runtime.asdict
+
+    def counting_asdict(value):
+        nonlocal asdict_calls
+        asdict_calls += 1
+        return original_asdict(value)
+
+    monkeypatch.setattr(runtime, "asdict", counting_asdict)
+
+    class Provider:
+        calibration_policy = CalibrationPolicySpec(
+            algorithm_revision="test-algorithm-v1",
+            input_revision="test-input-v1",
+            metric_pooling="unfiltered_attribution_claims",
+            lead_calendar_revision="city_local_target_date_v1",
+            lambda_=1.0,
+            min_train_weight=20,
+            beta_bounds=(0.0, 0.12),
+            logit_clip=3.0,
+            probability_clip=(0.005, 0.995),
+            refit_seconds=21600.0,
+        )
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def artifact(self, **kwargs):
+            nonlocal calls
+            result = artifacts[min(calls, len(artifacts) - 1)]
+            calls += 1
+            return result
+
+    monkeypatch.setattr(
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
+        Provider,
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")},
+    )
+    audit: dict[str, object] = {}
+    resolver = _entry_resolver(
+        object(),
+        target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        calibration_scope_resolver=lambda candidate, prepared: scope,
+        market_anchored_fit_artifact_audit=audit,
+    )
+    candidate = SimpleNamespace(
+        family_key="one",
+        side="YES",
+        bin_id="bin",
+        token_id="token",
+        execution_mode="TAKER_LIMIT",
+        action="BUY",
+    )
+    first = resolver(
+        candidate,
+        0.9,
+        0.35,
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    second = resolver(
+        candidate,
+        0.9,
+        0.35,
+        datetime(2026, 1, 2, 1, tzinfo=timezone.utc),
+    )
+    third = resolver(
+        candidate,
+        0.9,
+        0.35,
+        datetime(2026, 1, 2, 2, tzinfo=timezone.utc),
+    )
+
+    scope_identity = scope.as_payload()["scope_hash"]
+    consulted = audit["consulted_scopes"]
+    assert first is not None and second is not None and third is not None
+    assert first.corrected_q == second.corrected_q
+    assert first.lead_bucket == second.lead_bucket
+    assert first.alpha_lead == second.alpha_lead
+    assert len(consulted) == 2
+    assert f"{scope_identity}:param-old" in consulted
+    if same_parameters:
+        assert all(key.startswith(f"{scope_identity}:param-old") for key in consulted)
+    else:
+        assert f"{scope_identity}:param-new" in consulted
+    assert {row["artifact"]["training_manifest"]["input_hash"] for row in consulted.values()} == {"a" * 64, "b" * 64}
+    assert all(row["status"] == "AVAILABLE" for row in consulted.values())
+    assert asdict_calls == 2
+    assert audit["unavailable_scopes"] == {}
+
+
+def test_entry_resolver_records_unavailable_scope_without_fabricated_artifact(monkeypatch):
+    scope = CalibrationFitScope(
+        "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-raw-v3"
+    )
+
+    class Provider:
+        calibration_policy = object()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def artifact(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
+        Provider,
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")},
+    )
+    audit: dict[str, object] = {}
+    resolver = _entry_resolver(
+        object(),
+        target_context_by_family={"missing": ("Tokyo", date(2026, 1, 2))},
+        calibration_scope_resolver=lambda candidate, prepared: scope,
+        market_anchored_fit_artifact_audit=audit,
+    )
+
+    with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
+        resolver(
+            SimpleNamespace(
+                family_key="missing",
+                side="YES",
+                bin_id="bin",
+                token_id="token",
+                execution_mode="TAKER_LIMIT",
+                action="BUY",
+            ),
+            0.9,
+            0.35,
+            datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+    assert audit["consulted_scopes"] == {}
+    unavailable = audit["unavailable_scopes"]
+    assert len(unavailable) == 1
+    row = next(iter(unavailable.values()))
+    assert row["status"] == "UNAVAILABLE"
+    assert row["family_key"] == "missing"
+    assert row["scope_identity"] == scope.as_payload()["scope_hash"]
+    assert row["scope"] == scope.as_payload()
+    assert "artifact" not in row
+
+
+def test_fit_audit_delta_accepts_old_receipt_then_preserves_changed_snapshot():
+    import base64
+    import hashlib
+    import json
+    import zlib
+
+    base = {"probability_manifest": [["family", "witness"]]}
+    for param in ("first-fit", "refitted"):
+        current = {
+            "probability_manifest": base["probability_manifest"],
+            "market_anchored_fit_artifact_audit": {
+                "revision": "canonical_entry_fit_artifact_audit_v1",
+                "consulted_scopes": {"scope": {"param_hash": param}},
+                "unavailable_scopes": {},
+            },
+        }
+        delta = runtime._json_object_delta_receipt(
+            prefix="audit_context", base=base, current=current,
+            expected_sha256=hashlib.sha256(runtime._canonical_json_bytes(current)).hexdigest(),
+        )
+        payload = json.loads(zlib.decompress(base64.b64decode(delta["audit_context_delta_zlib_b64"])))
+        assert "market_anchored_fit_artifact_audit" in payload["replacements"]
+        base = runtime._apply_json_object_delta(base, payload)
+        assert base == current
 
 
 def test_missing_canonical_scope_does_not_construct_legacy_fit(monkeypatch):

@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Iterator, Literal
@@ -26,6 +26,7 @@ from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import MarketBookEventPayload, OpportunityEvent, make_opportunity_event
 from src.events.idempotency import stable_event_id
+from src.events.public_trade_observations import PublicTradeBuffer, write_public_trade_observations
 
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -245,6 +246,9 @@ class MarketChannelIngestor:
         self._pending_quote_seen_at: dict[str, str] = {}
         self._committed_loss_audit_token_ids: set[str] = set()
         self._pending_loss_audit_event_tokens: dict[str, str] = {}
+        self.public_trades = PublicTradeBuffer(
+            max_pending=max(1024, len(active_token_ids) * 8)
+        )
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -304,6 +308,16 @@ class MarketChannelIngestor:
         received_at: str,
     ) -> EventWriteResult | MarketChannelAction | MarketChannelQuoteResult | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
+        if event_type == "last_trade_price":
+            token_id = _message_token_id(message)
+            metadata = self._token_metadata.get(token_id)
+            cached_book = self.quote_cache.get(token_id)
+            self.public_trades.record(
+                "TRADE", message, received_at=received_at,
+                metadata=asdict(metadata) if metadata is not None else None,
+                cached_book=asdict(cached_book) if cached_book is not None else None,
+            )
+            return None
         if event_type == "tick_size_change":
             return MarketChannelAction(
                 refresh_snapshot=True,
@@ -2331,6 +2345,62 @@ class MarketChannelOnlineService:
                 logger=logger,
             )
 
+    async def _flush_public_trades_forever(
+        self, *, connection_done: asyncio.Event, write_gate: Any,
+        commit: Callable[[], None] | None,
+        rollback: Callable[[], None] | None, logger: Any | None,
+    ) -> None:
+        """Drain public deliveries separately; quote coalescing cannot erase them."""
+
+        final_failures = 0
+        while True:
+            buffer = self.ingestor.public_trades
+            if not buffer.ready_to_flush:
+                if connection_done.is_set():
+                    return
+                await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS)
+                continue
+            # Current executable quotes get the first writer turn.
+            coalescer = self.ingestor._coalescer
+            if coalescer is not None:
+                queued = coalescer.pending_counts()
+                if queued["lossless"] or queued["market"]:
+                    if connection_done.is_set():
+                        return  # retain deliveries rather than delay the final quote drain
+                    await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS)
+                    continue
+            rows = buffer.peek(MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE)
+            try:
+                with write_gate:
+                    try:
+                        write_public_trade_observations(
+                            self.ingestor._feasibility_conn, rows,
+                            schema=self.ingestor._feasibility_schema,
+                        )
+                        if commit is not None:
+                            commit()
+                        else:
+                            self.ingestor._feasibility_conn.commit()
+                    except BaseException:
+                        if rollback is not None:
+                            rollback()
+                        else:
+                            self.ingestor._feasibility_conn.rollback()
+                        raise
+                buffer.acknowledge(rows)
+                final_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # observation failure cannot disconnect quotes
+                if logger is not None:
+                    logger.warning("Public trade observation append deferred: %s", exc)
+                if connection_done.is_set():
+                    final_failures += 1
+                    if final_failures >= 2:
+                        return  # exact pending identities survive to the next connection
+                await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS)
+            await asyncio.sleep(MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS)
+
     async def _flush_quote_projection_forever(
         self,
         *,
@@ -2977,6 +3047,10 @@ class MarketChannelOnlineService:
                         )
                     )
                     connected_at = datetime.now(UTC).isoformat()
+                    self.ingestor.public_trades.record(
+                        "STREAM_OPEN", {"subscribed_token_ids": sorted(active_token_ids)},
+                        received_at=connected_at,
+                    )
                     self.connected = True
                     self.gap_start = None
                     self._connected_at = connected_at
@@ -3028,6 +3102,10 @@ class MarketChannelOnlineService:
                             quote_flush_wake.set()
 
                     async with asyncio.TaskGroup() as tasks:
+                        tasks.create_task(self._flush_public_trades_forever(
+                            connection_done=connection_done, write_gate=_quote_write_gate,
+                            commit=commit, rollback=rollback, logger=logger,
+                        ))
                         tasks.create_task(_seed_initial_books())
                         tasks.create_task(
                             self._refresh_subscription_universe_forever(
@@ -3073,7 +3151,11 @@ class MarketChannelOnlineService:
                                 event_type = str(
                                     message.get("event_type") or message.get("type") or ""
                                 )
-                                if event_type == "new_market":
+                                if event_type == "last_trade_price":
+                                    self.ingestor.handle_message(
+                                        message, received_at=datetime.now(UTC).isoformat(),
+                                    )
+                                elif event_type == "new_market":
                                     world_messages.append(message)
                                 elif event_type in {"tick_size_change", "market_resolved"}:
                                     action = self.ingestor.handle_message(
@@ -3206,6 +3288,9 @@ class MarketChannelOnlineService:
                                 )
                             for _action in pending_actions:
                                 self._enqueue_refresh_action(_action)
+                        self.ingestor.public_trades.record(
+                            "STREAM_CLOSED", {}, received_at=datetime.now(UTC).isoformat(),
+                        )
                         connection_done.set()
                         depth_repair_task.cancel()
                         quote_flush_wake.set()
@@ -3214,6 +3299,9 @@ class MarketChannelOnlineService:
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
                 gap_start = datetime.now(UTC).isoformat()
+                self.ingestor.public_trades.record(
+                    "STREAM_CLOSED", {"reason": type(exc).__name__}, received_at=gap_start,
+                )
                 # ROLLBACK-ON-DISCONNECT (2026-05-31): if on_connect/seed_from_rest or
                 # the WS message loop raised mid-transaction (e.g. 404 on the first
                 # REST-seed token), Python's sqlite3 implicit-BEGIN may have left an

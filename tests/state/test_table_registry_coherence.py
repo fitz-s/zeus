@@ -78,6 +78,7 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # W0.2 2026-07-02: blind-window metric transition log (ensure_table wired
     # into init_schema_trade_only via market_channel_connectivity_schema.py).
     "market_channel_connectivity_events",
+    "public_market_trade_observations",
     # LX-T4 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md):
     # durable coverage watermark for the continuous fill synchronizer
     # (ensure_table wired into init_schema_trade_only via

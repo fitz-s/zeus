@@ -128,6 +128,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'hko_hourly_accumulator': Domain.WORLD,
     'job_run': Domain.FORECASTS,
     'market_channel_connectivity_events': Domain.TRADE,
+    'public_market_trade_observations': Domain.TRADE,
     'market_events': Domain.FORECASTS,
     'market_microstructure_snapshots': Domain.FORECASTS,
     'market_price_history': Domain.TRADE,

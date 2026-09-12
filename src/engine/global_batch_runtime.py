@@ -552,6 +552,8 @@ _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS = (
     "buy_disabled_reason_by_family",
     "excluded_by_family",
     "excluded_by_candidate",
+    # Audit evidence only; this is not an ENTRY admission gate.
+    "market_anchored_fit_artifact_audit",
 )
 
 
@@ -3478,6 +3480,7 @@ def _store_global_auction_receipt(
     # so callers that never light up Tier-0 candidate-set persistence (tests,
     # any future caller that omits it) keep working unchanged.
     family_context_by_key: Mapping[str, Mapping[str, str]] | None = None,
+    market_anchored_fit_artifact_audit: Mapping[str, object] | None = None,
     persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
@@ -3626,6 +3629,32 @@ def _store_global_auction_receipt(
     )
     if not held_position_coverage_complete:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_HELD_POSITION_COVERAGE_INCOMPLETE")
+    if market_anchored_fit_artifact_audit is None:
+        market_anchored_fit_artifact_audit_payload: dict[str, object] = {
+            "revision": "canonical_entry_fit_artifact_audit_v1",
+            "consulted_scopes": {},
+            "unavailable_scopes": {},
+        }
+    elif not isinstance(market_anchored_fit_artifact_audit, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_FIT_ARTIFACT_AUDIT_INVALID")
+    else:
+        market_anchored_fit_artifact_audit_payload = dict(
+            market_anchored_fit_artifact_audit
+        )
+        if market_anchored_fit_artifact_audit_payload.get("revision") != (
+            "canonical_entry_fit_artifact_audit_v1"
+        ):
+            raise ValueError(
+                "GLOBAL_AUCTION_RECEIPT_FIT_ARTIFACT_AUDIT_REVISION_INVALID"
+            )
+        for key in ("consulted_scopes", "unavailable_scopes"):
+            value = market_anchored_fit_artifact_audit_payload.get(key)
+            if not isinstance(value, Mapping):
+                raise ValueError("GLOBAL_AUCTION_RECEIPT_FIT_ARTIFACT_AUDIT_INVALID")
+            market_anchored_fit_artifact_audit_payload[key] = {
+                str(identity): value[identity]
+                for identity in sorted(value, key=str)
+            }
     buy_minimum_repairs = {
         str(evaluation.candidate_id): evaluation.buy_minimum_marketable_repair
         for evaluation in evaluations
@@ -3861,6 +3890,9 @@ def _store_global_auction_receipt(
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
         "probability_manifest": probability_manifest,
+        "market_anchored_fit_artifact_audit": (
+            market_anchored_fit_artifact_audit_payload
+        ),
         "full_scope_identity": full_scope_identity,
         "full_scope_family_count": len(scope_keys),
         "eligible_probability_family_count": len(probability_keys),
@@ -6175,12 +6207,15 @@ def _market_anchored_correction_resolver(
     calibration_scope_resolver: Callable[[object, object], object | None] | None,
     deadline_monotonic: float | None = None,
     warm_corpus_at: datetime | None = None,
+    market_anchored_fit_artifact_audit: dict[str, object] | None = None,
 ):
     """Fit ENTRY corrections from canonical fills on the batch's borrowed handles.
 
     Each exact metric, probability revision and execution contract has its own
     artifact. The provider shares one causal corpus read across this batch's
     scopes; unavailable canonical evidence never falls back to selected claims.
+    The optional artifact audit is receipt evidence only and never changes q,
+    cost, selection, or admission.
     """
 
     from src.calibration.market_anchored_live_fit import (
@@ -6191,6 +6226,80 @@ def _market_anchored_correction_resolver(
         CalibrationFitScope, PayoffQCorrection, PayoffQCorrectionUnavailable,
     )
     from src.config import runtime_cities_by_name
+
+    if market_anchored_fit_artifact_audit is not None:
+        if not isinstance(market_anchored_fit_artifact_audit, dict):
+            raise TypeError("market_anchored_fit_artifact_audit must be a dict")
+        revision = market_anchored_fit_artifact_audit.setdefault(
+            "revision", "canonical_entry_fit_artifact_audit_v1"
+        )
+        if revision != "canonical_entry_fit_artifact_audit_v1":
+            raise ValueError("GLOBAL_ENTRY_FIT_ARTIFACT_AUDIT_REVISION_INVALID")
+        for key in ("consulted_scopes", "unavailable_scopes"):
+            value = market_anchored_fit_artifact_audit.setdefault(key, {})
+            if not isinstance(value, dict):
+                raise TypeError(
+                    f"market_anchored_fit_artifact_audit[{key!r}] must be a dict"
+                )
+
+    def record_unavailable(candidate, reason: str, scope=None) -> None:
+        if market_anchored_fit_artifact_audit is None:
+            return
+        scope_payload = (
+            scope.as_payload() if isinstance(scope, CalibrationFitScope) else None
+        )
+        family_key = str(getattr(candidate, "family_key", "") or "")
+        scope_identity = (
+            str(scope_payload["scope_hash"]) if scope_payload is not None else None
+        )
+        identity = "|".join(
+            (family_key, scope_identity or "", str(reason or "UNKNOWN"))
+        )
+        unavailable = market_anchored_fit_artifact_audit["unavailable_scopes"]
+        assert isinstance(unavailable, dict)
+        unavailable[identity] = {
+            "family_key": family_key,
+            "scope_identity": scope_identity,
+            "scope": scope_payload,
+            "status": "UNAVAILABLE",
+            "reason": str(reason or "UNKNOWN"),
+        }
+
+    artifact_audit_by_object: dict[
+        tuple[int, str, str], tuple[object, dict[str, object]]
+    ] = {}
+
+    def record_artifact(scope, artifact) -> None:
+        if market_anchored_fit_artifact_audit is None or artifact is None:
+            return
+        scope_payload = scope.as_payload()
+        scope_identity = str(scope_payload["scope_hash"])
+        param_hash = str(artifact.param_hash)
+        cache_key = (id(artifact), scope_identity, param_hash)
+        cached = artifact_audit_by_object.get(cache_key)
+        if cached is None:
+            entry = {
+                "scope_identity": scope_identity,
+                "param_hash": param_hash,
+                "status": "AVAILABLE",
+                "artifact": asdict(artifact),
+                "scope": scope_payload,
+                "policy": provider.calibration_policy.as_payload(),
+            }
+            # Retain the object too: an integer id may be reused after refits.
+            artifact_audit_by_object[cache_key] = (artifact, entry)
+        else:
+            entry = cached[1]
+        consulted = market_anchored_fit_artifact_audit["consulted_scopes"]
+        assert isinstance(consulted, dict)
+        snapshot_identity = f"{scope_identity}:{param_hash}"
+        prior = consulted.get(snapshot_identity)
+        if prior is not None and prior != entry:
+            # Equal coefficients can come from distinct committed input sets.
+            snapshot_identity += ":" + hashlib.sha256(
+                _canonical_json_bytes(entry)
+            ).hexdigest()
+        consulted.setdefault(snapshot_identity, entry)
 
     if calibration_scope_resolver is None:
         def no_correction(candidate, raw_q, p0, decision_at_utc):
@@ -6224,12 +6333,15 @@ def _market_anchored_correction_resolver(
 
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         if provider is None:
+            record_unavailable(candidate, "PROVIDER_UNAVAILABLE")
             raise PayoffQCorrectionUnavailable("PROVIDER_UNAVAILABLE")
         target_context = target_context_by_family.get(str(candidate.family_key))
         if target_context is None:
+            record_unavailable(candidate, "TARGET_CONTEXT_UNAVAILABLE")
             raise PayoffQCorrectionUnavailable("TARGET_CONTEXT_UNAVAILABLE")
         prepared = prepared_by_family.get(str(candidate.family_key))
         if prepared is None:
+            record_unavailable(candidate, "PREPARED_FAMILY_UNAVAILABLE")
             raise PayoffQCorrectionUnavailable("PREPARED_FAMILY_UNAVAILABLE")
         scope = calibration_scope_resolver(candidate, prepared)
         if (
@@ -6237,11 +6349,15 @@ def _market_anchored_correction_resolver(
             or scope.execution_mode != str(getattr(candidate, "execution_mode", ""))
             or str(getattr(candidate, "action", "BUY")) != "BUY"
         ):
+            record_unavailable(candidate, "FIT_SCOPE_UNAVAILABLE", scope)
             raise PayoffQCorrectionUnavailable("FIT_SCOPE_UNAVAILABLE")
         city, target_date = target_context
         artifact = provider.artifact(
             scope=scope, now=decision_at_utc, deadline_monotonic=deadline_monotonic
         )
+        record_artifact(scope, artifact)
+        if artifact is None:
+            record_unavailable(candidate, "SCOPED_FIT_UNAVAILABLE", scope)
         applied = corrected_probability(
             artifact,
             p0=p0,
@@ -6252,6 +6368,7 @@ def _market_anchored_correction_resolver(
             side=str(candidate.side),
         )
         if applied is None:
+            record_unavailable(candidate, "SCOPED_FIT_UNAVAILABLE", scope)
             raise PayoffQCorrectionUnavailable("SCOPED_FIT_UNAVAILABLE")
         corrected_q, lead_bucket, alpha_lead = applied
         return PayoffQCorrection(
@@ -6280,6 +6397,7 @@ def _market_anchored_correction_resolver(
         except PayoffQCorrectionUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - never reinterpret required-fit failure as raw q
+            record_unavailable(candidate, type(exc).__name__)
             raise PayoffQCorrectionUnavailable(type(exc).__name__) from exc
 
     return resolve
@@ -8025,12 +8143,14 @@ def process_current_global_batch(
         # Prepare immutable calibration input before spending the fresh-book
         # window. Scope resolution still reads the post-book ENTRY objects.
         entry_fit_prepared_by_family: dict[str, object] = {}
+        entry_fit_artifact_audit: dict[str, object] = {}
         payoff_q_correction_resolver = _market_anchored_correction_resolver(
             world_conn,
             trade_conn=trade_conn,
             forecast_conn=forecast_conn,
             calibration_scope_resolver=calibration_scope_resolver,
             prepared_by_family=entry_fit_prepared_by_family,
+            market_anchored_fit_artifact_audit=entry_fit_artifact_audit,
             warm_corpus_at=(
                 current_time()
                 if buy_candidates_enabled and any(
@@ -8731,6 +8851,7 @@ def process_current_global_batch(
                 wealth_reauction_audit=wealth_reauction_audit,
                 proof_counterfactual=proof_counterfactual,
                 family_context_by_key=family_context_by_key,
+                market_anchored_fit_artifact_audit=entry_fit_artifact_audit,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
                         work_context=work_context,

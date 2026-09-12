@@ -6954,6 +6954,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # §1 A2): durable WS connect/disconnect/reconnect transition log. Trade DB owner.
     from src.state.schema.market_channel_connectivity_schema import ensure_table as _ensure_market_channel_connectivity_table
     _ensure_market_channel_connectivity_table(conn)
+    from src.state.schema.public_market_trade_observations_schema import ensure_table as _ensure_public_market_trade_observations
+    _ensure_public_market_trade_observations(conn)
     # LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): durable coverage
     # watermark for the continuous fill synchronizer (src.ingest.fill_synchronizer).
     # Trade DB owner, mirrors the schema_epoch registration pattern.

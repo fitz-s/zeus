@@ -2493,6 +2493,28 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
         candidate_input_count=0,
     )
     at = _dt.datetime(2026, 7, 16, 18, 0, tzinfo=_dt.timezone.utc)
+    fit_artifact_audit = {
+        "revision": "canonical_entry_fit_artifact_audit_v1",
+        "consulted_scopes": {
+            "scope-a:param-a": {
+                "scope_identity": "scope-a",
+                "param_hash": "param-a",
+                "status": "AVAILABLE",
+                "artifact": {"alpha": {"day0": 0.1}},
+                "scope": {"scope_hash": "scope-a"},
+                "policy": {"policy_hash": "policy-a"},
+            },
+        },
+        "unavailable_scopes": {
+            "family-b|scope-b|SCOPED_FIT_UNAVAILABLE": {
+                "family_key": "family-b",
+                "scope_identity": "scope-b",
+                "scope": {"scope_hash": "scope-b"},
+                "status": "UNAVAILABLE",
+                "reason": "SCOPED_FIT_UNAVAILABLE",
+            },
+        },
+    }
     row_id = global_batch_runtime._store_global_auction_receipt(
         conn,
         selected=SimpleNamespace(decision=decision),
@@ -2538,6 +2560,7 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
         fractional_kelly_multiplier=Decimal("0.25"),
         book_captured_at_utc=at,
         book_max_age=_dt.timedelta(seconds=30),
+        market_anchored_fit_artifact_audit=fit_artifact_audit,
     )
 
     artifact = json.loads(
@@ -2554,6 +2577,13 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
     assert summary["book_native_side_state_count"] == 2
     assert summary["book_native_side_executable_count"] == 0
     assert summary["book_native_side_non_executable_count"] == 2
+    assert summary["market_anchored_fit_artifact_audit"] == fit_artifact_audit
+    audit_context = json.loads(
+        zlib.decompress(
+            base64.b64decode(summary["audit_context_zlib_b64"])
+        )
+    )
+    assert audit_context["market_anchored_fit_artifact_audit"] == fit_artifact_audit
 
 
 def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
@@ -2622,6 +2652,20 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
         for index, family_key in enumerate(families)
         for side in ("YES", "NO")
     )
+    fit_artifact_audit = {
+        "revision": "canonical_entry_fit_artifact_audit_v1",
+        "consulted_scopes": {
+            "scope-a:param-a": {
+                "scope_identity": "scope-a",
+                "param_hash": "param-a",
+                "status": "AVAILABLE",
+                "artifact": {"alpha": {"day0": 0.1}},
+                "scope": {"scope_hash": "scope-a"},
+                "policy": {"policy_hash": "policy-a"},
+            },
+        },
+        "unavailable_scopes": {},
+    }
 
     def store(
         *,
@@ -2655,6 +2699,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
             book_max_age=(
                 _dt.timedelta(seconds=30) if book_available else None
             ),
+            market_anchored_fit_artifact_audit=fit_artifact_audit,
         )
         assert row_id is not None
         return row_id
@@ -2719,6 +2764,9 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
         "family-0",
         "q-second-0",
     ]
+    assert reconstructed_context["market_anchored_fit_artifact_audit"] == (
+        fit_artifact_audit
+    )
     assert hashlib.sha256(
         global_batch_runtime._canonical_json_bytes(reconstructed_context)
     ).hexdigest() == duplicate_summary["audit_context_sha256"]

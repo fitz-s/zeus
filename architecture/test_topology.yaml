@@ -208,6 +208,7 @@ test_trust_policy:
     tests/test_replay_learning_authority.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_public_trade_observations.py: {created: "2026-09-12", last_used: "2026-09-12", note: "Public delivery retry identity, duplicate preservation, source clocks, explicit overflow, append-only ownership, and websocket persistence separate from quote coalescing and own fills."}
     tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-08-10"}

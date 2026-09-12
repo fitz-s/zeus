@@ -2030,6 +2030,12 @@ files:
     why: Emits causally timestamped Day0 extreme events from canonical observation authority. Scanner rows receive an exact Python timestamp recheck after the bounded SQL prefilter, so subsecond imports after the decision cut defer to the next scan instead of failing the full reactor cycle or crossing the availability boundary.
     downstream:
     - src/events/reactor.py
+  src/events/public_trade_observations.py:
+    zone: K2_runtime
+    authority_role: public_trade_delivery_observer
+    why: Preserves public last-trade deliveries and explicit FIFO overflow ranges using retry-stable local identities, without merging same-transaction prints or promoting public observations to own fills or cohort completeness.
+    downstream:
+    - src/events/triggers/market_channel_ingestor.py
   src/events/triggers/market_channel_ingestor.py:
     zone: K2_runtime
     authority_role: market_channel_quote_projection
@@ -2949,6 +2955,12 @@ files:
     downstream:
     - src/state/db.py
     - src/state/entry_exposure_obligation.py
+  src/state/schema/public_market_trade_observations_schema.py:
+    zone: K2_runtime
+    authority_role: public_trade_observation_schema_owner
+    why: TRADE append-only public delivery and coverage-gap schema, initialized by the existing trade owner and explicitly distinct from execution truth.
+    downstream:
+    - src/state/db.py
   src/state/schema/market_channel_connectivity_schema.py:
     zone: K2_runtime
     authority_role: market_channel_connectivity_schema_owner

@@ -1123,6 +1123,26 @@ tables:
       EDLI v1 dead-letter record for event processing failures. No SQLite FK is
       declared so cross-DB FK illusions cannot be introduced.
 
+  - name: public_market_trade_observations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: observation_id
+    required_columns:
+      - {name: observation_id, type: TEXT, nullable: false}
+      - {name: observer_id, type: TEXT, nullable: false}
+      - {name: sequence, type: INTEGER, nullable: false}
+      - {name: end_sequence, type: INTEGER, nullable: false}
+      - {name: kind, type: TEXT, nullable: false}
+      - {name: received_at, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+    notes: >
+      Append-only public websocket deliveries and local coverage gaps. Local
+      sequence identity deduplicates retries only, never chain executions.
+      SOURCE_UNSEQUENCED and PUBLIC_DELIVERY_ONLY cannot authorize trades or
+      become Zeus fill, position, realized profit or complete-cohort truth.
+
   - name: market_channel_connectivity_events
     db: trade
     schema_class: trade_class
