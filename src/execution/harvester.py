@@ -728,12 +728,44 @@ def _row_value(row, key: str):
     return None
 
 
+#: NOAA observation sources in settlement precedence order. `noaa_wrh_` rows
+#: carry the value the market's own page shows; `ogimet_metar_` rows are a
+#: whole-degree METAR-body reconstruction of it, which disagreed with the
+#: chain-winning bin on 15-37% of days for the US degF cities (measured
+#: 2026-09-12). Both are settlement-family valid; the page product wins
+#: whenever it exists for that (city, target_date).
+_NOAA_SETTLEMENT_SOURCE_PREFIXES = ("noaa_wrh_", "ogimet_metar_")
+
+#: data_version stamped into settlement provenance, per observation source.
+_NOAA_SETTLEMENT_DATA_VERSION = {
+    "noaa_wrh_": "noaa_wrh_timeseries_v1",
+    "ogimet_metar_": "ogimet_metar",
+}
+
+
+def _noaa_source_rank(source: str) -> Optional[int]:
+    """Settlement precedence of a NOAA observation source; None if unrelated."""
+    src = str(source or "").strip().lower()
+    for rank, prefix in enumerate(_NOAA_SETTLEMENT_SOURCE_PREFIXES):
+        if src.startswith(prefix):
+            return rank
+    return None
+
+
+def _noaa_settlement_data_version(source: str) -> Optional[str]:
+    src = str(source or "").strip().lower()
+    for prefix, version in _NOAA_SETTLEMENT_DATA_VERSION.items():
+        if src.startswith(prefix):
+            return version
+    return None
+
+
 def _source_matches_settlement_family(source: str, source_type: str) -> bool:
     src = str(source or "").strip().lower()
     if source_type == "wu_icao":
         return src == "wu_icao_history" or src.startswith("wu_icao_history_")
     if source_type == "noaa":
-        return src.startswith("ogimet_metar_")
+        return _noaa_source_rank(src) is not None
     if source_type == "hko":
         return src == "hko_daily_api" or src.startswith("hko_daily_api_")
     return False
@@ -766,9 +798,13 @@ def _lookup_settlement_obs(
 
     Routes per city.settlement_source_type (P-C routing rules, DR-33 plan §3.3):
       - wu_icao   → observations.source='wu_icao_history'
-      - noaa      → observations.source LIKE 'ogimet_metar_%'
+      - noaa      → 'noaa_wrh_<station>' preferred, else 'ogimet_metar_<station>'
       - hko       → observations.source='hko_daily_api'
       - cwa_station → no accepted proxy (returns None; row will be written DISPUTED)
+
+    For NOAA the two sources are the market's own page value and a whole-degree
+    METAR reconstruction of it, so precedence is part of the settlement
+    contract, not a tie-break: see _NOAA_SETTLEMENT_SOURCE_PREFIXES.
     """
     metric_identity = _metric_identity_for(temperature_metric)
     st = city.settlement_source_type
@@ -787,6 +823,7 @@ def _lookup_settlement_obs(
            WHERE city = ? AND target_date = ?""",
         (city.name, target_date),
     ).fetchall()
+    candidates: list[tuple[int, object, str]] = []
     for r in rows:
         if not isinstance(r, (sqlite3.Row, dict)):
             r = dict(zip(column_names, r))
@@ -797,9 +834,13 @@ def _lookup_settlement_obs(
             continue
         if "station_id" in columns and not _station_matches_city(_row_value(r, "station_id"), city):
             continue
-        observed_temp = _row_value(r, metric_field)
-        if observed_temp is None:
+        if _row_value(r, metric_field) is None:
             continue
+        rank = _noaa_source_rank(src) if st == "noaa" else 0
+        candidates.append((rank if rank is not None else 0, r, src))
+
+    for _rank, r, src in sorted(candidates, key=lambda item: item[0]):
+        observed_temp = _row_value(r, metric_field)
         # M1 (timing-semantics fix 2026-06-16): carry the metric-aware
         # station-reported LOCAL observation instant (high_local_time /
         # low_local_time) so the settlement writer can stamp settled_at from
@@ -824,6 +865,7 @@ def _lookup_settlement_obs(
             "observation_field": metric_field,
             "observed_temp": observed_temp,
             "observation_local_time": _observation_local_time,
+            "data_version": _noaa_settlement_data_version(src),
         }
     return None
 
@@ -1889,6 +1931,10 @@ def _parsed_temperature_bins_equivalent(left: object, right: object) -> Optional
     )
 
 
+# Per-source-type default. For NOAA the observation row decides between
+# `noaa_wrh_timeseries_v1` and `ogimet_metar`, so the settled row's
+# data_version is read off obs_row (see _write_settlement_truth); this table
+# only covers the case where no observation was found at all.
 _HARVESTER_LIVE_DATA_VERSION = {
     "wu_icao": "wu_icao_history",
     "hko": "hko_daily_api",
@@ -1941,7 +1987,10 @@ def _write_settlement_truth(
     """
     _SOURCE_TYPE_MAP = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
     db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
-    data_version = _HARVESTER_LIVE_DATA_VERSION.get(
+    # The settled row records the data_version of the observation it actually
+    # used, so a NOAA row says whether it came from the market's own page feed
+    # or from the Ogimet reconstruction.
+    data_version = (obs_row or {}).get("data_version") or _HARVESTER_LIVE_DATA_VERSION.get(
         city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)

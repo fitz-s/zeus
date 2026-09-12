@@ -1,0 +1,42 @@
+packet: current/noaa_settlement_page_truth
+status: active
+owner: agent
+frontier:
+- NOAA settlement product from the market's own resolution page
+- per-city settlement page view (hourly vs all-data)
+- settlement source precedence for NOAA cities
+- scanner page-view antibody
+in_scope:
+- docs/operations/current/noaa_settlement_page_truth/**
+- docs/operations/current_data_state.md
+- config/cities.json
+- src/config.py
+- src/data/noaa_wrh_timeseries.py
+- src/data/daily_obs_append.py
+- src/data/market_scanner.py
+- src/execution/harvester.py
+- src/ingest/harvester_truth_writer.py
+- src/state/db_writer_lock.py
+- scripts/backfill_noaa_wrh.py
+- scripts/rebuild_settlements.py
+- scripts/drain_settlement_disputes.py
+- architecture/script_manifest.yaml
+- tests/test_noaa_wrh_settlement_product.py
+- tests/fixtures/noaa_wrh/**
+- tests/test_market_scanner_provenance.py
+allow_companions: []
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- state/zeus-forecasts.db
+- state/zeus-forecasts.db-*
+- src/data/ogimet_hourly_client.py
+- src/contracts/settlement_semantics.py
+live_side_effects_allowed: false
+supersedes: null
+tests:
+- pytest -q tests/test_noaa_wrh_settlement_product.py
+- pytest -q tests/test_market_scanner_provenance.py tests/test_scanner_slug_pattern.py
+- pytest -q tests/test_cities_config_authoritative.py tests/test_hourly_clients_parse.py
+- pytest -q tests/test_k2_live_ingestion_relationships.py tests/test_backfill_scripts_match_live_config.py
+closeout_required: true

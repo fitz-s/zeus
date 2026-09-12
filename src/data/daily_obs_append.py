@@ -1157,14 +1157,23 @@ def _build_atom_pair(
     api_endpoint: str,
     provenance: dict,
     fetch_utc: datetime | None = None,
+    high_local_time: datetime | str | None = None,
+    low_local_time: datetime | str | None = None,
 ) -> tuple[ObservationAtom, ObservationAtom]:
     """Build a (high_atom, low_atom) pair with full K1-C provenance fields.
 
-    Shared by WU and HKO write paths. Applies IngestionGuard layers 1, 4,
-    5 (Layers 2 and 3 removed — Layer 2 skipped because TIGGE-derived
-    p01/p99 under-represent observation tails; Layer 3 deleted). Raises
-    IngestionRejected if validation fails — caller must catch and record
-    FAILED in data_coverage.
+    Shared by the WU, HKO, Ogimet and weather.gov page write paths. Applies
+    IngestionGuard layers 1, 4, 5 (Layers 2 and 3 removed — Layer 2 skipped
+    because TIGGE-derived p01/p99 under-represent observation tails; Layer 3
+    deleted). Raises IngestionRejected if validation fails — caller must catch
+    and record FAILED in data_coverage.
+
+    ``high_local_time``/``low_local_time`` carry the station-reported LOCAL
+    instant of each extremum for sources that know it (the weather.gov page
+    feed does). When a source does not report them, both atoms carry the
+    city's historical peak hour — a synthesized placeholder, not an observed
+    time. The DST context fields are always derived from that peak-hour
+    instant so they stay comparable across sources.
     """
     city_cfg = cities_by_name.get(city_name)
     if city_cfg is None:
@@ -1274,11 +1283,37 @@ def _build_atom_pair(
     )
     target_high = Temperature(float(high_val), raw_unit).to(target_unit).value
     target_low = Temperature(float(low_val), raw_unit).to(target_unit).value
+
+    def _reported_local_time(value: datetime | str | None) -> datetime:
+        """Re-anchor a source's reported instant onto the city's own zone.
+
+        Sources report the extremum with a fixed UTC offset (the page feed sends
+        ``2026-09-11T15:51:00-0400``). ObservationAtom requires a ZoneInfo-keyed
+        local_time so the declared timezone is checkable, and converting through
+        the city's zone preserves the instant while supplying that key.
+        """
+        if value is None:
+            return local_time
+        reported = value
+        if not isinstance(reported, datetime):
+            try:
+                reported = datetime.fromisoformat(str(value))
+            except ValueError:
+                raise IngestionRejected(
+                    f"{city_name}/{target_d.isoformat()}: unparseable reported "
+                    f"local time {value!r}"
+                )
+        if reported.tzinfo is None:
+            return reported.replace(tzinfo=tz)
+        return reported.astimezone(tz)
+
     atom_high = ObservationAtom(
-        value_type="high", value=target_high, raw_value=high_val, **common,
+        value_type="high", value=target_high, raw_value=high_val,
+        **{**common, "local_time": _reported_local_time(high_local_time)},
     )
     atom_low = ObservationAtom(
-        value_type="low", value=target_low, raw_value=low_val, **common,
+        value_type="low", value=target_low, raw_value=low_val,
+        **{**common, "local_time": _reported_local_time(low_local_time)},
     )
     return atom_high, atom_low
 
@@ -1759,6 +1794,217 @@ def _fetch_ogimet_day(
     return max(temps), min(temps), len(temps), first_utc, last_utc
 
 
+# ---------------------------------------------------------------------------
+# NOAA settlement product: the feed behind weather.gov/wrh/timeseries
+#
+# Ogimet mirrors the same METAR stream but only its whole-degree bodies, and
+# it cannot express which rows the market's chosen page view shows. This path
+# reads the page's own feed and is therefore the settlement product for NOAA
+# cities; append_ogimet_city stays as the fallback (and as the hourly/history
+# mirror) for any city/date the page feed refuses or has no rows for.
+# ---------------------------------------------------------------------------
+
+NOAA_WRH_DATA_SOURCE_VERSION = "noaa_wrh_timeseries_v1"
+
+
+def noaa_wrh_source_tag(station: str) -> str:
+    return f"noaa_wrh_{str(station).strip().lower()}"
+
+
+def append_noaa_wrh_city(
+    city_name: str,
+    target_dates: list[date],
+    conn,
+    *,
+    rebuild_run_id: str | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Write the page's daily high/low for a NOAA city into ``observations``.
+
+    One Synoptic request per target date, sized by
+    ``recent_minutes_for_local_day`` — the page's own request shape and the
+    sparsity the per-IP token quota requires (see
+    src/data/noaa_wrh_timeseries.py for the measured facts).
+
+    A refused token (HTTP 403) and a station-dark day are recorded differently
+    on purpose: the refusal is a FAILED coverage row with a retry embargo,
+    while no rows for the local date writes nothing at all. Neither guesses a
+    value, so the settlement writer's no-observation path keeps the market
+    DISPUTED rather than settling on a number the page never showed.
+    """
+    from src.data.noaa_wrh_timeseries import (
+        WrhError,
+        WrhTokenRefused,
+        daily_extreme,
+        fetch_wrh_timeseries,
+        fetch_wrh_token,
+        recent_minutes_for_local_day,
+        request_url_without_token,
+        token_fetched_at,
+    )
+
+    city_cfg = cities_by_name.get(city_name)
+    if city_cfg is None:
+        logger.warning("append_noaa_wrh_city: %s not in cities.json", city_name)
+        return {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0}
+    station = str(city_cfg.wu_station or "").strip().upper()
+    if not station:
+        raise RuntimeError(f"{city_name}: NOAA settlement source has no ICAO station")
+
+    if rebuild_run_id is None:
+        rebuild_run_id = (
+            f"noaa_wrh_live_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+
+    source_tag = noaa_wrh_source_tag(station)
+    view = city_cfg.settlement_page_view
+    unit = city_cfg.settlement_unit
+    stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0}
+
+    try:
+        token = fetch_wrh_token()
+    except WrhError as exc:
+        logger.warning("noaa_wrh token unavailable for %s: %s", city_name, exc)
+        for target_d in target_dates:
+            stats["fetch_errors"] += 1
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=2),
+            )
+        conn.commit()
+        return stats
+
+    for target_d in target_dates:
+        recent_minutes = recent_minutes_for_local_day(
+            target_d, city_cfg.timezone, now_utc=now_utc,
+        )
+        request_url = request_url_without_token(
+            station, unit=unit, recent_minutes=recent_minutes,
+        )
+        try:
+            rows = fetch_wrh_timeseries(
+                station, unit=unit, token=token, recent_minutes=recent_minutes,
+            )
+        except WrhTokenRefused as exc:
+            # Quota or header contract, never "the station was dark". One
+            # WARNING per run keeps a refused day visible without flooding.
+            stats["fetch_errors"] += 1
+            logger.warning("noaa_wrh refused for %s/%s: %s", city_name, target_d, exc)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=6),
+            )
+            conn.commit()
+            break
+        except WrhError as exc:
+            stats["fetch_errors"] += 1
+            logger.warning("noaa_wrh fetch failed %s/%s: %s", city_name, target_d, exc)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=2),
+            )
+            conn.commit()
+            continue
+
+        high = daily_extreme(
+            rows, target_date_local=target_d, view=view, metric="high",
+        )
+        low = daily_extreme(
+            rows, target_date_local=target_d, view=view, metric="low",
+        )
+        if high is None or low is None:
+            # Station dark for this local date under the contract's view.
+            stats["no_rows"] += 1
+            logger.info(
+                "noaa_wrh %s/%s: no %s-view rows; leaving the day unwritten",
+                city_name, target_d, view,
+            )
+            continue
+
+        fetch_utc = datetime.now(timezone.utc)
+        token_at = token_fetched_at()
+        provenance = {
+            "station": station,
+            "upstream": "weather.gov_wrh_timeseries",
+            "settlement_page_view": view,
+            "n_rows": high.n_rows,
+            "n_official": high.n_official,
+            "high_raw_metar": high.raw_metar,
+            "low_raw_metar": low.raw_metar,
+            "high_local_timestamp": high.local_timestamp,
+            "low_local_timestamp": low.local_timestamp,
+            "token_fetched_at": token_at.isoformat() if token_at else None,
+            "request_url": request_url,
+        }
+
+        try:
+            atom_high, atom_low = _build_atom_pair(
+                city_name=city_name,
+                target_d=target_d,
+                high_val=high.value,
+                low_val=low.value,
+                raw_unit=unit,
+                target_unit=unit,
+                station_id=station,
+                source=source_tag,
+                rebuild_run_id=rebuild_run_id,
+                data_source_version=NOAA_WRH_DATA_SOURCE_VERSION,
+                api_endpoint=provenance["request_url"],
+                provenance=provenance,
+                fetch_utc=fetch_utc,
+                high_local_time=high.local_timestamp,
+                low_local_time=low.local_timestamp,
+            )
+        except IngestionRejected as e:
+            stats["guard_rejected"] += 1
+            logger.warning("noaa_wrh guard dropped %s/%s: %s", city_name, target_d, e)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.GUARD_REJECTED,
+                retry_after=_retry_embargo(hours=24),
+            )
+            conn.commit()
+            continue
+
+        try:
+            _write_atom_with_coverage(conn, atom_high, atom_low, data_source=source_tag)
+            stats["inserted"] += 1
+        except Exception as e:
+            logger.error("noaa_wrh insert failed %s/%s: %s", city_name, target_d, e)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=1),
+            )
+        conn.commit()
+
+    conn.commit()
+    return stats
+
+
 def append_ogimet_city(
     city_name: str,
     target_dates: list[date],
@@ -1965,10 +2211,17 @@ def daily_tick(
             accumulator_schema=hko_accumulator_schema,
         )
 
-    # Ogimet documents a slow-query cadence. Shard current NOAA cities across
-    # the 24 hourly ticks so every station is refreshed daily without one
-    # 48-city request burst monopolizing the ingest worker or tripping quota.
+    # NOAA cities carry two daily lanes over the same station and the same
+    # shard schedule: the weather.gov page feed is the settlement product, and
+    # Ogimet remains the hourly/history mirror and the row the settlement
+    # writer reads when the page feed produced nothing for that city/date.
+    # Both are sharded across the 24 hourly ticks so neither one turns into a
+    # 48-city request burst, and both run before the 45-minute
+    # harvester_truth_writer cron reads the day.
     ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+    noaa_wrh_stats = {
+        "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
+    }
     for city_name in _ogimet_city_shard_for_hour(now_utc):
         city_cfg = cities_by_name.get(city_name)
         if city_cfg is None:
@@ -1977,6 +2230,12 @@ def daily_tick(
         local_yesterday = local_today - timedelta(days=1)
         if settlement_source_type_for_city(city_cfg, local_yesterday) != "noaa":
             continue
+        wrh_stats = append_noaa_wrh_city(
+            city_name, [local_yesterday], conn,
+            rebuild_run_id=rebuild_run_id, now_utc=now_utc,
+        )
+        for k in noaa_wrh_stats:
+            noaa_wrh_stats[k] += wrh_stats.get(k, 0)
         stats = append_ogimet_city(
             city_name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
         )
@@ -1988,6 +2247,7 @@ def daily_tick(
         "hko": hko_stats,
         "hko_daily_extract": hko_daily_extract_stats,
         "hko_realtime": hko_rt_stats,
+        "noaa_wrh": noaa_wrh_stats,
         "ogimet": ogimet_stats,
     }
 
@@ -2019,11 +2279,26 @@ def catch_up_missing(
     wu_by_city: dict[str, list[date]] = {}
     hko_months: set[tuple[int, int]] = set()
     ogimet_by_city: dict[str, list[date]] = {}
+    noaa_wrh_by_city: dict[str, list[date]] = {}
     ogimet_sources = {t.source_tag for t in OGIMET_CITIES.values()}
+    # The page feed shares the Ogimet cities' station identity but writes its
+    # own coverage rows, so a day the Synoptic token refused is retried here
+    # instead of waiting a full day for that city's next shard tick.
+    noaa_wrh_sources = {
+        noaa_wrh_source_tag(t.station) for t in OGIMET_CITIES.values()
+    }
     inapplicable_pending = 0
     for r in rows:
         target = date.fromisoformat(r["target_date"])
         if target < cutoff:
+            continue
+        if r["data_source"] in noaa_wrh_sources:
+            if settlement_source_type_for_city(
+                cities_by_name.get(r["city"]), target
+            ) != "noaa":
+                inapplicable_pending += 1
+                continue
+            noaa_wrh_by_city.setdefault(r["city"], []).append(target)
             continue
         if r["data_source"] != daily_observation_source_for_city(
             r["city"], target
@@ -2040,6 +2315,8 @@ def catch_up_missing(
     totals = {"wu_cities_touched": 0, "wu_inserted": 0, "wu_guard_rejected": 0,
               "hko_months_touched": 0, "hko_inserted": 0, "hko_incomplete": 0,
               "ogimet_cities_touched": 0, "ogimet_inserted": 0, "ogimet_guard_rejected": 0,
+              "noaa_wrh_cities_touched": 0, "noaa_wrh_inserted": 0,
+              "noaa_wrh_guard_rejected": 0,
               "inapplicable_pending_skipped": inapplicable_pending}
 
     for i, (city_name, dates) in enumerate(wu_by_city.items()):
@@ -2067,5 +2344,19 @@ def catch_up_missing(
         totals["ogimet_cities_touched"] += 1
         totals["ogimet_inserted"] += stats["inserted"]
         totals["ogimet_guard_rejected"] += stats["guard_rejected"]
+
+    wrh_items = list(noaa_wrh_by_city.items())
+    if wrh_items:
+        offset = datetime.now(timezone.utc).date().toordinal() % len(wrh_items)
+        wrh_items = wrh_items[offset:] + wrh_items[:offset]
+    for i, (city_name, dates) in enumerate(wrh_items):
+        if i >= max_ogimet_cities:
+            break
+        stats = append_noaa_wrh_city(
+            city_name, dates, conn, rebuild_run_id=rebuild_run_id,
+        )
+        totals["noaa_wrh_cities_touched"] += 1
+        totals["noaa_wrh_inserted"] += stats["inserted"]
+        totals["noaa_wrh_guard_rejected"] += stats["guard_rejected"]
 
     return totals

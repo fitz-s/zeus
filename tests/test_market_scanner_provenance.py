@@ -89,6 +89,45 @@ def _make_dummy_event(market_id: str = "m1") -> dict:
     }
 
 
+# Verbatim descriptions from the live Gamma payload for 2026-09-12. NYC's
+# carries the "Show Hourly Data" clause and London's does not; that single
+# sentence is the whole difference between the two settlement surfaces, so the
+# page-view tests below quote the real prose rather than paraphrasing it.
+_NYC_HOURLY_CLAUSE_DESCRIPTION = (
+    "This market will resolve to the temperature range that contains the "
+    "lowest temperature recorded by NOAA at the LaGuardia Airport Station in "
+    "degrees Fahrenheit on 12 Sep '26.\n\n"
+    "The resolution source for this market will be information from NOAA, "
+    'specifically the lowest reading under the "Temp" column for all times on '
+    "this day, available here: "
+    "https://www.weather.gov/wrh/timeseries?site=klga\n\n"
+    "This market will resolve off of the Hourly Data provided using the "
+    '"Show Hourly Data" button.\n\n'
+    "If NOAA data for the observation date is unavailable by 11:59 PM ET on "
+    "the day following the observation date, the Weather Underground Daily "
+    "Observations table will be used as the resolution source.\n\n"
+    "The resolution source for this market measures temperatures to whole "
+    "degrees Fahrenheit (eg, 21°F). Thus, this is the level of precision that "
+    "will be used when resolving the market."
+)
+
+_LONDON_ALL_DATA_DESCRIPTION = (
+    "This market will resolve to the temperature range that contains the "
+    "lowest temperature recorded by NOAA at the London City Airport Station in "
+    "degrees Celsius on 12 Sep '26.\n\n"
+    "The resolution source for this market will be information from NOAA, "
+    'specifically the lowest reading under the "Temp" column for all times on '
+    "this day, available here: "
+    "https://www.weather.gov/wrh/timeseries?site=eglc\n\n"
+    "If NOAA data for the observation date is unavailable by 11:59 PM ET on "
+    "the day following the observation date, the Weather Underground Daily "
+    "Observations table will be used as the resolution source.\n\n"
+    "The resolution source for this market measures temperatures to whole "
+    "degrees Celsius (eg, 9°C). Thus, this is the level of precision that "
+    "will be used when resolving the market."
+)
+
+
 def _gamma_temperature_event(
     *,
     event_id: str = "event1",
@@ -1523,6 +1562,112 @@ class TestSourceContractGate:
         assert parsed["source_contract"]["status"] == "MATCH"
         assert parsed["source_contract"]["source_family"] == "hko"
         assert parsed["source_contract"]["station_id"] is None
+
+    # ----------------------------------------------------------------------
+    # Settlement page view (2026-09-12). Provider + station do not pin the
+    # resolution surface on their own: a NOAA description that names the "Show
+    # Hourly Data" view resolves off routine METAR plus station-prefixed SPECI
+    # rows, one that omits it resolves off every row, and the two give
+    # different daily extrema. Both descriptions below are verbatim from the
+    # live Gamma payload for 2026-09-12.
+    # ----------------------------------------------------------------------
+
+    def test_hourly_clause_description_matches_the_hourly_view_city(self):
+        event = _gamma_temperature_event(
+            title="Lowest temperature in NYC on September 12?",
+            slug="lowest-temperature-in-nyc-on-september-12-2026",
+            question="Will the low temperature in NYC be 72°F or higher?",
+            resolution_source=None,
+            description=_NYC_HOURLY_CLAUSE_DESCRIPTION,
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 9, 12, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert parsed["city"].name == "NYC"
+        assert parsed["source_contract"]["status"] == "MATCH"
+        assert parsed["source_contract"]["source_family"] == "noaa"
+        assert parsed["source_contract"]["station_id"] == "KLGA"
+
+    def test_missing_hourly_clause_on_an_hourly_view_city_is_a_mismatch(self):
+        """NYC's slug with London's (clause-free) prose must not persist.
+
+        The station and provider still check out, so only the page-view gate
+        catches it — and if it did persist, Zeus would settle NYC off every row
+        while the market settled off the hourly rows.
+        """
+        event = _gamma_temperature_event(
+            title="Lowest temperature in NYC on September 12?",
+            slug="lowest-temperature-in-nyc-on-september-12-2026",
+            question="Will the low temperature in NYC be 72°F or higher?",
+            resolution_source=None,
+            description=_LONDON_ALL_DATA_DESCRIPTION.replace(
+                "London City Airport Station in degrees Celsius",
+                "LaGuardia Airport Station in degrees Fahrenheit",
+            ).replace("site=eglc", "site=klga"),
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 9, 12, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is None
+        check = ms._check_source_contract(event, ms.cities_by_name["NYC"])
+        assert check.status == "MISMATCH"
+        assert "Show Hourly Data" in check.reason
+        assert "omits" in check.reason
+
+    def test_all_data_clause_free_description_matches_the_all_view_city(self):
+        event = _gamma_temperature_event(
+            title="Lowest temperature in London on September 12?",
+            slug="lowest-temperature-in-london-on-september-12-2026",
+            question="Will the low temperature in London be 16°C or higher?",
+            resolution_source=None,
+            description=_LONDON_ALL_DATA_DESCRIPTION,
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 9, 12, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert parsed["city"].name == "London"
+        assert parsed["source_contract"]["status"] == "MATCH"
+        assert parsed["source_contract"]["source_family"] == "noaa"
+
+    def test_hourly_clause_on_an_all_view_city_is_a_mismatch(self):
+        """London's market gaining the clause would change its settlement law."""
+        event = _gamma_temperature_event(
+            title="Lowest temperature in London on September 12?",
+            slug="lowest-temperature-in-london-on-september-12-2026",
+            question="Will the low temperature in London be 16°C or higher?",
+            resolution_source=None,
+            description=(
+                _LONDON_ALL_DATA_DESCRIPTION
+                + "\n\nThis market will resolve off of the Hourly Data provided "
+                'using the "Show Hourly Data" button.'
+            ),
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 9, 12, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is None
+        check = ms._check_source_contract(event, ms.cities_by_name["London"])
+        assert check.status == "MISMATCH"
+        assert "Show Hourly Data" in check.reason
+        assert "carries" in check.reason
 
     def test_watch_report_alerts_on_source_drift(self):
         from scripts.watch_source_contract import analyze_events, exit_code_for_report

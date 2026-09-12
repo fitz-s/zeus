@@ -1,6 +1,6 @@
 {
   "_coord_note": "All lat/lon coordinates correspond to the physical station named by the current Polymarket settlement source. They MUST match the configured station exactly — do not use downtown or approximate coordinates.",
-  "_settlement_source_discipline": "ROUTINE CHECK NEEDED. Polymarket can change a city's settlement source / station / unit at any time. A 2026-09-02 live audit found a same-station provider migration from Wunderground to NOAA weather.gov across 45 active cities; station coordinates and ICAO identities remained unchanged. Earlier verified exceptions include HKO Hong Kong, WU Jinan/Taipei, and NOAA Istanbul/Moscow/Tel Aviv. Audit all active market descriptions monthly and whenever recalibration or onboarding is planned. Single source of truth: the most recent active market description. settlement_source_type values: 'wu_icao', 'hko', 'noaa', 'cwa_station'.",
+  "_settlement_source_discipline": "ROUTINE CHECK NEEDED. Polymarket can change a city's settlement source / station / unit at any time. A 2026-09-02 live audit found a same-station provider migration from Wunderground to NOAA weather.gov across 45 active cities; station coordinates and ICAO identities remained unchanged. Earlier verified exceptions include HKO Hong Kong, WU Jinan/Taipei, and NOAA Istanbul/Moscow/Tel Aviv. Audit all active market descriptions monthly and whenever recalibration or onboarding is planned. Single source of truth: the most recent active market description. settlement_source_type values: 'wu_icao', 'hko', 'noaa', 'cwa_station'. The 2026-09-12 gamma-api description census added a second per-city contract axis for NOAA cities: `settlement_page_view` records which view of weather.gov/wrh/timeseries the description names — 'hourly' for the 11 US degF cities whose text says 'This market will resolve off of the Hourly Data provided using the \"Show Hourly Data\" button.', 'all' for the other 37. The two views yield different daily extrema, so audit this field with the station and unit whenever descriptions are re-read.",
   "cities": [
     {
       "name": "Amsterdam",
@@ -87,7 +87,8 @@
       "lon": -84.428101,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Auckland",
@@ -144,7 +145,8 @@
       "lon": -97.662015,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Beijing",
@@ -316,7 +318,8 @@
       "lon": -87.9048,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Chongqing",
@@ -376,7 +379,8 @@
       "lon": -96.847653,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Denver",
@@ -409,7 +413,8 @@
       "lon": -104.751999,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Guangzhou",
@@ -526,7 +531,8 @@
       "lon": -95.276812,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Istanbul",
@@ -575,7 +581,8 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 10.0,
-      "weighted_low_calibration_eligible": false
+      "weighted_low_calibration_eligible": false,
+      "settlement_source_type": "wu_icao"
     },
     {
       "name": "Jakarta",
@@ -768,7 +775,8 @@
       "lon": -118.407997,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Lucknow",
@@ -911,7 +919,8 @@
       "lon": -80.289751,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Milan",
@@ -1029,7 +1038,8 @@
       "lon": -73.872597,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Panama City",
@@ -1147,7 +1157,8 @@
       "weighted_low_calibration_eligible": true,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Sao Paulo",
@@ -1209,7 +1220,8 @@
       "lon": -122.310276,
       "settlement_source_type": "noaa",
       "previous_settlement_source_type": "wu_icao",
-      "settlement_source_type_effective_date": "2026-08-23"
+      "settlement_source_type_effective_date": "2026-08-23",
+      "settlement_page_view": "hourly"
     },
     {
       "name": "Seoul",
@@ -1671,6 +1683,8 @@
       "confirmed_by": "web_search Polymarket snippets + audit 2026-04-15"
     },
     "2026-06-17: lat/lon corrected to precise WU settlement-station coords (4dp, station_precise_coords.json/OurAirports). Config previously held approximate coords off by up to 3.4km, violating _coord_note; live forecast fetch (replacement_forecast_production.py) requests at these coords so the wrong cell was sampled.",
-    "2026-06-17: Auckland NZAA re-pinned to OurAirports (-37.008099,174.792007); station_precise_coords value was ~1.5km off (caught by independent Polymarket/OurAirports verify, polymarket_station_verify.md)."
+    "2026-06-17: Auckland NZAA re-pinned to OurAirports (-37.008099,174.792007); station_precise_coords value was ~1.5km off (caught by independent Polymarket/OurAirports verify, polymarket_station_verify.md).",
+    "2026-09-12: settlement_page_view added and set to 'hourly' on the 11 US degF NOAA cities (Atlanta, Austin, Chicago, Dallas, Denver, Houston, Los Angeles, Miami, NYC, San Francisco, Seattle); every other city stays 'all'. Reason: those markets' descriptions carry the clause 'This market will resolve off of the Hourly Data provided using the \"Show Hourly Data\" button.', which restricts the resolution surface to routine METAR plus station-prefixed SPECI rows. discovered_via: gamma-api description census of 270 active events (66 carried the clause, all 11 of these cities and no others). Replay against chain-winning bins 2026-08-23..2026-09-11: hourly view 434/434 settled degF cells, all-data view 302/434.",
+    "2026-09-12: Jinan settlement_source_type set explicitly to 'wu_icao' (the key was absent, so the runtime default carried the contract). Active Jinan events name the Weather Underground ZSJN history page. discovered_via: same gamma-api description census."
   ]
 }

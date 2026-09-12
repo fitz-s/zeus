@@ -50,6 +50,36 @@ SETTLEMENT_DATA_VERSION_BY_SOURCE_TYPE = {
     "cwa_station": "cwa_no_collector",
 }
 
+#: NOAA observation sources in settlement precedence order, and the
+#: data_version each one stamps. `noaa_wrh_` rows carry the value the market's
+#: own weather.gov page shows; `ogimet_metar_` rows are a whole-degree
+#: METAR-body reconstruction of it. A rebuild must pick the page row whenever
+#: it exists for a (city, target_date), so this script rebuilds one row per
+#: (city, date, metric) rather than one per observation row.
+NOAA_SETTLEMENT_SOURCES = (
+    ("noaa_wrh_", "noaa_wrh_timeseries_v1"),
+    ("ogimet_metar_", "ogimet_metar"),
+)
+
+
+def _noaa_source_rank(source: str) -> int | None:
+    src = str(source or "").strip().lower()
+    for rank, (prefix, _version) in enumerate(NOAA_SETTLEMENT_SOURCES):
+        if src.startswith(prefix):
+            return rank
+    return None
+
+
+def _settlement_data_version(row: sqlite3.Row, city) -> str:
+    if city.settlement_source_type == "noaa":
+        src = str(row["source"] or "").strip().lower()
+        for prefix, version in NOAA_SETTLEMENT_SOURCES:
+            if src.startswith(prefix):
+                return version
+    return SETTLEMENT_DATA_VERSION_BY_SOURCE_TYPE.get(
+        city.settlement_source_type, "unknown_v0",
+    )
+
 
 class SettlementRebuildSkip(ValueError):
     """Expected row-level skip for rebuild_settlements."""
@@ -84,7 +114,7 @@ def _validate_source_family(row: sqlite3.Row, city) -> None:
         raise SettlementRebuildSkip("source_family_mismatch")
 
     if source_type == "noaa":
-        if source.startswith("ogimet_metar_"):
+        if _noaa_source_rank(source) is not None:
             return
         raise SettlementRebuildSkip("source_family_mismatch")
 
@@ -92,6 +122,28 @@ def _validate_source_family(row: sqlite3.Row, city) -> None:
         raise SettlementRebuildSkip("unsupported_source_family")
 
     raise SettlementRebuildSkip("unsupported_source_family")
+
+
+def _preferred_rows_per_city_date(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """Keep one observation row per (city, target_date), best source first.
+
+    A NOAA city can hold both a page-feed row and an Ogimet row for the same
+    day. Rebuilding from every row would let whichever one is written last win
+    the settlements UPSERT; keeping only the preferred source makes the
+    rebuild's outcome independent of row order.
+    """
+    best: dict[tuple[str, str], tuple[int, sqlite3.Row]] = {}
+    order: list[tuple[str, str]] = []
+    for row in rows:
+        key = (str(row["city"]), str(row["target_date"]))
+        rank = _noaa_source_rank(row["source"])
+        rank = rank if rank is not None else 0
+        if key not in best:
+            best[key] = (rank, row)
+            order.append(key)
+        elif rank < best[key][0]:
+            best[key] = (rank, row)
+    return [best[key][1] for key in order]
 
 
 def _round_metric_value(
@@ -161,6 +213,7 @@ def rebuild_settlements(
         """,
         params,
     ).fetchall()
+    rows = _preferred_rows_per_city_date(rows)
 
     unverified_where = "authority != 'VERIFIED'"
     unverified_params: list[Any] = []
@@ -204,10 +257,7 @@ def rebuild_settlements(
             rows_written += 1
             continue
 
-        data_version = SETTLEMENT_DATA_VERSION_BY_SOURCE_TYPE.get(
-            city.settlement_source_type,
-            "unknown_v0",
-        )
+        data_version = _settlement_data_version(row, city)
         provenance_json = json.dumps(
             {
                 "source": "scripts/rebuild_settlements.py",

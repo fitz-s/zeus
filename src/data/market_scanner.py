@@ -2601,6 +2601,31 @@ def _extract_station_id(source: str, city: City) -> str | None:
     return None
 
 
+#: The literal clause that restricts a NOAA market to the page's hourly view.
+#: Verified 2026-09-12 against 270 active daily-temperature events: exactly the
+#: 66 events of the 11 US degF cities carry it, and no others.
+HOURLY_DATA_CLAUSE = "Show Hourly Data"
+
+#: The settlement surface whose view the clause selects. The page-view check
+#: below runs only against prose that names this page: a payload whose proof is
+#: a structured resolutionSource field carries no view statement to compare, and
+#: silence is not a contradiction.
+_WRH_TIMESERIES_PAGE = "weather.gov/wrh/timeseries"
+
+
+def _page_view_declared_by_description(event: dict) -> str | None:
+    """Return the page view the market's own prose names, or None if it is silent.
+
+    ``"hourly"`` when the description carries the "Show Hourly Data" clause,
+    ``"all"`` when it names the timeseries page without that clause, and None
+    when the payload carries no prose about that page at all.
+    """
+    combined = "\n".join(_description_source_text_fields(event))
+    if _WRH_TIMESERIES_PAGE not in combined.lower():
+        return None
+    return "hourly" if HOURLY_DATA_CLAUSE in combined else "all"
+
+
 def _check_source_contract(
     event: dict,
     city: City,
@@ -2716,6 +2741,28 @@ def _check_source_contract(
             resolution_sources=sources,
             source_family=None,
             station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+
+    # The settlement surface is not proven by provider + station alone. A NOAA
+    # market that names the "Show Hourly Data" view resolves off routine METAR
+    # plus station-prefixed SPECI rows only; one that does not resolves off
+    # every row. The two views give different daily extrema, so a description
+    # whose clause disagrees with the configured view is the same class of
+    # defect as a station mismatch and must not reach persistence.
+    declared_view = _page_view_declared_by_description(event)
+    if declared_view is not None and declared_view != city.settlement_page_view:
+        return SourceContractCheck(
+            status="MISMATCH",
+            reason=(
+                f"description {'carries' if declared_view == 'hourly' else 'omits'} "
+                f"the {HOURLY_DATA_CLAUSE!r} resolution clause but configured "
+                f"settlement_page_view={city.settlement_page_view!r}"
+            ),
+            resolution_sources=sources,
+            source_family=source_family or expected_family,
+            station_id=station_id,
             configured_source_family=expected_family,
             configured_station_id=expected_station,
         )

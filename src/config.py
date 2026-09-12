@@ -167,6 +167,14 @@ class City:
     settlement_source_type: str = "wu_icao"  # "wu_icao" | "hko" | "noaa" | "cwa_station"
     previous_settlement_source_type: Optional[str] = None
     settlement_source_type_effective_date: Optional[str] = None
+    # Which view of weather.gov/wrh/timeseries the market's own description
+    # names as its resolution surface: "hourly" for the 11 US cities whose
+    # contract says 'This market will resolve off of the Hourly Data provided
+    # using the "Show Hourly Data" button.', "all" for every other NOAA city.
+    # The two views give different daily extrema (the hourly view shows only
+    # routine METAR + station-prefixed SPECI rows), so this is a settlement
+    # field, not a display preference. NOAA cities only.
+    settlement_page_view: str = "all"  # "hourly" | "all"
     diurnal_amplitude: float = 12.0
     historical_peak_hour: float = 15.0
     # Optional per-city instrument noise override (in city.settlement_unit).
@@ -389,6 +397,7 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 settlement_source_type_effective_date=c.get(
                     "settlement_source_type_effective_date"
                 ),
+                settlement_page_view=c.get("settlement_page_view") or "all",
                 diurnal_amplitude=amp,
                 historical_peak_hour=float(c.get("historical_peak_hour", 15.0)),
                 instrument_noise_override=(
@@ -597,6 +606,17 @@ def validate_cities_config(city_list: list[City] | None = None) -> list[str]:
                     f"{c.name}: invalid settlement_source_type_effective_date="
                     f"{c.settlement_source_type_effective_date!r}"
                 )
+        if c.settlement_page_view not in ("hourly", "all"):
+            warnings.append(
+                f"{c.name}: settlement_page_view={c.settlement_page_view!r} "
+                "is not a known view"
+            )
+        elif c.settlement_page_view == "hourly" and c.settlement_source_type != "noaa":
+            warnings.append(
+                f"{c.name}: settlement_page_view='hourly' requires "
+                f"settlement_source_type='noaa', got "
+                f"{c.settlement_source_type!r}"
+            )
     if warnings:
         for w in warnings:
             logger.warning("City config validation: %s", w)

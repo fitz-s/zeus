@@ -213,7 +213,12 @@ def declared_source_fact(
     return {
         "declared_source_type": declared_source_type,
         "declared_source_observed_value": rounded,
-        "declared_source_detail": f"obs_id={obs.get('id')}",
+        # Name the observation source, not just its row id: a NOAA city can
+        # hold both the page-feed row and the Ogimet reconstruction, and the
+        # forecast-skill lane needs to know which one graded the day.
+        "declared_source_detail": (
+            f"obs_id={obs.get('id')} source={obs.get('source')}"
+        ),
     }
 
 

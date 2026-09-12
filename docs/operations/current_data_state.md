@@ -19,6 +19,7 @@ Authority status: not authority law; audit-bound current fact only. Full source 
 ## Observation / settlement (ACTIVE as of 2026-07-21 audit)
 
 - Observation: `wu_icao_history` (48-city primary), `hko_daily_api`/`hko_realtime_api`, `ogimet_metar_*` (Tel Aviv / Moscow / Istanbul). Settlement: `polymarket_gamma` → `settlements`.
+- NOAA settlement product (2026-09-12): `noaa_wrh_timeseries` — the feed behind `weather.gov/wrh/timeseries?site=<ICAO>`, written as `observations.source='noaa_wrh_<station>'` with `data_source_version='noaa_wrh_timeseries_v1'`. It is the settlement source for all 48 NOAA cities and is preferred over `ogimet_metar_<station>`, which stays the hourly/history mirror and the row settlement reads when the page feed produced nothing. Per-city `settlement_page_view` selects which view of that page the market's own description names; replay against chain-winning bins for 2026-08-23..2026-09-11 matched 434/434 settled degF cells under the hourly view versus 302/434 under the all-data view. Packet: `docs/operations/current/noaa_settlement_page_truth/`.
 - Source-freshness facts here come from a read-only audit of `state/zeus-forecasts.db` on 2026-07-21; re-query before trusting past the staleness ceiling.
 
 ## Notes
