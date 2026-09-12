@@ -8837,8 +8837,11 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     observations.close()
 
 
+@pytest.mark.parametrize(
+    "supporting_clock", ("same", "older_clock", "different_source_clock")
+)
 def test_current_day0_global_probability_uses_current_remaining_day_simplex(
-    monkeypatch,
+    monkeypatch, supporting_clock,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
@@ -9002,6 +9005,14 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T06:00:00+00:00",
     )
+    if supporting_clock != "same":
+        source_clock_bundle.provenance_json["day0_provisional_observation"][
+            "observation_time"
+        ] = "2026-07-11T16:30:00+00:00"
+    if supporting_clock == "different_source_clock":
+        source_clock_bundle.provenance_json["day0_provisional_observation"][
+            "source"
+        ] = "aviationweather_metar"
     replacement_bound_reads = 0
     source_clock_available = {"value": True}
 
@@ -9083,6 +9094,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
                 "rounded_value": rounded,
                 "posterior_id": kwargs["posterior_id"],
                 "probability_base_identity": base_identity,
+                "probability_conditioning_identity": (
+                    {**kwargs["conditioning"], "unit": "C"}
+                    if kwargs["conditioning"] is not None else None
+                ),
             },
         }
 
@@ -9169,6 +9184,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert binding["probability_base_identity"]
     assert binding["posterior_id"] == 17
     assert remaining_day_calls == 1
+    assert binding["probability_conditioning_identity"]["observation_time"] == (
+        "2026-07-11T17:00:00+00:00" if supporting_clock == "same"
+        else "2026-07-11T16:30:00+00:00"
+    )
     assert day0_payload["q_source"] == "day0_remaining_day"
     assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
     assert day0_payload["_edli_day0_causal_evidence_bundle"] == causal_bundle
@@ -9547,6 +9566,19 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert vector_gap_payload["_edli_day0_held_pinned_fallback_reason"] == (
         "current_remaining_vectors_unavailable"
     )
+    if supporting_clock != "same":
+        monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: False)
+        with pytest.raises(
+            ValueError, match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH"
+        ):
+            era._prepare_current_global_probability_family(
+                _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+                forecast_conn=forecast,
+                topology_conn=forecast,
+                observation_conn=observations,
+                decision_time=_dt.datetime(2026, 7, 11, 18, tzinfo=_dt.timezone.utc),
+                max_age=_dt.timedelta(seconds=30),
+            )
     observations.close()
     forecast.close()
 

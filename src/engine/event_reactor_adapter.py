@@ -38987,12 +38987,18 @@ def _prepare_current_global_probability_family(
     current_day0_redecision_only = False
     held_day0_current_bundle_pin_eligible = False
     direct_day0_entry_carrier: Mapping[str, object] | None = None
+    remaining_path_supporting_conditioning = False
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
             raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
         local_target = date.fromisoformat(str(family.target_date))
         local_now = decision_time.astimezone(ZoneInfo(str(city.timezone)))
+        remaining_path_supporting_conditioning = bool(
+            entry_authority
+            and local_target == local_now.date()
+            and _day0_remaining_day_q_enabled()
+        )
         from src.execution.day0_hard_fact_exit import (
             _final_daily_observation_extreme,
         )
@@ -39482,17 +39488,19 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
-            if probability_conditioning_is_provisional and entry_authority:
+            if (
+                probability_conditioning_is_provisional
+                and entry_authority
+                and not remaining_path_supporting_conditioning
+            ):
                 # The provisional replacement posterior is conditioned on the
                 # physical Day0 source clock.  Keep the settlement-channel
                 # fact above for final/settlement authority; only the fast
                 # residual route is identified by its statistical fact.
-                # Held/reduce-only redecision validates after
-                # ``_global_day0_execution_payload`` has bound a same-extreme
-                # clock advance.  Rejecting it here would require exact clock
-                # equality before that typed binding exists and would strand a
-                # position whenever the observation clock advances without a
-                # new extreme.
+                # Remaining-path entry and held redecision validate after
+                # _global_day0_execution_payload reconciles current observations
+                # with the original conditioning identity. Checking raw clocks
+                # here would reject an unchanged extreme before that binding.
                 provisional_identity_fact = (
                     provisional_day0_fact
                     if fast_residual_conditioning is not None
@@ -39605,11 +39613,6 @@ def _prepare_current_global_probability_family(
     )
     omega = build_outcome_space(family, case)
     if is_day0 and not use_unobserved_day0_replacement:
-        remaining_path_supporting_conditioning = bool(
-            entry_authority
-            and local_target == local_now.date()
-            and _day0_remaining_day_q_enabled()
-        )
         if final_daily_observation is not None:
             current_day0_payload = _global_final_daily_probability_payload(
                 family=family,
