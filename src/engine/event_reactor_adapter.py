@@ -38598,6 +38598,7 @@ def _prepare_current_day0_exact_family(
     required_condition_id: str | None,
     day0_payload_out: dict[str, object] | None,
     cache_metadata_out: dict[str, object] | None,
+    require_complete_family: bool = False,
 ):
     """Price only observation-proved bins, independently of forecast readiness."""
 
@@ -38706,6 +38707,8 @@ def _prepare_current_day0_exact_family(
     known_conditions = sorted(
         binding.condition_id for binding in bindings if binding.bin_id in known_bins
     )
+    if require_complete_family and len(exact_payoffs) != len(bindings):
+        return None
     if not exact_payoffs or (
         required_condition_id is not None
         and required_condition_id not in known_conditions
@@ -38848,7 +38851,7 @@ def _prepare_current_global_probability_family(
             pinned_complete_bundle=pinned_bundle,
         )
 
-    def _prepare_exact_family():
+    def _prepare_exact_family(*, require_complete_family: bool = False):
         if not allow_partial_deterministic:
             return None
         return _prepare_current_day0_exact_family(
@@ -38857,6 +38860,7 @@ def _prepare_current_global_probability_family(
             decision_time=decision_time, max_age=max_age,
             required_condition_id=required_condition_id,
             day0_payload_out=day0_payload_out, cache_metadata_out=cache_metadata_out,
+            require_complete_family=require_complete_family,
         )
 
     if max_age <= timedelta(0):
@@ -39130,10 +39134,13 @@ def _prepare_current_global_probability_family(
                             hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
                         )
                     )
-        # A selected exact action and its immediate held belief must reproduce
-        # the same witness kind when forecast readiness changes meanwhile.
-        if required_condition_id and allow_partial_deterministic:
-            exact_family = _prepare_exact_family()
+        # Complete absorbing facts retain exact authority with or without a
+        # forecast. Partial facts keep the full statistical family unless the
+        # caller is revalidating a selected condition already proved exact.
+        if allow_partial_deterministic:
+            exact_family = _prepare_exact_family(
+                require_complete_family=required_condition_id is None,
+            )
             if exact_family is not None:
                 return exact_family
         held_day0_redecision_fallback_eligible = False

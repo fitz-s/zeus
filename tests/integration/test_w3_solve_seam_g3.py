@@ -8014,6 +8014,77 @@ def test_day0_entry_unknown_required_bin_is_invalid_before_forecast_fallback(mon
         fixture.observations.close()
 
 
+@pytest.mark.parametrize(("metric", "observed", "winner_condition"), (
+    ("high", 31.0, "c2"), ("low", 29.0, "c0"),
+))
+def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
+    monkeypatch, metric, observed, winner_condition,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_readiness as readiness_reader
+    import tests.solve.test_solver_properties as solver_tests
+    from src.solve.solver import global_candidate_from_native
+
+    fixture = _day0_partial_exact_fixture(metric=metric, observed=observed)
+    _patch_day0_exact_runtime(monkeypatch, fixture)
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(
+        ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY",
+    ))
+    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
+        "metric": metric, "source": "ogimet_metar_ltfm",
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": observed, "unit": "C",
+    })
+    payload = {}
+    try:
+        prepared = era._prepare_current_global_probability_family(
+            fixture.event, forecast_conn=fixture.forecast,
+            topology_conn=fixture.forecast, observation_conn=fixture.observations,
+            decision_time=fixture.decision_at, max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=True, day0_payload_out=payload,
+        )
+        witness = prepared.probability_witness
+        assert isinstance(witness, DeterministicBinPayoffWitness)
+        assert len(witness.exact_yes_payoffs) == len(witness.bindings)
+        assert {b.condition_id: witness.exact_yes_payoff(b.bin_id) for b in witness.bindings} == {
+            condition: int(condition == winner_condition) for condition, *_ in fixture.bins
+        }
+        assert payload["_edli_q_source"] == "day0_deterministic_bin_payoff"
+        winner = next(b for b in witness.bindings if b.condition_id == winner_condition)
+        curve = solver_tests._global_curve(
+            side="YES", token=winner.yes_token_id,
+            levels=(("0.40", "100"),), min_order="5",
+        )
+        candidate = global_candidate_from_native(
+            SimpleNamespace(
+                no_trade_reason=None, executable_cost_curve=curve,
+                family_key=witness.family_key, bin_id=winner.bin_id,
+                condition_id=winner.condition_id, side="YES", token_id=winner.yes_token_id,
+                hypothesis_id="exact-shoulder",
+            ),
+            probability_witness=witness, ledger_snapshot_id="ledger-current",
+            book_captured_at_utc=fixture.decision_at, neg_risk=False,
+            native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+        )
+        monkeypatch.setattr(solver_tests, "_DECISION_AT", fixture.decision_at)
+        correction_calls = []
+        def forbidden_correction(*args):
+            correction_calls.append(args)
+            pytest.fail("A proved settlement payoff cannot be market-corrected")
+        selected = solver_tests._global_select(
+            (candidate,), probability_witnesses={witness.family_key: witness},
+            payoff_q_correction_resolver=forbidden_correction,
+            fractional_kelly_multiplier="0.125",
+        )
+        assert not correction_calls
+        assert selected.candidate is candidate
+        assert selected.expected_terminal_wealth.win_probability_mean == 1.0
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
 def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as target_plan
@@ -8035,6 +8106,8 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
         np.asarray([0.2, 0.5, 0.3], dtype=float),
         era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     ))
+    payload = {}
+    metadata = {}
     try:
         prepared = era._prepare_current_global_probability_family(
             fixture.event,
@@ -8044,8 +8117,12 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
             decision_time=fixture.decision_at,
             max_age=_dt.timedelta(seconds=30),
             allow_partial_deterministic=True,
+            day0_payload_out=payload, cache_metadata_out=metadata,
         )
         assert not isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+        assert "_edli_day0_deterministic_witness_identity" not in payload
+        assert "_edli_day0_exact_yes_payoffs" not in payload
+        assert "deterministic_condition_ids_json" not in metadata
         assert prepared.probability_witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
     finally:
         fixture.forecast.close()
