@@ -728,6 +728,63 @@ class TestExecutor:
         with pytest.raises(ValueError, match="BUY notional is below venue minimum"):
             execute_final_intent(final_intent, conn=_TEST_CONN)
 
+    @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+    @pytest.mark.parametrize("order_type", ("GTC", "GTD"))
+    def test_execute_final_intent_admits_sub_dollar_post_only_buy(
+        self, monkeypatch, direction, order_type,
+    ):
+        final_intent = _final_execution_intent(
+            direction=direction,
+            final_limit_price=Decimal("0.10"),
+            size_value=Decimal("0.50"),
+            submitted_shares=Decimal("5"),
+            snapshot_top_ask=Decimal("0.11"),
+            snapshot_top_bid=Decimal("0.09"),
+            order_policy="post_only_passive_limit",
+            order_type=order_type,
+            post_only=True,
+        )
+        captured = {}
+
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(intent=intent, shares=shares)
+            return OrderResult(trade_id=trade_id, status="pending")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+        result = execute_final_intent(final_intent, conn=_TEST_CONN)
+        assert result.status == "pending"
+        assert captured["shares"] == pytest.approx(5)
+        assert captured["intent"].target_size_usd == pytest.approx(0.50)
+        assert captured["intent"].submit_order_type == order_type
+        assert captured["intent"].post_only is True
+
+    @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+    @pytest.mark.parametrize(
+        ("order_type", "post_only", "policy"),
+        (
+            ("FOK", False, "limit_may_take_conservative"),
+            ("FAK", False, "limit_may_take_conservative"),
+            ("GTC", False, "post_only_passive_limit"),
+            ("GTD", False, "post_only_passive_limit"),
+            ("GTC", True, "limit_may_take_conservative"),
+            ("GTD", True, "limit_may_take_conservative"),
+            ("FOK", True, "post_only_passive_limit"),
+            ("FAK", True, "post_only_passive_limit"),
+        ),
+    )
+    def test_buy_cash_minimum_rejects_nonpassive_or_incoherent_mode(
+        self, direction, order_type, post_only, policy,
+    ):
+        from src.execution.executor import _assert_final_intent_buy_notional_meets_venue_minimum
+
+        intent = SimpleNamespace(
+            direction=direction, order_type=order_type, post_only=post_only,
+            order_policy=policy, final_limit_price=Decimal("0.10"),
+        )
+        with pytest.raises(ValueError, match="BUY notional is below venue minimum"):
+            _assert_final_intent_buy_notional_meets_venue_minimum(intent, submitted_shares=5)
+        _assert_final_intent_buy_notional_meets_venue_minimum(intent, submitted_shares=10)
+
     def test_execute_final_intent_routes_buy_no_selected_token(self, monkeypatch):
         final_intent = _final_execution_intent(
             token_id="no-token-final",

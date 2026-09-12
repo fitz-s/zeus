@@ -4226,9 +4226,7 @@ class GlobalSingleOrderDecision:
                 "FAMILY_JOINT_FRACTIONAL_TARGET",
             }
         else:
-            raw_min = _single_order_min_marketable_shares(
-                self.candidate.economic_cost_curve
-            )
+            raw_min = _single_order_min_buy_shares(self.candidate)
             legal_min = (
                 _single_order_venue_legal_neighbor(
                     self.candidate,
@@ -4807,6 +4805,21 @@ def _single_order_min_marketable_shares(
     return None
 
 
+def _single_order_min_buy_shares(
+    candidate: GlobalSingleOrderCandidate,
+) -> Decimal | None:
+    """Apply the cash minimum only when a BUY can take liquidity."""
+
+    curve = candidate.economic_cost_curve
+    if candidate.execution_mode != "MAKER_REST":
+        return _single_order_min_marketable_shares(curve)
+    minimum = (
+        curve.min_order_size / _SIZE_QUANTUM
+    ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
+    depth = sum((level.size for level in curve.levels), Decimal("0"))
+    return minimum if minimum <= depth else None
+
+
 def _single_order_execution_boundary(
     candidate: GlobalSingleOrderCandidate,
     shares: Decimal,
@@ -5142,9 +5155,7 @@ def plan_family_joint_buy_targets(
         )
     minimum_costs: list[Decimal] = []
     for candidate in candidates:
-        minimum = _single_order_min_marketable_shares(
-            candidate.economic_cost_curve
-        )
+        minimum = _single_order_min_buy_shares(candidate)
         if minimum is None:
             continue
         try:
@@ -5212,9 +5223,7 @@ def plan_family_joint_buy_targets(
             if additional > 0
             else None
         )
-        raw_min = _single_order_min_marketable_shares(
-            candidate.economic_cost_curve
-        )
+        raw_min = _single_order_min_buy_shares(candidate)
         legal_min = (
             _single_order_venue_legal_neighbor(
                 candidate,
@@ -5669,9 +5678,7 @@ def _score_global_single_order(
         candidate.economic_cost_curve,
         spend_limit_usd=spend_limit,
     )
-    raw_min_shares = _single_order_min_marketable_shares(
-        candidate.economic_cost_curve
-    )
+    raw_min_shares = _single_order_min_buy_shares(candidate)
     liquidation_capacity = current_precliff_liquidation_capacity(
         candidate.native_bid_levels
     )
@@ -7719,9 +7726,7 @@ def select_global_single_order(
             liquidation_cap_shares = (
                 min(liquidation_capacity, executable_ask_depth) / _SIZE_QUANTUM
             ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
-            liquidation_min_shares = _single_order_min_marketable_shares(
-                candidate.economic_cost_curve
-            )
+            liquidation_min_shares = _single_order_min_buy_shares(candidate)
             if (
                 liquidation_min_shares is None
                 or liquidation_cap_shares < liquidation_min_shares

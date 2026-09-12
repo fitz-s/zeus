@@ -5158,21 +5158,23 @@ def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
     assert calls <= 25
 
 
-def _maker_neighbor_candidate(*, side, tick, price="0.19", proposal_size="100"):
+def _maker_neighbor_candidate(
+    *, side, tick, price="0.19", proposal_size="100", min_order="1"
+):
     taker = _global_candidate(
         candidate_id=f"maker-neighbor-{side}-{tick}",
         family=f"maker-neighbor-{side}-{tick}",
         side=side,
         q=0.80,
         levels=(("0.20", "100"),),
-        min_order="1",
+        min_order=min_order,
     )
     proposal = replace(
         _global_curve(
             side=side,
             token=taker.token_id,
             levels=((price, proposal_size),),
-            min_order="1",
+            min_order=min_order,
         ),
         min_tick=Decimal(tick),
     )
@@ -5270,8 +5272,10 @@ def test_maker_neighbor_rechecks_depth_after_at_least_rounding():
     ) is None
 
 
-def test_global_select_admits_gtc_maker_minimum_with_real_fill_witness():
-    maker = _maker_neighbor_candidate(side="YES", tick="0.01")
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("cap", ("1.045", "0.95"))
+def test_global_select_admits_gtc_maker_minimum_with_real_fill_witness(side, cap):
+    maker = _maker_neighbor_candidate(side=side, tick="0.01", min_order="5")
     maker_witness = _current_maker_witness(
         maker,
         proposal=maker.proposal_cost_curve,
@@ -5296,16 +5300,44 @@ def test_global_select_admits_gtc_maker_minimum_with_real_fill_witness():
     decision = _global_select(
         (maker,),
         cash="100",
-        cap="1.045",
+        cap=cap,
         fractional_kelly_multiplier="0.125",
         candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
         resolution_hours_by_family={maker.family_key: 24.0},
     )
     assert decision.candidate is maker
-    assert Decimal("5.27") <= decision.shares <= Decimal("5.90")
-    assert decision.cost_usd <= Decimal("1.045")
+    if cap == "0.95":
+        assert decision.shares == Decimal("5")
+        assert decision.cost_usd == Decimal("0.95")
+    else:
+        assert Decimal("5.27") <= decision.shares <= Decimal("5.90")
+    assert decision.cost_usd <= Decimal(cap)
     assert decision.expected_growth is not None
     assert decision.expected_growth.expected_ev_usd > 0.0
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("minimum", "depth", "expected"),
+    (("5", "4.99", None), ("5.005", "5.005", None), ("5.005", "5.01", "5.01")),
+)
+def test_maker_buy_minimum_preserves_share_floor_grid_and_depth(side, minimum, depth, expected):
+    maker = _maker_neighbor_candidate(
+        side=side, tick="0.01", min_order=minimum, proposal_size=depth,
+    )
+    result = S._single_order_min_buy_shares(maker)
+    assert result == (None if expected is None else Decimal(expected))
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_buy_cash_minimum_applies_to_taker_only(side):
+    maker = _maker_neighbor_candidate(side=side, tick="0.01", min_order="5")
+    taker = _global_candidate(
+        candidate_id="taker-cash-floor", family="taker-cash-floor", side=side,
+        q=0.80, levels=(("0.19", "100"),), min_order="5",
+    )
+    assert S._single_order_min_buy_shares(maker) == Decimal("5")
+    assert S._single_order_min_buy_shares(taker) == Decimal("5.27")
 
 
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():

@@ -5922,6 +5922,12 @@ def _assert_final_intent_buy_notional_meets_venue_minimum(
 ) -> None:
     if intent.direction not in {"buy_yes", "buy_no"}:
         return
+    if (
+        intent.order_policy == "post_only_passive_limit"
+        and intent.post_only is True
+        and intent.order_type in {"GTC", "GTD"}
+    ):
+        return
     notional = Decimal(str(submitted_shares)) * Decimal(str(intent.final_limit_price))
     if notional < MIN_MARKETABLE_BUY_NOTIONAL_USD:
         raise ValueError(
