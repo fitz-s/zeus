@@ -4317,7 +4317,10 @@ class TestParsePayload:
                 modified_at=now - timedelta(minutes=29),
                 authority="provider_meta_declared",
                 endpoint_mode="ensemble_meta_stamped",
-                request_params={"endpoint": "ensemble"},
+                request_params={
+                    "endpoint": "ensemble",
+                    "metadata_model": "ecmwf_ifs025_ensemble",
+                },
                 request_hash="sha256:test",
                 fetch_started_at=now - timedelta(minutes=2),
                 fetch_finished_at=now - timedelta(minutes=1),
@@ -4361,14 +4364,19 @@ def test_hourly_ensemble_fetch_binds_one_provider_run(
 
     now = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
     update = OpenMeteoModelUpdate(
-        model="ecmwf_ifs025",
+        model="ecmwf_ifs025_ensemble",
         last_run_initialisation_time=now - timedelta(hours=2),
         last_run_availability_time=now - timedelta(minutes=30),
         last_run_modification_time=now - timedelta(minutes=29),
     )
+    metadata_calls = []
+
+    def fetch_updates(models, **_kwargs):
+        metadata_calls.append(tuple(models))
+        return (update,)
+
     monkeypatch.setattr(
-        "src.data.openmeteo_model_updates.fetch_model_updates",
-        lambda *_args, **_kwargs: (update,),
+        "src.data.openmeteo_model_updates.fetch_model_updates", fetch_updates
     )
     hourly = {"time": [f"2026-08-31T{hour:02d}:00" for hour in range(24)]}
     hourly["temperature_2m"] = [20.0] * 24
@@ -4376,10 +4384,16 @@ def test_hourly_ensemble_fetch_binds_one_provider_run(
         hourly[f"temperature_2m_member{index:02d}"] = [
             20.0 + index / 100.0
         ] * 24
+    fetched_params = {}
+
+    def fake_fetch(_url, params, **_kwargs):
+        fetched_params.update(params)
+        return {"hourly": hourly}
+
     monkeypatch.setattr(
         openmeteo_client,
         "fetch",
-        lambda *_args, **_kwargs: {"hourly": hourly},
+        fake_fetch,
     )
 
     vectors, request_hash = fetch_day0_source_clock_ensemble_vectors(
@@ -4391,9 +4405,77 @@ def test_hourly_ensemble_fetch_binds_one_provider_run(
     metadata = json.loads(vectors[0].source_run_meta_json or "{}")
     assert metadata["model_api_id"] == "ecmwf_ifs025"
     assert metadata["endpoint_mode"] == "ensemble_meta_stamped"
+    assert fetched_params["models"] == "ecmwf_ifs025"
+    request_params = json.loads(metadata["request_params_json"])
+    assert request_params["metadata_model"] == (
+        "ecmwf_ifs025_ensemble"
+    )
     assert metadata["provider_source_cycle_time_utc"] == (
         now - timedelta(hours=2)
     ).isoformat()
+    assert metadata_calls == [
+        ("ecmwf_ifs025_ensemble",),
+        ("ecmwf_ifs025_ensemble",),
+    ]
+
+
+def test_source_clock_reader_rejects_legacy_deterministic_metadata_domain():
+    """An old HRES-stamped ENS row cannot sponsor current source-clock authority."""
+    import src.data.day0_hourly_vectors as day0
+
+    now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+    member = day0.day0_source_clock_ensemble_member_models()[0]
+
+    def member_vector(metadata_model: str, captured_at: datetime) -> Day0HourlyVector:
+        return _vector(
+            model=member,
+            captured_at=captured_at,
+            source_run_meta_json=json.dumps(
+                {
+                    "model": member,
+                    "provider": "openmeteo",
+                    "request_params_json": json.dumps(
+                        {"metadata_model": metadata_model}
+                    ),
+                }
+            ),
+        )
+
+    legacy = member_vector("ecmwf_ifs025", now - timedelta(minutes=2))
+    current = member_vector("ecmwf_ifs025_ensemble", now)
+
+    assert select_ready_day0_hourly_vectors(
+        [legacy],
+        target_date="2026-06-10",
+        now=now,
+        expected_models=[member],
+        require_expected=True,
+    ) == []
+    assert select_ready_day0_hourly_vectors(
+        [current],
+        target_date="2026-06-10",
+        now=now,
+        expected_models=[member],
+        require_expected=True,
+    ) == [current]
+
+    conn = _conn()
+    assert persist_day0_hourly_vectors(
+        [legacy, current],
+        target_date="2026-06-10",
+        conn=conn,
+        request_hash="sha256:metadata-domain",
+        now=now,
+    ) == 2
+    selected = read_freshest_day0_hourly_vectors(
+        city="Paris",
+        target_date="2026-06-10",
+        now=now,
+        conn=conn,
+        expected_models=[member],
+        require_expected=True,
+    )
+    assert selected == [current]
 
 
 def test_direct_entry_carrier_binds_persisted_51_member_paths():
@@ -4436,7 +4518,10 @@ def test_direct_entry_carrier_binds_persisted_51_member_paths():
             modified_at=available - timedelta(minutes=1),
             authority="provider_meta_declared",
             endpoint_mode="ensemble_meta_stamped",
-            request_params={"endpoint": OPENMETEO_ENSEMBLE_URL},
+            request_params={
+                "endpoint": OPENMETEO_ENSEMBLE_URL,
+                "metadata_model": "ecmwf_ifs025_ensemble",
+            },
             request_hash=request_hash,
             fetch_started_at=captured + timedelta(seconds=1),
             fetch_finished_at=captured + timedelta(seconds=2),

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json as _json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
@@ -237,7 +238,13 @@ def _det_vector(city, model: str, decision_time: datetime) -> Day0HourlyVector:
 
 
 def _ensemble_member_vector(
-    city, member: str, run: datetime, available: datetime, decision_time: datetime
+    city,
+    member: str,
+    run: datetime,
+    available: datetime,
+    decision_time: datetime,
+    *,
+    metadata_model: str | None = None,
 ) -> Day0HourlyVector:
     tz = ZoneInfo(city.timezone)
     local_day = decision_time.astimezone(tz).date()
@@ -251,6 +258,14 @@ def _ensemble_member_vector(
         "provider": "openmeteo",
         "provider_source_cycle_time_utc": run.isoformat(),
         "provider_source_available_at_utc": available.isoformat(),
+        "request_params_json": _json.dumps(
+            {
+                "metadata_model": (
+                    metadata_model
+                    or "ecmwf_ifs025_ensemble"
+                )
+            }
+        ),
     }
     return Day0HourlyVector(
         model=member, city=city.name, target_date="",
@@ -328,7 +343,7 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: hwm_probes.__setitem__("n", hwm_probes["n"] + 1)
         or Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -404,7 +419,7 @@ def test_ens_ready_fetches_only_missing_deterministic_and_release_due_refetches(
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=decision - timedelta(hours=2),
             run_availability_time=decision - timedelta(minutes=30),
         ),
@@ -483,7 +498,7 @@ def test_ens_failure_marks_retry_and_does_not_probe_before_retry(monkeypatch) ->
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: counts.__setitem__("probe", counts["probe"] + 1)
         or Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -557,7 +572,7 @@ def test_complete_ens_persists_when_deterministic_fetch_fails(monkeypatch) -> No
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -644,7 +659,7 @@ def test_ens_failure_keeps_deterministic_write_and_next_due_fetches_only_ens(
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -762,7 +777,7 @@ def test_ensemble_persists_when_deterministic_fetch_raises(
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -844,7 +859,7 @@ def test_deterministic_persists_when_ensemble_fetch_raises(
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda **_kwargs: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=available,
         ),
@@ -1018,7 +1033,7 @@ def test_ensemble_fetch_uses_completion_clock_for_strict_materialization(
     for index in range(1, 51):
         hourly[f"temperature_2m_member{index:02d}"] = [20.0] * len(times)
     update = OpenMeteoModelUpdate(
-        model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        model="ecmwf_ifs025_ensemble",
         last_run_initialisation_time=decision - timedelta(hours=2),
         last_run_availability_time=decision - timedelta(minutes=30),
         last_run_modification_time=decision - timedelta(minutes=25),
@@ -1089,7 +1104,7 @@ def test_current_ensemble_bundle_already_persisted_matches_a_single_run_hwm_acro
         city="Singapore",
         target_dates=("2026-09-06",),
         run_hwm=Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=hwm_avail,
         ),
@@ -1144,7 +1159,7 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
 
     def fake_probe_hwm(*, decision_time, timeout_s):
         return Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=current_run["init"],
             run_availability_time=current_run["avail"],
         )
@@ -1262,7 +1277,7 @@ def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavaila
         day0,
         "_probe_day0_source_clock_ensemble_run_hwm",
         lambda *, decision_time, timeout_s: Day0ProviderRunHwm(
-            model=day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+            model="ecmwf_ifs025_ensemble",
             run_initialisation_time=run,
             run_availability_time=avail,
         ),
@@ -1375,3 +1390,159 @@ def test_priority_probe_window_start_is_the_newest_metric_boundary(monkeypatch) 
     assert probe.refresh_due_families == frozenset(
         {(city.name, target_date, "high"), (city.name, target_date, "low")}
     )
+
+
+@pytest.mark.parametrize(
+    "metadata_model,expected_hit",
+    [("ecmwf_ifs025", False), ("ecmwf_ifs025_ensemble", True)],
+)
+def test_legacy_ensemble_metadata_rows_cannot_satisfy_refresh_dedup(
+    monkeypatch, tmp_path, metadata_model, expected_hit,
+) -> None:
+    city = SimpleNamespace(name="Singapore", timezone="Asia/Singapore", lat=1.35, lon=103.99)
+    decision_time = datetime(2026, 9, 6, 1, 0, tzinfo=UTC)
+    run = datetime(2026, 9, 5, 18, tzinfo=UTC)
+    available = datetime(2026, 9, 6, 0, 27, 39, tzinfo=UTC)
+    captured_at = decision_time - timedelta(minutes=2)
+    vectors = []
+    for member in day0.day0_source_clock_ensemble_member_models():
+        vector = _strict_ensemble_member_vector(
+            city, member, run, available, captured_at,
+            captured_at, captured_at + timedelta(seconds=20),
+        )
+        meta = _json.loads(vector.source_run_meta_json)
+        meta["request_params_json"] = _json.dumps({"metadata_model": metadata_model})
+        vectors.append(replace(vector, source_run_meta_json=_json.dumps(meta)))
+    path = tmp_path / "vectors.db"
+    conn = sqlite3.connect(path)
+    day0._ensure_schema(conn)
+    assert day0.persist_day0_hourly_vectors(
+        vectors, target_date="2026-09-06", conn=conn,
+        request_hash="sha256:ensemble-domain",
+        endpoint=day0.OPENMETEO_ENSEMBLE_URL, now=decision_time,
+    ) == 51
+    conn.commit()
+    conn.close()
+
+    def read_only_connection():
+        result = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        result.row_factory = sqlite3.Row
+        return result
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only", read_only_connection,
+    )
+    assert day0._current_ensemble_bundle_already_persisted(
+        city="Singapore", target_dates=("2026-09-06",),
+        run_hwm=Day0ProviderRunHwm(
+            model="ecmwf_ifs025_ensemble",
+            run_initialisation_time=run, run_availability_time=available,
+        ),
+        decision_time=decision_time,
+        remaining_window_starts={"2026-09-06": decision_time},
+    ) is expected_hit
+
+
+def test_source_clock_ensemble_hwm_probe_uses_ensemble_metadata_namespace(
+    monkeypatch,
+) -> None:
+    """ENS data uses the ensemble metadata domain for its run HWM.
+
+    The API payload still uses the historical ``ecmwf_ifs025`` model parameter,
+    so this catches accidentally probing deterministic HRES metadata again.
+    """
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    day0._DAY0_PROVIDER_RUN_HWM_PIN.clear()
+    monkeypatch.setattr(day0, "_day0_provider_run_hwm_pin_persistence_enabled", lambda: False)
+    calls: list[tuple[str, ...]] = []
+    deterministic_run = datetime(2026, 9, 12, 12, tzinfo=UTC)
+    run = datetime(2026, 9, 12, 6, tzinfo=UTC)
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs025_ensemble",
+        last_run_initialisation_time=run,
+        last_run_availability_time=run + timedelta(hours=6),
+        last_run_modification_time=run + timedelta(hours=6, minutes=1),
+    )
+
+    def fetch_updates(models, **_kwargs):
+        calls.append(tuple(models))
+        return (update,)
+
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates", fetch_updates
+    )
+    day0._apply_day0_provider_run_hwm_pin(
+        {
+            day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL: _hwm(
+                day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+                deterministic_run,
+                deterministic_run + timedelta(hours=6),
+            )
+        }
+    )
+
+    hwm = day0._probe_day0_source_clock_ensemble_run_hwm(
+        decision_time=datetime(2026, 9, 12, 13, tzinfo=UTC), timeout_s=1.0
+    )
+
+    assert hwm is not None
+    assert hwm.model == "ecmwf_ifs025_ensemble"
+    assert calls == [("ecmwf_ifs025_ensemble",)]
+    assert set(day0._DAY0_PROVIDER_RUN_HWM_PIN) == {
+        day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        "ecmwf_ifs025_ensemble"
+    }
+    assert (
+        day0._DAY0_PROVIDER_RUN_HWM_PIN[day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL]
+        .run_initialisation_time
+        == deterministic_run
+    )
+
+
+@pytest.mark.parametrize("wrong_phase", ["probe", "before", "after"])
+def test_ensemble_metadata_response_cannot_relabel_deterministic_model(
+    monkeypatch, wrong_phase,
+) -> None:
+    from dataclasses import replace
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 9, 12, 13, tzinfo=UTC)
+    correct = OpenMeteoModelUpdate(
+        model="ecmwf_ifs025_ensemble",
+        last_run_initialisation_time=now - timedelta(hours=7),
+        last_run_availability_time=now - timedelta(hours=1),
+        last_run_modification_time=now - timedelta(minutes=59),
+    )
+    wrong = replace(correct, model="ecmwf_ifs025")
+    rows = iter([correct, wrong] if wrong_phase == "after" else [wrong])
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (next(rows),),
+    )
+    pins = []
+    monkeypatch.setattr(
+        day0, "_apply_day0_provider_run_hwm_pin",
+        lambda value: pins.append(value) or value,
+    )
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: now)
+    fetched = []
+    monkeypatch.setattr(
+        "src.data.openmeteo_client.fetch",
+        lambda *_args, **_kwargs: fetched.append(True) or {},
+    )
+    parsed = []
+    monkeypatch.setattr(
+        day0, "parse_openmeteo_ensemble_hourly_payload",
+        lambda *_args, **_kwargs: parsed.append(True) or [object()] * 51,
+    )
+    if wrong_phase == "probe":
+        assert day0._probe_day0_source_clock_ensemble_run_hwm(
+            decision_time=now, timeout_s=1.0,
+        ) is None
+    else:
+        city = SimpleNamespace(name="ENS city", lat=0.0, lon=0.0, timezone="UTC")
+        assert day0.fetch_day0_source_clock_ensemble_vectors(city, now=now) == ([], "")
+    assert pins == []
+    assert parsed == []
+    assert fetched == ([True] if wrong_phase == "after" else [])

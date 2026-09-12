@@ -81,6 +81,10 @@ OPENMETEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 # paths in the existing hourly-vector table so selection and submit can bind
 # the same possession proof without adding a parallel truth store.
 DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL = "ecmwf_ifs025"
+# The source-clock carrier is served by Open-Meteo's distinct ensemble
+# metadata domain. Keep its HWM namespace separate from the deterministic
+# ``ecmwf_ifs025`` metadata domain; both endpoints can report different runs.
+DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL = "ecmwf_ifs025_ensemble"
 DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT = 51
 DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX = (
     f"{DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL}_member"
@@ -2005,16 +2009,17 @@ def _probe_day0_source_clock_ensemble_run_hwm(
 ) -> Day0ProviderRunHwm | None:
     """Cheap meta-only probe of the ENS carrier's current provider run.
 
-    Folded through the same monotone per-model HWM pin used for the
-    deterministic models (commit a09d8b0c0) so a stale meta.json replica can
-    never look newer than a run already accepted for ``ecmwf_ifs025``.
+    Folded through the same monotone HWM pin used for deterministic models,
+    but under the ensemble metadata namespace. The deterministic
+    ``ecmwf_ifs025`` metadata endpoint is a different provider domain and may
+    report a different run from the 51-member ensemble carrier.
     """
 
     try:
         from src.data.openmeteo_model_updates import fetch_model_updates
 
         updates = fetch_model_updates(
-            [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            [DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL],
             timeout_seconds=max(0.25, float(timeout_s)),
             max_workers=1,
             priority=True,
@@ -2024,14 +2029,17 @@ def _probe_day0_source_clock_ensemble_run_hwm(
     if len(updates) != 1:
         return None
     update = updates[0]
+    if update.model != DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL:
+        return None
     probe = Day0ProviderRunHwm(
-        model=DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
+        model=DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL,
         run_initialisation_time=update.last_run_initialisation_time.astimezone(UTC),
         run_availability_time=update.last_run_availability_time.astimezone(UTC),
     )
-    return _apply_day0_provider_run_hwm_pin({DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL: probe})[
-        DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL
-    ]
+    pinned = _apply_day0_provider_run_hwm_pin(
+        {DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL: probe}
+    )
+    return pinned[DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
 
 
 def fetch_day0_source_clock_ensemble_vectors(
@@ -2059,7 +2067,7 @@ def fetch_day0_source_clock_ensemble_vectors(
     captured_at = decision_time.isoformat()
     try:
         before_rows = fetch_model_updates(
-            [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            [DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL],
             timeout_seconds=max(0.25, float(timeout_s)),
             max_workers=1,
             priority=True,
@@ -2068,7 +2076,8 @@ def fetch_day0_source_clock_ensemble_vectors(
             return [], ""
         before = before_rows[0]
         if (
-            before.last_run_modification_time is None
+            before.model != DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+            or before.last_run_modification_time is None
             or before.last_run_initialisation_time > decision_time
             or before.last_run_availability_time > decision_time
             or decision_time < source_publicly_usable_at(before.to_source_run_clock())
@@ -2084,6 +2093,10 @@ def fetch_day0_source_clock_ensemble_vectors(
             "temperature_unit": "celsius",
             "cell_selection": "land",
         }
+        metadata_params = {
+            **params,
+            "metadata_model": DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL,
+        }
         fetch_started = _day0_utc_now()
         payload = fetch_openmeteo(
             OPENMETEO_ENSEMBLE_URL,
@@ -2094,18 +2107,22 @@ def fetch_day0_source_clock_ensemble_vectors(
         )
         fetch_finished = _day0_utc_now()
         after_rows = fetch_model_updates(
-            [DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
+            [DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL],
             timeout_seconds=max(0.25, float(timeout_s)),
             max_workers=1,
             priority=True,
         )
         after = after_rows[0] if len(after_rows) == 1 else None
-        if not _same_model_update(before, after):
+        if (
+            after is None
+            or after.model != DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+            or not _same_model_update(before, after)
+        ):
             return [], ""
         request_hash = build_request_hash(
             endpoint=OPENMETEO_ENSEMBLE_URL,
             params={
-                **params,
+                **metadata_params,
                 "provider_run": before.last_run_initialisation_time.isoformat(),
             },
             models=[DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL],
@@ -2123,7 +2140,7 @@ def fetch_day0_source_clock_ensemble_vectors(
                 authority="provider_meta_declared",
                 endpoint_mode="ensemble_meta_stamped",
                 request_params={
-                    **params,
+                    **metadata_params,
                     "endpoint": OPENMETEO_ENSEMBLE_URL,
                     "run": before.last_run_initialisation_time.isoformat(),
                 },
@@ -2354,6 +2371,34 @@ def _vector_covers_target_from_capture(
     )
 
 
+def _day0_source_clock_ensemble_metadata_is_current(
+    vector: Day0HourlyVector,
+) -> bool:
+    """Require ENS rows to carry the ensemble metadata-domain provenance."""
+
+    if not str(vector.model or "").strip().startswith(
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX
+    ):
+        return True
+    try:
+        source_meta = json.loads(str(vector.source_run_meta_json or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(source_meta, Mapping):
+        return False
+    try:
+        request_params = json.loads(
+            str(source_meta.get("request_params_json") or "")
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(request_params, Mapping)
+        and str(request_params.get("metadata_model") or "").strip()
+        == DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+    )
+
+
 def select_ready_day0_hourly_vectors(
     vectors: Iterable[Day0HourlyVector],
     *,
@@ -2386,6 +2431,8 @@ def select_ready_day0_hourly_vectors(
     for vector in vectors:
         model = str(vector.model or "").strip()
         if not model or (expected_set and model not in expected_set):
+            continue
+        if not _day0_source_clock_ensemble_metadata_is_current(vector):
             continue
         try:
             captured = datetime.fromisoformat(
