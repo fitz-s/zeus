@@ -4842,15 +4842,47 @@ def _single_order_venue_legal_neighbor(
     *,
     at_most: bool,
 ) -> Decimal | None:
-    """Nearest venue-legal FOK BUY size on one side of ``shares``.
+    """Nearest venue-legal BUY size on one side of ``shares``.
 
-    Venue legality depends on the deepest consumed price, while changing size can
-    change that price. Iterate the monotone normalization to a fixed point instead
-    of treating the 0.01-share base grid as the complete executable set.
+    Immediate BUYs use the FOK venue amount grid. Passive maker BUYs are GTC/GTD
+    and use the venue's share quantizer only. Taker legality depends on the deepest
+    consumed price, while changing size can change that price, so its normalization
+    iterates to a monotone fixed point.
     """
 
     current = Decimal(shares)
     direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    if candidate.execution_mode == "MAKER_REST":
+        try:
+            limit_price, _, _ = _single_order_execution_boundary(
+                candidate,
+                current,
+                enforce_live_fill_band=False,
+            )
+            quantize = (
+                quantize_submit_shares_for_venue_at_most
+                if at_most
+                else quantize_submit_shares_for_venue
+            )
+            normalized = quantize(
+                direction,
+                current,
+                final_limit_price=limit_price,
+                order_type="GTC",
+                tick_size=candidate.economic_cost_curve.min_tick,
+            )
+            _single_order_execution_boundary(
+                candidate,
+                normalized,
+                enforce_live_fill_band=False,
+            )
+        except ValueError:
+            return None
+        if (at_most and normalized > current) or (
+            not at_most and normalized < current
+        ):
+            raise AssertionError("venue share normalization moved in the wrong direction")
+        return normalized
     # Each normalization is monotone and can cross a ladder boundary only once;
     # one final pass proves stability at the last reached boundary.
     for _ in range(len(candidate.economic_cost_curve.levels) + 2):

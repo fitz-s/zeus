@@ -5081,6 +5081,148 @@ def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
     assert calls <= 25
 
 
+def _maker_neighbor_candidate(*, side, tick, price="0.19", proposal_size="100"):
+    taker = _global_candidate(
+        candidate_id=f"maker-neighbor-{side}-{tick}",
+        family=f"maker-neighbor-{side}-{tick}",
+        side=side,
+        q=0.80,
+        levels=(("0.20", "100"),),
+        min_order="1",
+    )
+    proposal = replace(
+        _global_curve(
+            side=side,
+            token=taker.token_id,
+            levels=((price, proposal_size),),
+            min_order="1",
+        ),
+        min_tick=Decimal(tick),
+    )
+    return replace(
+        taker,
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=0.8,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-neighbor-epoch",
+        native_bid_levels=(BookLevel(price=Decimal("0.18"), size=Decimal("100")),),
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("tick", ("0.01", "0.001", "0.0001"))
+def test_maker_neighbor_uses_gtc_share_grid_for_all_sides_and_ticks(side, tick):
+    maker = _maker_neighbor_candidate(side=side, tick=tick)
+    direction = "buy_yes" if side == "YES" else "buy_no"
+    raw = Decimal("5.501")
+    expected_at_most = quantize_submit_shares_for_venue_at_most(
+        direction,
+        raw,
+        final_limit_price=Decimal("0.19"),
+        order_type="GTC",
+        tick_size=Decimal(tick),
+    )
+    expected_at_least = quantize_submit_shares_for_venue(
+        direction,
+        raw,
+        final_limit_price=Decimal("0.19"),
+        order_type="GTC",
+        tick_size=Decimal(tick),
+    )
+    assert expected_at_most == Decimal("5.50")
+    assert expected_at_least == Decimal("5.51")
+    assert S._single_order_venue_legal_neighbor(
+        maker, raw, at_most=True
+    ) == expected_at_most
+    assert S._single_order_venue_legal_neighbor(
+        maker, raw, at_most=False
+    ) == expected_at_least
+
+
+def test_taker_neighbor_retains_fok_price_modular_grid():
+    taker = _global_candidate(
+        candidate_id="taker-fok-neighbor",
+        family="taker-fok-neighbor",
+        side="YES",
+        q=0.80,
+        levels=(("0.19", "100"),),
+        min_order="1",
+    )
+    assert S._single_order_venue_legal_neighbor(
+        taker, Decimal("5.50"), at_most=True
+    ) == quantize_submit_shares_for_venue_at_most(
+        "buy_yes",
+        Decimal("5.50"),
+        final_limit_price=Decimal("0.19"),
+        order_type="FOK",
+        tick_size=taker.economic_cost_curve.min_tick,
+    )
+    assert S._single_order_venue_legal_neighbor(
+        taker, Decimal("5.50"), at_most=False
+    ) == quantize_submit_shares_for_venue(
+        "buy_yes",
+        Decimal("5.50"),
+        final_limit_price=Decimal("0.19"),
+        order_type="FOK",
+        tick_size=taker.economic_cost_curve.min_tick,
+    )
+
+
+@pytest.mark.parametrize("at_most", (True, False))
+@pytest.mark.parametrize("shares", (Decimal("0"), Decimal("-1"), Decimal("101")))
+def test_maker_neighbor_rejects_invalid_or_out_of_depth_amounts(at_most, shares):
+    maker = _maker_neighbor_candidate(side="YES", tick="0.001")
+    assert S._single_order_venue_legal_neighbor(
+        maker, shares, at_most=at_most
+    ) is None
+
+
+def test_maker_neighbor_rechecks_depth_after_at_least_rounding():
+    maker = _maker_neighbor_candidate(
+        side="YES",
+        tick="0.001",
+        proposal_size="5.505",
+    )
+    assert S._single_order_venue_legal_neighbor(
+        maker, Decimal("5.505"), at_most=True
+    ) == Decimal("5.50")
+    assert S._single_order_venue_legal_neighbor(
+        maker, Decimal("5.505"), at_most=False
+    ) is None
+
+
+def test_global_select_admits_gtc_maker_minimum_with_real_fill_witness():
+    maker = _maker_neighbor_candidate(side="YES", tick="0.01")
+    maker_witness = _current_maker_witness(
+        maker,
+        proposal=maker.proposal_cost_curve,
+        asset_epoch=maker.asset_epoch_identity,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.80"), Decimal("1"), Decimal("-0.19")),
+            S.MakerFillOutcome(Decimal("0.20"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        maker,
+        fill_probability=maker_witness.fill_probability,
+        fill_probability_source=maker_witness.witness_identity,
+        maker_fill_witness=maker_witness,
+    )
+    decision = _global_select(
+        (maker,),
+        cash="1.045",
+        cap="1.045",
+        resolution_hours_by_family={maker.family_key: 24.0},
+    )
+    assert decision.candidate is maker
+    assert Decimal("5.27") <= decision.shares <= Decimal("5.90")
+    assert decision.cost_usd <= Decimal("1.045")
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_ev_usd > 0.0
+
+
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     yes = _global_candidate(
         candidate_id="yes", family="a", side="YES", q=0.70,
