@@ -4846,8 +4846,8 @@ def _single_order_venue_legal_neighbor(
 
     Immediate BUYs use the FOK venue amount grid. Passive maker BUYs are GTC/GTD
     and use the venue's share quantizer only. Taker legality depends on the deepest
-    consumed price, while changing size can change that price, so its normalization
-    iterates to a monotone fixed point.
+    consumed price. Search each price segment separately: its amount grid can
+    admit a smaller size than a neighboring segment's normalization suggests.
     """
 
     current = Decimal(shares)
@@ -4883,22 +4883,36 @@ def _single_order_venue_legal_neighbor(
         ):
             raise AssertionError("venue share normalization moved in the wrong direction")
         return normalized
-    # Each normalization is monotone and can cross a ladder boundary only once;
-    # one final pass proves stability at the last reached boundary.
-    for _ in range(len(candidate.economic_cost_curve.levels) + 2):
+    segments = []
+    cumulative = Decimal("0")
+    for level in candidate.economic_cost_curve.levels:
+        lower = (
+            cumulative / _SIZE_QUANTUM
+        ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM + _SIZE_QUANTUM
+        cumulative += level.size
+        upper = (
+            cumulative / _SIZE_QUANTUM
+        ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+        segments.append((lower, upper, level.price))
+    if not current.is_finite() or current <= 0 or current > cumulative:
+        return None
+    for lower, upper, limit_price in (reversed(segments) if at_most else segments):
+        if at_most:
+            upper = min(upper, current)
+            anchor_size = upper
+        else:
+            lower = max(lower, current)
+            anchor_size = lower
+        if lower > upper:
+            continue
         try:
-            limit_price, _, _ = _single_order_execution_boundary(
-                candidate,
-                current,
-                enforce_live_fill_band=False,
-            )
             tick = candidate.economic_cost_curve.min_tick
             price_decimals = abs(tick.normalize().as_tuple().exponent)
             scale = 10 ** price_decimals
             price_units = int(round(float(limit_price) * scale))
             legal_step = scale // math.gcd(abs(price_units), scale)
             raw_units = int(
-                (current / _SIZE_QUANTUM).to_integral_value(
+                (anchor_size / _SIZE_QUANTUM).to_integral_value(
                     rounding=ROUND_FLOOR if at_most else ROUND_CEILING
                 )
             )
@@ -4914,9 +4928,9 @@ def _single_order_venue_legal_neighbor(
                     Decimal(units) * _SIZE_QUANTUM
                     for units in unit_candidates
                     if (
-                        Decimal(units) * _SIZE_QUANTUM <= current
+                        Decimal(units) * _SIZE_QUANTUM <= anchor_size
                         if at_most
-                        else Decimal(units) * _SIZE_QUANTUM >= current
+                        else Decimal(units) * _SIZE_QUANTUM >= anchor_size
                     )
                 ),
                 reverse=at_most,
@@ -4947,19 +4961,16 @@ def _single_order_venue_legal_neighbor(
                 )
                 normalized = quantize(
                     direction,
-                    current,
+                    anchor_size,
                     final_limit_price=limit_price,
                     order_type="FOK",
                     tick_size=tick,
                 )
         except ValueError:
-            return None
-        if normalized == current:
-            return current
-        if (at_most and normalized > current) or (not at_most and normalized < current):
-            raise AssertionError("venue share normalization moved in the wrong direction")
-        current = normalized
-    raise AssertionError("venue share normalization did not converge")
+            continue
+        if lower <= normalized <= upper:
+            return normalized
+    return None
 
 
 def _single_order_metrics(

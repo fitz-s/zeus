@@ -5057,6 +5057,83 @@ def test_global_venue_neighbor_matches_sdk_faithful_quantizer(price, raw):
     )
 
 
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("at_most", (True, False))
+@pytest.mark.parametrize(
+    "levels",
+    (
+        (("0.557", "2.53"), ("0.572", "3.65"), ("0.701", "4")),
+        (("0.113", "2.531"), ("0.125", "3.65"), ("0.173", "4")),
+        (("0.525", "2.50"), ("0.540", "3.50"), ("0.550", "4")),
+    ),
+)
+def test_global_venue_neighbor_searches_each_price_segment(side, at_most, levels):
+    candidate = _global_candidate(
+        candidate_id="segment-neighbor", family="segment-neighbor", side=side,
+        q=0.8, levels=levels,
+    )
+    legal = []
+    depth = sum(Decimal(size) for _, size in levels)
+    for units in range(1, int(depth * 100) + 1):
+        size = Decimal(units) / 100
+        cumulative = Decimal("0")
+        for price, volume in levels:
+            cumulative += Decimal(volume)
+            if size <= cumulative:
+                break
+        if venue_submit_amount_precision_error(
+            direction="buy_yes" if side == "YES" else "buy_no",
+            final_limit_price=Decimal(price), submitted_shares=size,
+            order_type="FOK", tick_size=candidate.economic_cost_curve.min_tick,
+        ) is None:
+            legal.append(size)
+    for raw in ("0.01", "1.80", "2.50", "2.53", "2.54", "5", "6", "6.18", "6.181", "10"):
+        size = Decimal(raw)
+        expected = [x for x in legal if x <= size] if at_most else [
+            x for x in legal if x >= size
+        ]
+        nearest = (max(expected) if at_most else min(expected)) if expected else None
+        assert S._single_order_venue_legal_neighbor(
+            candidate, size, at_most=at_most,
+        ) == nearest
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("expected_mean", (False, True))
+def test_global_buy_keeps_positive_lot_between_different_price_grids(side, expected_mean):
+    q = 0.7193857537483415
+    candidate = _global_candidate(
+        candidate_id="positive-middle-lot", family="positive-middle-lot", side=side,
+        q=q, levels=(("0.557", "2.53"), ("0.572", "3.65"), ("0.701", "4")),
+        fee="0.03", min_order="0.79",
+    )
+    kwargs = dict(
+        band_alpha=0.05, wealth_floor_usd=Decimal("60.66"),
+        wealth_ceiling_usd=Decimal("90.37"), spendable_cash_usd=Decimal("19.37"),
+        capital_limit_usd=Decimal("19.63"), fractional_kelly_multiplier=Decimal("0.697"),
+        current_token_shares=Decimal("1.81"),
+    )
+    score = (
+        S._score_global_single_order_buy_expected(
+            candidate, payoff_probability_mean=q, sample_count=400, **kwargs,
+        ) if expected_mean else S._score_global_single_order(
+            candidate, q_samples=np.full(400, q), **kwargs,
+        )
+    )
+    assert score.candidate is candidate
+    assert score.shares == Decimal("5")
+    assert score.limit_price == Decimal("0.572")
+    assert score.shares + Decimal("1.81") <= score.fractional_kelly_target_shares
+    if expected_mean:
+        assert score.expected_terminal_wealth.expected_delta_log_wealth == pytest.approx(
+            0.0032979687776
+        )
+        assert score.expected_terminal_wealth.expected_ev_usd == pytest.approx(0.7380095022)
+    else:
+        assert score.robust_delta_log_wealth == pytest.approx(0.0032979687776)
+        assert score.robust_ev_usd == pytest.approx(0.7380095022)
+
 def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
     candidate = _global_candidate(
         candidate_id="venue-neighbor-bounded",
