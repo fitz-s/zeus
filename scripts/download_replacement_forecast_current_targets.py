@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-31
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-31; last_reused=2026-08-31
+# Last reused/audited: 2026-09-12
+# Lifecycle: created=2026-06-07; last_reviewed=2026-09-12; last_reused=2026-09-12
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -704,7 +704,7 @@ def _canonical_sibling_payload_reuse(
     cycle: datetime,
     targets: Sequence[object],
 ) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
-    """Reuse one verified hourly payload for the missing HIGH/LOW twin.
+    """Reuse one verified hourly payload for a missing target date or metric.
 
     Open-Meteo serves one run-pinned hourly ``temperature_2m`` payload per
     city/run. HIGH and LOW are distinct downstream data versions, but the same
@@ -805,7 +805,7 @@ def _canonical_sibling_payload_reuse(
                 key = (city, target_date)
                 if (
                     key in reused
-                    or {wanted_metric, sibling_metric} != {"high", "low"}
+                    or wanted_metric not in {"high", "low"}
                     or not _current_target_payload_materializable(
                         payload,
                         city_timezone=city_config.timezone,

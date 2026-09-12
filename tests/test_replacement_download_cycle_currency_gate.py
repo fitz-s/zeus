@@ -1260,7 +1260,7 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
 
 @pytest.mark.parametrize(
     ("sibling_metric", "wanted_metric"),
-    (("high", "low"), ("low", "high")),
+    (("high", "low"), ("low", "high"), ("high", "high"), ("low", "low")),
 )
 def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     tmp_path,
@@ -1268,7 +1268,7 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     sibling_metric: str,
     wanted_metric: str,
 ) -> None:
-    """One canonical hourly payload supplies both metric manifests at one cycle."""
+    """Canonical hourly bytes supply a new date with newly derived precision."""
     import scripts.download_replacement_forecast_current_targets as dl
 
     target = _TargetRow(
@@ -1358,8 +1358,9 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
         "json_extract(artifact_metadata_json, '$.metric'), "
         "json_extract(artifact_metadata_json, '$.raw_metric_sibling_reuse'), "
         "json_extract(artifact_metadata_json, '$.raw_target_date_sibling_reuse') "
-        "FROM raw_forecast_artifacts WHERE data_version = ?",
-        (wanted_data_version,),
+        "FROM raw_forecast_artifacts WHERE data_version = ? "
+        "AND json_extract(artifact_metadata_json, '$.target_date') = ?",
+        (wanted_data_version, target.target_date),
     ).fetchone()
     conn.close()
     assert report["sibling_payload_reuse_count"] == 1
@@ -1370,6 +1371,12 @@ def test_direct_downloader_fans_out_verified_sibling_payload_without_network(
     )
     assert low[3] == hashlib.sha256(Path(low[2]).read_bytes()).hexdigest()
     assert low[4:] == (wanted_metric, sibling_metric, sibling_target_date)
+    precision_path = raw_dir / f"openmeteo_precision_Dallas_2026-06-10_{wanted_metric}.json"
+    precision = json.loads(precision_path.read_text())
+    assert precision["target_local_date"] == "2026-06-10"
+    assert precision["local_day_start_utc"] == "2026-06-10T05:00:00+00:00"
+    assert precision["local_day_end_utc"] == "2026-06-11T05:00:00+00:00"
+    assert report["downloaded"]["openmeteo_transport_fetch_count"] == 0
 
 
 def test_scoped_download_closes_active_metric_twin_from_one_payload(

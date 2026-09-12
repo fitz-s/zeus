@@ -3115,61 +3115,42 @@ def test_current_target_plan_counts_openmeteo_manifest_with_target_day_samples(t
     assert london.can_seed is True
 
 
-def test_current_target_plan_counts_meta_stamped_horizon_manifest_with_target_day_samples(tmp_path) -> None:
-    db = tmp_path / "forecasts.db"
-    _create_db(db)
-    payload = tmp_path / "london_meta_stamped_payload.json"
-    payload.write_text(
-        json.dumps(
-            {
-                "hourly": {
-                    "time": ["2026-06-08T12:00", "2026-06-09T00:00", "2026-06-09T12:00"],
-                    "temperature_2m": [13.0, 14.0, 18.0],
-                }
-            }
-        ),
-        encoding="utf-8",
+@pytest.mark.parametrize("declared_dates", [True, False])
+def test_meta_stamped_horizon_does_not_supply_another_days_precision(
+    tmp_path, declared_dates: bool,
+) -> None:
+    payload = tmp_path / "hourly.json"
+    payload.write_text(json.dumps({"hourly": {
+        "time": ["2026-06-08T12:00", "2026-06-09T00:00", "2026-06-09T12:00"],
+        "temperature_2m": [13.0, 14.0, 18.0],
+    }}))
+    metadata = {
+        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+        "openmeteo_endpoint": "standard_api_meta_stamped",
+        "city": "London", "target_date": "2026-06-08",
+        "forecast_hours": 120, "openmeteo_payload_json": str(payload),
+        "precision_metadata_json": str(tmp_path / "precision-2026-06-08.json"),
+    }
+    if declared_dates:
+        metadata["target_dates"] = ["2026-06-08"]
+    cycle = "2026-06-07T06:00:00+00:00"
+    manifest = current_target_plan._OpenMeteoManifest(
+        str(payload), metadata, cycle, cycle, cycle, cycle,
     )
-    precision = tmp_path / "precision.json"
-    precision.write_text("{}", encoding="utf-8")
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute(
-            """
-            UPDATE raw_forecast_artifacts
-            SET product_metadata_json = ?
-            WHERE product_metadata_json LIKE '%London%'
-            """,
-            (
-                json.dumps(
-                    {
-                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
-                        "openmeteo_endpoint": "standard_api_meta_stamped",
-                        "city": "London",
-                        "cities": ["London"],
-                        "target_date": "2026-06-08",
-                        "target_dates": ["2026-06-08"],
-                        "forecast_hours": 120,
-                        "source_cycle_time": "2026-06-07T06:00:00+00:00",
-                        "source_run_id": "openmeteo-current-London",
-                        "openmeteo_payload_json": str(payload),
-                        "precision_metadata_json": str(precision),
-                    }
-                ),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    plan = build_replacement_forecast_current_target_plan(
-        db,
-        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
-    )
-    london = next(row for row in plan.rows if row.city == "London")
-
-    assert london.openmeteo_manifest_count == 1
-    assert london.can_seed is True
+    assert current_target_plan._openmeteo_manifest_coverage(
+        (manifest,), target_date="2026-06-09", city_timezone="Europe/London",
+        required_source_cycle_time=cycle,
+    ) == (0, None, None)
+    # Same-cycle, exact-target inputs still satisfy the planner. The downloader
+    # must supply this new target certificate even though hourly bytes overlap.
+    metadata["target_date"] = "2026-06-09"
+    metadata["precision_metadata_json"] = str(tmp_path / "precision-2026-06-09.json")
+    if declared_dates:
+        metadata["target_dates"] = ["2026-06-09"]
+    assert current_target_plan._openmeteo_manifest_coverage(
+        (manifest,), target_date="2026-06-09", city_timezone="Europe/London",
+        required_source_cycle_time=cycle,
+    )[0] == 1
 
 
 def test_current_target_plan_requires_target_specific_single_runs_manifest(tmp_path) -> None:
