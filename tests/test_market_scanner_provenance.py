@@ -1643,6 +1643,38 @@ class TestSourceContractGate:
         assert parsed["source_contract"]["status"] == "MATCH"
         assert parsed["source_contract"]["source_family"] == "noaa"
 
+    def test_hourly_clause_is_matched_case_insensitively(self):
+        """A re-cased clause must not drop all 11 hourly cities' markets.
+
+        The page check was already case-insensitive while the clause check was
+        not, so a cosmetic upstream re-casing would read as the all-data view and
+        MISMATCH every hourly city. Fail-closed, but a total coverage loss.
+        """
+        for clause in (
+            'This market will resolve off of the Hourly Data provided using '
+            'the "Show Hourly Data" button.',
+            'this market will resolve off of the hourly data provided using '
+            'the "show hourly data" button.',
+            'THIS MARKET WILL RESOLVE OFF OF THE HOURLY DATA PROVIDED USING '
+            'THE "SHOW HOURLY DATA" BUTTON.',
+        ):
+            event = _gamma_temperature_event(
+                title="Lowest temperature in NYC on September 12?",
+                slug="lowest-temperature-in-nyc-on-september-12-2026",
+                question="Will the low temperature in NYC be 72°F or higher?",
+                resolution_source=None,
+                description=(
+                    _NYC_HOURLY_CLAUSE_DESCRIPTION.replace(
+                        'This market will resolve off of the Hourly Data '
+                        'provided using the "Show Hourly Data" button.',
+                        clause,
+                    )
+                ),
+            )
+            assert ms._page_view_declared_by_description(event) == "hourly", clause
+            check = ms._check_source_contract(event, ms.cities_by_name["NYC"])
+            assert check.status == "MATCH", clause
+
     def test_hourly_clause_on_an_all_view_city_is_a_mismatch(self):
         """London's market gaining the clause would change its settlement law."""
         event = _gamma_temperature_event(

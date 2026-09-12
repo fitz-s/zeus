@@ -135,6 +135,29 @@ def _validate_source_family(row: sqlite3.Row, city) -> None:
     raise SettlementRebuildSkip("unsupported_source_family")
 
 
+def _settlement_valid_rank(row: sqlite3.Row) -> int | None:
+    """Rank a row within its city's settlement family; None if not in it at all.
+
+    Dedup must never let a foreign-family row displace a settlement-valid
+    sibling. A NOAA city can hold a legacy `wu_icao_history` row from before its
+    provider migration alongside its `ogimet_metar_` or `noaa_wrh_` row, and
+    ranking by NOAA prefix alone gave the foreign row rank 0 — the same rank as
+    the most-preferred source — so an arbitrary row order decided which one
+    survived. On the live table that discarded the valid sibling for 517
+    city/date pairs across 2024-12-01..2026-08-31, and each of those days then
+    failed family validation and rebuilt nothing where it used to rebuild
+    correctly.
+    """
+    try:
+        city = _city_for_observation(row)
+        _validate_source_family(row, city)
+    except SettlementRebuildSkip:
+        return None
+    if city.settlement_source_type == "noaa":
+        return _noaa_source_rank(row["source"]) or 0
+    return 0
+
+
 def _preferred_rows_per_city_date(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     """Keep one observation row per (city, target_date), best source first.
 
@@ -142,19 +165,29 @@ def _preferred_rows_per_city_date(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     day. Rebuilding from every row would let whichever one is written last win
     the settlements UPSERT; keeping only the preferred source makes the
     rebuild's outcome independent of row order.
+
+    Rows outside the city's settlement family never compete: they are carried
+    through only when nothing valid exists for that (city, date), so the caller
+    still raises the same `source_family_mismatch` skip it always did and the
+    reason counts stay honest.
     """
     best: dict[tuple[str, str], tuple[int, sqlite3.Row]] = {}
+    invalid: dict[tuple[str, str], sqlite3.Row] = {}
     order: list[tuple[str, str]] = []
     for row in rows:
         key = (str(row["city"]), str(row["target_date"]))
-        rank = _noaa_source_rank(row["source"])
-        rank = rank if rank is not None else 0
-        if key not in best:
-            best[key] = (rank, row)
+        if key not in best and key not in invalid:
             order.append(key)
-        elif rank < best[key][0]:
+        rank = _settlement_valid_rank(row)
+        if rank is None:
+            invalid.setdefault(key, row)
+            continue
+        if key not in best or rank < best[key][0]:
             best[key] = (rank, row)
-    return [best[key][1] for key in order]
+    return [
+        best[key][1] if key in best else invalid[key]
+        for key in order
+    ]
 
 
 def _round_metric_value(

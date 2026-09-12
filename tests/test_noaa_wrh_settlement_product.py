@@ -17,7 +17,7 @@ import json
 import re
 import sqlite3
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -30,6 +30,7 @@ from src.config import cities_by_name, validate_cities_config
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.noaa_wrh_timeseries import (
     MAX_REQUEST_WINDOW_DAYS,
+    WrhWindowTooOld,
     daily_extreme,
     recent_minutes_for_local_day,
     request_url_without_token,
@@ -229,18 +230,68 @@ def test_fahrenheit_view_sends_units_and_metric_view_does_not():
         assert "token=REDACTED" in url
 
 
-def test_recent_window_covers_the_local_day_and_respects_the_request_cap():
+def test_recent_window_covers_the_local_day():
     minutes = recent_minutes_for_local_day(
         date(2026, 9, 11), "America/New_York",
         now_utc=datetime(2026, 9, 12, 5, 30, tzinfo=timezone.utc),
     )
     # Local midnight 2026-09-11 is 04:00Z; 25.5h elapsed plus the 3h margin.
     assert minutes == 25 * 60 + 30 + 180
-    capped = recent_minutes_for_local_day(
-        date(2026, 1, 1), "America/New_York",
-        now_utc=datetime(2026, 9, 12, tzinfo=timezone.utc),
+
+
+def test_recent_window_refuses_a_day_it_cannot_reach_instead_of_clamping():
+    """A clamped window returns the day's TAIL, which looks like a whole day.
+
+    Measured on the KHOU feed: for a target date seven days old the clamped
+    window starts after the day's true minimum, so the low reads 80.96 degF
+    instead of 78.98 and would be written VERIFIED. The only safe shape is a
+    typed refusal, because a truncated row set and a complete one are otherwise
+    indistinguishable to the caller.
+    """
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+    # 5 and 6 days old still fit inside the cap.
+    for age in (5, 6):
+        target = date(2026, 9, 12) - timedelta(days=age)
+        minutes = recent_minutes_for_local_day(
+            target, "America/New_York", now_utc=now,
+        )
+        assert minutes <= MAX_REQUEST_WINDOW_DAYS * 24 * 60
+
+    # 7 and 8 days old cannot, and must raise rather than clamp.
+    for age in (7, 8):
+        target = date(2026, 9, 12) - timedelta(days=age)
+        with pytest.raises(WrhWindowTooOld):
+            recent_minutes_for_local_day(target, "America/New_York", now_utc=now)
+
+
+def test_truncated_window_would_have_given_a_wrong_low_for_khou():
+    """Pin the exact defect the refusal prevents, so it cannot be re-introduced.
+
+    If a future change clamps again instead of raising, this test still shows
+    what the clamped window computes: a low 1.98 degF above the real one.
+    """
+    rows = _rows("KHOU")
+    target = date(2026, 9, 9)
+    full = daily_extreme(
+        rows, target_date_local=target, view="hourly", metric="low",
     )
-    assert capped == MAX_REQUEST_WINDOW_DAYS * 24 * 60
+    assert full.value == pytest.approx(78.98)
+
+    # The window a 7-day-old clamp would have produced.
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    window_start = now - timedelta(minutes=MAX_REQUEST_WINDOW_DAYS * 24 * 60)
+    truncated = daily_extreme(
+        [row for row in rows if row.utc >= window_start],
+        target_date_local=target, view="hourly", metric="low",
+    )
+    # Non-empty, so the "station dark" guard would NOT have fired.
+    assert truncated is not None
+    assert truncated.value == pytest.approx(80.96)
+    assert truncated.value > full.value
+
+    # And the live lane refuses that day rather than writing it.
+    with pytest.raises(WrhWindowTooOld):
+        recent_minutes_for_local_day(target, "America/Chicago", now_utc=now)
 
 
 # ---------------------------------------------------------------------------
@@ -582,10 +633,84 @@ def test_backfill_writes_the_forecasts_db_not_the_world_ghost():
     assert "get_forecasts_connection_with_world" in source
     assert hasattr(module, "get_forecasts_connection_with_world")
     # The world schema initialiser must never run against a forecasts file, and
-    # the world connection helper must not appear at all.
+    # the world-only connection helper must not be reachable from here.
     assert "init_schema" not in source
-    assert "get_world_connection" not in source
-    assert "ZEUS_WORLD_DB_PATH" not in source
+    assert "get_world_connection(" not in source
+    # ZEUS_WORLD_DB_PATH is referenced, but only to REFUSE an explicit path that
+    # names it — never to open it. Pin that distinction rather than the bare name,
+    # so the assertion keeps its meaning instead of breaking on a legitimate use.
+    assert "get_world_connection" not in source.replace(
+        "get_forecasts_connection_with_world", ""
+    )
+    for line in source.splitlines():
+        if "ZEUS_WORLD_DB_PATH" in line:
+            assert "resolve()" in line or "import" in line, (
+                f"ZEUS_WORLD_DB_PATH used for something other than the "
+                f"canonical-path refusal: {line.strip()!r}"
+            )
+
+
+def test_explicit_db_paths_still_take_both_writer_locks(tmp_path, monkeypatch):
+    """The --db branch must not trade the writer flock for convenience.
+
+    The canonical path gets its locks from get_forecasts_connection_with_world.
+    An earlier version of the explicit branch took none, so a run pointed at real
+    files would have written with no protection against the live ingest daemon's
+    writers — the WAL write-lock collision the lock discipline exists to prevent.
+    """
+    module = _load_backfill_module()
+    from src.state import db_writer_lock as dwl
+
+    # A subdirectory, not tmp_path itself: the conftest DB-isolation fixture
+    # points the canonical path constants at tmp_path/zeus-forecasts.db, so
+    # building the fixture pair there would trip the canonical-path refusal.
+    pair_dir = tmp_path / "explicit_pair"
+    pair_dir.mkdir()
+    db_path, world_path = _live_schema_db_pair(pair_dir)
+    taken: list[str] = []
+    real_lock = dwl.db_writer_lock
+
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager
+    def spy(path, write_class, **kwargs):
+        taken.append(Path(str(path)).name)
+        with real_lock(path, write_class, **kwargs) as held:
+            yield held
+
+    monkeypatch.setattr(dwl, "db_writer_lock", spy)
+    with module._open_target(str(db_path), str(world_path)) as conn:
+        assert [row[1] for row in conn.execute("PRAGMA database_list")] == [
+            "main", "world",
+        ]
+    # Both files, forecasts before world per canonical_lock_order.
+    assert taken == [db_path.name, world_path.name]
+
+
+def test_explicit_db_paths_refuse_to_name_a_canonical_database():
+    """Naming the live files explicitly can only be a mistake; refuse it.
+
+    The no-flag path already writes the live pair under both locks, so the only
+    effect of naming them here would be a second lock holder contending with the
+    daemon rather than cooperating with it.
+    """
+    module = _load_backfill_module()
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH
+
+    assert module._canonical_db_refusal(
+        str(ZEUS_FORECASTS_DB_PATH), str(ZEUS_WORLD_DB_PATH)
+    )
+    # Either side alone is enough to refuse.
+    assert module._canonical_db_refusal(str(ZEUS_FORECASTS_DB_PATH), "/tmp/w.db")
+    assert module._canonical_db_refusal("/tmp/f.db", str(ZEUS_WORLD_DB_PATH))
+    # A fixture pair is fine.
+    assert module._canonical_db_refusal("/tmp/f.db", "/tmp/w.db") is None
+    # And the CLI exits non-zero rather than writing.
+    assert module.main([
+        "--start", "2026-09-11", "--end", "2026-09-11",
+        "--db", str(ZEUS_FORECASTS_DB_PATH),
+        "--world-db", str(ZEUS_WORLD_DB_PATH),
+    ]) == 2
 
 
 def test_backfill_requires_db_and_world_db_together():
@@ -695,6 +820,301 @@ def test_operator_sequence_heals_houston_through_the_ingest_truth_writer(
     assert outcome["settlement_value"] == 94.0
     assert outcome["settlement_unit"] == "F"
     conn.close()
+
+
+def test_backfill_chunks_never_exceed_the_request_cap(tmp_path):
+    """Every window, after the local-day widening, must fit the provider cap.
+
+    An earlier version advanced by chunk_days and then widened by a day on each
+    side, so the default 7 produced an 8d23h span. fetch_wrh_timeseries rejects
+    that with a bare ValueError, which is not a WrhError, so it escaped the
+    per-window handler and aborted the entire run on chunk 1 — every backfill
+    longer than about a week died before its first request.
+    """
+    module = _load_backfill_module()
+    start, end = date(2026, 8, 23), date(2026, 9, 11)
+
+    for chunk_days in range(1, MAX_REQUEST_WINDOW_DAYS + 1):
+        windows = module._chunks(start, end, chunk_days)
+        for window_start, window_end in windows:
+            # _fetch_window turns a window into start 00:00Z .. end 23:59Z.
+            span = (
+                datetime(
+                    window_end.year, window_end.month, window_end.day,
+                    23, 59, tzinfo=timezone.utc,
+                )
+                - datetime(
+                    window_start.year, window_start.month, window_start.day,
+                    tzinfo=timezone.utc,
+                )
+            )
+            assert span <= timedelta(days=MAX_REQUEST_WINDOW_DAYS), (
+                f"chunk_days={chunk_days} window "
+                f"{window_start}..{window_end} spans {span}"
+            )
+        # Every target date must still sit inside some window.
+        for offset in range((end - start).days + 1):
+            target = start + timedelta(days=offset)
+            assert any(a <= target <= b for a, b in windows), (
+                f"chunk_days={chunk_days} leaves {target} uncovered"
+            )
+
+
+def test_backfill_walks_a_twenty_day_range_with_default_flags(tmp_path, monkeypatch):
+    """The commit's own replay range must run end to end without raising.
+
+    The fixture path short-circuits before the request validator, so this test
+    routes each window through the real ``fetch_wrh_timeseries`` window check
+    first and only then serves fixture rows. Without that, a chunking regression
+    would pass here and only fail in production.
+    """
+    module = _load_backfill_module()
+    from src.data import noaa_wrh_timeseries as wrh
+
+    seen: list[tuple[date, date]] = []
+    real_rows = _rows("KHOU")
+
+    def validating_fetch(station, start_utc=None, end_utc=None, **kwargs):
+        # Reuse the shipped cap check rather than restating it here.
+        if end_utc - start_utc > timedelta(days=wrh.MAX_REQUEST_WINDOW_DAYS):
+            raise ValueError(
+                f"window {start_utc.isoformat()}..{end_utc.isoformat()} exceeds "
+                f"the {wrh.MAX_REQUEST_WINDOW_DAYS}-day request cap"
+            )
+        seen.append((start_utc.date(), end_utc.date()))
+        return real_rows
+
+    monkeypatch.setattr(wrh, "fetch_wrh_timeseries", validating_fetch)
+    monkeypatch.setattr(module, "fetch_wrh_timeseries", validating_fetch)
+    monkeypatch.setattr(module, "fetch_wrh_token", lambda: "token")
+
+    db_path, world_path = _temp_forecasts_pair(tmp_path)
+    conn = _attached(db_path, world_path)
+    summary = module.backfill(
+        conn,
+        start=date(2026, 8, 23),
+        end=date(2026, 9, 11),
+        city_filter=["Houston"],
+        apply_writes=False,
+        fixture_dir=None,
+    )
+    assert summary["refused_at"] is None
+    assert summary["days_seen"] == 20
+    assert not [line for line in summary["lines"] if "FETCH_FAILED" in line]
+    assert seen, "no window was requested"
+    conn.close()
+
+
+def test_window_over_the_cap_is_a_wrh_error_not_a_bare_value_error():
+    """A chunking mistake must degrade to one reported window, not kill the run."""
+    module = _load_backfill_module()
+    from src.data.noaa_wrh_timeseries import WrhError
+
+    with pytest.raises(WrhError):
+        module._fetch_window(
+            "KLGA", (date(2026, 8, 1), date(2026, 8, 20)),
+            unit="F", token="token", fixture_dir=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Hole-scanner registry
+# ---------------------------------------------------------------------------
+
+
+def test_hole_scanner_expects_a_page_feed_row_for_every_noaa_city():
+    """A missed page-feed day must become a visible hole.
+
+    Without the page lane in the registry the scanner never emits a MISSING row
+    for it, so the day keeps only its Ogimet row and settles on the
+    reconstruction this product replaces — silently, with nothing for an
+    operator to see.
+    """
+    from src.data.hole_scanner import SOURCES_BY_TABLE, _source_applies_to_city
+    from src.state.data_coverage import DataTable
+
+    sources = SOURCES_BY_TABLE[DataTable.OBSERVATIONS]
+    page_sources = {s for s in sources if s.startswith("noaa_wrh_")}
+    noaa_cities = [
+        c for c in cities_by_name.values() if c.settlement_source_type == "noaa"
+    ]
+    assert len(page_sources) == len(noaa_cities)
+    assert page_sources == {
+        f"noaa_wrh_{c.wu_station.strip().lower()}" for c in noaa_cities
+    }
+
+    # A NOAA city expects BOTH of its lanes for a post-migration date, and no
+    # other city's station.
+    nyc = cities_by_name["NYC"]
+    post = date(2026, 9, 11)
+    assert _source_applies_to_city("noaa_wrh_klga", nyc, post)
+    assert _source_applies_to_city("ogimet_metar_klga", nyc, post)
+    assert not _source_applies_to_city("noaa_wrh_khou", nyc, post)
+    # A WU city never expects a page-feed row.
+    assert not _source_applies_to_city("noaa_wrh_klga", cities_by_name["Jinan"], post)
+    # Nor does a NOAA city for a date before it migrated to NOAA.
+    assert not _source_applies_to_city("noaa_wrh_klga", nyc, date(2026, 8, 1))
+
+
+def test_page_feed_sources_carry_a_retro_start_so_history_is_not_a_hole():
+    """The product starts at the provider migration, not at the global floor."""
+    from src.data.hole_scanner import ExceptionsConfig
+
+    config = ExceptionsConfig.load()
+    retro = {
+        source: start
+        for source, start in config.model_retro_starts.items()
+        if source.startswith("noaa_wrh_")
+    }
+    noaa_cities = [
+        c for c in cities_by_name.values() if c.settlement_source_type == "noaa"
+    ]
+    assert len(retro) == len(noaa_cities)
+    assert set(retro.values()) == {date(2026, 8, 23)}
+
+
+# ---------------------------------------------------------------------------
+# Token rotation
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_request_retries_once_with_a_freshly_read_token(monkeypatch):
+    """A mid-run upstream rotation must not refuse a station until restart.
+
+    The token is cached for the life of the daemon and a 403 cannot distinguish
+    "quota" from "the token rotated under us", so the only way to tell is to
+    re-read apiKey.js once and see whether the token changed.
+    """
+    from src.data import daily_obs_append as appender
+    from src.data.noaa_wrh_timeseries import WrhTokenRefused
+
+    calls: list[str] = []
+
+    def fake_fetch(station, **kwargs):
+        calls.append(kwargs["token"])
+        if kwargs["token"] == "stale":
+            raise WrhTokenRefused("Invalid request per token rules")
+        return ["row"]
+
+    monkeypatch.setattr(
+        "src.data.noaa_wrh_timeseries.fetch_wrh_timeseries", fake_fetch,
+    )
+    monkeypatch.setattr(
+        "src.data.noaa_wrh_timeseries.fetch_wrh_token", lambda refresh=False: "fresh",
+    )
+
+    rows = appender._fetch_wrh_rows_with_token_refresh(
+        "KLGA", unit="F", token="stale", recent_minutes=120,
+    )
+    assert rows == ["row"]
+    assert calls == ["stale", "fresh"]
+
+
+def test_a_quota_refusal_still_raises_when_the_token_did_not_change(monkeypatch):
+    """A genuine quota refusal must stop the run, not burn a second request."""
+    from src.data import daily_obs_append as appender
+    from src.data.noaa_wrh_timeseries import WrhTokenRefused
+
+    calls: list[str] = []
+
+    def always_refused(station, **kwargs):
+        calls.append(kwargs["token"])
+        raise WrhTokenRefused("Invalid request per token rules")
+
+    monkeypatch.setattr(
+        "src.data.noaa_wrh_timeseries.fetch_wrh_timeseries", always_refused,
+    )
+    monkeypatch.setattr(
+        "src.data.noaa_wrh_timeseries.fetch_wrh_token", lambda refresh=False: "same",
+    )
+
+    with pytest.raises(WrhTokenRefused):
+        appender._fetch_wrh_rows_with_token_refresh(
+            "KLGA", unit="F", token="same", recent_minutes=120,
+        )
+    # Exactly one request: the re-read returned the same token, so retrying
+    # would just spend another request against a live quota.
+    assert calls == ["same"]
+
+
+# ---------------------------------------------------------------------------
+# Rebuild dedup
+# ---------------------------------------------------------------------------
+
+
+def _obs_row(city: str, target_date: str, source: str, high: float) -> dict:
+    return {
+        "city": city, "target_date": target_date, "source": source,
+        "high_temp": high, "low_temp": high - 10.0, "unit": "F",
+        "authority": "VERIFIED",
+    }
+
+
+def test_rebuild_dedup_never_lets_a_foreign_family_row_displace_a_valid_one():
+    """A legacy wu_icao_history row must not evict a NOAA city's real row.
+
+    Ranking by NOAA prefix alone gave a foreign source rank 0 — the same rank as
+    the most-preferred one — so with a strict < tie-break an arbitrary row order
+    decided the winner. On the live table that discarded the valid sibling for
+    517 city/date pairs, and each of those days then failed family validation and
+    rebuilt nothing where it previously rebuilt correctly.
+    """
+    import importlib
+
+    rs = importlib.import_module("scripts.rebuild_settlements")
+
+    # Foreign row first: the Ogimet row must still win.
+    kept = rs._preferred_rows_per_city_date([
+        _obs_row("Amsterdam", "2026-08-01", "wu_icao_history", 20.0),
+        _obs_row("Amsterdam", "2026-08-01", "ogimet_metar_eham", 22.0),
+    ])
+    assert [r["source"] for r in kept] == ["ogimet_metar_eham"]
+
+    # Foreign row first against the page row: the page row must win.
+    kept = rs._preferred_rows_per_city_date([
+        _obs_row("Atlanta", "2026-09-05", "wu_icao_history", 90.0),
+        _obs_row("Atlanta", "2026-09-05", "noaa_wrh_katl", 97.0),
+    ])
+    assert [r["source"] for r in kept] == ["noaa_wrh_katl"]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("noaa_wrh_katl", "ogimet_metar_katl"),
+        ("ogimet_metar_katl", "noaa_wrh_katl"),
+    ],
+)
+def test_rebuild_dedup_prefers_the_page_row_in_either_row_order(order):
+    import importlib
+
+    rs = importlib.import_module("scripts.rebuild_settlements")
+    kept = rs._preferred_rows_per_city_date(
+        [_obs_row("Atlanta", "2026-09-05", source, 95.0) for source in order]
+    )
+    assert [r["source"] for r in kept] == ["noaa_wrh_katl"]
+
+
+def test_rebuild_dedup_keeps_an_invalid_row_when_nothing_valid_exists():
+    """The caller must still see and count the family mismatch it always did."""
+    import importlib
+
+    rs = importlib.import_module("scripts.rebuild_settlements")
+    rows = [_obs_row("Atlanta", "2026-09-06", "wu_icao_history", 88.0)]
+    kept = rs._preferred_rows_per_city_date(rows)
+    assert [r["source"] for r in kept] == ["wu_icao_history"]
+    with pytest.raises(rs.SettlementRebuildSkip):
+        rs._validate_source_family(kept[0], cities_by_name["Atlanta"])
+
+
+def test_rebuild_dedup_leaves_a_wu_city_alone():
+    import importlib
+
+    rs = importlib.import_module("scripts.rebuild_settlements")
+    kept = rs._preferred_rows_per_city_date(
+        [_obs_row("Jinan", "2026-09-05", "wu_icao_history", 30.0)]
+    )
+    assert [r["source"] for r in kept] == ["wu_icao_history"]
 
 
 def test_backfill_is_registered_in_the_script_manifest():

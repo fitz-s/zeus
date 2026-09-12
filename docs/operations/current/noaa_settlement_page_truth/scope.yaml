@@ -24,7 +24,11 @@ in_scope:
 - tests/test_noaa_wrh_settlement_product.py
 - tests/fixtures/noaa_wrh/**
 - tests/test_market_scanner_provenance.py
+- tests/test_k2_live_ingestion_relationships.py
 - src/ingest/harvester_truth_writer.py
+- src/data/hole_scanner.py
+- src/state/data_coverage.py
+- config/data_availability_exceptions.yaml
 allow_companions: []
 out_of_scope:
 - state/zeus-world.db

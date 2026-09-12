@@ -2620,10 +2620,15 @@ def _page_view_declared_by_description(event: dict) -> str | None:
     ``"all"`` when it names the timeseries page without that clause, and None
     when the payload carries no prose about that page at all.
     """
-    combined = "\n".join(_description_source_text_fields(event))
-    if _WRH_TIMESERIES_PAGE not in combined.lower():
+    # Both checks read the same lower-cased text. A case-sensitive clause check
+    # against a case-insensitive page check would read a re-cased clause as
+    # "all" and MISMATCH all 11 hourly cities, dropping every one of their
+    # markets — fail-closed, but a total coverage loss for a purely cosmetic
+    # upstream edit.
+    combined = "\n".join(_description_source_text_fields(event)).lower()
+    if _WRH_TIMESERIES_PAGE not in combined:
         return None
-    return "hourly" if HOURLY_DATA_CLAUSE in combined else "all"
+    return "hourly" if HOURLY_DATA_CLAUSE.lower() in combined else "all"
 
 
 def _check_source_contract(

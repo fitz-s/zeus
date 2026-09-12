@@ -1172,8 +1172,18 @@ def _build_atom_pair(
     instant of each extremum for sources that know it (the weather.gov page
     feed does). When a source does not report them, both atoms carry the
     city's historical peak hour — a synthesized placeholder, not an observed
-    time. The DST context fields are always derived from that peak-hour
-    instant so they stay comparable across sources.
+    time.
+
+    The DST context fields (``utc_offset_minutes``, ``dst_active``,
+    ``is_ambiguous_local_hour``, ``is_missing_local_hour``) describe the
+    peak-hour ANCHOR, not the extremum instant, and are left that way
+    deliberately so they stay comparable across sources that do and do not
+    report an instant. The consequence is explicit: on a DST-transition day
+    where the extremum falls on the other side of the change from the peak
+    hour, a row's ``local_time`` and its ``utc_offset_minutes`` describe
+    different offsets. Readers that need the extremum's own offset must derive
+    it from ``local_time``, which carries its own tzinfo, rather than from
+    ``utc_offset_minutes``.
     """
     city_cfg = cities_by_name.get(city_name)
     if city_cfg is None:
@@ -1811,6 +1821,37 @@ def noaa_wrh_source_tag(station: str) -> str:
     return f"noaa_wrh_{str(station).strip().lower()}"
 
 
+def _fetch_wrh_rows_with_token_refresh(station: str, **kwargs):
+    """Fetch one window, re-reading the token once if the first attempt is refused.
+
+    A 403 means either the per-IP quota or a token this process cached before an
+    upstream rotation, and the response cannot tell them apart. The token is
+    cached for the life of the daemon, so without this retry a single rotation
+    would refuse that station until the next restart. One re-read distinguishes
+    the cases at the cost of one request: a rotation succeeds on the retry, a
+    genuine quota refusal raises again and the caller still stops the run.
+    """
+    from src.data.noaa_wrh_timeseries import (
+        WrhTokenRefused,
+        fetch_wrh_timeseries,
+        fetch_wrh_token,
+    )
+
+    try:
+        return fetch_wrh_timeseries(station, **kwargs)
+    except WrhTokenRefused:
+        refreshed = fetch_wrh_token(refresh=True)
+        if refreshed == kwargs.get("token"):
+            # Same token came back, so the refusal was not staleness. Re-raise
+            # rather than spend a second identical request on a live quota.
+            raise
+        logger.warning(
+            "noaa_wrh token rotated upstream; retrying %s once with the new token",
+            station,
+        )
+        return fetch_wrh_timeseries(station, **{**kwargs, "token": refreshed})
+
+
 def append_noaa_wrh_city(
     city_name: str,
     target_dates: list[date],
@@ -1835,6 +1876,7 @@ def append_noaa_wrh_city(
     from src.data.noaa_wrh_timeseries import (
         WrhError,
         WrhTokenRefused,
+        WrhWindowTooOld,
         daily_extreme,
         fetch_wrh_timeseries,
         fetch_wrh_token,
@@ -1859,7 +1901,10 @@ def append_noaa_wrh_city(
     source_tag = noaa_wrh_source_tag(station)
     view = city_cfg.settlement_page_view
     unit = city_cfg.settlement_unit
-    stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0}
+    stats = {
+        "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
+        "window_too_old": 0,
+    }
 
     try:
         token = fetch_wrh_token()
@@ -1880,14 +1925,41 @@ def append_noaa_wrh_city(
         return stats
 
     for target_d in target_dates:
-        recent_minutes = recent_minutes_for_local_day(
-            target_d, city_cfg.timezone, now_utc=now_utc,
-        )
+        try:
+            recent_minutes = recent_minutes_for_local_day(
+                target_d, city_cfg.timezone, now_utc=now_utc,
+            )
+        except WrhWindowTooOld as exc:
+            # A single recent= window cannot reach the start of this local day.
+            # Requesting a clamped one would return the day's tail and its
+            # extremum would be indistinguishable from a complete day's, so this
+            # path records the gap and writes no value. Older days belong to
+            # scripts/backfill_noaa_wrh.py, which asks by explicit start/end.
+            stats["window_too_old"] += 1
+            logger.warning(
+                "noaa_wrh %s/%s outside the single-window horizon: %s",
+                city_name, target_d, exc,
+            )
+            # LEGITIMATE_GAP, not FAILED: re-running this lane cannot reach the
+            # day, so a retry embargo would just re-log forever. The day is
+            # still fillable, by scripts/backfill_noaa_wrh.py's explicit
+            # start/end request; the gap row is what shows an operator it needs
+            # filling.
+            record_legitimate_gap(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=source_tag,
+                target_date=target_d,
+                reason=CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW,
+            )
+            conn.commit()
+            continue
         request_url = request_url_without_token(
             station, unit=unit, recent_minutes=recent_minutes,
         )
         try:
-            rows = fetch_wrh_timeseries(
+            rows = _fetch_wrh_rows_with_token_refresh(
                 station, unit=unit, token=token, recent_minutes=recent_minutes,
             )
         except WrhTokenRefused as exc:
@@ -2221,6 +2293,7 @@ def daily_tick(
     ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
     noaa_wrh_stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
+        "window_too_old": 0,
     }
     for city_name in _ogimet_city_shard_for_hour(now_utc):
         city_cfg = cities_by_name.get(city_name)

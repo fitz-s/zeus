@@ -418,6 +418,16 @@ def fetch_wrh_timeseries(
     raise WrhFetchFailed(f"{station}: {last_error or 'no response'}")
 
 
+class WrhWindowTooOld(WrhError):
+    """The target local day cannot fit in one ``recent=`` request.
+
+    A window that starts after the target day began would still return rows, and
+    an extremum over that subset looks exactly like a complete day. Making this
+    a typed refusal is the only way the caller can tell "the whole day arrived"
+    from "the tail of the day arrived": both produce a non-empty row set.
+    """
+
+
 def recent_minutes_for_local_day(
     target_date_local: date,
     timezone_name: str,
@@ -429,8 +439,16 @@ def recent_minutes_for_local_day(
 
     The daily product runs after local midnight, so one window reaching back to
     the start of the target local day (plus a margin for the next day's first
-    reports, which the contract's finality clause keys on) is the entire
-    request budget for that station that day.
+    reports, which the contract's finality clause keys on) is the entire request
+    budget for that station that day.
+
+    Raises :class:`WrhWindowTooOld` when the needed window exceeds
+    :data:`MAX_REQUEST_WINDOW_DAYS`. Clamping instead would silently return a
+    window that starts mid-day: measured on the KHOU feed, a target date seven
+    days old yields a window missing the true 05:53 minimum, so the day's low
+    reads 80.96 degF instead of 78.98 and would be written VERIFIED. A caller
+    that needs an older day must use the explicit ``start_utc``/``end_utc``
+    form, which is what the backfill CLI does.
     """
     from zoneinfo import ZoneInfo
 
@@ -446,7 +464,13 @@ def recent_minutes_for_local_day(
     elapsed = now_utc - day_start_local.astimezone(timezone.utc)
     minutes = int(elapsed.total_seconds() // 60) + margin_minutes
     cap = MAX_REQUEST_WINDOW_DAYS * 24 * 60
-    return max(1, min(minutes, cap))
+    if minutes > cap:
+        raise WrhWindowTooOld(
+            f"{target_date_local.isoformat()} needs a {minutes}-minute window, "
+            f"over the {cap}-minute request cap; a clamped window would not "
+            "contain the whole local day"
+        )
+    return max(1, minutes)
 
 
 def daily_extreme(

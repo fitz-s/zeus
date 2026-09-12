@@ -81,6 +81,12 @@ class CoverageReason:
     CITY_NOT_YET_ONBOARDED = "CITY_NOT_YET_ONBOARDED"  # target_date < city.onboarded_at
     SOURCE_NOT_PUBLISHED_YET = "SOURCE_NOT_PUBLISHED_YET"  # HKO month not yet published
     GUARD_REJECTED = "GUARD_REJECTED"  # IngestionGuard raised — deterministic
+    # The source has the day, but this lane's single-request window cannot reach
+    # back to the start of it, so any value it computed would be a partial-day
+    # extremum. Permanent for the live lane and fillable by the matching
+    # backfill script's explicit start/end request — which is why it is a gap
+    # reason rather than a FAILED retry: retrying the same lane cannot succeed.
+    OUTSIDE_LANE_REQUEST_WINDOW = "OUTSIDE_LANE_REQUEST_WINDOW"
     # Guard rejections are LEGITIMATE_GAP, not FAILED: the rejection is
     # deterministic (the guard will raise the same way on retry with the
     # same data). If a future guard-code change makes a previously-rejected

@@ -53,6 +53,7 @@ from src.data.daily_obs_append import (
     OGIMET_CITIES,
     WU_SOURCE,
     daily_observation_source_for_city,
+    noaa_wrh_source_tag,
 )
 from src.data.forecast_source_registry import forecast_table_source_ids
 from src.state.data_coverage import (
@@ -83,6 +84,16 @@ SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
         WU_SOURCE,
         HKO_SOURCE,
         *(target.source_tag for target in OGIMET_CITIES.values()),
+        # The weather.gov page feed is the settlement product for NOAA cities,
+        # so a day it misses has to become a visible MISSING row. Without this,
+        # the scanner never re-attempts the page lane and the day settles off the
+        # Ogimet reconstruction the product exists to replace — silently, with no
+        # hole for an operator to see. Derived from cities.json via
+        # OGIMET_CITIES, so a resolver migration cannot leave a second list.
+        *(
+            noaa_wrh_source_tag(target.station)
+            for target in OGIMET_CITIES.values()
+        ),
     ),
     DataTable.OBSERVATION_INSTANTS: ("openmeteo_archive_hourly",),
     DataTable.SOLAR_DAILY: ("openmeteo_archive_solar",),
@@ -90,18 +101,35 @@ SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
 }
 
 
+def _noaa_wrh_source_for_city(
+    city: City, target_date: date | str | None = None
+) -> str | None:
+    """The page-feed source tag for a city whose target date resolves NOAA."""
+    from src.config import settlement_source_type_for_city
+
+    if settlement_source_type_for_city(city, target_date) != "noaa":
+        return None
+    station = str(city.wu_station or "").strip()
+    return noaa_wrh_source_tag(station) if station else None
+
+
 def _source_applies_to_city(
     data_source: str,
     city: City,
     target_date: date | str | None = None,
 ) -> bool:
-    """Return True if this data_source is the one Zeus uses for this city.
+    """Return True if this data_source is one Zeus uses for this city.
 
     For observations, the split is derived from ``city.settlement_source_type``:
     WU-sourced cities use ``wu_icao_history``; HKO-sourced cities use
-    ``hko_daily_api``.  For every other table, all cities share the same source.
+    ``hko_daily_api``. A NOAA city runs TWO daily lanes over the same station and
+    expects a row from each — the weather.gov page feed (the settlement product)
+    and the Ogimet mirror — so this is the one table where a city is not reduced
+    to a single source. For every other table, all cities share the same source.
     """
     if data_source in SOURCES_BY_TABLE[DataTable.OBSERVATIONS]:
+        if data_source.startswith("noaa_wrh_"):
+            return data_source == _noaa_wrh_source_for_city(city, target_date)
         return data_source == daily_observation_source_for_city(
             city.name, target_date
         )

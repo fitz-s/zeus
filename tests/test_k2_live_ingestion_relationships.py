@@ -135,6 +135,27 @@ def test_R2_daily_obs_sources_match_registry() -> None:
     assert {
         target.source_tag for target in daily_obs_append.OGIMET_CITIES.values()
     } <= set(expected)
+    # Every source the appender can write must be in the registry, not just the
+    # three families this test originally named. The weather.gov page feed was
+    # added to the appender and missed here, so the scanner never emitted a
+    # MISSING row for it and the test still passed — a registry test that only
+    # checks known sources cannot see a new one. Asserting the whole set both
+    # ways closes that blind spot for the next lane too.
+    appender_observation_sources = {
+        daily_obs_append.WU_SOURCE,
+        daily_obs_append.HKO_SOURCE,
+        *(t.source_tag for t in daily_obs_append.OGIMET_CITIES.values()),
+        *(
+            daily_obs_append.noaa_wrh_source_tag(t.station)
+            for t in daily_obs_append.OGIMET_CITIES.values()
+        ),
+    }
+    assert appender_observation_sources == set(expected), (
+        "hole_scanner's OBSERVATIONS registry and daily_obs_append's writable "
+        "sources have diverged: "
+        f"appender-only={sorted(appender_observation_sources - set(expected))}, "
+        f"registry-only={sorted(set(expected) - appender_observation_sources)}"
+    )
 
 
 def test_R2_daily_obs_registry_uses_exact_noaa_proxy_source() -> None:

@@ -88,22 +88,40 @@ step below acts on `state/zeus-forecasts.db`, which is where `observations`,
 3. `python3 scripts/backfill_noaa_wrh.py --start 2026-08-23 --end <today> --apply`.
    If it stops with a refused token, resume with a later `--start` once the
    per-IP quota window has passed rather than retrying immediately.
-4. `python3 -m scripts.backfill_harvester_settlements --days 30` to re-resolve
-   settlement truth from the now-preferred page rows. This runs the ingest truth
-   writer (`src/ingest/harvester_truth_writer.py::write_settlement_truth_for_open_markets`)
+4. `python3 -m scripts.backfill_harvester_settlements` to re-resolve settlement
+   truth from the now-preferred page rows. This runs the ingest truth writer
+   (`src/ingest/harvester_truth_writer.py::write_settlement_truth_for_open_markets`)
    on the forecasts DB, which rewrites `settlements`, `settlement_outcomes` and
    `market_events` through `SettlementSemantics`. No new entry point was needed:
    `_stable_settlement_truth_matches` compares `data_version`, so an
    already-VERIFIED row is re-resolved as soon as a higher-ranked `noaa_wrh_`
-   observation appears. The live hourly ingest tick does the same work on its own
-   30-day window, so this step only shortens the wait.
+   observation appears.
+
+   Two limits to know before relying on this step. Its `--days` flag controls
+   only that script's own discovery pagination and never reaches the write:
+   `write_settlement_truth_for_open_markets` takes no event list and re-fetches
+   its own markets under a hardcoded 30-day cutoff, so `--days 60` does not widen
+   what gets rewritten. And because the live hourly ingest tick runs the same
+   writer on the same window, this step only shortens the wait for anything
+   inside 30 days. A market older than that cutoff needs a separate repair path
+   that does not exist yet; this packet's own target dates are all well inside it.
 5. `python3 scripts/drain_settlement_disputes.py` to close any DISPUTED backlog
    the wrong values left behind, grading from venue resolution.
 6. Verify in `state/zeus-forecasts.db`: Houston 2026-09-11 high and Denver
    2026-09-11 high are VERIFIED and in-bin, with
    `data_version='noaa_wrh_timeseries_v1'`.
 
-Do **not** use `scripts/rebuild_settlements.py` for step 4. It opens the world DB
-and writes the ghost `settlements` table, so it cannot change what the settlement
-readers see. That is a pre-existing defect in that script, out of this packet's
-scope; it is recorded here so the next operator does not reach for it.
+The live daily lane only reaches back about six days, because one `recent=`
+request cannot cover an older local day without truncating it. A day beyond that
+horizon is recorded as an `OUTSIDE_LANE_REQUEST_WINDOW` coverage gap and is
+filled by step 3's explicit start/end request, never by the tick. That is why the
+backfill is part of the sequence rather than a one-time migration.
+
+Do **not** use `scripts/rebuild_settlements.py` for step 4. Its `main()` opens the
+world DB and writes the ghost `settlements` table, so a default run cannot change
+what the settlement readers see. That DB-targeting defect is pre-existing and out
+of this packet's scope; it is recorded here and in the script's own docstring so
+the next operator does not reach for it. Its NOAA source dedup, which review
+found would discard the settlement-valid row for 517 city/date pairs, IS fixed
+here, because that function is importable and the defect would run the moment
+anyone pointed it at the forecasts file.

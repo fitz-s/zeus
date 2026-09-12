@@ -31,6 +31,12 @@ Usage
 ``--fixture-dir`` reads saved ``syn_<STID>.json`` response bodies instead of
 fetching, for offline replay and tests.
 
+``--db``/``--world-db`` are for a non-canonical pair (a fixture or a scoped
+export). They take the same writer flocks on both files, in canonical order, as
+the default path; naming a canonical DB is refused, because the default path
+already writes the live pair under those locks and a second holder would contend
+with the daemon rather than protect against it.
+
 Database targeting (K1 split — get this wrong and the run is a silent no-op)
 ---------------------------------------------------------------------------
 ``observations`` is forecast-class: the authoritative copy lives on
@@ -72,6 +78,7 @@ from src.data.daily_obs_append import (  # noqa: E402
 from src.data.noaa_wrh_timeseries import (  # noqa: E402
     MAX_REQUEST_WINDOW_DAYS,
     WrhError,
+    WrhFetchFailed,
     WrhRow,
     WrhTokenRefused,
     daily_extreme,
@@ -98,16 +105,30 @@ def _noaa_cities() -> dict[str, Any]:
 def _chunks(
     start: date, end: date, chunk_days: int
 ) -> list[tuple[date, date]]:
-    """Split [start, end] into windows of at most chunk_days, widened by a day.
+    """Split [start, end] into request windows of at most ``chunk_days`` span.
 
-    The extra day on each side covers the local-vs-UTC edge: the caller filters
-    rows by the local date the feed itself reports, so the window only has to
-    contain every candidate row, not align with a calendar boundary.
+    Each window is widened by a day on both sides so it contains every candidate
+    row for its target dates: the caller filters by the local date the feed
+    itself reports, so a window need not align with a UTC calendar boundary, but
+    it must not clip the local day's edges.
+
+    The widening is inside the budget, not on top of it — ``_fetch_window`` turns
+    a window into ``start 00:00Z .. end 23:59Z`` and ``fetch_wrh_timeseries``
+    rejects a span over ``MAX_REQUEST_WINDOW_DAYS`` with a ValueError, which is
+    not a ``WrhError`` and so aborts the whole run rather than one chunk. An
+    earlier version advanced by ``chunk_days`` and then widened, producing 8d23h
+    spans that failed on the first chunk of any range longer than about a week.
     """
+    if chunk_days < 1:
+        raise ValueError("chunk_days must be at least 1")
+    # Two days of the span are spent on the widening, so a window carries at
+    # most chunk_days - 2 target dates. At chunk_days <= 2 that would be zero or
+    # negative, so a single target date per request is the floor.
+    per_window = max(1, chunk_days - 2)
     windows: list[tuple[date, date]] = []
     cursor = start
     while cursor <= end:
-        chunk_end = min(cursor + timedelta(days=chunk_days - 1), end)
+        chunk_end = min(cursor + timedelta(days=per_window - 1), end)
         windows.append((cursor - timedelta(days=1), chunk_end + timedelta(days=1)))
         cursor = chunk_end + timedelta(days=1)
     return windows
@@ -133,9 +154,16 @@ def _fetch_window(
     end_utc = datetime(
         window[1].year, window[1].month, window[1].day, 23, 59, tzinfo=timezone.utc,
     )
-    return fetch_wrh_timeseries(
-        station, start_utc, end_utc, unit=unit, token=token,
-    )
+    try:
+        return fetch_wrh_timeseries(
+            station, start_utc, end_utc, unit=unit, token=token,
+        )
+    except ValueError as exc:
+        # The window exceeds the request cap: a chunking bug, not a provider
+        # fault. Re-raise as a WrhError so the per-window handler reports it and
+        # the rest of the run continues, rather than a bare ValueError escaping
+        # backfill() and aborting every remaining city.
+        raise WrhFetchFailed(f"{station}: {exc}") from exc
 
 
 def _existing_rows(
@@ -397,28 +425,76 @@ def _fmt(value: Optional[float]) -> str:
     return "--" if value is None else f"{value:.0f}"
 
 
+def _canonical_db_refusal(db: str, world_db: Optional[str]) -> Optional[str]:
+    """Refuse an explicit path that names a live DB; the locked path owns those.
+
+    The canonical (no-flag) path already writes the live pair through the helper
+    that takes both writer flocks. Naming the live files explicitly can only be a
+    mistake, and it is the one case where the explicit branch's own locks would
+    contend with the daemon instead of protecting against it.
+    """
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH
+
+    canonical = {ZEUS_FORECASTS_DB_PATH.resolve(), ZEUS_WORLD_DB_PATH.resolve()}
+    named = sorted(
+        str(p)
+        for p in (Path(db).resolve(), Path(str(world_db)).resolve())
+        if p in canonical
+    )
+    if not named:
+        return None
+    return (
+        f"--db/--world-db must not name a canonical DB ({named}); omit both "
+        "flags to write the live pair through the locked helper"
+    )
+
+
 @contextlib.contextmanager
 def _open_target(db: Optional[str], world_db: Optional[str]):
     """Yield a forecasts-MAIN connection with world ATTACHed as ``world``.
 
     Without ``--db`` this is the canonical live pair, opened through the same
-    helper the daily tick uses so the writer locks are taken on both files in
-    canonical order. With ``--db`` it is an explicit pair of files, connected but
-    never schema-initialised: the world initialiser would create ghost
-    forecast-class tables on whatever file it was pointed at.
+    helper the daily tick uses, which takes the writer flock on both files in
+    canonical order before yielding.
+
+    With ``--db`` it is an explicit pair of files, connected but never
+    schema-initialised: the world initialiser would create ghost forecast-class
+    tables on whatever file it was pointed at. That branch still takes both
+    writer locks, in the same canonical order, because a caller who points it at
+    a real file would otherwise write with no flock against the live ingest
+    daemon's writers — the WAL write-lock collision this repo's lock discipline
+    exists to prevent. Pointing ``--db`` at a canonical path is refused outright:
+    the locked canonical path already does that job, so the only reason to name
+    the live files explicitly is a mistake.
     """
+    from src.state.db_writer_lock import (
+        WriteClass,
+        canonical_lock_order,
+        db_writer_lock,
+    )
+
     if db is None:
         with get_forecasts_connection_with_world(write_class="bulk") as conn:
             conn.row_factory = sqlite3.Row
             yield conn
         return
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
-        yield conn
-    finally:
-        conn.close()
+
+    forecasts_path = Path(db).resolve()
+    world_path = Path(str(world_db)).resolve()
+    refusal = _canonical_db_refusal(db, world_db)
+    if refusal:
+        raise ValueError(refusal)
+
+    ordered = canonical_lock_order([forecasts_path, world_path])
+    with db_writer_lock(ordered[0], WriteClass.BULK):
+        with db_writer_lock(ordered[1], WriteClass.BULK):
+            conn = sqlite3.connect(forecasts_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+                yield conn
+            finally:
+                conn.close()
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -472,6 +548,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.db:
+        refusal = _canonical_db_refusal(args.db, args.world_db)
+        if refusal:
+            print(f"ERROR: {refusal}", file=sys.stderr)
+            return 2
 
     print(f"=== noaa_wrh backfill {start}..{end} apply={args.apply} ===")
     with _open_target(args.db, args.world_db) as conn:

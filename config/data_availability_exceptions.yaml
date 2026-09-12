@@ -31,6 +31,58 @@ model_retro_starts:
   ecmwf_previous_runs: "2024-01-18"      # ECMWF IFS retro via Open-Meteo
   icon_previous_runs: "2024-01-18"       # DWD ICON retro via Open-Meteo
   ukmo_previous_runs: "2024-08-04"       # UKMO retro window is narrower (confirmed empirically)
+  # The weather.gov page feed became Zeus's NOAA settlement product on
+  # 2026-09-12; 2026-08-23 is the earliest target date it is asked for,
+  # matching the provider migration that moved these cities to NOAA. Earlier
+  # dates are a LEGITIMATE_GAP for this source, not a hole to chase.
+  noaa_wrh_cyyz: "2026-08-23"
+  noaa_wrh_eddm: "2026-08-23"
+  noaa_wrh_efhk: "2026-08-23"
+  noaa_wrh_eglc: "2026-08-23"
+  noaa_wrh_eham: "2026-08-23"
+  noaa_wrh_epwa: "2026-08-23"
+  noaa_wrh_fact: "2026-08-23"
+  noaa_wrh_katl: "2026-08-23"
+  noaa_wrh_kaus: "2026-08-23"
+  noaa_wrh_kbkf: "2026-08-23"
+  noaa_wrh_kdal: "2026-08-23"
+  noaa_wrh_khou: "2026-08-23"
+  noaa_wrh_klax: "2026-08-23"
+  noaa_wrh_klga: "2026-08-23"
+  noaa_wrh_kmia: "2026-08-23"
+  noaa_wrh_kord: "2026-08-23"
+  noaa_wrh_ksea: "2026-08-23"
+  noaa_wrh_ksfo: "2026-08-23"
+  noaa_wrh_lemd: "2026-08-23"
+  noaa_wrh_lfpb: "2026-08-23"
+  noaa_wrh_limc: "2026-08-23"
+  noaa_wrh_llbg: "2026-08-23"
+  noaa_wrh_ltac: "2026-08-23"
+  noaa_wrh_ltfm: "2026-08-23"
+  noaa_wrh_mmmx: "2026-08-23"
+  noaa_wrh_mpmg: "2026-08-23"
+  noaa_wrh_nzwn: "2026-08-23"
+  noaa_wrh_oejn: "2026-08-23"
+  noaa_wrh_opkc: "2026-08-23"
+  noaa_wrh_rjtt: "2026-08-23"
+  noaa_wrh_rkpk: "2026-08-23"
+  noaa_wrh_rksi: "2026-08-23"
+  noaa_wrh_rpll: "2026-08-23"
+  noaa_wrh_saez: "2026-08-23"
+  noaa_wrh_sbgr: "2026-08-23"
+  noaa_wrh_uuww: "2026-08-23"
+  noaa_wrh_vilk: "2026-08-23"
+  noaa_wrh_wmkk: "2026-08-23"
+  noaa_wrh_wsss: "2026-08-23"
+  noaa_wrh_zbaa: "2026-08-23"
+  noaa_wrh_zggg: "2026-08-23"
+  noaa_wrh_zgsz: "2026-08-23"
+  noaa_wrh_zhcc: "2026-08-23"
+  noaa_wrh_zhhh: "2026-08-23"
+  noaa_wrh_zspd: "2026-08-23"
+  noaa_wrh_zsqd: "2026-08-23"
+  noaa_wrh_zuck: "2026-08-23"
+  noaa_wrh_zuuu: "2026-08-23"
 
 # ---------------------------------------------------------------------------
 # Upstream publication lag — current-period data not yet released
@@ -42,6 +94,54 @@ model_retro_starts:
 publication_lag_days:
   wu_icao_history: 2            # WU ICAO history usually 24-48h delayed
   hko_daily_api: 2              # HKO publishes 1 day after end-of-day HKT
+  noaa_wrh_cyyz: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_eddm: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_efhk: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_eglc: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_eham: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_epwa: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_fact: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_katl: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_kaus: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_kbkf: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_kdal: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_khou: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_klax: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_klga: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_kmia: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_kord: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_ksea: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_ksfo: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_lemd: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_lfpb: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_limc: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_llbg: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_ltac: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_ltfm: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_mmmx: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_mpmg: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_nzwn: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_oejn: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_opkc: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_rjtt: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_rkpk: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_rksi: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_rpll: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_saez: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_sbgr: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_uuww: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_vilk: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_wmkk: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_wsss: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zbaa: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zggg: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zgsz: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zhcc: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zhhh: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zspd: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zsqd: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zuck: 1                # weather.gov page feed; the tick fills local_yesterday
+  noaa_wrh_zuuu: 1                # weather.gov page feed; the tick fills local_yesterday
   openmeteo_archive_hourly: 3   # Open-Meteo Archive API ~2-3d behind real time
   openmeteo_solar: 0            # sunrise/sunset is deterministic / future-computable
   openmeteo_previous_runs: 1    # forecasts for today+1 are stable ~1d after issue

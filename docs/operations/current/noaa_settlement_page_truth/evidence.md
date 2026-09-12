@@ -304,6 +304,77 @@ The assertion was mutation-checked rather than assumed: inverting
 and the precedence test fail with `VERIFIED` becoming `DISPUTED`, and restoring
 the order makes them pass again.
 
+## Defects found by review, and what they changed
+
+An independent review of the first two commits reproduced five defects in the
+plumbing around the core law. All were real; each is fixed with a
+mutation-checked test. Recorded here because the numbers above were partly
+measured on code that carried them.
+
+**The request window could silently cover only part of the target day.**
+`recent_minutes_for_local_day` clamped to the 7-day cap instead of refusing, so a
+catch-up fill of a day about 6.5 to 7 days old requested a window starting
+mid-day. The resulting extremum is indistinguishable from a complete day's, and
+would have been written VERIFIED. Measured on the KHOU feed for 2026-09-09: the
+clamped window omits the true 05:53 minimum and the day's low reads 80.96 degF
+instead of 78.98, a 1.98 degF error on a settlement value. It now raises
+`WrhWindowTooOld`, and the live lane records a `OUTSIDE_LANE_REQUEST_WINDOW`
+coverage gap and writes no value. Older days belong to the backfill CLI, which
+asks by explicit start and end. This was armed but not yet firing, because the
+hole scanner never created a pending row for the new source.
+
+**The rebuild script's dedup could discard the settlement-valid row.** Ranking by
+NOAA prefix alone gave a foreign-family source the same rank as the most
+preferred one, so with a strict tie-break an arbitrary row order decided the
+winner. On the live table that discarded the valid sibling for 517 city/date
+pairs across 2024-12-01 to 2026-08-31, and every one of those days then failed
+family validation and rebuilt nothing where it previously rebuilt correctly.
+Dedup now filters through the family validator before ranking.
+
+**The backfill's default chunking could not issue a single request.** Windows
+were widened by a day on each side on top of the chunk budget, so the default 7
+produced an 8d23h span that the request cap rejects with a bare ValueError,
+outside the per-window handler, aborting the whole run. The replay figures in
+this document were produced with that defect present, which means they came from
+a path the shipped default could not run. Both are now true: the widening is
+inside the budget, and a cap violation raises a `WrhError` so one bad window is
+reported instead of killing the run. Re-verified live with default flags,
+Houston 2026-08-23..2026-09-11: 20 days seen, no refusal, no fetch failure.
+
+**A missed page-feed day was invisible.** The hole scanner's observation source
+registry had no page-feed entries, so a day the tick missed was never
+re-attempted and settled on the Ogimet reconstruction, silently and with no
+MISSING row. All 48 station tags are now registered, derived from cities.json; a
+NOAA city expects both lanes for a post-migration date and neither before it. The
+K2 registry relationship test that should have caught this asserted only that the
+three known families were present, so it passed while the new source was absent;
+it now compares the appender's writable sources against the registry as a set in
+both directions.
+
+**A token rotation was a permanent refusal.** The `refresh=True` path existed but
+nothing called it, and the token is cached for the life of the daemon. A refused
+request now re-reads apiKey.js once; if the token changed it retries, and if it
+did not it re-raises rather than spending a second request against a live quota.
+
+Two quality defects went with them: the clause check was case-sensitive while the
+page check was not, so a re-cased clause would have read as the all-data view and
+MISMATCHed all 11 hourly cities; and the atom-builder docstring claimed DST
+context fields follow the reported instant when they describe the peak-hour
+anchor.
+
+A second review of the database-targeting commit found one more, also real. Making
+`--db` explicit had dropped the writer flock that the first version held on both
+branches: the canonical path inherits its locks from
+`get_forecasts_connection_with_world`, but the explicit branch did a bare connect.
+Pointed at real files it would have written with no protection against the live
+ingest daemon's writers. That branch now takes both locks in canonical order, and
+naming a canonical path is refused outright, since the unlocked-path risk only
+exists if someone bypasses the helper that already does the job. The same review
+confirmed by its own mutation test that the settlement-precedence re-resolution is
+non-vacuous, and flagged that `backfill_harvester_settlements.py`'s `--days` flag
+does not reach its write path — corrected in PLAN.md step 4 rather than papered
+over.
+
 ## What this evidence does not prove
 
 It proves the settlement product now reproduces the surface the markets name,
