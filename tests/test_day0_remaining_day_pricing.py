@@ -577,6 +577,15 @@ def test_day0_v1_mismatch_skips_impossible_successor_probe_and_logs_diverged_fie
     assert receipt["expected_bundle_identity"] == expected["bundle_identity"]
     assert receipt["actual_bundle_identity"] == actual["bundle_identity"]
     assert receipt["actual_bundle_identity"] != expected["bundle_identity"]
+    # The receipt attached to the raised error must be the capture-augmented
+    # one (`receipt_with_capture`, matching what payload[receipt_key] holds),
+    # not the bare receipt lacking `capture_equivalence` — otherwise the
+    # outer warning and downstream telemetry silently lose that field.
+    capture_equivalence = receipt.get("capture_equivalence")
+    assert isinstance(capture_equivalence, dict)
+    assert capture_equivalence.get("ok") is False
+    capture_reason = str(capture_equivalence.get("reason") or "")
+    assert capture_reason
 
     # (iii): the outer seam's warning names the diverged fields plus identity
     # prefixes, without changing the grepped prefix other tooling relies on.
@@ -614,6 +623,10 @@ def test_day0_v1_mismatch_skips_impossible_successor_probe_and_logs_diverged_fie
         f"actual_carrier_vector_identity="
         f"{actual['carrier_vector_identity'][:12]}"
     ) in caplog.text
+    # The capture_equivalence status must reach the warning line too — this
+    # only holds if the receipt attached to the raised error is the
+    # capture-augmented one, not the bare receipt.
+    assert f"capture_equivalence={capture_reason}" in caplog.text
 
 
 def test_day0_v1_capture_equivalence_requires_original_successor_visibility(

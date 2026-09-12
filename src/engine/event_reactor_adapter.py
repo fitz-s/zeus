@@ -46686,7 +46686,7 @@ def _validate_day0_causal_bundle_successor(
         # Probing it is a guaranteed-False DB round trip; raise directly.
         payload[successor_key] = False
         error = ValueError(str(validation.reason))
-        setattr(error, "day0_causal_bundle_validation_receipt", receipt)
+        setattr(error, "day0_causal_bundle_validation_receipt", receipt_with_capture)
         raise error
 
     # A matching identity is still not consumable until the materializer's
