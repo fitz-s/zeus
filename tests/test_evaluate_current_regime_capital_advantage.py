@@ -2009,6 +2009,198 @@ def test_order_ledger_prefers_canonical_trade_and_partial_gain_journal():
     assert order["realized_accounting_gain_after_exit_fee_usd"] == pytest.approx(0.4)
 
 
+def _order_ledger_partial_exit_fixture():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,envelope_id TEXT,"
+        "position_id TEXT,decision_id TEXT,intent_kind TEXT,side TEXT,size REAL,"
+        "price REAL,state TEXT,created_at TEXT,updated_at TEXT,venue_order_id TEXT);"
+        "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,"
+        "outcome_label TEXT,post_only INTEGER,fee_details_json TEXT);"
+        "CREATE TABLE execution_fact (intent_id TEXT,command_id TEXT,"
+        "order_role TEXT,fill_price REAL,shares REAL,filled_at TEXT,"
+        "terminal_exec_status TEXT);"
+        "CREATE TABLE position_events (event_id TEXT,position_id TEXT,"
+        "command_id TEXT,order_id TEXT,event_type TEXT,sequence_no INTEGER,"
+        "occurred_at TEXT,caused_by TEXT,payload_json TEXT,"
+        "UNIQUE(position_id,sequence_no));"
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?,?,?,?)",
+        ("env", "YES", 1, "{}"),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "command", "env", "position", "decision", "EXIT", "SELL", 5.0,
+            0.5, "FILLED", "2026-09-01T00:00:00+00:00",
+            "2026-09-01T00:00:02+00:00", "venue-order",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+        (
+            "exit-fact", "command", "exit", 0.6, 2.0,
+            "2026-09-01T00:00:02+00:00", "partial",
+        ),
+    )
+    # A long uninteresting event history: today's unbounded predicate reads all
+    # of it per EXIT command; the scan index narrows it to the one hit below.
+    conn.executemany(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                f"noise-{sequence_no}", "position", None, None,
+                "MONITOR_REFRESHED", sequence_no,
+                "2026-09-01T00:00:01+00:00", "monitor_cycle", "{}",
+            )
+            for sequence_no in range(1, 20)
+        ],
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "partial-20", "position", None, "venue-order", "MONITOR_REFRESHED",
+            20, "2026-09-01T00:00:02+00:00", "partial_exit_fill",
+            json.dumps({"realized_pnl_delta_usd": "0.4"}),
+        ),
+    )
+    return conn
+
+
+def test_order_ledger_partial_exit_scan_index_round_trips_and_resumes():
+    conn = _order_ledger_partial_exit_fixture()
+    as_of = datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
+
+    first = evaluator._order_capital_ledger(conn, as_of=as_of)
+    assert first["partial_exit_scan_index"] == {
+        "position": {
+            "frontier_sequence_no": 20,
+            "frontier_event_id": "partial-20",
+            "candidate_sequence_nos": [20],
+        }
+    }
+    assert first["orders"][0][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] == pytest.approx(0.4)
+
+    # Resuming from the prior index reproduces the full walk byte for byte.
+    resumed = evaluator._order_capital_ledger(conn, as_of=as_of, prior=first)
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(first)
+
+
+def test_order_ledger_scan_index_picks_up_events_appended_after_the_frontier():
+    conn = _order_ledger_partial_exit_fixture()
+    as_of = datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
+    first = evaluator._order_capital_ledger(conn, as_of=as_of)
+
+    # One more partial-exit slice lands above the recorded frontier, plus noise.
+    conn.executemany(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "noise-21", "position", None, None, "MONITOR_REFRESHED", 21,
+                "2026-09-01T00:00:03+00:00", "monitor_cycle", "{}",
+            ),
+            (
+                "partial-22", "position", None, "venue-order",
+                "MONITOR_REFRESHED", 22, "2026-09-01T00:00:04+00:00",
+                "partial_exit_fill",
+                json.dumps({"realized_pnl_delta_usd": "0.1"}),
+            ),
+        ],
+    )
+
+    resumed = evaluator._order_capital_ledger(conn, as_of=as_of, prior=first)
+    walked = evaluator._order_capital_ledger(conn, as_of=as_of)
+    assert resumed["partial_exit_scan_index"]["position"] == {
+        "frontier_sequence_no": 22,
+        "frontier_event_id": "partial-22",
+        "candidate_sequence_nos": [20, 22],
+    }
+    assert resumed["orders"][0][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] == pytest.approx(0.5)
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(walked)
+
+
+def test_order_ledger_identity_mismatch_at_the_frontier_forces_a_full_walk():
+    conn = _order_ledger_partial_exit_fixture()
+    as_of = datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
+    first = evaluator._order_capital_ledger(conn, as_of=as_of)
+
+    # Reuse is what the prior artifact says it is -- once the frontier verifies.
+    inflated = json.loads(json.dumps(first))
+    inflated["partial_exit_scan_index"]["position"]["candidate_sequence_nos"] = []
+    reused = evaluator._order_capital_ledger(conn, as_of=as_of, prior=inflated)
+    assert reused["orders"][0][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] is None
+    assert reused["orders"][0]["gain_status"] == "EXIT_ACCOUNTING_GAIN_UNAVAILABLE"
+
+    # A frontier whose event_id no longer sits at that sequence_no is not
+    # trusted: full walk, prior candidates ignored.
+    renumbered = json.loads(json.dumps(inflated))
+    renumbered["partial_exit_scan_index"]["position"][
+        "frontier_event_id"
+    ] = "other"
+    walked = evaluator._order_capital_ledger(conn, as_of=as_of, prior=renumbered)
+    assert evaluator._canonical_json_bytes(
+        walked
+    ) == evaluator._canonical_json_bytes(first)
+
+    # A candidate above its own frontier is malformed: full walk too.
+    impossible = json.loads(json.dumps(first))
+    impossible["partial_exit_scan_index"]["position"][
+        "candidate_sequence_nos"
+    ] = [999]
+    walked = evaluator._order_capital_ledger(
+        conn, as_of=as_of, prior=impossible
+    )
+    assert evaluator._canonical_json_bytes(
+        walked
+    ) == evaluator._canonical_json_bytes(first)
+
+
+def test_order_ledger_changed_partial_exit_fact_is_regraded_not_resumed():
+    conn = _order_ledger_partial_exit_fixture()
+    as_of = datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
+    first = evaluator._order_capital_ledger(conn, as_of=as_of)
+    assert first["orders"][0][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] == pytest.approx(0.4)
+
+    # The index names rows, never their economics: a rewritten payload at a
+    # known candidate row is re-read and re-graded on the resumed run.
+    conn.execute(
+        "UPDATE position_events SET payload_json=? "
+        "WHERE position_id=? AND sequence_no=?",
+        (json.dumps({"realized_pnl_delta_usd": "0.9"}), "position", 20),
+    )
+    resumed = evaluator._order_capital_ledger(conn, as_of=as_of, prior=first)
+    assert resumed["orders"][0][
+        "realized_accounting_gain_after_exit_fee_usd"
+    ] == pytest.approx(0.9)
+    walked = evaluator._order_capital_ledger(conn, as_of=as_of)
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(walked)
+
+
+def test_prior_order_capital_ledger_missing_or_invalid_means_full_walk(tmp_path):
+    assert evaluator._prior_order_capital_ledger(tmp_path / "missing.json") is None
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(
+        "{\"per_order_capital_ledger\": []}", encoding="utf-8"
+    )
+    assert evaluator._prior_order_capital_ledger(invalid) is None
+
+
 def test_order_ledger_proof_gate_separates_capital_and_gain_gaps():
     assert evaluator._order_ledger_proof_failures(
         {

@@ -1082,14 +1082,124 @@ def _banded_bid_liquidation(
     }
 
 
+def _verified_prior_partial_exit_index(
+    conn: sqlite3.Connection,
+    prior: Mapping[str, object] | None,
+) -> dict[str, tuple[int, tuple[int, ...]]]:
+    """Return each position's trusted (frontier sequence_no, candidate rows).
+
+    The index is the prior run's answer to "which of this position's events
+    carry a partial-exit ``caused_by``, and how far did I read".  A position is
+    trusted only when the event still sitting at its recorded frontier
+    ``sequence_no`` carries the recorded ``event_id``: ``position_events`` is
+    append-only under ``UNIQUE(position_id, sequence_no)`` with every writer
+    assigning ``MAX(sequence_no)+1`` (src/state/canonical_write.py,
+    src/execution/command_recovery.py ``_latest_position_sequence``), so a
+    matching identity proves no row at or below that frontier was rewritten.
+    Anything else -- no prior, a malformed entry, a different event_id at the
+    frontier -- drops that position from the index and forces its full walk.
+    """
+
+    if not isinstance(prior, Mapping):
+        return {}
+    raw_index = prior.get("partial_exit_scan_index")
+    if not isinstance(raw_index, Mapping):
+        return {}
+    verified: dict[str, tuple[int, tuple[int, ...]]] = {}
+    for raw_position_id, raw_entry in raw_index.items():
+        position_id = str(raw_position_id)
+        if not position_id or not isinstance(raw_entry, Mapping):
+            continue
+        try:
+            frontier = int(raw_entry["frontier_sequence_no"])
+            frontier_event_id = str(raw_entry["frontier_event_id"])
+            candidates = tuple(
+                int(value) for value in raw_entry["candidate_sequence_nos"]
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if frontier <= 0 or not frontier_event_id:
+            continue
+        if any(value <= 0 or value > frontier for value in candidates):
+            continue
+        row = conn.execute(
+            "SELECT event_id FROM position_events "
+            "WHERE position_id=? AND sequence_no=?",
+            (position_id, frontier),
+        ).fetchone()
+        if row is None or str(row[0]) != frontier_event_id:
+            continue
+        verified[position_id] = (frontier, tuple(sorted(set(candidates))))
+    return verified
+
+
+def _partial_exit_candidate_rows(
+    conn: sqlite3.Connection,
+    position_id: str,
+    prior_index: Mapping[str, tuple[int, tuple[int, ...]]],
+) -> tuple[int, str, tuple[int, ...]]:
+    """Return this position's (frontier, frontier event_id, candidate rows).
+
+    ``caused_by`` carries no index on ``position_events``, so today's
+    ``position_id``-only seek pays for every event of a position that can hold
+    ten thousand of them.  ``sequence_no`` does share the
+    ``(position_id, sequence_no)`` unique index, so a trusted prior index lets
+    this walk only the rows appended since the prior run and union their
+    partial-exit hits with the ones the prior run already proved.  The row set
+    is identical to a full walk because the table is append-only and the
+    frontier row's identity was re-verified before reuse.
+    """
+
+    frontier_row = conn.execute(
+        "SELECT sequence_no,event_id FROM position_events "
+        "WHERE position_id=? ORDER BY sequence_no DESC LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if frontier_row is None:
+        return 0, "", ()
+    frontier = int(frontier_row[0])
+    frontier_event_id = str(frontier_row[1])
+    prior_entry = prior_index.get(position_id)
+    if prior_entry is not None and prior_entry[0] <= frontier:
+        prior_frontier, prior_candidates = prior_entry
+        appended = conn.execute(
+            "SELECT sequence_no FROM position_events "
+            "WHERE position_id=? AND sequence_no>? AND sequence_no<=? "
+            "AND caused_by IN "
+            "('partial_exit_fill','partial_exit_economics_repair')",
+            (position_id, prior_frontier, frontier),
+        ).fetchall()
+        candidates = set(prior_candidates)
+        candidates.update(int(row[0]) for row in appended)
+    else:
+        walked = conn.execute(
+            "SELECT sequence_no FROM position_events "
+            "WHERE position_id=? AND sequence_no<=? "
+            "AND caused_by IN "
+            "('partial_exit_fill','partial_exit_economics_repair')",
+            (position_id, frontier),
+        ).fetchall()
+        candidates = {int(row[0]) for row in walked}
+    return frontier, frontier_event_id, tuple(sorted(candidates))
+
+
 def _order_capital_ledger(
     conn: sqlite3.Connection,
     *,
     as_of: datetime,
+    prior: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Reproduce every current-window venue command and its exact cash flow."""
+    """Reproduce every current-window venue command and its exact cash flow.
+
+    ``prior`` is this evaluator's own previous output.  It supplies only the
+    per-position partial-exit scan index (see
+    :func:`_verified_prior_partial_exit_index`); every cash flow, fee and
+    realized gain below is recomputed from canonical rows on every run.
+    """
 
     cutoff = as_of - timedelta(days=WINDOW_DAYS)
+    prior_partial_exit_index = _verified_prior_partial_exit_index(conn, prior)
+    partial_exit_scan_index: dict[str, dict[str, object]] = {}
     canonical_facts: dict[str, list[dict[str, object]]] = {}
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -1335,25 +1445,56 @@ def _order_capital_ledger(
                     raw_pnl = exit_events[0].get("realized_pnl_usd")
             gain_status = "EXIT_ACCOUNTING_GAIN_UNAVAILABLE"
             if raw_pnl is None and str(item["venue_order_id"]):
-                raw_partial_events = conn.execute(
-                    "SELECT payload_json FROM position_events "
-                    "WHERE position_id=? "
-                    "AND caused_by IN "
-                    "('partial_exit_fill','partial_exit_economics_repair') "
-                    "AND occurred_at<=? "
-                    "AND (command_id=? OR lower(COALESCE(order_id,''))=lower(?) "
-                    "OR json_extract(payload_json,'$.command_id')=? "
-                    "OR lower(COALESCE(json_extract(payload_json,'$.venue_order_id'),''))"
-                    "=lower(?)) ORDER BY sequence_no,event_id",
+                position_id = str(item["position_id"])
+                if position_id in partial_exit_scan_index:
+                    entry = partial_exit_scan_index[position_id]
+                    candidate_rows = tuple(entry["candidate_sequence_nos"])
+                else:
                     (
-                        str(item["position_id"]),
-                        as_of.isoformat(),
-                        command_id,
-                        str(item["venue_order_id"]),
-                        command_id,
-                        str(item["venue_order_id"]),
-                    ),
-                ).fetchall()
+                        frontier,
+                        frontier_event_id,
+                        candidate_rows,
+                    ) = _partial_exit_candidate_rows(
+                        conn,
+                        position_id,
+                        prior_partial_exit_index,
+                    )
+                    if frontier > 0:
+                        partial_exit_scan_index[position_id] = {
+                            "frontier_sequence_no": frontier,
+                            "frontier_event_id": frontier_event_id,
+                            "candidate_sequence_nos": list(candidate_rows),
+                        }
+                # Seeking the already-known partial-exit sequence_nos keeps the
+                # (position_id, sequence_no) index in play; the remaining
+                # predicates are byte-identical to the unbounded form, they now
+                # just run over this position's handful of partial-exit rows
+                # instead of its entire event history.
+                raw_partial_events = (
+                    conn.execute(
+                        "SELECT payload_json FROM position_events "
+                        "WHERE position_id=? "
+                        f"AND sequence_no IN ({','.join('?' * len(candidate_rows))}) "
+                        "AND caused_by IN "
+                        "('partial_exit_fill','partial_exit_economics_repair') "
+                        "AND occurred_at<=? "
+                        "AND (command_id=? OR lower(COALESCE(order_id,''))=lower(?) "
+                        "OR json_extract(payload_json,'$.command_id')=? "
+                        "OR lower(COALESCE(json_extract(payload_json,'$.venue_order_id'),''))"
+                        "=lower(?)) ORDER BY sequence_no,event_id",
+                        (
+                            position_id,
+                            *candidate_rows,
+                            as_of.isoformat(),
+                            command_id,
+                            str(item["venue_order_id"]),
+                            command_id,
+                            str(item["venue_order_id"]),
+                        ),
+                    ).fetchall()
+                    if candidate_rows
+                    else []
+                )
                 partial_deltas: list[float] = []
                 partial_complete = bool(raw_partial_events)
                 for event in raw_partial_events:
@@ -1453,6 +1594,7 @@ def _order_capital_ledger(
             "ORDER CASH FLOW IS NOT PROFIT; EXIT ACCOUNTING GAIN BECOMES "
             "OUTCOME-CORRECT ONLY THROUGH THE SEPARATE VERIFIED SETTLEMENT GRADE"
         ),
+        "partial_exit_scan_index": dict(sorted(partial_exit_scan_index.items())),
         "orders": orders,
     }
 
@@ -2461,6 +2603,7 @@ def evaluate(
     prior_realized_proof_samples: Mapping[int, Mapping[str, object]] | None = None,
     scan_floor_decision_log_id: int = 0,
     prior_exit_quality: Mapping[str, object] | None = None,
+    prior_order_capital_ledger: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     trades = _read_only(
         trades_path,
@@ -2546,7 +2689,11 @@ def evaluate(
             forecasts,
             as_of=as_of,
         )
-        order_capital_ledger = _order_capital_ledger(trades, as_of=as_of)
+        order_capital_ledger = _order_capital_ledger(
+            trades,
+            as_of=as_of,
+            prior=prior_order_capital_ledger,
+        )
         total_portfolio_capital = _current_total_portfolio_capital(
             trades,
             as_of=as_of,
@@ -2709,6 +2856,17 @@ def _prior_exit_quality(path: Path) -> Mapping[str, object] | None:
     return prior if isinstance(prior, Mapping) else None
 
 
+def _prior_order_capital_ledger(path: Path) -> Mapping[str, object] | None:
+    """Load the prior artifact's order-ledger block; None means a full walk."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        prior = payload["per_order_capital_ledger"]
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return prior if isinstance(prior, Mapping) else None
+
+
 def _prior_realized_proof_samples(path: Path) -> dict[int, Mapping[str, object]]:
     """Load prior samples for the compatible public artifact API.
 
@@ -2767,6 +2925,7 @@ def main() -> int:
     prior_realized_proof_samples = _prior_realized_proof_samples(args.artifact)
     scan_floor_decision_log_id = _prior_scan_floor(args.artifact)
     prior_exit_quality = _prior_exit_quality(args.artifact)
+    prior_order_capital_ledger = _prior_order_capital_ledger(args.artifact)
     try:
         artifact = evaluate(
             world_path=world,
@@ -2778,6 +2937,7 @@ def main() -> int:
             prior_realized_proof_samples=prior_realized_proof_samples,
             scan_floor_decision_log_id=scan_floor_decision_log_id,
             prior_exit_quality=prior_exit_quality,
+            prior_order_capital_ledger=prior_order_capital_ledger,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         artifact = {
