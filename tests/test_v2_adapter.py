@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-02; last_reused=2026-09-12
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-02
+# Last reused/audited: 2026-09-12
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -3179,6 +3179,87 @@ def test_final_sdk_boundary_independently_rejects_off_tick_before_post(
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
     assert "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY" in (
+        result.error_message or ""
+    )
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_final_sdk_boundary_allows_subminimum_fak_buy_at_one_dollar(
+    tmp_path, monkeypatch
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={"orderID": "0xexpected", "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FAK", post_only=False
+    ).with_updates(size=Decimal("2.00"))
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "0xexpected"
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "accepted"
+    assert any(
+        call[0] == "post_order"
+        and call[2] == "FAK"
+        and call[3] is False
+        for call in fake.calls
+    )
+
+
+def test_final_sdk_boundary_allows_subminimum_fak_sell_without_cash_floor(
+    tmp_path, monkeypatch
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={"orderID": "0xexpected", "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(
+        side="SELL", order_type="FAK", post_only=False, size=Decimal("0.50")
+    )
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "0xexpected"
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "accepted"
+    assert any(
+        call[0] == "post_order"
+        and call[2] == "FAK"
+        and call[3] is False
+        for call in fake.calls
+    )
+
+
+def test_final_sdk_boundary_rejects_subminimum_fak_buy_below_one_dollar(
+    tmp_path, monkeypatch
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FAK", post_only=False
+    ).with_updates(size=Decimal("1.50"))
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "0xexpected"
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_ORDER_BUY_NOTIONAL_INVALID:FINAL_SDK_BOUNDARY" in (
         result.error_message or ""
     )
     assert any(call[0] == "create_order" for call in fake.calls)

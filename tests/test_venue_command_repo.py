@@ -1,6 +1,6 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-20
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused/audited: 2026-09-12
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-09-12
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
@@ -340,6 +340,7 @@ def _ensure_snapshot(
     snapshot_id: str | None = None,
     yes_token_id: str | None = None,
     no_token_id: str | None = None,
+    min_order_size: Decimal = Decimal("0.01"),
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -372,7 +373,7 @@ def _ensure_snapshot(
             market_close_at=None,
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.01"),
+            min_order_size=min_order_size,
             fee_details={},
             token_map_raw={"YES": yes_token_id, "NO": no_token_id},
             rfqe=None,
@@ -2824,3 +2825,61 @@ class TestAppendEventPayloadCoercion:
                 occurred_at="2026-04-26T00:01:00Z",
                 payload={"x": Opaque(), **_valid_execution_capability_payload()},
             )
+
+
+@pytest.mark.parametrize(
+    "intent_kind,side,order_type",
+    (("ENTRY", "BUY", "FOK"), ("ENTRY", "BUY", "FAK"), ("EXIT", "SELL", "FAK")),
+)
+def test_immediate_command_keeps_raw_book_floor_without_applying_it(conn, intent_kind, side, order_type):
+    from src.state.venue_command_repo import insert_command, insert_submission_envelope
+
+    snapshot_id = _ensure_snapshot(conn, token_id="small-token", min_order_size=Decimal("5"))
+    envelope = _make_envelope(token_id="small-token", side=side, price=0.5, size=2.5).with_updates(
+        order_type=order_type, post_only=False, min_order_size=Decimal("5"),
+    )
+    if intent_kind == "ENTRY":
+        _ensure_entry_certificate(conn, certificate_hash="small-cert", envelope=envelope)
+    else:
+        insert_submission_envelope(conn, envelope, envelope_id="small-envelope")
+    insert_command(
+        conn, command_id="small-command", snapshot_id=snapshot_id,
+        envelope_id="small-envelope", submission_envelope=envelope if intent_kind == "ENTRY" else None,
+        position_id="small-position", decision_id="small-decision", idempotency_key="small-idem",
+        intent_kind=intent_kind, market_id="small-market", token_id="small-token",
+        side=side, size=2.5, price=0.5, created_at=_NOW.isoformat(),
+        expected_min_order_size=Decimal("5"),
+        decision_certificate_hash="small-cert" if intent_kind == "ENTRY" else None,
+    )
+    row = conn.execute("SELECT size FROM venue_commands WHERE command_id='small-command'").fetchone()
+    assert row[0] == pytest.approx(2.5)
+    assert Decimal(conn.execute(
+        "SELECT min_order_size FROM executable_market_snapshots WHERE snapshot_id=?", (snapshot_id,),
+    ).fetchone()[0]) == Decimal("5")
+    assert Decimal(conn.execute(
+        "SELECT min_order_size FROM venue_submission_envelopes WHERE envelope_id='small-envelope'",
+    ).fetchone()[0]) == Decimal("5")
+
+
+@pytest.mark.parametrize("order_type", ("FOK", "FAK"))
+@pytest.mark.parametrize("persisted", (False, True))
+def test_immediate_buy_subdollar_envelope_cannot_authorize_command(conn, order_type, persisted):
+    from src.state.venue_command_repo import insert_command, insert_submission_envelope
+
+    snapshot_id = _ensure_snapshot(conn, token_id="small-cash-token", min_order_size=Decimal("5"))
+    envelope = _make_envelope(token_id="small-cash-token", price=0.49, size=2).with_updates(
+        order_type=order_type, post_only=False, min_order_size=Decimal("5"),
+    )
+    _ensure_entry_certificate(conn, certificate_hash="small-cash-cert", envelope=envelope)
+    with pytest.raises(ValueError, match="notional.*minimum"):
+        if persisted:
+            insert_submission_envelope(conn, envelope, envelope_id="small-cash-envelope")
+        insert_command(
+            conn, command_id="small-cash-command", snapshot_id=snapshot_id,
+            envelope_id="small-cash-envelope", submission_envelope=None if persisted else envelope,
+            position_id="small-cash-position", decision_id="small-cash-decision", idempotency_key="small-cash-idem",
+            intent_kind="ENTRY", market_id="small-market", token_id="small-cash-token",
+            side="BUY", size=2, price=0.49, created_at=_NOW.isoformat(),
+            decision_certificate_hash="small-cash-cert",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0

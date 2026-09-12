@@ -1485,6 +1485,27 @@ def insert_command(
         raise ValueError(
             "global SELL venue command requires non-empty q_version"
         )
+    order_type = getattr(submission_envelope, "order_type", None)
+    post_only = getattr(submission_envelope, "post_only", None)
+    if submission_envelope is None and envelope_id:
+        try:
+            with _row_factory_as(conn, None):
+                mode_row = conn.execute(
+                    "SELECT order_type, post_only FROM venue_submission_envelopes "
+                    "WHERE envelope_id = ?",
+                    (envelope_id,),
+                ).fetchone()
+        except sqlite3.OperationalError:
+            # Keep the strict unknown-mode check; the envelope gate below
+            # reports an unavailable provenance table before command creation.
+            mode_row = None
+        if mode_row is not None:
+            order_type = mode_row[0]
+            post_only = (
+                False if mode_row[1] == 0 else True if mode_row[1] == 1 else None
+            )
+    # The envelope gate below still binds these fields to this exact command
+    # before any insertion; unknown execution context keeps the book floor.
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,
@@ -1496,6 +1517,8 @@ def insert_command(
         expected_min_tick_size=expected_min_tick_size,
         expected_min_order_size=expected_min_order_size,
         expected_neg_risk=expected_neg_risk,
+        order_type=order_type,
+        post_only=post_only,
     )
     envelope_id_value = (
         _require_nonempty("envelope_id", envelope_id)
@@ -2227,6 +2250,13 @@ def _assert_envelope_gate(
             "persisted taker-capable order is not a legal live execution mode: "
             f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
         )
+    if marketable_taker and envelope_side == "BUY":
+        from src.contracts.execution_intent import (
+            POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
+        )
+
+        if _decimal(size) * _decimal(price) < POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD:
+            raise ValueError("marketable BUY notional is below venue minimum $1")
     if isinstance(snapshot_id, str) and snapshot_id.strip():
         with _row_factory_as(conn, sqlite3.Row):
             snapshot_row = conn.execute(
@@ -2521,6 +2551,8 @@ def _assert_snapshot_gate(
     expected_min_tick_size,
     expected_min_order_size,
     expected_neg_risk: bool | None,
+    order_type: str | None = None,
+    post_only: bool | None = None,
 ) -> None:
     """U1 single insertion-point freshness/tradability gate."""
 
@@ -2554,6 +2586,8 @@ def _assert_snapshot_gate(
         expected_min_tick_size=expected_min_tick_size,
         expected_min_order_size=expected_min_order_size,
         expected_neg_risk=expected_neg_risk,
+        order_type=order_type,
+        post_only=post_only,
     )
 
 

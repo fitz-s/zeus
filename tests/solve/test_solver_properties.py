@@ -1129,7 +1129,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         )
         assert target.shares <= target.fractional_kelly_target_shares
     target_by_id = {target.candidate_id: target.shares for target in plan.targets}
-    assert "candidate-33-YES" not in target_by_id
+    assert target_by_id["candidate-33-YES"] == Decimal("17.00")
     assert "candidate-35-NO" in target_by_id
     assert "candidate-36-NO" in target_by_id
     assert optimize_calls == 1
@@ -1377,8 +1377,12 @@ def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target()
         full.targets[0].full_kelly_target_shares * Decimal("0.03125")
         < Decimal("5")
     )
-    assert fractional.targets == ()
-    assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
+    assert fractional.no_trade_reason is None
+    assert len(fractional.targets) == 1
+    target = fractional.targets[0]
+    assert target.shares == Decimal("1.50")
+    assert target.shares <= target.fractional_kelly_target_shares
+    assert fractional.fractional_target_cost_usd >= Decimal("1")
 
 
 def test_family_joint_repair_uses_current_point_not_confidence_sample_mean():
@@ -2882,7 +2886,7 @@ def test_global_buy_precliff_cap_is_symmetric_when_bid_and_ask_depth_match():
 
 @pytest.mark.parametrize(
     ("ask_size", "expected_candidate"),
-    (("10.009", True), ("4.999", False)),
+    (("10.009", True), ("4.999", True), ("2.859", False)),
 )
 def test_global_buy_precliff_cap_rounds_ask_depth_down_before_minimum_lot(
     ask_size, expected_candidate
@@ -3768,14 +3772,14 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     }
     assert evaluations[sell.candidate_id].position_id == "position-bad-sell"
     assert evaluations[sell.candidate_id].held_shares == Decimal("10")
-    assert evaluations[sell.candidate_id].shares == Decimal("1")
-    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.2000")
+    assert evaluations[sell.candidate_id].shares == Decimal("0.01")
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.002000")
     assert evaluations[sell.candidate_id].limit_price == Decimal("0.20")
     assert evaluations[sell.candidate_id].expected_fill_price_before_fee == Decimal(
         "0.20"
     )
     assert evaluations[sell.candidate_id].robust_delta_log_wealth < 0
-    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.600)
+    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.006)
     assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
@@ -4411,9 +4415,9 @@ def test_global_single_order_taker_sell_is_capped_by_bid_depth():
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.shares == Decimal("9.00")
-    assert sell.held_shares - decision.shares == Decimal("1.00")
-    assert decision.cash_proceeds_usd == Decimal("4.500")
+    assert decision.shares == Decimal("9.99")
+    assert sell.held_shares - decision.shares == Decimal("0.01")
+    assert decision.cash_proceeds_usd == Decimal("4.995")
     assert decision.robust_delta_log_wealth > 0.0
     assert decision.robust_ev_usd > 0.0
 
@@ -4424,7 +4428,7 @@ def test_global_single_order_taker_sell_rejects_subminimum_bid_depth():
         family="sell-subminimum-depth-family",
         side="YES",
         held_q=0.10,
-        bids=(("0.50", "0.99"),),
+        bids=(("0.50", "0.009"),),
         shares="10",
     )
 
@@ -5338,6 +5342,53 @@ def test_buy_cash_minimum_applies_to_taker_only(side):
     )
     assert S._single_order_min_buy_shares(maker) == Decimal("5")
     assert S._single_order_min_buy_shares(taker) == Decimal("5.27")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_immediate_buy_can_use_fractional_kelly_below_resting_share_floor(side):
+    candidate = _global_candidate(
+        candidate_id="immediate-small-buy", family="immediate-small-buy",
+        side=side, q=0.5451, levels=(("0.50", "100"),),
+        fee="0.05", min_order="5",
+    )
+    decision = _global_select(
+        (candidate,), cash="221.090581", floor="221.090581",
+        ceiling="221.090581", cap="5", fractional_kelly_multiplier="0.125",
+    )
+    assert decision.candidate is candidate
+    assert Decimal("2") <= decision.shares < Decimal("5")
+    assert decision.shares <= decision.fractional_kelly_target_shares
+    assert decision.shares * decision.limit_price >= Decimal("1")
+    assert decision.expected_growth.expected_ev_usd > 0
+    assert decision.expected_growth.expected_delta_log_wealth > 0
+    assert candidate.economic_cost_curve.min_order_size == Decimal("5")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_immediate_buy_does_not_waive_cash_minimum_for_small_share_orders(side):
+    candidate = _global_candidate(
+        candidate_id="immediate-small-cash", family="immediate-small-cash",
+        side=side, q=0.8, levels=(("0.50", "1.99"),), min_order="5",
+    )
+    assert S._single_order_min_buy_shares(candidate) is None
+    assert _global_select((candidate,)).candidate is None
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_immediate_sell_can_liquidate_below_resting_share_floor(side):
+    candidate = _global_sell_candidate(
+        candidate_id="immediate-small-sell", family="immediate-small-sell",
+        side=side, held_q=0.2, bids=(("0.50", "100"),),
+        shares="2.50", min_order="5", fee="0.05",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    decision = _global_select((candidate,))
+    assert decision.candidate is candidate
+    assert decision.shares == Decimal("2.50")
+    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert decision.expected_growth.expected_ev_usd > 0
+    assert decision.expected_growth.expected_delta_log_wealth > 0
+    assert candidate.economic_sell_curve.min_order_size == Decimal("5")
 
 
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
@@ -7790,7 +7841,7 @@ def test_fee_inclusive_near_breakeven_rejects_both_sides(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-@pytest.mark.parametrize("bid_size, expected_shares", (("4", None), ("5", "5"), ("10", "10"), ("30", "15")))
+@pytest.mark.parametrize("bid_size, expected_shares", (("1.99", None), ("4", "4"), ("5", "5"), ("10", "10"), ("30", "15")))
 def test_fractional_kelly_target_does_not_haircut_exit_capacity(side, bid_size, expected_shares):
     candidate = _global_candidate(
         candidate_id="fractional-exit-capacity",

@@ -1,5 +1,6 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused/audited: 2026-09-12
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-09-12
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -36,6 +37,7 @@ from src.contracts.executable_market_snapshot import (
     canonicalize_fee_details,
     fee_details_from_gamma_fee_schedule,
     is_fresh,
+    assert_snapshot_executable,
 )
 from src.contracts.exceptions import EmptyOrderbookError
 from src.contracts.execution_intent import (
@@ -43,6 +45,7 @@ from src.contracts.execution_intent import (
     ExecutableTradeHypothesis,
     FinalExecutionIntent,
     PassiveMakerExecutionContext,
+    _assert_min_order_satisfied,
     simulate_clob_sweep,
 )
 from src.engine.evaluator import (
@@ -1780,6 +1783,198 @@ def test_min_order_size_mismatch_blocks_before_signing(conn):
             snapshot_id="snap-min-size",
             size=1.0,
             expected_min_order_size=Decimal("5"),
+        )
+
+
+@pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+def test_explicit_non_post_only_taker_bypasses_book_minimum(order_type):
+    snapshot = _snapshot(min_order_size=Decimal("5"))
+
+    # Two shares at $0.50 is a $1 gross BUY; the book's resting share floor is
+    # not applicable to an explicitly non-post-only immediate order.
+    assert_snapshot_executable(
+        snapshot,
+        token_id="yes-token",
+        side="BUY",
+        price=Decimal("0.50"),
+        size=Decimal("2"),
+        now=NOW,
+        order_type=order_type,
+        post_only=False,
+    )
+
+    # The same minimum seam is used for an immediate FAK SELL; SELL's separate
+    # positive exact-grid law is outside the snapshot's book-floor check.
+    assert_snapshot_executable(
+        snapshot,
+        token_id="yes-token",
+        side="SELL",
+        price=Decimal("0.49"),
+        size=Decimal("2"),
+        now=NOW,
+        order_type="FAK",
+        post_only=False,
+    )
+
+
+@pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+@pytest.mark.parametrize("size", ["0", "-1", "NaN", "Infinity"])
+def test_immediate_snapshot_rejects_nonpositive_or_nonfinite_size(order_type, size):
+    with pytest.raises(MarketSnapshotMismatchError, match="size must be"):
+        assert_snapshot_executable(
+            _snapshot(min_order_size=Decimal("5")),
+            token_id="yes-token",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal(size),
+            now=NOW,
+            order_type=order_type,
+            post_only=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("order_type", "post_only"),
+    [
+        ("GTC", True),
+        ("GTD", True),
+        ("GTC", False),
+        ("GTD", False),
+        (None, None),
+        ("FOK", True),
+        ("FAK", True),
+    ],
+)
+def test_book_minimum_stays_strict_without_explicit_taker_context(order_type, post_only):
+    snapshot = _snapshot(min_order_size=Decimal("5"))
+
+    with pytest.raises(MarketSnapshotMismatchError, match="below snapshot min_order_size"):
+        assert_snapshot_executable(
+            snapshot,
+            token_id="yes-token",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal("2"),
+            now=NOW,
+            order_type=order_type,
+            post_only=post_only,
+        )
+
+    with pytest.raises(ValueError, match="size .* below min_order_size"):
+        _assert_min_order_satisfied(
+            size_kind="shares",
+            size_value=Decimal("2"),
+            final_limit_price=Decimal("0.50"),
+            min_order_size=Decimal("5"),
+            order_type=order_type,
+            post_only=post_only,
+        )
+
+
+def test_minimum_validator_keeps_invalid_metadata_and_numeric_guards():
+    for kwargs in (
+        {"min_order_size": Decimal("0")},
+        {"size_value": Decimal("-1")},
+    ):
+        with pytest.raises(ValueError):
+            _assert_min_order_satisfied(
+                size_kind="shares",
+                size_value=kwargs.get("size_value", Decimal("2")),
+                final_limit_price=kwargs.get("final_limit_price", Decimal("0.50")),
+                min_order_size=kwargs.get("min_order_size", Decimal("5")),
+                order_type="FAK",
+                post_only=False,
+            )
+
+    with pytest.raises(ValueError, match="final_limit_price"):
+        _assert_min_order_satisfied(
+            size_kind="notional_usd",
+            size_value=Decimal("1"),
+            final_limit_price=Decimal("0"),
+            min_order_size=Decimal("5"),
+            order_type="FAK",
+            post_only=False,
+        )
+
+    with pytest.raises(MarketSnapshotMismatchError, match="not aligned"):
+        assert_snapshot_executable(
+            _snapshot(min_order_size=Decimal("5")),
+            token_id="yes-token",
+            side="BUY",
+            price=Decimal("0.505"),
+            size=Decimal("2"),
+            now=NOW,
+            order_type="FOK",
+            post_only=False,
+        )
+
+
+@pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+def test_final_execution_intent_passes_explicit_taker_below_book_minimum(order_type):
+    cost_basis = _buy_no_cost_basis(
+        snapshot=_no_snapshot(min_order_size=Decimal("5")),
+        direction="buy_no",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("2"),
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+        hypothesis=hypothesis,
+        cost_basis=cost_basis,
+        order_type=order_type,
+        post_only=False,
+    )
+
+    assert intent.submitted_shares == Decimal("2")
+    assert intent.min_order_size == Decimal("5")
+
+
+def test_final_execution_intent_passes_explicit_fak_sell_below_book_minimum():
+    snapshot = _snapshot(min_order_size=Decimal("5"))
+
+    intent = FinalExecutionIntent(
+        hypothesis_id="hypothesis:sell",
+        selected_token_id="yes-token",
+        direction="sell_yes",
+        size_kind="shares",
+        size_value=Decimal("2"),
+        submitted_shares=Decimal("2"),
+        final_limit_price=Decimal("0.49"),
+        expected_fill_price_before_fee=Decimal("0.49"),
+        fee_adjusted_execution_price=Decimal("0.482503"),
+        order_policy="limit_may_take_conservative",
+        order_type="FAK",
+        post_only=False,
+        cancel_after=None,
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_hash=snapshot.executable_snapshot_hash,
+        cost_basis_id="cost_basis:" + ("a" * 16),
+        cost_basis_hash="a" * 64,
+        max_slippage_bps=Decimal("200"),
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        fee_rate=Decimal("0.03"),
+        neg_risk=False,
+    )
+
+    assert intent.direction == "sell_yes"
+    assert intent.submitted_shares == Decimal("2")
+
+
+def test_final_execution_intent_keeps_unknown_submit_mode_strict():
+    cost_basis = _buy_no_cost_basis(
+        snapshot=_no_snapshot(min_order_size=Decimal("5")),
+        direction="buy_no",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("2"),
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="below min_order_size"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
         )
 
 

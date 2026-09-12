@@ -49,6 +49,7 @@ from src.contracts.execution_intent import (
 from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MAX_UNIT_PRICE,
     LIVE_ORDER_MIN_UNIT_PRICE,
+    assert_live_order_size,
     assert_live_order_unit_price,
 )
 from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
@@ -6209,11 +6210,18 @@ def _recapture_fresh_entry_snapshot_if_needed(
         final_intent.final_limit_price,
         fresh.min_tick_size,
     )
-    if Decimal(str(submitted_shares)) < Decimal(str(fresh.min_order_size)):
+    try:
+        assert_live_order_size(
+            submitted_shares,
+            fresh.min_order_size,
+            order_type=getattr(final_intent, "order_type", None),
+            post_only=getattr(final_intent, "post_only", None),
+        )
+    except ValueError as exc:
         raise ValueError(
             "recaptured executable snapshot submitted_shares below fresh min_order_size: "
             f"submitted_shares={submitted_shares} fresh_min_order_size={fresh.min_order_size}"
-        )
+        ) from exc
     # neg_risk is venue metadata attached to the same condition/token identity.
     # Older elected/JIT snapshots can be missing the CLOB negRisk fact and carry
     # the default False; the fresh recapture below is the authority that gets
@@ -6333,12 +6341,22 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 tick_size=Decimal(str(fresh.min_tick_size)),
             )
             wire_cash = wire_size * Decimal(str(fresh_limit_price))
-            if wire_size < Decimal(str(fresh.min_order_size)):
+            try:
+                assert_live_order_size(
+                    wire_size,
+                    fresh.min_order_size,
+                    order_type="FAK",
+                    post_only=False,
+                )
+            except ValueError as exc:
                 raise ValueError(
                     "recaptured FAK fixed-cash size is below fresh min order: "
                     f"wire_size={wire_size} min_order_size={fresh.min_order_size}"
-                )
-            if wire_cash < MIN_MARKETABLE_BUY_NOTIONAL_USD:
+                ) from exc
+            if (
+                final_intent.direction in {"buy_yes", "buy_no"}
+                and wire_cash < MIN_MARKETABLE_BUY_NOTIONAL_USD
+            ):
                 raise ValueError(
                     "recaptured FAK fixed cash is below venue minimum: "
                     f"cash={wire_cash} min_notional={MIN_MARKETABLE_BUY_NOTIONAL_USD}"

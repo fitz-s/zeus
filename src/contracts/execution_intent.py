@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Optional
 
 from src.contracts.semantic_types import Direction
 
@@ -212,7 +212,16 @@ def _assert_min_order_satisfied(
     size_value: Decimal,
     final_limit_price: Decimal,
     min_order_size: Decimal,
+    order_type: OrderType | str | None = None,
+    post_only: bool | None = None,
 ) -> None:
+    """Enforce the snapshot share floor when the order is a resting order.
+
+    Missing execution-mode metadata intentionally preserves the historical
+    fail-closed behavior. Only an explicitly non-post-only FOK/FAK order may
+    bypass the book's resting minimum; BUY cash minimums and SELL grid rules
+    remain separate execution-policy checks.
+    """
     if min_order_size <= Decimal("0"):
         raise ValueError("min_order_size must be positive")
     if size_value <= Decimal("0"):
@@ -221,7 +230,11 @@ def _assert_min_order_satisfied(
     if size_kind == "notional_usd":
         _require_unit_interval_open(final_limit_price, "final_limit_price")
         shares = size_value / final_limit_price
-    if shares < min_order_size:
+    bypass_resting_floor = (
+        post_only is False
+        and str(order_type or "").strip().upper() in {"FOK", "FAK"}
+    )
+    if shares < min_order_size and not bypass_resting_floor:
         raise ValueError(
             f"size {shares} shares is below min_order_size {min_order_size}"
         )
@@ -1560,7 +1573,12 @@ class ExecutableCostBasis:
             min_order_size=self.min_order_size,
         )
 
-    def assert_submit_safe(self) -> None:
+    def assert_submit_safe(
+        self,
+        *,
+        order_type: OrderType | str | None = None,
+        post_only: bool | None = None,
+    ) -> None:
         """Fail closed unless this cost basis can authorize a live limit submit."""
 
         if self.tick_status != "PASS":
@@ -1582,6 +1600,8 @@ class ExecutableCostBasis:
             size_value=self.requested_size_value,
             final_limit_price=self.final_limit_price,
             min_order_size=self.min_order_size,
+            order_type=order_type,
+            post_only=post_only,
         )
 
 
@@ -1866,7 +1886,7 @@ class FinalExecutionIntent:
         actionable_certificate_hash: str | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
-        cost_basis.assert_submit_safe()
+        cost_basis.assert_submit_safe(order_type=order_type, post_only=post_only)
         normalized_event_id = str(event_id or hypothesis.event_id or "").strip()
         hypothesis_event_id = str(hypothesis.event_id or "").strip()
         if normalized_event_id and hypothesis_event_id and normalized_event_id != hypothesis_event_id:
@@ -2086,8 +2106,16 @@ class FinalExecutionIntent:
             size_value=self.size_value,
             final_limit_price=self.final_limit_price,
             min_order_size=self.min_order_size,
+            order_type=self.order_type,
+            post_only=self.post_only,
         )
-        if self.submitted_shares < self.min_order_size:
+        if (
+            self.submitted_shares < self.min_order_size
+            and not (
+                self.post_only is False
+                and self.order_type in {"FOK", "FAK"}
+            )
+        ):
             raise ValueError(
                 f"submitted_shares {self.submitted_shares} is below "
                 f"min_order_size {self.min_order_size}"

@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-09-12
 # Authority basis: EDLI_EXECUTION_STRATEGY_DESIGN_2026_05_31.md §4 items 1,2,3,7 +
 #   §6.1 test-first relationship test (governor-TAKER -> 3-layer FOK acceptance + submittable).
 """Relationship tests for the EDLI taker execution spine.
@@ -29,11 +29,13 @@ import pytest
 
 from src.decision_kernel.certificates.execution import (
     _declared_max_slippage_bps,
+    build_execution_command_certificate_from_final_intent,
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
 )
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.verifier import (
+    verify_execution_command,
     verify_executor_expressibility,
     verify_final_intent,
 )
@@ -93,7 +95,8 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  order_type: str | None = None,
                  time_in_force: str | None = None,
                  fee_rate: float = 0.0,
-                 taker_quality_proof: dict | None = None):
+                 taker_quality_proof: dict | None = None,
+                 min_order_size: float = 1.0):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
     Mirrors ``test_execution_command_certificate.builder_chain`` but threads an
@@ -166,7 +169,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         "best_ask": 0.45,  # spread = 5c, large; best_ask < reservation 0.50 => cross is +EV
         "visible_depth": 8.0,  # thin
         "tick_size": 0.01,
-        "min_order_size": 1.0,
+        "min_order_size": min_order_size,
         "neg_risk": False,
         "fill_claim": False,
     }
@@ -236,7 +239,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         order_type=order_type,
         time_in_force=time_in_force,
         tick_size=0.01,
-        min_order_size=1.0,
+        min_order_size=min_order_size,
         fee_rate=fee_rate,
         best_bid=float(quote_payload["best_bid"]),
         best_ask=float(quote_payload["best_ask"]),
@@ -254,7 +257,9 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
     return actionable, executable, final_intent
 
 
-def _buy_fak_prefix_economics(*, shares: float = 5.0, limit: float = 0.45) -> dict:
+def _buy_fak_prefix_economics(
+    *, shares: float = 5.0, limit: float = 0.45, side: str = "YES"
+) -> dict:
     fee_rate = 0.05
     win_q = 0.60
     loss_q = 0.40
@@ -269,7 +274,7 @@ def _buy_fak_prefix_economics(*, shares: float = 5.0, limit: float = 0.45) -> di
     )
     curve = "curve-current"
     return {
-        "side": "YES",
+        "side": side,
         "global_jit_execution_curve_identity": curve,
         "global_target_shares": str(shares),
         "global_limit_price": str(limit),
@@ -294,6 +299,13 @@ def _buy_fak_prefix_economics(*, shares: float = 5.0, limit: float = 0.45) -> di
         "global_buy_fak_full_worst_cost_usd": str(full_cost),
         "global_buy_fak_full_robust_delta_log_wealth": robust_du,
         "global_buy_fak_full_robust_ev_usd": win_q * shares - full_cost,
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": win_q,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": win_q,
     }
 
 
@@ -505,6 +517,214 @@ def test_global_exact_taker_preserves_deep_limit_and_exact_share_count():
         "0.1666666666666666666666666667"
     )
     assert final_intent.payload["global_exact_order"] is True
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize(
+    ("time_in_force", "order_type"),
+    (("FOK", "FOK_LIMIT"), ("FAK", "FAK_LIMIT")),
+)
+def test_subminimum_exact_taker_buy_survives_full_certificate_chain(
+    direction, time_in_force, order_type
+):
+    fak = time_in_force == "FAK"
+    _, executable, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type=order_type,
+        time_in_force=time_in_force,
+        fee_rate=0.05 if fak else 0.0,
+        actionable_overrides={
+            "direction": direction,
+            **(
+                {
+                    "qkernel_execution_economics": _buy_fak_prefix_economics(
+                        shares=2.0,
+                        limit=0.50,
+                        side="NO" if direction.endswith("_no") else "YES",
+                    )
+                }
+                if fak
+                else {}
+            ),
+        },
+        quote_overrides={
+            "best_bid": 0.40,
+            "best_ask": 0.50,
+            "native_execution_price": 0.50,
+        },
+        available_crossable_shares=2.0,
+        sweep_expected_fill_price="0.50",
+        exact_taker_shares="2.00",
+        exact_taker_limit_price="0.50",
+        min_order_size=5.0,
+        return_parents=True,
+    )
+
+    verify_final_intent(final_intent, parents)
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    assert native_hash
+    live_cap = _cert(claims.LIVE_CAP, "live-cap:subminimum", _live_cap_payload())
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable,
+        live_cap_cert=live_cap,
+        decision_time=NOW,
+        executor_native_intent_hash=native_hash,
+    )
+    verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
+
+    from tests.decision_kernel.test_execution_command_certificate import _pre_submit_cert
+
+    pre_submit = _pre_submit_cert(
+        final_intent,
+        live_cap,
+        command_payload={
+            "limit_price": 0.50,
+            "size": 2.0,
+            "min_order_size": 5.0,
+            "tick_size": 0.01,
+            "order_type": order_type,
+            "time_in_force": time_in_force,
+            "post_only": False,
+            "side": "BUY",
+            "direction": direction,
+            "min_submit_edge_density": 0.02,
+            "expected_edge": 0.10,
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": (
+                _buy_fak_prefix_economics(
+                    shares=2.0,
+                    limit=0.50,
+                    side="NO" if direction.endswith("_no") else "YES",
+                )
+                if fak
+                else {
+                    "source": "qkernel_spine",
+                    "side": "NO" if direction.endswith("_no") else "YES",
+                    "payoff_q_point": 0.70,
+                    "payoff_q_lcb": 0.60,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.60,
+                }
+            ),
+        },
+    )
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=parents[0],
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
+        decision_time=NOW,
+    )
+    verify_execution_command(
+        command,
+        (parents[0], final_intent, expressibility, live_cap, pre_submit),
+    )
+    assert final_intent.payload["size"] == pytest.approx(2.0)
+    assert final_intent.payload["notional_usd"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("direction", ("sell_yes", "sell_no"))
+def test_subminimum_exact_taker_sell_preserves_positive_size(
+    direction,
+):
+    time_in_force, order_type = "FAK", "FAK_LIMIT"
+    _, _, final_intent, _ = _taker_chain(
+        order_mode="TAKER",
+        order_type=order_type,
+        time_in_force=time_in_force,
+        actionable_overrides={"direction": direction},
+        quote_overrides={
+            "best_bid": 0.50,
+            "best_ask": 0.60,
+            "native_execution_price": 0.50,
+        },
+        available_crossable_shares=2.0,
+        sweep_expected_fill_price="0.50",
+        exact_taker_shares="2.00",
+        exact_taker_limit_price="0.50",
+        min_order_size=5.0,
+        return_parents=True,
+    )
+
+    assert final_intent.payload["size"] == pytest.approx(2.0)
+    assert final_intent.payload["side"] == "SELL"
+
+
+@pytest.mark.parametrize("direction", ("sell_yes", "sell_no"))
+def test_sell_fok_is_rejected_by_taker_order_tuple(direction):
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type="FOK_LIMIT",
+        time_in_force="FOK",
+        actionable_overrides={"direction": direction},
+        quote_overrides={
+            "best_bid": 0.50,
+            "best_ask": 0.60,
+            "native_execution_price": 0.50,
+        },
+        available_crossable_shares=2.0,
+        sweep_expected_fill_price="0.50",
+        exact_taker_shares="2.00",
+        exact_taker_limit_price="0.50",
+        min_order_size=5.0,
+        return_parents=True,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="SELL FOK is unsupported"):
+        verify_final_intent(final_intent, parents)
+
+
+def test_exact_taker_rejects_insufficient_crossable_depth_before_floor_bypass():
+    with pytest.raises(ValueError, match="EXACT_TAKER_DEPTH_INSUFFICIENT"):
+        _taker_chain(
+            order_mode="TAKER",
+            order_type="FAK_LIMIT",
+            time_in_force="FAK",
+            available_crossable_shares=1.0,
+            sweep_expected_fill_price="0.50",
+            exact_taker_shares="2.00",
+            exact_taker_limit_price="0.50",
+            min_order_size=5.0,
+        )
+
+
+def test_final_intent_keeps_resting_maker_floor_strict():
+    _, _, maker_intent, parents = _taker_chain(
+        order_mode="MAKER",
+        min_order_size=5.0,
+        return_parents=True,
+    )
+    tampered = _cert(
+        claims.FINAL_INTENT,
+        "final-intent:maker-subminimum",
+        {**maker_intent.payload, "size": 2.0, "notional_usd": 1.0},
+        parents=parents,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="final intent size below min_order_size"):
+        verify_final_intent(tampered, parents)
+
+
+def test_exact_taker_buy_below_one_dollar_is_rejected_at_final_intent():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type="FOK_LIMIT",
+        time_in_force="FOK",
+        available_crossable_shares=1.5,
+        sweep_expected_fill_price="0.50",
+        exact_taker_shares="1.50",
+        exact_taker_limit_price="0.50",
+        min_order_size=5.0,
+        return_parents=True,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="BUY notional below venue minimum"):
+        verify_final_intent(final_intent, parents)
 
 
 def test_global_exact_taker_slippage_uses_persisted_high_precision_vwap():

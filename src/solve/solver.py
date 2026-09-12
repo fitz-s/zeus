@@ -4163,7 +4163,7 @@ class GlobalSingleOrderDecision:
                 or (
                     self.candidate.held_shares - self.shares != 0
                     and self.candidate.held_shares - self.shares
-                    < self.candidate.economic_sell_curve.min_order_size
+                    < _single_order_min_sell_shares(self.candidate)
                 )
                 or self.cost_usd <= 0
                 or self.cash_proceeds_usd <= 0
@@ -4697,12 +4697,15 @@ def _single_order_cost(
     shares: Decimal,
     *,
     enforce_venue_minimum: bool = True,
+    execution_mode: str | None = None,
 ) -> Decimal:
     """Exact all-in spend for ``shares`` on the side-native ask ladder."""
 
     remaining = Decimal(shares)
     if remaining <= 0 or (
-        enforce_venue_minimum and remaining < curve.min_order_size
+        enforce_venue_minimum
+        and execution_mode != "TAKER_LIMIT"
+        and remaining < curve.min_order_size
     ):
         raise ValueError("share size is below the executable minimum")
     cost = Decimal("0")
@@ -4779,10 +4782,10 @@ def _single_order_max_shares(
 def _single_order_min_marketable_shares(
     curve: ExecutableCostCurve,
 ) -> Decimal | None:
-    """Smallest share-grid size satisfying both venue minimums.
+    """Smallest share-grid size satisfying the immediate BUY cash minimum.
 
-    The venue share floor and the marketable BUY notional floor are separate
-    constraints.  The submitted notional uses the deepest raw limit price, so
+    The book share floor applies to resting orders. The immediate BUY
+    submitted notional uses the deepest raw limit price, so
     scan the monotone ask ladder instead of dividing by one assumed price.
     """
 
@@ -4790,7 +4793,7 @@ def _single_order_min_marketable_shares(
     for level in curve.levels:
         level_end = level_start + level.size
         required = max(
-            curve.min_order_size,
+            _SIZE_QUANTUM,
             POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD / level.price,
             level_start,
         )
@@ -4818,6 +4821,21 @@ def _single_order_min_buy_shares(
     ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
     depth = sum((level.size for level in curve.levels), Decimal("0"))
     return minimum if minimum <= depth else None
+
+
+def _single_order_min_sell_shares(
+    candidate: GlobalSingleOrderSellCandidate,
+) -> Decimal:
+    """Immediate SELLs use the share grid; resting SELLs need a book lot."""
+
+    minimum = (
+        _SIZE_QUANTUM
+        if candidate.execution_mode == "TAKER_LIMIT"
+        else candidate.economic_sell_curve.min_order_size
+    )
+    return (minimum / _SIZE_QUANTUM).to_integral_value(
+        rounding=ROUND_CEILING
+    ) * _SIZE_QUANTUM
 
 
 def _single_order_execution_boundary(
@@ -5008,6 +5026,7 @@ def _single_order_metrics(
         candidate.economic_cost_curve,
         shares,
         enforce_venue_minimum=enforce_venue_minimum,
+        execution_mode=candidate.execution_mode,
     )
     floor = float(wealth_floor_usd)
     ceiling = float(wealth_ceiling_usd)
@@ -5160,7 +5179,10 @@ def plan_family_joint_buy_targets(
             continue
         try:
             minimum_costs.append(
-                _single_order_cost(candidate.economic_cost_curve, minimum)
+                _single_order_cost(
+                    candidate.economic_cost_curve, minimum,
+                    execution_mode=candidate.execution_mode,
+                )
             )
         except ValueError:
             continue
@@ -5247,7 +5269,10 @@ def plan_family_joint_buy_targets(
 
     fractional_cost = sum(
         (
-            _single_order_cost(candidates[index].economic_cost_curve, shares)
+            _single_order_cost(
+                candidates[index].economic_cost_curve, shares,
+                execution_mode=candidates[index].execution_mode,
+            )
             for index, shares in desired
         ),
         Decimal("0"),
@@ -5262,7 +5287,10 @@ def plan_family_joint_buy_targets(
         w_end = w0.copy()
         for index, shares in pairs:
             candidate = candidates[index]
-            cost = _single_order_cost(candidate.economic_cost_curve, shares)
+            cost = _single_order_cost(
+                candidate.economic_cost_curve, shares,
+                execution_mode=candidate.execution_mode,
+            )
             column = bins.index(candidate.bin_id)
             claim: NDArray[np.float64] = np.ones(len(bins), dtype=np.float64)
             if candidate.side == "YES":
@@ -5302,7 +5330,10 @@ def plan_family_joint_buy_targets(
     )
     full_cost = sum(
         (
-            _single_order_cost(candidates[index].economic_cost_curve, shares)
+            _single_order_cost(
+                candidates[index].economic_cost_curve, shares,
+                execution_mode=candidates[index].execution_mode,
+            )
             for index, shares in full_pairs
         ),
         Decimal("0"),
@@ -6442,9 +6473,7 @@ def _score_global_single_order_sell(
     # prefix crossable by the legal submitted floor.
     curve = candidate.economic_sell_curve
     quantum = Decimal("0.01")
-    min_shares = (
-        Decimal(curve.min_order_size) / quantum
-    ).to_integral_value(rounding=ROUND_CEILING) * quantum
+    min_shares = _single_order_min_sell_shares(candidate)
     max_shares = min(
         held_shares,
         sum((Decimal(level.size) for level in curve.levels), Decimal("0")),
@@ -7742,6 +7771,7 @@ def select_global_single_order(
                         _single_order_cost(
                             candidate.economic_cost_curve,
                             liquidation_cap_shares,
+                            execution_mode=candidate.execution_mode,
                         ),
                     )
                 except ValueError:
@@ -8105,6 +8135,7 @@ def select_global_single_order(
                 target_cost = _single_order_cost(
                     candidate.economic_cost_curve,
                     target.shares,
+                    execution_mode=candidate.execution_mode,
                 )
                 fixed = _score_global_single_order_buy_expected(
                     candidate,

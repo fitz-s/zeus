@@ -43,7 +43,10 @@ from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from py_clob_client_v2.exceptions import PolyApiException
 
-from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.execution_intent import (
+    POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
+    ExecutionIntent,
+)
 from src.contracts.semantic_types import Direction
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
@@ -3735,6 +3738,7 @@ def _assert_final_executable_price_bound(
             "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY:"
             f"price={price}:tick_size={tick_size}"
         )
+    order_type = str(envelope.order_type or "").strip().upper()
     size = Decimal(envelope.size)
     min_order_size = Decimal(envelope.min_order_size)
     if (
@@ -3742,13 +3746,26 @@ def _assert_final_executable_price_bound(
         or not min_order_size.is_finite()
         or size <= 0
         or min_order_size <= 0
-        or size < min_order_size
+        or (
+            size < min_order_size
+            and not (envelope.post_only is False and order_type in {"FOK", "FAK"})
+        )
     ):
         raise ValueError(
             "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY:"
             f"size={size}:min_order_size={min_order_size}"
         )
-    order_type = str(envelope.order_type or "").strip().upper()
+    if (
+        envelope.side == "BUY"
+        and envelope.post_only is False
+        and order_type in {"FOK", "FAK"}
+        and size * price < POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD
+    ):
+        raise ValueError(
+            "LIVE_ORDER_BUY_NOTIONAL_INVALID:FINAL_SDK_BOUNDARY:"
+            f"notional={size * price}:"
+            f"min_notional={POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD}"
+        )
     maker = envelope.post_only and order_type in {"GTC", "GTD"}
     marketable_taker = (
         not envelope.post_only

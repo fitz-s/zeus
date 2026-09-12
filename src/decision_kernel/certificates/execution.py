@@ -28,6 +28,7 @@ from src.decision_kernel.verifier import (
     verify_live_cap_transition,
 )
 from src.contracts.execution_intent import quantize_submit_shares_for_venue_at_most
+from src.contracts.venue_submission_envelope import assert_live_order_size
 from src.events.live_order_aggregate import LiveOrderAggregateEvent
 
 
@@ -150,12 +151,8 @@ def build_final_intent_certificate_from_actionable(
         size = desired_shares_for_reserved_notional(
             min_order_size, reserved_notional, limit_price
         )
-    # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
-    # requested size to the crossable book depth so the FOK can fully fill on a thin
-    # book.  available_crossable_shares is computed by the caller (ERA) via
-    # simulate_clob_sweep on the elected snapshot before cert build.  If the capped
-    # size falls below min_order_size the book is too thin → raise so the candidate
-    # correctly skips (fail-closed, no -EV order).
+    # Legacy requested sizes may be capped to crossable depth. A globally
+    # selected exact target must fit without resizing; a resting lot is separate.
     if available_crossable_shares is not None and order_spec.mode == "TAKER":
         if exact_taker and float(available_crossable_shares) + 1e-12 < size:
             raise ValueError(
@@ -163,11 +160,18 @@ def build_final_intent_certificate_from_actionable(
                 f"target_shares={size}:available_crossable_shares={available_crossable_shares}"
             )
         size = min(size, float(available_crossable_shares))
-        if size < float(min_order_size):
+        try:
+            assert_live_order_size(
+                size,
+                min_order_size,
+                order_type=order_spec.time_in_force,
+                post_only=order_spec.post_only,
+            )
+        except ValueError as exc:
             raise ValueError(
                 f"DEPTH_BELOW_MIN_ORDER_SIZE: available_crossable_shares="
                 f"{available_crossable_shares:.4f} < min_order_size={min_order_size:.4f}"
-            )
+            ) from exc
     quantized_size = quantize_submit_shares_for_venue_at_most(
         str(action["direction"]),
         Decimal(str(size)),

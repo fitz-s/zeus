@@ -43,8 +43,15 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
 def assert_live_order_size(
     size: Decimal | str | float,
     min_order_size: Decimal | str | float,
+    *,
+    order_type: str | None = None,
+    post_only: bool | None = None,
 ) -> Decimal:
-    """Return a finite positive size at or above the bound venue minimum."""
+    """Validate positive size; the book share floor applies to resting orders.
+
+    Only explicit non-resting FOK/FAK context bypasses that floor. Unknown
+    legacy context stays strict; BUY cash minimums remain separate checks.
+    """
 
     try:
         value = size if isinstance(size, Decimal) else Decimal(str(size))
@@ -63,7 +70,10 @@ def assert_live_order_size(
         or not minimum.is_finite()
         or value <= 0
         or minimum <= 0
-        or value < minimum
+        or (
+            value < minimum
+            and not (post_only is False and order_type in {"FOK", "FAK"})
+        )
     ):
         raise ValueError(
             "live order size is below venue minimum or invalid: "
@@ -203,7 +213,23 @@ class VenueSubmissionEnvelope:
         """Fail closed unless a trade envelope's limit is safe and market-bound."""
 
         assert_live_order_unit_price(self.price)
-        assert_live_order_size(self.size, self.min_order_size)
+        assert_live_order_size(
+            self.size,
+            self.min_order_size,
+            order_type=self.order_type,
+            post_only=self.post_only,
+        )
+        if (
+            self.side == "BUY"
+            and self.post_only is False
+            and self.order_type in {"FOK", "FAK"}
+        ):
+            from src.contracts.execution_intent import (
+                POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
+            )
+
+            if self.size * self.price < POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD:
+                raise ValueError("marketable BUY notional is below venue minimum $1")
         assert_live_order_tick(self.price, self.tick_size)
         self.assert_live_market_bound()
 

@@ -6771,6 +6771,23 @@ def _below_snapshot_min_order_error(
     return f"executable_snapshot_gate: size {selected} is below snapshot min_order_size {min_order}"
 
 
+def _global_sell_taker_fak_min_order_floor_bypass_authorized(
+    exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority,
+) -> bool:
+    """Allow sub-minimum shares only for a verified global taker FAK cut."""
+
+    return bool(
+        str(getattr(exit_intent, "submit_order_type", "") or "").strip().upper()
+        == "FAK"
+        and str(
+            getattr(getattr(authority, "jit_candidate", None), "execution_mode", "")
+            or ""
+        ).strip().upper()
+        == "TAKER_LIMIT"
+    )
+
+
 def _global_sell_partial_residual_min_order_error(
     exit_intent: ExitIntent,
     authority: GlobalSellExecutionAuthority,
@@ -6798,6 +6815,13 @@ def _global_sell_partial_residual_min_order_error(
     )
     if min_order is None:
         return "global_sell_partial_residual_snapshot_min_order_size_unavailable"
+    if _global_sell_taker_fak_min_order_floor_bypass_authorized(
+        exit_intent,
+        authority,
+    ):
+        if residual < _CHAIN_BALANCE_DUST_SHARES - tolerance:
+            return "global_sell_partial_residual_below_share_quantum"
+        return ""
     if residual < min_order - tolerance:
         return (
             "global_sell_partial_residual_below_snapshot_min_order_size: "
@@ -8129,6 +8153,14 @@ def _execute_live_exit(
                 conn=conn,
             )
             return f"exit_blocked: {authority_error}"
+    global_taker_fak_min_order_floor_bypass = bool(
+        global_authorized
+        and global_sell_authority is not None
+        and _global_sell_taker_fak_min_order_floor_bypass_authorized(
+            exit_intent,
+            global_sell_authority,
+        )
+    )
     if global_authorized and global_sell_authority is not None:
         residual_error = _global_sell_partial_residual_min_order_error(
             exit_intent,
@@ -8153,10 +8185,14 @@ def _execute_live_exit(
             )
             return f"exit_blocked: {residual_error}"
 
-    dust_error = _below_snapshot_min_order_error(
-        position,
-        snapshot_context,
-        shares=exit_intent.shares,
+    dust_error = (
+        ""
+        if global_taker_fak_min_order_floor_bypass
+        else _below_snapshot_min_order_error(
+            position,
+            snapshot_context,
+            shares=exit_intent.shares,
+        )
     )
     if dust_error:
         dust_reason = f"{exit_context.exit_reason} [DUST: {dust_error}]"
@@ -12160,7 +12196,11 @@ def check_pending_retries(
         )
         return False
 
-    dust_error = _latest_snapshot_min_order_dust_error(position, conn=conn)
+    dust_error = (
+        ""
+        if global_snapshot_reauction
+        else _latest_snapshot_min_order_dust_error(position, conn=conn)
+    )
     if dust_error:
         current_reason = str(getattr(position, "exit_reason", "") or "EXIT_RETRY_PENDING")
         dust_reason = (

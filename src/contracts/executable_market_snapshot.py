@@ -409,8 +409,15 @@ def assert_snapshot_executable(
     expected_min_tick_size: Any = None,
     expected_min_order_size: Any = None,
     expected_neg_risk: Optional[bool] = None,
+    order_type: str | None = None,
+    post_only: bool | None = None,
 ) -> None:
-    """Fail closed unless ``snapshot`` authorizes this command shape."""
+    """Fail closed unless ``snapshot`` authorizes this command shape.
+
+    The snapshot retains the venue's raw ``min_order_size`` fact. Missing
+    execution-mode metadata keeps the historical strict share-floor check;
+    only explicit non-post-only FOK/FAK orders bypass that resting floor.
+    """
 
     if snapshot is None:
         raise StaleMarketSnapshotError("venue command requires executable market snapshot_id")
@@ -472,7 +479,13 @@ def assert_snapshot_executable(
         )
 
     submitted_size = _as_decimal(size, "size")
-    if submitted_size < snapshot.min_order_size:
+    if submitted_size <= 0:
+        raise MarketSnapshotMismatchError("size must be positive")
+    bypass_resting_floor = (
+        post_only is False
+        and str(order_type or "").strip().upper() in {"FOK", "FAK"}
+    )
+    if submitted_size < snapshot.min_order_size and not bypass_resting_floor:
         raise MarketSnapshotMismatchError(
             f"size {submitted_size} is below snapshot min_order_size {snapshot.min_order_size}"
         )

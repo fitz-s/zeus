@@ -23442,10 +23442,7 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            # The global solve already certifies the exact target size against
-            # current depth.  Preserve the allocator's atomic taker semantics:
-            # FAK may confirm an arbitrary positive entry prefix below the venue
-            # minimum SELL lot and create exposure that cannot be exited.
+            # Preserve the global solve's exact target with atomic FOK semantics.
             order_type="FOK_LIMIT" if global_fok_authorized else None,
             time_in_force="FOK" if global_fok_authorized else None,
             # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the

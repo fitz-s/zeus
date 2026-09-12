@@ -9,7 +9,9 @@ import re
 from typing import Iterable, Mapping
 
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.execution_intent import POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD
 from src.contracts.settlement_semantics import settlement_preimage_offsets
+from src.contracts.venue_submission_envelope import assert_live_order_size
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
@@ -72,6 +74,48 @@ def _uses_remaining_day_probability_authority(
         and str(payload.get("probability_authority") or "").strip()
         == DAY0_REMAINING_DAY_GLOBAL_AUTHORITY
     )
+
+
+def _is_explicit_taker_order_tuple(payload: Mapping[str, object]) -> bool:
+    """Return true only for the closed, non-resting TAKER FOK/FAK tuple."""
+
+    return bool(
+        str(payload.get("order_mode") or "").strip().upper() == "TAKER"
+        and str(payload.get("time_in_force") or "").strip().upper()
+        in {"FOK", "FAK"}
+        and payload.get("post_only") is False
+    )
+
+
+def _verify_typed_order_size(
+    *,
+    payload: Mapping[str, object],
+    size: float,
+    min_order_size: float,
+    limit_price: float,
+    surface: str,
+) -> None:
+    immediate_taker = _is_explicit_taker_order_tuple(payload)
+    try:
+        assert_live_order_size(
+            size,
+            min_order_size,
+            order_type=(payload.get("time_in_force") if immediate_taker else None),
+            post_only=(False if immediate_taker else None),
+        )
+    except ValueError as exc:
+        raise CertificateVerificationError(
+            f"{surface} size below min_order_size"
+        ) from exc
+    if (
+        immediate_taker
+        and str(payload.get("direction") or "").startswith("buy_")
+        and Decimal(str(size)) * Decimal(str(limit_price))
+        < POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD
+    ):
+        raise CertificateVerificationError(
+            f"{surface} BUY notional below venue minimum"
+        )
 
 
 def _actionable_source_parent_types(
@@ -1112,8 +1156,13 @@ def _verify_execution_command_payload(
     tick_size = _finite_float(payload.get("tick_size"), "execution command tick_size")
     if size <= 0:
         raise CertificateVerificationError("execution command size must be positive")
-    if size < min_order_size:
-        raise CertificateVerificationError("execution command size below min_order_size")
+    _verify_typed_order_size(
+        payload=final_intent,
+        size=size,
+        min_order_size=min_order_size,
+        limit_price=limit_price,
+        surface="execution command",
+    )
     # 2026-06-08: the tiny_live notional cap is DELETED. Order size is governed
     # solely by structural fractional-Kelly sizing; there is no max_notional_usd
     # ceiling to verify here. The order<=reserved integrity guard still runs on
@@ -1397,6 +1446,9 @@ def _verify_final_intent_payload(
         raise CertificateVerificationError("final intent limit_price must be in (0, 1)")
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
+    min_order_size = _finite_float(
+        payload.get("min_order_size"), "final intent min_order_size"
+    )
     if _entry_floor_applies(payload):
         min_entry_price = _finite_float(
             payload.get("min_entry_price"), "final intent min_entry_price"
@@ -1448,6 +1500,13 @@ def _verify_final_intent_payload(
         if not math.isclose(limit_price, target_limit, rel_tol=0.0, abs_tol=1e-12):
             raise CertificateVerificationError("global exact order limit binding mismatch")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
+    _verify_typed_order_size(
+        payload=payload,
+        size=size,
+        min_order_size=min_order_size,
+        limit_price=limit_price,
+        surface="final intent",
+    )
     if (
         payload.get("time_in_force") == "FAK"
         and payload.get("global_exact_order") is True
@@ -1564,8 +1623,13 @@ def _verify_executor_expressibility_payload(
         effective_min_entry_price = floor_decision.effective_min_entry_price
         if limit_price + 1e-12 < effective_min_entry_price:
             raise CertificateVerificationError("executor expressibility limit_price below strategy entry floor")
-    if size < min_order_size:
-        raise CertificateVerificationError("executor expressibility size below min_order_size")
+    _verify_typed_order_size(
+        payload=final_intent,
+        size=size,
+        min_order_size=min_order_size,
+        limit_price=limit_price,
+        surface="executor expressibility",
+    )
     _assert_order_type_tuple_coherent(
         payload,
         surface="executor expressibility",
@@ -2343,6 +2407,8 @@ def _assert_order_type_tuple_coherent(
             raise CertificateVerificationError(f"{surface} taker order must have post_only=False")
         if maker_intent not in (False, None):
             raise CertificateVerificationError(f"{surface} taker order must have maker_intent=False")
+        if tif == "FOK" and str(payload.get("direction") or "").strip().lower().startswith("sell_"):
+            raise CertificateVerificationError(f"{surface} SELL FOK is unsupported")
         if require_executor_order_type and payload.get("executor_order_type") not in _TAKER_TIF:
             raise CertificateVerificationError(f"{surface} taker executor_order_type unsupported")
         return

@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-04
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-04; last_reused=2026-09-04
+# Last reused/audited: 2026-09-12
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-04; last_reused=2026-09-12
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -13578,16 +13578,26 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         condition_id="condition-test",
         state="holding",
         chain_state="synced",
-        shares=8.3,
-        chain_shares=8.3,
-        cost_basis_usd=4.98,
-        chain_cost_basis_usd=4.98,
+        shares=2.0,
+        chain_shares=2.0,
+        cost_basis_usd=1.20,
+        chain_cost_basis_usd=1.20,
         strategy_key="forecast_qkernel_entry",
         env="live",
         entered_at="2026-07-28T10:00:00+00:00",
         order_status="filled",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-global-sell-subminimum-reauction",
+        orderbook_top_bid=Decimal("0.50"),
+        orderbook_top_ask=Decimal("0.51"),
+    )
     _seed_exit_intent_event(
         conn,
         position_id=position.trade_id,
@@ -14806,6 +14816,99 @@ def test_global_sell_partial_residual_uses_fresh_snapshot_minimum(
 
 
 @pytest.mark.parametrize(
+    ("execution_mode", "submit_order_type", "expected"),
+    (
+        ("TAKER_LIMIT", "FAK", ""),
+        (
+            "MAKER_REST",
+            "GTC",
+            "global_sell_partial_residual_below_snapshot_min_order_size",
+        ),
+        (
+            "TAKER_LIMIT",
+            "GTC",
+            "global_sell_partial_residual_below_snapshot_min_order_size",
+        ),
+        (
+            "MAKER_REST",
+            "FAK",
+            "global_sell_partial_residual_below_snapshot_min_order_size",
+        ),
+    ),
+)
+def test_global_sell_partial_residual_subminimum_floor_requires_verified_taker_fak(
+    execution_mode, submit_order_type, expected
+):
+    from types import SimpleNamespace
+
+    from src.execution import exit_lifecycle
+
+    authority = SimpleNamespace(
+        jit_candidate=SimpleNamespace(
+            execution_mode=execution_mode,
+            held_shares=Decimal("2"),
+        )
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id="global-sell-subminimum-residual",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=1.0,
+        current_market_price=0.50,
+        best_bid=0.50,
+        submit_order_type=submit_order_type,
+        close_position=False,
+    )
+
+    error = exit_lifecycle._global_sell_partial_residual_min_order_error(
+        intent,
+        authority,
+        {"executable_snapshot_min_order_size": "5"},
+    )
+
+    if expected:
+        assert error.startswith(expected)
+    else:
+        assert error == ""
+
+
+@pytest.mark.parametrize(
+    ("held_shares", "min_order_size", "expected"),
+    (
+        ("1.01", "5", ""),
+        ("1.005", "5", "global_sell_partial_residual_below_share_quantum"),
+        ("2", "NaN", "global_sell_partial_residual_snapshot_min_order_size_unavailable"),
+        ("2", "0", "global_sell_partial_residual_snapshot_min_order_size_unavailable"),
+    ),
+)
+def test_global_taker_partial_residual_preserves_quantum_and_snapshot_metadata(
+    held_shares, min_order_size, expected
+):
+    from types import SimpleNamespace
+
+    from src.execution import exit_lifecycle
+
+    authority = SimpleNamespace(
+        jit_candidate=SimpleNamespace(
+            execution_mode="TAKER_LIMIT", held_shares=Decimal(held_shares)
+        )
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id="global-sell-subminimum-residual",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=1.0,
+        current_market_price=0.50,
+        best_bid=0.50,
+        submit_order_type="FAK",
+        close_position=False,
+    )
+    assert exit_lifecycle._global_sell_partial_residual_min_order_error(
+        intent, authority, {"executable_snapshot_min_order_size": min_order_size}
+    ) == expected
+
+
+@pytest.mark.parametrize(
     ("authority_error", "planned_shares", "close_position", "expected_error"),
     (
         (
@@ -15076,6 +15179,137 @@ def test_live_global_maker_rest_reaches_submit_when_bid_is_below_floor(
         "AND event_type = 'EXIT_ORDER_POSTED'",
         (position.trade_id,),
     ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("planned_shares", "close_position"),
+    ((2.0, True), (1.0, False)),
+)
+def test_live_global_taker_fak_allows_subminimum_selected_and_residual(
+    conn,
+    monkeypatch,
+    planned_shares,
+    close_position,
+):
+    from types import SimpleNamespace
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.execution.executor import OrderResult
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id=f"pos-global-taker-fak-subminimum-{planned_shares}",
+        market_id="condition-global-taker-fak-subminimum",
+        condition_id="condition-global-taker-fak-subminimum",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-10",
+        temperature_metric="high",
+        bin_label="30C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        state="holding",
+        chain_state="synced",
+        shares=2.0,
+        chain_shares=2.0,
+        cost_basis_usd=1.20,
+        chain_cost_basis_usd=1.20,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-08-10T10:00:00+00:00",
+        order_status="filled",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    authority = SimpleNamespace(
+        jit_candidate=SimpleNamespace(
+            execution_mode="TAKER_LIMIT",
+            held_shares=Decimal("2"),
+            book_captured_at_utc=datetime.now(timezone.utc),
+            executable_sell_curve=SimpleNamespace(
+                book_hash="book-global-taker-fak-subminimum",
+                quote_ttl=timedelta(seconds=30),
+            ),
+        )
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=planned_shares,
+        current_market_price=0.50,
+        best_bid=0.50,
+        exact_limit_price=0.50,
+        submit_order_type="FAK",
+        close_position=close_position,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_execution_authority_shape_error",
+        lambda _authority: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_receipt_closure_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_capital_certificate_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snap-global-taker-fak-subminimum",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_orderbook_top_bid": "0.50",
+            "executable_snapshot_orderbook_top_ask": "0.51",
+            "execution_authority_deadline_utc": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    submitted = []
+
+    def execute_order(intent, **_kwargs):
+        submitted.append(
+            {
+                "shares": intent.shares,
+                "submit_order_type": intent.submit_order_type,
+            }
+        )
+        return OrderResult(
+            trade_id=position.trade_id,
+            status="pending",
+            order_id=f"ord-global-taker-fak-subminimum-{planned_shares}",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", execute_order)
+
+    result = exit_lifecycle._execute_live_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            current_market_price=0.50,
+            current_market_price_is_fresh=True,
+            best_bid=0.50,
+        ),
+        intent,
+        None,
+        conn=conn,
+        execution_evidence=exit_lifecycle.ExitExecutionEvidence(),
+        is_red_force_exit=False,
+        global_sell_authority=authority,
+        hard_fact_authority=None,
+    )
+
+    assert result.startswith("sell_placed: order=ord-global-taker-fak-subminimum")
+    assert len(submitted) == 1
+    assert submitted[0]["shares"] == planned_shares
+    assert submitted[0]["submit_order_type"] == "FAK"
 
 
 def test_no_bid_retry_releases_on_favorable_above_submit_band_bid(conn):
