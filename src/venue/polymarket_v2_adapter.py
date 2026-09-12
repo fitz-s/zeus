@@ -4454,15 +4454,15 @@ def _order_args_from_envelope(envelope: VenueSubmissionEnvelope) -> SimpleNamesp
 
         return OrderArgs(
             token_id=envelope.selected_outcome_token_id,
-            price=float(envelope.price),
-            size=float(envelope.size),
+            price=envelope.price,
+            size=envelope.size,
             side=envelope.side,
         )
     except Exception:
         return SimpleNamespace(
             token_id=envelope.selected_outcome_token_id,
-            price=float(envelope.price),
-            size=float(envelope.size),
+            price=envelope.price,
+            size=envelope.size,
             side=envelope.side,
             builder_code=None,
         )

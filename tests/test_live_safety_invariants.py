@@ -7200,7 +7200,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else 500.0
         ),
         chain_state="synced",
-        chain_shares=0.002221 if outcome == "sub_precision" else 500.0,
+        chain_shares=(
+            3.0 if outcome == "dust" else 0.002221 if outcome == "sub_precision" else 500.0
+        ),
         token_id="paris-yes",
         no_token_id="paris-no",
         condition_id="0x" + "5a" * 32,
@@ -7518,7 +7520,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     monitor_now = (
         (lambda: datetime.now(timezone.utc))
-        if outcome in {"dust", "sub_precision"}
+        if outcome == "sub_precision"
         else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
     )
 
@@ -7589,7 +7591,14 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert reserved_requests == []
         assert execute_calls == []
         assert event_order == ["canonical_monitor_refreshed"]
-    elif outcome in {"dust", "sub_precision"}:
+    elif outcome == "dust":
+        assert summary.get("monitor_statistical_sell_dust_holds", 0) == 0
+        assert summary["exits"] == 0
+        assert execute_calls == []
+        assert len(auction_completion_requests) == 1
+        assert "fresh_snapshot_sub_minimum_dust_hold" not in pos.applied_validations
+        assert "[DUST:" not in results[0].exit_reason
+    elif outcome == "sub_precision":
         assert summary["monitor_statistical_sell_dust_holds"] == 1
         assert summary["exits"] == 0
         assert results[0].should_exit is False

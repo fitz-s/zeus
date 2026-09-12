@@ -502,6 +502,44 @@ def _test_identity_receipt(signed_envelope, **overrides):
         conn.close()
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(
+    ("side", "expected_maker", "expected_taker"),
+    (("BUY", 1_326_600, 2_010_000), ("SELL", 2_010_000, 1_326_600)),
+)
+def test_sdk_order_args_preserve_decimal_share_precision(
+    monkeypatch, fallback, side, expected_maker, expected_taker
+):
+    """The installed SDK must sign the exact selected 0.01-share quantity."""
+
+    from py_clob_client_v2.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    envelope = SimpleNamespace(
+        selected_outcome_token_id="token-precision",
+        price=Decimal("0.66"),
+        size=Decimal("2.01"),
+        side=side,
+    )
+    if fallback:
+        import py_clob_client_v2.clob_types as clob_types
+
+        def unavailable_order_args(**kwargs):
+            raise TypeError("exercise the compatibility argument branch")
+
+        monkeypatch.setattr(clob_types, "OrderArgs", unavailable_order_args)
+    args = adapter_mod._order_args_from_envelope(envelope)
+
+    _, maker_amount, taker_amount = OrderBuilder.get_order_amounts(
+        None,
+        args.side,
+        args.size,
+        args.price,
+        ROUNDING_CONFIG["0.01"],
+    )
+    assert (maker_amount, taker_amount) == (expected_maker, expected_taker)
+
+
 def test_default_client_factory_prefers_keychain_creds_over_env_and_derivation(monkeypatch):
     ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
     import src.venue.polymarket_v2_adapter as adapter_mod

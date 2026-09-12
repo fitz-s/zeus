@@ -9993,9 +9993,9 @@ def execute_monitoring_phase(
                 )
             )
             if should_exit:
-                # No SELL actuator can make a sub-minimum holding executable.
-                # Apply the same current-book size law before global, direct,
-                # hard-fact, and RED paths so no route can mint impossible debt.
+                # Global redecision may choose an immediate FAK below the
+                # resting lot. Keep the share quantum here; the selected mode
+                # owns its executable lot check at submit.
                 from src.execution.exit_lifecycle import (
                     _latest_fresh_snapshot_min_order,
                     _mark_exit_dust_hold,
@@ -10040,7 +10040,8 @@ def execute_monitoring_phase(
                     )
                 below_share_precision = held_shares > 0 and sellable_shares <= 0
                 below_min_order = (
-                    fresh_min_order is not None
+                    not statistical_sell_requires_global
+                    and fresh_min_order is not None
                     and held_shares > 0
                     and held_shares < fresh_min_order
                 )
