@@ -808,6 +808,7 @@ def joint_probability_witness_identity(
     yes_point_q: np.ndarray,
     yes_q_samples: np.ndarray,
     captured_at_utc: datetime,
+    exact_payoff_witness: DeterministicBinPayoffWitness | None = None,
 ) -> str:
     """Bind one complete family-simplex probability authority.
 
@@ -851,6 +852,9 @@ def joint_probability_witness_identity(
         digest.update(b"\x1f")
     digest.update(point.astype("<f8", copy=False).tobytes(order="C"))
     digest.update(samples.astype("<f8", copy=False).tobytes(order="C"))
+    if exact_payoff_witness is not None:
+        digest.update(b"\x1fexact_payoff_witness_identity_v1\x1f")
+        digest.update(exact_payoff_witness.witness_identity.encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -867,6 +871,7 @@ def joint_probability_content_identity(
     band_basis: str,
     yes_point_q: np.ndarray,
     yes_q_samples: np.ndarray,
+    exact_payoff_witness: DeterministicBinPayoffWitness | None = None,
 ) -> str:
     """Bind complete probability content without receipt-time identity."""
 
@@ -916,6 +921,11 @@ def joint_probability_content_identity(
         digest.update(b"\x1f")
     digest.update(point.astype("<f8", copy=False).tobytes(order="C"))
     digest.update(samples.astype("<f8", copy=False).tobytes(order="C"))
+    if exact_payoff_witness is not None:
+        digest.update(b"\x1fexact_payoff_witness_content_identity_v1\x1f")
+        digest.update(
+            exact_payoff_witness.probability_content_identity.encode("utf-8")
+        )
     return digest.hexdigest()
 
 
@@ -943,6 +953,7 @@ class JointOutcomeProbabilityWitness:
     captured_at_utc: datetime
     max_age: timedelta
     witness_identity: str
+    exact_payoff_witness: DeterministicBinPayoffWitness | None = None
 
     @property
     def bin_ids(self) -> tuple[str, ...]:
@@ -975,7 +986,16 @@ class JointOutcomeProbabilityWitness:
             band_basis=self.band_basis,
             yes_point_q=self.yes_point_q,
             yes_q_samples=self.yes_q_samples,
+            exact_payoff_witness=self.exact_payoff_witness,
         )
+
+    @property
+    def exact_payoff_content_identity(self) -> str | None:
+        """Content identity of the optional typed exact-payoff child."""
+
+        if self.exact_payoff_witness is None:
+            return None
+        return self.exact_payoff_witness.probability_content_identity
 
     def __post_init__(self) -> None:
         point = np.asarray(self.yes_point_q, dtype=np.float64)
@@ -1020,6 +1040,27 @@ class JointOutcomeProbabilityWitness:
             )
         ):
             raise ValueError("probability witness authority identities must be non-empty")
+        child = self.exact_payoff_witness
+        if child is not None:
+            if type(child) is not DeterministicBinPayoffWitness:
+                raise ValueError("exact payoff witness must be deterministic")
+            if (
+                child.family_key != self.family_key
+                or child.bindings != self.bindings
+                or child.resolution_identity != self.resolution_identity
+                or child.topology_identity != self.topology_identity
+                or child.band_alpha != self.band_alpha
+                or child.captured_at_utc != self.captured_at_utc
+                or child.max_age < self.max_age
+            ):
+                raise ValueError("exact payoff witness does not match parent authority")
+            for bin_id, exact_yes_payoff in child.exact_yes_payoffs:
+                column = self.bin_ids.index(bin_id)
+                if (
+                    point[column] != exact_yes_payoff
+                    or not np.all(samples[:, column] == exact_yes_payoff)
+                ):
+                    raise ValueError("exact payoff witness disagrees with parent q")
         expected = joint_probability_witness_identity(
             family_key=self.family_key,
             bindings=self.bindings,
@@ -1034,6 +1075,7 @@ class JointOutcomeProbabilityWitness:
             yes_point_q=point,
             yes_q_samples=samples,
             captured_at_utc=self.captured_at_utc,
+            exact_payoff_witness=child,
         )
         if self.witness_identity != expected:
             raise ValueError("probability witness identity does not bind its family simplex")
@@ -1268,6 +1310,23 @@ def actionable_family_payoff_bindings(
     )
 
 
+def family_exact_yes_payoff(
+    witness: FamilyPayoffWitness,
+    *,
+    bin_id: str,
+) -> int | None:
+    """Return an exact YES payoff only when the selected bin is typed and proved."""
+
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        return witness.exact_yes_payoff(bin_id)
+    if isinstance(witness, JointOutcomeProbabilityWitness):
+        child = witness.exact_payoff_witness
+        if child is None:
+            return None
+        return child.exact_yes_payoff(bin_id)
+    return None
+
+
 def family_payoff_q_samples(
     witness: FamilyPayoffWitness,
     *,
@@ -1367,6 +1426,14 @@ def rebind_family_payoff_witness(
             captured_at_utc=witness.captured_at_utc,
         )
         return replace(witness, bindings=rebound, witness_identity=identity)
+    exact_payoff_witness = (
+        rebind_family_payoff_witness(
+            witness.exact_payoff_witness,
+            bindings=rebound,
+        )
+        if witness.exact_payoff_witness is not None
+        else None
+    )
     identity = joint_probability_witness_identity(
         family_key=witness.family_key,
         bindings=rebound,
@@ -1381,8 +1448,14 @@ def rebind_family_payoff_witness(
         yes_point_q=witness.yes_point_q,
         yes_q_samples=witness.yes_q_samples,
         captured_at_utc=witness.captured_at_utc,
+        exact_payoff_witness=exact_payoff_witness,
     )
-    return replace(witness, bindings=rebound, witness_identity=identity)
+    return replace(
+        witness,
+        bindings=rebound,
+        exact_payoff_witness=exact_payoff_witness,
+        witness_identity=identity,
+    )
 
 
 def reissue_family_payoff_witness(
@@ -1409,6 +1482,15 @@ def reissue_family_payoff_witness(
             captured_at_utc=captured_at_utc,
         )
     else:
+        exact_payoff_witness = (
+            reissue_family_payoff_witness(
+                witness.exact_payoff_witness,
+                authority_certificate_hash=authority_certificate_hash,
+                captured_at_utc=captured_at_utc,
+            )
+            if witness.exact_payoff_witness is not None
+            else None
+        )
         identity = joint_probability_witness_identity(
             family_key=witness.family_key,
             bindings=witness.bindings,
@@ -1423,11 +1505,17 @@ def reissue_family_payoff_witness(
             yes_point_q=witness.yes_point_q,
             yes_q_samples=witness.yes_q_samples,
             captured_at_utc=captured_at_utc,
+            exact_payoff_witness=exact_payoff_witness,
         )
     return replace(
         witness,
         authority_certificate_hash=authority_certificate_hash,
         captured_at_utc=captured_at_utc,
+        **(
+            {"exact_payoff_witness": exact_payoff_witness}
+            if isinstance(witness, JointOutcomeProbabilityWitness)
+            else {}
+        ),
         witness_identity=identity,
     )
 
@@ -2156,16 +2244,15 @@ def global_candidates_from_native(
     ):
         raise ValueError("native condition/token does not own the selected q column")
     if (
-        isinstance(probability_witness, DeterministicBinPayoffWitness)
-        and probability_witness.exact_yes_payoff(binding.bin_id) is None
+        family_exact_yes_payoff(probability_witness, bin_id=binding.bin_id) is None
+        and isinstance(probability_witness, DeterministicBinPayoffWitness)
         and eligibility_reason is None
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
     bids = tuple(native_bid_levels)
-    exact_yes_payoff = (
-        probability_witness.exact_yes_payoff(binding.bin_id)
-        if isinstance(probability_witness, DeterministicBinPayoffWitness)
-        else None
+    exact_yes_payoff = family_exact_yes_payoff(
+        probability_witness,
+        bin_id=binding.bin_id,
     )
     settlement_locked_exact_payoff = exact_yes_payoff is not None and (
         exact_yes_payoff if native.side == "YES" else 1 - exact_yes_payoff
@@ -2479,8 +2566,8 @@ def global_sell_candidate_from_holding(
         return None
     eligibility_reason: GlobalEligibilityReason | None = None
     if (
-        isinstance(probability_witness, DeterministicBinPayoffWitness)
-        and probability_witness.exact_yes_payoff(binding.bin_id) is None
+        family_exact_yes_payoff(probability_witness, bin_id=binding.bin_id) is None
+        and isinstance(probability_witness, DeterministicBinPayoffWitness)
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
     (
@@ -7161,7 +7248,7 @@ def select_global_single_order(
         if (
             payoff_q_correction_resolver is None
             or not isinstance(candidate, GlobalSingleOrderCandidate)
-            or isinstance(witness, DeterministicBinPayoffWitness)
+            or family_exact_yes_payoff(witness, bin_id=candidate.bin_id) is not None
             or candidate.settlement_locked_exact_payoff
         ):
             return None
@@ -7264,6 +7351,11 @@ def select_global_single_order(
         reason: str | None = candidate.eligibility_reason
         q_samples: np.ndarray | None = None
         probability_witness = probability_witnesses.get(candidate.family_key)
+        exact_yes_payoff = (
+            family_exact_yes_payoff(probability_witness, bin_id=candidate.bin_id)
+            if probability_witness is not None
+            else None
+        )
         if reason is None:
             reason = _maker_witness_rejection(
                 candidate, decision_at_utc=decision_at_utc
@@ -7291,16 +7383,9 @@ def select_global_single_order(
             and isinstance(candidate, GlobalSingleOrderCandidate)
             and candidate.settlement_locked_exact_payoff
             and (
-                not isinstance(
-                    probability_witness,
-                    DeterministicBinPayoffWitness,
-                )
-                or family_payoff_point_q(
-                    probability_witness,
-                    bin_id=candidate.bin_id,
-                    side=candidate.side,
-                )
-                != 1.0
+                exact_yes_payoff is None
+                or (exact_yes_payoff if candidate.side == "YES" else 1 - exact_yes_payoff)
+                != 1
             )
         ):
             reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
@@ -7552,15 +7637,15 @@ def select_global_single_order(
             rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
             continue
         probability_witness = probability_witnesses[candidate.family_key]
+        exact_yes_payoff = family_exact_yes_payoff(
+            probability_witness,
+            bin_id=candidate.bin_id,
+        )
         settlement_locked_exact_payoff = (
             candidate.settlement_locked_exact_payoff
-            and isinstance(probability_witness, DeterministicBinPayoffWitness)
-            and family_payoff_point_q(
-                probability_witness,
-                bin_id=candidate.bin_id,
-                side=candidate.side,
-            )
-            == 1.0
+            and exact_yes_payoff is not None
+            and (exact_yes_payoff if candidate.side == "YES" else 1 - exact_yes_payoff)
+            == 1
         )
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:

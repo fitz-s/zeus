@@ -1593,6 +1593,273 @@ def _global_select(
     )
 
 
+def _joint_exact_fixture(
+    *,
+    parent_samples=None,
+    child_exact=(("dead", 0),),
+    child_bindings=None,
+    child_family="joint-exact-family",
+    child_resolution="resolution-joint-exact",
+    child_topology="topology-joint-exact",
+    child_band_alpha=ALPHA,
+    child_captured_at=None,
+    child_max_age=timedelta(seconds=2),
+):
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    bindings = (
+        S.OutcomeTokenBinding(
+            bin_id="dead",
+            condition_id="condition-dead",
+            yes_token_id="yes-dead",
+            no_token_id="no-dead",
+        ),
+        S.OutcomeTokenBinding(
+            bin_id="warm",
+            condition_id="condition-warm",
+            yes_token_id="yes-warm",
+            no_token_id="no-warm",
+        ),
+        S.OutcomeTokenBinding(
+            bin_id="cool",
+            condition_id="condition-cool",
+            yes_token_id="yes-cool",
+            no_token_id="no-cool",
+        ),
+    )
+    samples = (
+        np.tile(np.array([0.0, 0.6, 0.4]), (400, 1))
+        if parent_samples is None
+        else np.ascontiguousarray(parent_samples, dtype=np.float64)
+    )
+    child_bindings = bindings if child_bindings is None else tuple(child_bindings)
+    child_captured_at = captured_at if child_captured_at is None else child_captured_at
+    child_fields = {
+        "family_key": child_family,
+        "bindings": child_bindings,
+        "exact_yes_payoffs": tuple(child_exact),
+        "q_version": "q-day0-exact",
+        "resolution_identity": child_resolution,
+        "topology_identity": child_topology,
+        "posterior_identity_hash": "posterior-day0-exact",
+        "source_truth_identity": "source-day0-exact",
+        "authority_certificate_hash": "certificate-day0-exact",
+        "band_alpha": child_band_alpha,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": child_captured_at,
+    }
+    child = S.DeterministicBinPayoffWitness(
+        **child_fields,
+        max_age=child_max_age,
+        witness_identity=S.deterministic_bin_payoff_witness_identity(**child_fields),
+    )
+    parent_fields = {
+        "family_key": "joint-exact-family",
+        "bindings": bindings,
+        "q_version": "q-joint-statistical",
+        "resolution_identity": "resolution-joint-exact",
+        "topology_identity": "topology-joint-exact",
+        "posterior_identity_hash": "posterior-joint-statistical",
+        "source_truth_identity": "source-joint-statistical",
+        "authority_certificate_hash": "certificate-joint-statistical",
+        "band_alpha": ALPHA,
+        "band_basis": "joint_q_band_samples",
+        "yes_point_q": np.mean(samples, axis=0),
+        "yes_q_samples": samples,
+        "captured_at_utc": captured_at,
+    }
+    parent = S.JointOutcomeProbabilityWitness(
+        **parent_fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=S.joint_probability_witness_identity(
+            **parent_fields,
+            exact_payoff_witness=child,
+        ),
+        exact_payoff_witness=child,
+    )
+    return parent, child, bindings
+
+
+def test_joint_exact_child_none_hash_compatibility_and_content_sealing():
+    parent, child, _bindings = _joint_exact_fixture()
+    fields = {
+        "family_key": parent.family_key,
+        "bindings": parent.bindings,
+        "q_version": parent.q_version,
+        "resolution_identity": parent.resolution_identity,
+        "topology_identity": parent.topology_identity,
+        "posterior_identity_hash": parent.posterior_identity_hash,
+        "source_truth_identity": parent.source_truth_identity,
+        "authority_certificate_hash": parent.authority_certificate_hash,
+        "band_alpha": parent.band_alpha,
+        "band_basis": parent.band_basis,
+        "yes_point_q": parent.yes_point_q,
+        "yes_q_samples": parent.yes_q_samples,
+        "captured_at_utc": parent.captured_at_utc,
+    }
+    assert S.joint_probability_witness_identity(**fields) == S.joint_probability_witness_identity(
+        **fields,
+        exact_payoff_witness=None,
+    )
+    no_child = S.joint_probability_witness_identity(**fields)
+    with_child = S.joint_probability_witness_identity(
+        **fields,
+        exact_payoff_witness=child,
+    )
+    assert with_child != no_child
+    content_fields = {
+        key: value
+        for key, value in fields.items()
+        if key not in {"authority_certificate_hash", "captured_at_utc"}
+    }
+    assert parent.probability_content_identity != S.joint_probability_content_identity(
+        **content_fields
+    )
+    assert parent.exact_payoff_content_identity == child.probability_content_identity
+
+
+@pytest.mark.parametrize(
+    "fixture_kwargs",
+    (
+        {"child_exact": (("dead", 1),)},
+        {
+            "parent_samples": np.tile(
+                np.array([0.1, 0.6, 0.3]),
+                (400, 1),
+            )
+        },
+        {
+            "child_bindings": (
+                S.OutcomeTokenBinding(
+                    bin_id="dead",
+                    condition_id="condition-dead",
+                    yes_token_id="yes-dead-child",
+                    no_token_id="no-dead",
+                ),
+                S.OutcomeTokenBinding(
+                    bin_id="warm",
+                    condition_id="condition-warm",
+                    yes_token_id="yes-warm",
+                    no_token_id="no-warm",
+                ),
+                S.OutcomeTokenBinding(
+                    bin_id="cool",
+                    condition_id="condition-cool",
+                    yes_token_id="yes-cool",
+                    no_token_id="no-cool",
+                ),
+            )
+        },
+        {"child_captured_at": _DECISION_AT},
+        {"child_family": "different-family"},
+        {"child_resolution": "different-resolution"},
+        {"child_topology": "different-topology"},
+        {"child_band_alpha": 0.04},
+        {"child_max_age": timedelta(milliseconds=500)},
+    ),
+)
+def test_joint_exact_child_rejects_mismatched_authority(fixture_kwargs):
+    with pytest.raises(ValueError):
+        _joint_exact_fixture(**fixture_kwargs)
+
+
+def test_joint_exact_child_rebind_reissue_preserve_content_and_identity_parity():
+    parent, child, bindings = _joint_exact_fixture()
+    rebound_bindings = tuple(
+        replace(binding, no_token_id=f"{binding.no_token_id}-current")
+        for binding in bindings
+    )
+    rebound = S.rebind_family_payoff_witness(
+        parent,
+        bindings=rebound_bindings,
+    )
+    assert isinstance(rebound, S.JointOutcomeProbabilityWitness)
+    assert rebound.exact_payoff_witness is not None
+    assert rebound.exact_payoff_witness.exact_yes_payoffs == child.exact_yes_payoffs
+    assert rebound.exact_payoff_witness.source_truth_identity == child.source_truth_identity
+    assert rebound.exact_payoff_content_identity == (
+        rebound.exact_payoff_witness.probability_content_identity
+    )
+    assert rebound.witness_identity != parent.witness_identity
+
+    reissued = S.reissue_family_payoff_witness(
+        rebound,
+        authority_certificate_hash="certificate-reissued",
+        captured_at_utc=parent.captured_at_utc + timedelta(milliseconds=10),
+    )
+    assert isinstance(reissued, S.JointOutcomeProbabilityWitness)
+    assert reissued.exact_payoff_witness is not None
+    assert reissued.exact_payoff_witness.source_truth_identity == child.source_truth_identity
+    assert reissued.exact_payoff_witness.probability_content_identity == (
+        rebound.exact_payoff_witness.probability_content_identity
+    )
+    assert reissued.exact_payoff_content_identity == (
+        reissued.exact_payoff_witness.probability_content_identity
+    )
+    assert reissued.witness_identity != rebound.witness_identity
+
+
+def test_joint_exact_child_selector_skips_only_proved_bin_calibration():
+    witness, _child, bindings = _joint_exact_fixture()
+
+    def native(binding, *, side, token, price):
+        return SimpleNamespace(
+            no_trade_reason=None,
+            executable_cost_curve=_global_curve(
+                side=side,
+                token=token,
+                levels=((price, "100"),),
+                min_order="1",
+            ),
+            family_key=witness.family_key,
+            bin_id=binding.bin_id,
+            condition_id=binding.condition_id,
+            side=side,
+            token_id=token,
+            hypothesis_id=f"buy-{token}",
+        )
+
+    exact = S.global_candidate_from_native(
+        native(bindings[0], side="NO", token="no-dead", price="0.20"),
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=witness.captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=(BookLevel(price=Decimal("0.06"), size=Decimal("100")),),
+    )
+    sibling = S.global_candidate_from_native(
+        native(bindings[1], side="YES", token="yes-warm", price="0.55"),
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=witness.captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=(BookLevel(price=Decimal("0.06"), size=Decimal("100")),),
+    )
+    calibration_calls = []
+    decision = _global_select(
+        (exact, sibling),
+        probability_witnesses={witness.family_key: witness},
+        payoff_q_correction_resolver=lambda candidate, *_args: calibration_calls.append(
+            candidate.candidate_id
+        )
+        or None,
+    )
+    assert S.family_exact_yes_payoff(witness, bin_id="dead") == 0
+    assert decision.candidate == exact
+    assert exact.candidate_id not in calibration_calls
+    assert sibling.candidate_id in calibration_calls
+
+
+def test_joint_statistical_endpoint_does_not_gain_untyped_exact_payoff():
+    statistical = _global_candidate(
+        candidate_id="statistical-q-one",
+        family="statistical-q-one-family",
+        side="YES",
+        q=1.0,
+    )
+    witness = _GLOBAL_PROBABILITY_WITNESSES[statistical.probability_witness_identity]
+    assert S.family_exact_yes_payoff(witness, bin_id=statistical.bin_id) is None
+
+
 def test_global_rejected_buy_detail_failure_does_not_abort_auction(monkeypatch):
     candidate = _global_candidate(
         candidate_id="global-rejected-detail",
