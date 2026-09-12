@@ -3884,6 +3884,61 @@ def test_global_producer_captures_real_hardfact_endpoint():
     assert current["payoff_q_action"] == 1.0
     assert current["raw_calibration_input"]["raw_q_held"] == 1.0
     assert current["raw_calibration_input"]["p0_held"] == pytest.approx(0.35)
+    assert "probability_input_kind" not in current["raw_calibration_input"]
+
+
+@pytest.mark.parametrize("bin_index,side,held_q", [(0, "NO", 1.0), (1, "YES", 0.6)])
+def test_global_producer_marks_only_typed_exact_child_bin(bin_index, side, held_q):
+    from src.solve.solver import family_payoff_point_q, global_candidate_from_native
+    from tests.solve.test_solver_properties import _global_curve, _joint_exact_fixture
+
+    witness, child, bindings = _joint_exact_fixture()
+    binding = bindings[bin_index]
+    acting_q = family_payoff_point_q(witness, bin_id=binding.bin_id, side=side)
+    token = binding.no_token_id if side == "NO" else binding.yes_token_id
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=_global_curve(
+            side=side, token=token, levels=(("0.35", "100"),), min_order="1",
+        ),
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side=side,
+        token_id=token,
+        hypothesis_id=f"capture-{token}",
+    )
+    candidate = global_candidate_from_native(
+        native, probability_witness=witness, ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=witness.captured_at_utc, neg_risk=False,
+    )
+    unit_cost = candidate.economic_cost_curve.avg_cost_for_shares(Decimal("10")).value
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=acting_q, payoff_q_lcb=acting_q,
+        pre_qkernel_q_lcb_5pct=acting_q, cost=unit_cost, edge_lcb=acting_q-unit_cost,
+    )
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=_global_decision(
+            shares="10", cost=str(Decimal(str(unit_cost))*10),
+            q=str(acting_q), candidate=candidate,
+        ),
+        witness=witness,
+    )
+    capture = current["raw_calibration_input"]
+    assert capture["raw_q_held"] == pytest.approx(held_q)
+    assert current["source"] == cert["source"]
+    assert current["market_anchored_correction"] == {"applied": False}
+    if bin_index == 0:
+        assert capture["probability_input_kind"] == "TYPED_EXACT_PAYOFF"
+        assert capture["exact_payoff"] == 1
+        assert capture["exact_payoff_content_identity"] == child.probability_content_identity
+        assert capture["exact_payoff_witness_identity"] == child.witness_identity
+        assert current["false_edge_rate"] > 0
+    else:
+        assert "probability_input_kind" not in capture
+        assert "exact_payoff_content_identity" not in capture
 
 
 def test_raw_calibration_input_is_hashed_but_legacy_hash_remains_compatible():

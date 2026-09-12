@@ -756,6 +756,7 @@ _PROBABILITY_ACTION_CONTENT_FIELDS = (
     "band_alpha",
     "band_basis",
     "sample_matrix_identity",
+    "exact_payoff_content_identity",
 )
 
 

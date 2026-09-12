@@ -8085,25 +8085,37 @@ def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
         fixture.observations.close()
 
 
-def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch):
+@pytest.mark.parametrize("metric,point", [("high", [0.0, 0.6, 0.4]), ("low", [0.4, 0.6, 0.0])])
+@pytest.mark.parametrize("action", ["BUY", "SELL"])
+@pytest.mark.parametrize("selected_unknown", [False, True])
+def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch, metric, point, action, selected_unknown):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
+    from tests.solve.test_solver_properties import _global_candidate, _global_sell_candidate
+    from src.solve.solver import executable_curve_identity, rebind_family_payoff_witness
 
-    fixture = _day0_partial_exact_fixture()
+    fixture = _day0_partial_exact_fixture(metric=metric)
     bundle = _day0_ready_bundle(fixture)
+    fixture.observations.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("Istanbul", "2026-07-11", "ogimet_metar_ltfm", "LTFM",
+         "2026-07-11T12:00:00+03:00", fixture.fact["observation_time"], "UTC",
+         30.0, 30.0, "C", fixture.fact["observation_available_at"],
+         "live", "causal", "settlement", 1, "{}"),
+    )
     monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
     monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": "high", "source": "ogimet_metar_ltfm",
+        "metric": metric, "source": "ogimet_metar_ltfm",
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
     monkeypatch.setattr(era, "_day0_remaining_global_probability_components", lambda *_a, **k: (
-        np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float),
-        np.asarray([0.2, 0.5, 0.3], dtype=float),
+        np.asarray([point] * 400, dtype=float),
+        np.asarray(point, dtype=float),
         era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     ))
     payload = {}
@@ -8120,10 +8132,68 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
             day0_payload_out=payload, cache_metadata_out=metadata,
         )
         assert not isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+        assert isinstance(prepared.probability_witness.exact_payoff_witness, DeterministicBinPayoffWitness)
+        assert len(prepared.probability_witness.exact_payoff_witness.exact_yes_payoffs) == 1
         assert "_edli_day0_deterministic_witness_identity" not in payload
         assert "_edli_day0_exact_yes_payoffs" not in payload
         assert "deterministic_condition_ids_json" not in metadata
-        assert prepared.probability_witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
+        assert prepared.probability_witness.yes_point_q.tolist() == pytest.approx(point)
+        prepared = replace(prepared, probability_witness=rebind_family_payoff_witness(
+            prepared.probability_witness,
+            bindings=tuple(replace(item, no_token_id=f"no-{item.condition_id}")
+                           for item in prepared.probability_witness.bindings),
+        ))
+        index = 1 if selected_unknown else (0 if metric == "high" else 2)
+        binding = prepared.probability_witness.bindings[index]
+        side = "NO" if action == "BUY" else "YES"
+        token = binding.no_token_id if side == "NO" else binding.yes_token_id
+        held_q = 1-point[index] if side == "NO" else point[index]
+        candidate_args = {
+            "candidate_id": "revalidate-exact", "family": prepared.probability_witness.family_key,
+            "side": side,
+        }
+        candidate = (
+            _global_candidate(**candidate_args, q=held_q)
+            if action == "BUY" else
+            _global_sell_candidate(**candidate_args, held_q=held_q, bids=(("0.40", "10"),))
+        )
+        curve = replace(
+            candidate.executable_cost_curve if action == "BUY" else candidate.executable_sell_curve,
+            token_id=token,
+        )
+        curve_fields = (
+            {"executable_cost_curve": curve} if action == "BUY" else
+            {"executable_sell_curve": curve, "proposal_sell_curve": replace(
+                candidate.proposal_sell_curve, token_id=token,
+            )}
+        )
+        candidate = replace(
+            candidate, condition_id=binding.condition_id, bin_id=binding.bin_id,
+            token_id=token,
+            execution_curve_identity=executable_curve_identity(curve),
+            probability_witness_identity=prepared.probability_witness.witness_identity,
+            **curve_fields,
+        )
+        actuation = SimpleNamespace(
+            probability_witness=prepared.probability_witness,
+            decision=SimpleNamespace(candidate=candidate),
+        )
+        rebound, current_payload = era._current_global_actuation_prepared_family(
+            fixture.event, global_actuation=actuation,
+            forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+            observation_conn=fixture.observations,
+            decision_time=fixture.decision_at,
+        )
+        assert rebound.probability_witness is prepared.probability_witness
+        assert "_edli_day0_deterministic_witness_identity" not in current_payload
+        monkeypatch.setattr(era, "_prepare_current_day0_exact_family", lambda *_a, **_k: None)
+        with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+            era._current_global_actuation_prepared_family(
+                fixture.event, global_actuation=actuation,
+                forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+                observation_conn=fixture.observations,
+                decision_time=fixture.decision_at,
+            )
     finally:
         fixture.forecast.close()
         fixture.observations.close()
@@ -39731,3 +39801,57 @@ def test_global_current_economics_seals_scope_without_refitting_q():
     )
     assert current["payoff_q_action"] == pytest.approx(.52)
     assert current["market_anchored_correction"]["fit_scope"] == scope.as_payload()
+
+
+@pytest.mark.parametrize("change", ("removed", "source"))
+def test_joint_exact_fact_change_invalidates_all_action_content_comparisons(change):
+    from tests.solve.test_solver_properties import _joint_exact_fixture
+    from src.solve.solver import deterministic_bin_payoff_witness_identity, joint_probability_witness_identity
+
+    selected, child, _ = _joint_exact_fixture()
+    if change == "removed":
+        changed_child = None
+    else:
+        child_fields = dict(vars(child))
+        child_fields.pop("max_age")
+        child_fields.pop("witness_identity")
+        child_fields["source_truth_identity"] = "changed-source-proof"
+        changed_child = DeterministicBinPayoffWitness(
+            **child_fields, max_age=child.max_age,
+            witness_identity=deterministic_bin_payoff_witness_identity(**child_fields),
+        )
+    fields = dict(vars(selected))
+    fields.pop("max_age")
+    fields.pop("witness_identity")
+    fields["exact_payoff_witness"] = changed_child
+    changed = JointOutcomeProbabilityWitness(
+        **fields, max_age=selected.max_age,
+        witness_identity=joint_probability_witness_identity(**fields),
+    )
+    assert np.array_equal(selected.yes_q_samples, changed.yes_q_samples)
+    for compare in (
+        era._global_probability_witness_content_mismatches,
+        era._global_probability_action_content_mismatches,
+        global_batch_runtime._probability_action_content_mismatches,
+    ):
+        assert "exact_payoff_content_identity" in compare(selected, changed)
+
+
+def test_joint_exact_fact_is_not_reissued_by_probability_cache(monkeypatch):
+    from tests.solve.test_solver_properties import _joint_exact_fixture
+
+    parent, _, _ = _joint_exact_fixture()
+    prepared = SimpleNamespace(probability_witness=parent, candidate_payoff_q_lcb_caps=())
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    era._store_global_probability_family_cache(
+        "namespace", family_key=parent.family_key, event_id="event",
+        family_binding_hash="binding", prepared=prepared,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
+    )
+    assert era._GLOBAL_PROBABILITY_FAMILY_CACHE == {}
+    with pytest.raises(ValueError, match="EXACT_FACT_RECHECK_REQUIRED"):
+        era._reissue_cached_global_probability_family(
+            prepared, event_id="event", causal_snapshot_id="snapshot",
+            family_binding_hash="binding", captured_at_utc=parent.captured_at_utc,
+        )

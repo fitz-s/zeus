@@ -1169,6 +1169,8 @@ def _reissue_cached_global_probability_family(
     if tuple(getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ()):
         raise ValueError("GLOBAL_PROBABILITY_CACHE_TIME_DEPENDENT")
     witness = getattr(prepared, "probability_witness", None)
+    if getattr(witness, "exact_payoff_witness", None) is not None:
+        raise ValueError("GLOBAL_PROBABILITY_CACHE_EXACT_FACT_RECHECK_REQUIRED")
     previous_at = getattr(witness, "captured_at_utc", None)
     if (
         witness is None
@@ -1270,6 +1272,7 @@ def _store_global_probability_family_cache(
         or not event_id
         or not family_binding_hash
         or tuple(getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ())
+        or getattr(getattr(prepared, "probability_witness", None), "exact_payoff_witness", None) is not None
     ):
         return
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
@@ -15463,7 +15466,7 @@ def _global_preflight_entry_jit_receipt(
         if shares <= 0:
             raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
         from src.solve.solver import (
-            DeterministicBinPayoffWitness,
+            family_exact_yes_payoff,
             ExpectedBuyTerminalWealthCertificate,
             current_precliff_liquidation_capacity,
         )
@@ -15482,8 +15485,11 @@ def _global_preflight_entry_jit_receipt(
         )
         expected_terminal = getattr(decision, "expected_terminal_wealth", None)
         witness = getattr(global_actuation, "probability_witness", None)
+        exact_yes_payoff = family_exact_yes_payoff(
+            witness, bin_id=str(getattr(candidate, "bin_id", "") or ""),
+        )
         binding = None
-        if isinstance(witness, DeterministicBinPayoffWitness):
+        if exact_yes_payoff is not None:
             binding = next(
                 (
                     item
@@ -15500,12 +15506,6 @@ def _global_preflight_entry_jit_receipt(
             if binding is not None and side == "NO"
             else None
         )
-        exact_yes_payoff = (
-            witness.exact_yes_payoff(binding.bin_id)
-            if isinstance(witness, DeterministicBinPayoffWitness)
-            and binding is not None
-            else None
-        )
         exact_held_payoff = (
             exact_yes_payoff == 1
             if side == "YES"
@@ -15514,12 +15514,12 @@ def _global_preflight_entry_jit_receipt(
             else False
         )
         witness_fresh = (
-            isinstance(witness, DeterministicBinPayoffWitness)
+            exact_yes_payoff is not None
             and witness.captured_at_utc <= mode_checked_at
             and mode_checked_at <= witness.captured_at_utc + witness.max_age
         )
         typed_exact_payoff_binding = (
-            isinstance(witness, DeterministicBinPayoffWitness)
+            exact_yes_payoff is not None
             and binding is not None
             and witness_fresh
             and witness.family_key == str(getattr(candidate, "family_key", "") or "")
@@ -15933,6 +15933,7 @@ def _global_current_state_execution_economics(
         GlobalSingleOrderCandidate,
         _lower_cvar,
         family_payoff_point_q,
+        family_exact_yes_payoff,
         family_payoff_q_samples,
         executable_curve_identity,
     )
@@ -16355,6 +16356,19 @@ def _global_current_state_execution_economics(
                 else None
             ),
         }
+    if isinstance(candidate, GlobalSingleOrderCandidate):
+        exact_yes = family_exact_yes_payoff(witness, bin_id=candidate.bin_id)
+        if exact_yes is not None:
+            exact_witness = (
+                witness if isinstance(witness, DeterministicBinPayoffWitness)
+                else witness.exact_payoff_witness
+            )
+            current["raw_calibration_input"].update({
+                "probability_input_kind": "TYPED_EXACT_PAYOFF",
+                "exact_payoff_content_identity": exact_witness.probability_content_identity,
+                "exact_payoff_witness_identity": exact_witness.witness_identity,
+                "exact_payoff": exact_yes if side == "YES" else 1 - exact_yes,
+            })
     current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         current
     )
@@ -17041,6 +17055,7 @@ def _global_actuation_selected_proof(
         "band_alpha",
         "band_basis",
         "sample_matrix_identity",
+        "exact_payoff_content_identity",
     )
     if any(
         getattr(prepared_witness, field, None) != getattr(witness, field, None)
@@ -17906,7 +17921,10 @@ def _current_global_actuation_prepared_family(
         # liquidate a claim that current hard fact proves will pay $1.
         allow_partial_deterministic=(
             isinstance(selected, DeterministicBinPayoffWitness)
-            or probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+            or (
+                probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+                and getattr(selected, "exact_payoff_witness", None) is None
+            )
         ),
         allow_unobserved_day0_replacement=(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
@@ -36446,6 +36464,7 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
     "band_alpha",
     "band_basis",
     "sample_matrix_identity",
+    "exact_payoff_content_identity",
 )
 
 _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS = (
@@ -36455,6 +36474,7 @@ _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS = (
     "band_alpha",
     "band_basis",
     "sample_matrix_identity",
+    "exact_payoff_content_identity",
 )
 
 
@@ -40685,6 +40705,16 @@ def _prepare_current_global_probability_family(
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
+    exact_payoff_witness = None
+    if current_day0_payload is not None:
+        exact_family = _prepare_current_day0_exact_family(
+            event, family=family, observation_conn=day0_observation_conn,
+            settlement_fact=settlement_day0_fact, physical_fact=physical_day0_fact,
+            decision_time=decision_time, max_age=max_age,
+            required_condition_id=None, day0_payload_out=None, cache_metadata_out=None,
+        )
+        if exact_family is not None:
+            exact_payoff_witness = exact_family.probability_witness
     sample_identity = probability_sample_matrix_identity(samples)
     if current_day0_payload is not None:
         from src.events.day0_authority import (
@@ -40861,6 +40891,7 @@ def _prepare_current_global_probability_family(
         yes_point_q=point_q,
         yes_q_samples=samples,
         captured_at_utc=decision_time,
+        exact_payoff_witness=exact_payoff_witness,
     )
     witness = JointOutcomeProbabilityWitness(
         family_key=family.family_id,
@@ -40876,6 +40907,7 @@ def _prepare_current_global_probability_family(
         band_alpha=alpha,
         band_basis=band_basis,
         captured_at_utc=decision_time,
+        exact_payoff_witness=exact_payoff_witness,
         max_age=max_age,
         witness_identity=witness_identity,
     )
