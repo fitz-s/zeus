@@ -6271,6 +6271,7 @@ def _market_anchored_correction_resolver(
             param_hash=artifact.param_hash,
             calibration_policy=provider.calibration_policy,
             fit_scope=scope,
+            training_manifest=artifact.training_manifest,
         )
 
     def resolve(candidate, raw_q: float, p0: float, decision_at_utc: datetime):

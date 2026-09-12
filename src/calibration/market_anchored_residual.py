@@ -47,6 +47,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from src.decision_kernel.canonicalization import stable_hash
+from src.contracts.payoff_q_correction import CanonicalTrainingManifest
 
 _LOG = logging.getLogger(__name__)
 
@@ -173,6 +174,30 @@ class ResidualCalibratorArtifact:
     param_hash: str
     lead_calendar_revision: str = UNBOUND_LEAD_CALENDAR_REVISION
     city_timezone_snapshot: tuple[tuple[str, str], ...] = ()
+    training_manifest: CanonicalTrainingManifest | None = None
+
+    def __post_init__(self) -> None:
+        if self.training_manifest is None:
+            return
+        if not isinstance(self.training_manifest, CanonicalTrainingManifest):
+            raise TypeError("training_manifest must be CanonicalTrainingManifest or None")
+        try:
+            artifact_cutoff = datetime.fromisoformat(
+                self.training_cutoff.replace("Z", "+00:00")
+            )
+            manifest_cutoff = datetime.fromisoformat(
+                self.training_manifest.training_cutoff.replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("training manifest cutoff is invalid") from exc
+        if (
+            artifact_cutoff.tzinfo is None
+            or manifest_cutoff.tzinfo is None
+            or artifact_cutoff.astimezone(timezone.utc)
+            != manifest_cutoff.astimezone(timezone.utc)
+            or self.training_manifest.row_count != self.n_train
+        ):
+            raise ValueError("training manifest does not match artifact")
 
     def predict(self, p0: float, q_raw: float, lead_bucket: str | None) -> float | None:
         return apply_artifact(self, p0, q_raw, lead_bucket)
@@ -306,6 +331,7 @@ def fit(
     training_cutoff: str,
     lead_calendar_revision: str = UNBOUND_LEAD_CALENDAR_REVISION,
     city_timezone_snapshot: tuple[tuple[str, str], ...] = (),
+    training_manifest: CanonicalTrainingManifest | None = None,
 ) -> ResidualCalibratorArtifact:
     """Fit one artifact at a fixed lambda on the given rows.
 
@@ -313,6 +339,10 @@ def fit(
     excluded and counted in the returned artifact's excluded_reasons —
     never silently dropped, never crash the fit.
     """
+    if training_manifest is not None and not isinstance(
+        training_manifest, CanonicalTrainingManifest
+    ):
+        raise TypeError("training_manifest must be CanonicalTrainingManifest or None")
     lead_buckets = (
         LEGACY_LEAD_BUCKETS
         if lead_calendar_revision == LEGACY_LEAD_CALENDAR_REVISION
@@ -339,6 +369,16 @@ def fit(
         design_rows.append(built)
 
     n_excluded = sum(excluded_reasons.values())
+    if training_manifest is not None:
+        if training_manifest.row_count != len(design_rows):
+            raise ValueError("training manifest row count does not match fit")
+        if not math.isclose(
+            training_manifest.weight_sum,
+            math.fsum(row[3] for row in design_rows),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("training manifest weight does not match fit")
     if not design_rows:
         alpha = {bucket: 0.0 for bucket in lead_buckets}
         beta = 0.0
@@ -390,6 +430,7 @@ def fit(
         param_hash=param_hash,
         lead_calendar_revision=lead_calendar_revision,
         city_timezone_snapshot=city_timezone_snapshot,
+        training_manifest=training_manifest,
     )
 
 

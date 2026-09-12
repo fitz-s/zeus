@@ -1,7 +1,7 @@
 """City-local calendar identity tests for market-anchored correction."""
 
 # Created: 2026-09-08
-# Last reused or audited: 2026-09-10
+# Last reused or audited: 2026-09-11
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
@@ -305,10 +305,30 @@ def test_resolver_snapshots_all_runtime_cities(monkeypatch):
     }
 
 
-def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch):
+@pytest.mark.parametrize("with_manifest", [False, True])
+def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch, with_manifest):
     artifact = _artifact(
         snapshot=(("New York", "America/New_York"), ("Tokyo", "Asia/Tokyo"))
     )
+    if with_manifest:
+        from dataclasses import replace
+        from src.contracts.payoff_q_correction import CanonicalTrainingManifest
+
+        scope = CalibrationFitScope(
+            "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "fixture-revision-v1",
+        )
+        manifest = CanonicalTrainingManifest.build(
+            scope_hash=scope.as_payload()["scope_hash"],
+            corpus_revision="fixture-corpus-v1",
+            training_cutoff=artifact.training_cutoff,
+            row_count=artifact.n_train,
+            event_count=artifact.n_train,
+            weight_sum=float(artifact.n_train),
+            max_fill_available_at="2025-12-30T00:00:00Z",
+            max_label_available_at="2025-12-31T00:00:00Z",
+            input_hash="a" * 64,
+        )
+        artifact = replace(artifact, training_manifest=manifest)
 
     class StubProvider:
         calibration_policy = CalibrationPolicySpec(
@@ -365,6 +385,11 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch)
     assert ny_correction.calibration_policy is StubProvider.calibration_policy
     assert ny_correction.as_cert_fields()["calibration_policy"] == (
         StubProvider.calibration_policy.as_payload()
+    )
+    assert ny_correction.training_manifest is artifact.training_manifest
+    assert tokyo_correction.training_manifest is artifact.training_manifest
+    assert ny_correction.as_cert_fields().get("training_manifest") == (
+        artifact.training_manifest.as_payload() if with_manifest else None
     )
 
     fixed_now = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)

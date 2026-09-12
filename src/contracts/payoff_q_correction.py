@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 def _finite_number(value: object) -> bool:
@@ -264,6 +265,183 @@ class CalibrationPolicySpec:
 
 
 @dataclass(frozen=True)
+class CanonicalTrainingManifest:
+    """Constant-size commitment to the canonical rows used by one fit."""
+
+    scope_hash: str
+    corpus_revision: str
+    training_cutoff: str
+    row_count: int
+    event_count: int
+    weight_sum: float
+    max_fill_available_at: str
+    max_label_available_at: str
+    availability_upper_bound: str
+    input_hash: str
+    manifest_hash: str
+
+    _TYPE = "CanonicalTrainingManifest"
+    _VERSION = 1
+
+    @staticmethod
+    def _timestamp(value: object, *, name: str) -> datetime:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"canonical training manifest {name} is invalid")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"canonical training manifest {name} is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"canonical training manifest {name} is invalid")
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _finite(value: object) -> bool:
+        return type(value) in (int, float) and math.isfinite(float(value))
+
+    @staticmethod
+    def _hash_value(value: object) -> bool:
+        if not isinstance(value, str) or len(value) != 64:
+            return False
+        return all(character in "0123456789abcdef" for character in value)
+
+    def __post_init__(self) -> None:
+        if (
+            not self._hash_value(self.scope_hash)
+            or not isinstance(self.corpus_revision, str)
+            or not self.corpus_revision.strip()
+            or not self._hash_value(self.input_hash)
+            or not self._hash_value(self.manifest_hash)
+        ):
+            raise ValueError("canonical training manifest identity is invalid")
+        cutoff = self._timestamp(self.training_cutoff, name="training_cutoff")
+        fill_at = self._timestamp(self.max_fill_available_at, name="max_fill_available_at")
+        label_at = self._timestamp(self.max_label_available_at, name="max_label_available_at")
+        upper = self._timestamp(self.availability_upper_bound, name="availability_upper_bound")
+        if max(fill_at, label_at) != upper or upper >= cutoff:
+            raise ValueError("canonical training manifest availability is invalid")
+        if type(self.row_count) is not int or self.row_count <= 0:
+            raise ValueError("canonical training manifest row_count is invalid")
+        if type(self.event_count) is not int or self.event_count <= 0 or self.event_count > self.row_count:
+            raise ValueError("canonical training manifest event_count is invalid")
+        if not self._finite(self.weight_sum) or self.weight_sum <= 0:
+            raise ValueError("canonical training manifest weight_sum is invalid")
+        object.__setattr__(self, "training_cutoff", cutoff.isoformat().replace("+00:00", "Z"))
+        object.__setattr__(self, "max_fill_available_at", fill_at.isoformat().replace("+00:00", "Z"))
+        object.__setattr__(self, "max_label_available_at", label_at.isoformat().replace("+00:00", "Z"))
+        object.__setattr__(self, "availability_upper_bound", upper.isoformat().replace("+00:00", "Z"))
+        body = {
+            "type": self._TYPE,
+            "version": self._VERSION,
+            "scope_hash": self.scope_hash,
+            "corpus_revision": self.corpus_revision,
+            "training_cutoff": self.training_cutoff,
+            "row_count": self.row_count,
+            "event_count": self.event_count,
+            "weight_sum": self.weight_sum,
+            "max_fill_available_at": self.max_fill_available_at,
+            "max_label_available_at": self.max_label_available_at,
+            "availability_upper_bound": self.availability_upper_bound,
+            "input_hash": self.input_hash,
+        }
+        if self.manifest_hash != self._hash(body):
+            raise ValueError("canonical training manifest hash is invalid")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "type": self._TYPE,
+            "version": self._VERSION,
+            "scope_hash": self.scope_hash,
+            "corpus_revision": self.corpus_revision,
+            "training_cutoff": self.training_cutoff,
+            "row_count": self.row_count,
+            "event_count": self.event_count,
+            "weight_sum": self.weight_sum,
+            "max_fill_available_at": self.max_fill_available_at,
+            "max_label_available_at": self.max_label_available_at,
+            "availability_upper_bound": self.availability_upper_bound,
+            "input_hash": self.input_hash,
+            "manifest_hash": self.manifest_hash,
+        }
+
+    @classmethod
+    def build(
+        cls, *, scope_hash: str, corpus_revision: str, training_cutoff: str,
+        row_count: int, event_count: int, weight_sum: float,
+        max_fill_available_at: str, max_label_available_at: str, input_hash: str,
+    ) -> "CanonicalTrainingManifest":
+        cutoff = cls._timestamp(training_cutoff, name="training_cutoff")
+        fill_at = cls._timestamp(max_fill_available_at, name="max_fill_available_at")
+        label_at = cls._timestamp(max_label_available_at, name="max_label_available_at")
+        upper = max(fill_at, label_at)
+        body = {
+            "type": cls._TYPE,
+            "version": cls._VERSION,
+            "scope_hash": scope_hash,
+            "corpus_revision": corpus_revision,
+            "training_cutoff": cutoff.isoformat().replace("+00:00", "Z"),
+            "row_count": row_count,
+            "event_count": event_count,
+            "weight_sum": weight_sum,
+            "max_fill_available_at": fill_at.isoformat().replace("+00:00", "Z"),
+            "max_label_available_at": label_at.isoformat().replace("+00:00", "Z"),
+            "availability_upper_bound": upper.isoformat().replace("+00:00", "Z"),
+            "input_hash": input_hash,
+        }
+        return cls(
+            scope_hash=scope_hash,
+            corpus_revision=corpus_revision,
+            training_cutoff=body["training_cutoff"],
+            row_count=row_count,
+            event_count=event_count,
+            weight_sum=weight_sum,
+            max_fill_available_at=body["max_fill_available_at"],
+            max_label_available_at=body["max_label_available_at"],
+            availability_upper_bound=body["availability_upper_bound"],
+            input_hash=input_hash,
+            manifest_hash=cls._hash(body),
+        )
+
+    @staticmethod
+    def _hash(payload: dict[str, object]) -> str:
+        from src.decision_kernel.canonicalization import stable_hash
+        return stable_hash(payload)
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "CanonicalTrainingManifest":
+        if not isinstance(payload, dict):
+            raise ValueError("canonical training manifest payload must be an object")
+        expected = {
+            "type", "version", "scope_hash", "corpus_revision", "training_cutoff",
+            "row_count", "event_count", "weight_sum", "max_fill_available_at",
+            "max_label_available_at", "availability_upper_bound", "input_hash", "manifest_hash",
+        }
+        if (
+            set(payload) != expected
+            or payload.get("type") != cls._TYPE
+            or type(payload.get("version")) is not int
+            or payload.get("version") != cls._VERSION
+        ):
+            raise ValueError("canonical training manifest payload fields are invalid")
+        manifest_hash = payload.get("manifest_hash")
+        body = {key: payload[key] for key in expected if key != "manifest_hash"}
+        if not isinstance(manifest_hash, str) or manifest_hash != cls._hash(body):
+            raise ValueError("canonical training manifest hash is invalid")
+        manifest = cls(
+            scope_hash=payload["scope_hash"], corpus_revision=payload["corpus_revision"],
+            training_cutoff=payload["training_cutoff"], row_count=payload["row_count"],
+            event_count=payload["event_count"], weight_sum=payload["weight_sum"],
+            max_fill_available_at=payload["max_fill_available_at"],
+            max_label_available_at=payload["max_label_available_at"],
+            availability_upper_bound=payload["availability_upper_bound"],
+            input_hash=payload["input_hash"], manifest_hash=manifest_hash,
+        )
+        if manifest.as_payload() != payload:
+            raise ValueError("canonical training manifest payload is not canonical")
+        return manifest
+
+
+@dataclass(frozen=True)
 class PayoffQCorrection:
     """One candidate's market-anchored correction, sealed at solve time.
 
@@ -294,6 +472,7 @@ class PayoffQCorrection:
     param_hash: str
     calibration_policy: CalibrationPolicySpec | None = None
     fit_scope: CalibrationFitScope | None = None
+    training_manifest: CanonicalTrainingManifest | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -331,6 +510,26 @@ class PayoffQCorrection:
             self.fit_scope, CalibrationFitScope
         ):
             raise TypeError("payoff q correction fit scope is invalid")
+        if self.training_manifest is not None and not isinstance(
+            self.training_manifest, CanonicalTrainingManifest
+        ):
+            raise TypeError("payoff q correction training manifest is invalid")
+        if self.training_manifest is not None:
+            if self.fit_scope is None:
+                raise ValueError("payoff q correction training manifest requires fit scope")
+            if self.training_manifest.scope_hash != self.fit_scope.as_payload()["scope_hash"]:
+                raise ValueError("payoff q correction training manifest scope is unbound")
+            try:
+                correction_cutoff = CanonicalTrainingManifest._timestamp(
+                    self.training_cutoff, name="training_cutoff"
+                )
+                manifest_cutoff = CanonicalTrainingManifest._timestamp(
+                    self.training_manifest.training_cutoff, name="training_cutoff"
+                )
+            except ValueError as exc:
+                raise ValueError("payoff q correction training manifest cutoff is invalid") from exc
+            if correction_cutoff != manifest_cutoff or self.n_train != self.training_manifest.row_count:
+                raise ValueError("payoff q correction training manifest does not match correction")
 
     def matches(
         self, *, family_key: str, bin_id: str, side: str, token_id: str
@@ -365,4 +564,6 @@ class PayoffQCorrection:
             fields["calibration_policy"] = self.calibration_policy.as_payload()
         if self.fit_scope is not None:
             fields["fit_scope"] = self.fit_scope.as_payload()
+        if self.training_manifest is not None:
+            fields["training_manifest"] = self.training_manifest.as_payload()
         return fields

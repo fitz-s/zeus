@@ -57,7 +57,11 @@ from src.calibration.market_anchored_residual import (
     legacy_lead_bucket_of,
     lead_bucket_of,
 )
-from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
+from src.contracts.payoff_q_correction import (
+    CalibrationFitScope,
+    CalibrationPolicySpec,
+    CanonicalTrainingManifest,
+)
 
 # One fit serves this long before a refit is attempted. Six hours matches the
 # forecast cycle interval (00/06/12/18Z): settled rows arrive in bursts tied to
@@ -522,10 +526,10 @@ class CanonicalFitCorpus:
     revision: str = CANONICAL_CORPUS_REVISION
     command_accounting: tuple[Mapping[str, object], ...] = ()
 
-    def fit_rows(
+    def _fit_selection(
         self, *, metric: str, execution_mode: str, probability_revision: str,
         execution_contract: str,
-    ) -> list[FitRow]:
+    ) -> tuple[list[Mapping[str, object]], list[FitRow]]:
         """Keep HIGH/LOW and execution policies separate; normalize each event."""
         if metric not in {"high", "low"}:
             raise ValueError("unsupported metric")
@@ -547,13 +551,105 @@ class CanonicalFitCorpus:
             totals[record["event_key"]] += record["confirmed_shares"]
         # The serving transform applies the artifact in YES-event space.
         # Complement NO inputs AND label together, never just the prediction.
-        return [FitRow(
+        rows = [FitRow(
             p0=r["p0"] if r["side"] == "YES" else 1 - r["p0"],
             q_raw=r["q_raw"] if r["side"] == "YES" else 1 - r["q_raw"],
             y=r["payout"] if r["side"] == "YES" else 1 - r["payout"],
             lead_bucket=r["lead_bucket"],
             w=r["confirmed_shares"] / totals[r["event_key"]],
         ) for r in records]
+        return records, rows
+
+    def fit_rows(
+        self, *, metric: str, execution_mode: str, probability_revision: str,
+        execution_contract: str,
+    ) -> list[FitRow]:
+        return self._fit_selection(
+            metric=metric, execution_mode=execution_mode,
+            probability_revision=probability_revision,
+            execution_contract=execution_contract,
+        )[1]
+
+    def training_manifest(
+        self, *, scope: CalibrationFitScope,
+    ) -> CanonicalTrainingManifest:
+        """Describe precisely the normalized rows returned by ``fit_rows``."""
+        if not isinstance(scope, CalibrationFitScope):
+            raise TypeError("canonical training manifest scope is invalid")
+        records, rows = self._fit_selection(
+            metric=scope.metric, execution_mode=scope.execution_mode,
+            probability_revision=scope.raw_probability_revision,
+            execution_contract=scope.execution_contract,
+        )
+        if len(records) != len(rows) or not records:
+            raise ValueError("canonical training manifest rows are not aligned")
+        manifest_rows: list[dict[str, object]] = []
+        for record, row in zip(records, rows, strict=True):
+            identity_fields = (
+                record.get("command_id"), record.get("certificate_hash"),
+                record.get("condition_id"), record.get("token_id"),
+                record.get("side"), row.lead_bucket,
+            )
+            event_key = record.get("event_key")
+            if (
+                not all(isinstance(value, str) and value.strip() for value in identity_fields)
+                or record.get("side") not in {"YES", "NO"}
+                or not isinstance(event_key, tuple) or len(event_key) != 3
+                or not all(isinstance(value, str) and value.strip() for value in event_key)
+                or not all(
+                    type(value) in (int, float) and math.isfinite(float(value))
+                    for value in (row.p0, row.q_raw, row.w, row.y)
+                )
+                or not 0.0 <= float(row.p0) <= 1.0
+                or not 0.0 <= float(row.q_raw) <= 1.0
+                or float(row.y) not in {0.0, 1.0}
+                or float(row.w) <= 0.0
+            ):
+                raise ValueError("canonical training manifest row is not aligned")
+            fill_at = _parse_ts(record.get("fill_available_at"))
+            label_at = _parse_ts(record.get("payout_available_at"))
+            if fill_at is None or label_at is None:
+                raise ValueError("canonical training manifest availability is unavailable")
+            available_at = max(fill_at, label_at)
+            manifest_rows.append({
+                "command_id": str(record.get("command_id") or ""),
+                "certificate_hash": str(record.get("certificate_hash") or ""),
+                "condition_id": str(record.get("condition_id") or ""),
+                "token_id": str(record.get("token_id") or ""),
+                "side": str(record.get("side") or ""),
+                "event_key": [str(item) for item in event_key],
+                "lead_bucket": str(row.lead_bucket or ""),
+                "p0": float(row.p0),
+                "q_raw": float(row.q_raw),
+                "label": int(row.y),
+                "weight": float(row.w),
+                "fill_available_at": fill_at.isoformat().replace("+00:00", "Z"),
+                "label_available_at": label_at.isoformat().replace("+00:00", "Z"),
+                "availability_upper_bound": available_at.isoformat().replace("+00:00", "Z"),
+            })
+        # IRLS consumes this sequence; floating-point reductions depend on it.
+        ordered = tuple(manifest_rows)
+        from src.decision_kernel.canonicalization import stable_hash
+        input_hash = stable_hash({"rows": [dict(row) for row in ordered]})
+        fill_available = max(
+            _parse_ts(row["fill_available_at"]) for row in ordered
+        )
+        label_available = max(
+            _parse_ts(row["label_available_at"]) for row in ordered
+        )
+        if fill_available is None or label_available is None:
+            raise ValueError("canonical training manifest availability is unavailable")
+        return CanonicalTrainingManifest.build(
+            scope_hash=scope.as_payload()["scope_hash"],
+            corpus_revision=self.revision,
+            training_cutoff=self.training_cutoff,
+            row_count=len(ordered),
+            event_count=len({tuple(row["event_key"]) for row in ordered}),
+            weight_sum=math.fsum(float(row["weight"]) for row in ordered),
+            max_fill_available_at=fill_available.isoformat().replace("+00:00", "Z"),
+            max_label_available_at=label_available.isoformat().replace("+00:00", "Z"),
+            input_hash=input_hash,
+        )
 
 
 
@@ -614,7 +710,9 @@ def _command_accounting(command, fills, pair, *, conn, cutoff, schema,
                net_markout_per_share_numerator=None, net_markout_per_share_denominator=None,
                endpoint_available_at=None, physical_endpoint_status="UNKNOWN",
                physical_endpoint_reason=None, calibration_evidence_reason=None,
-               calibration_policy=None, calibration_policy_reason=None)
+               calibration_policy=None, calibration_policy_reason=None,
+               calibration_training_manifest=None,
+               calibration_training_manifest_reason="CALIBRATION_EVIDENCE_NOT_EVALUATED")
     reasons = []
     if command.get("order_side") != "BUY":
         reasons.append("ENTRY_SIDE_UNSUPPORTED_FOR_BUY_MARKOUT")
@@ -891,6 +989,51 @@ def _sealed_calibration_policy(
     ):
         return None, "CALIBRATION_POLICY_INVALID"
     return policy.as_payload(), None
+
+
+def _sealed_training_manifest(
+    correction: Mapping[str, object], *,
+    calibration_policy: dict[str, object] | None,
+    decision_at: datetime | None,
+    scope: CalibrationFitScope,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Validate a decision's training commitment, not its OOS profitability.
+
+    The canonical certificate reader authenticates the containing decision.
+    A consumer must still reproduce the committed inputs and prove the frozen
+    evaluation cohort, endpoints and controls before granting entry authority.
+    """
+    if correction.get("applied") is not True:
+        return None, "CALIBRATION_NOT_APPLIED"
+    if calibration_policy is None:
+        return None, "CALIBRATION_POLICY_UNAVAILABLE"
+    if correction.get("training_manifest") is None:
+        return None, "CALIBRATION_TRAINING_MANIFEST_MISSING"
+    try:
+        policy = CalibrationPolicySpec.from_payload(calibration_policy)
+        manifest = CanonicalTrainingManifest.from_payload(correction["training_manifest"])
+        sealed_scope = CalibrationFitScope.from_payload(correction.get("fit_scope"))
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None, "CALIBRATION_TRAINING_MANIFEST_INVALID"
+    if (
+        policy.input_revision != CANONICAL_CALIBRATION_INPUT_REVISION
+        or policy.metric_pooling != CANONICAL_CALIBRATION_METRIC_POOLING
+        or manifest.corpus_revision != CANONICAL_CORPUS_REVISION
+    ):
+        return None, "CALIBRATION_TRAINING_MANIFEST_REVISION_MISMATCH"
+    if sealed_scope != scope or manifest.scope_hash != scope.as_payload()["scope_hash"]:
+        return None, "CALIBRATION_TRAINING_MANIFEST_SCOPE_MISMATCH"
+    cutoff = _parse_ts(correction.get("training_cutoff"))
+    if cutoff is None or cutoff != _parse_ts(manifest.training_cutoff):
+        return None, "CALIBRATION_TRAINING_MANIFEST_CUTOFF_MISMATCH"
+    if (
+        decision_at is None or decision_at.tzinfo is None
+        or decision_at.utcoffset() is None or cutoff > decision_at
+    ):
+        return None, "CALIBRATION_TRAINING_MANIFEST_DECISION_CLOCK_UNBOUND"
+    if type(correction.get("n_train")) is not int or correction["n_train"] != manifest.row_count:
+        return None, "CALIBRATION_TRAINING_MANIFEST_COUNT_MISMATCH"
+    return manifest.as_payload(), None
 
 
 def load_canonical_fit_corpus(
@@ -1666,6 +1809,20 @@ def load_canonical_fit_corpus(
         held = next(row for row in pair if row["outcome_index"] == outcome_index)
         accounting_row["calibration_policy"] = calibration_policy_payload
         accounting_row["calibration_policy_reason"] = calibration_policy_reason
+        training_manifest, training_manifest_reason = (None, "CALIBRATION_FIT_SCOPE_UNAVAILABLE")
+        if raw_probability_revision:
+            training_manifest, training_manifest_reason = _sealed_training_manifest(
+                correction,
+                calibration_policy=calibration_policy_payload,
+                decision_at=decision_at,
+                scope=CalibrationFitScope(
+                    metric=metric, execution_mode=mode,
+                    execution_contract=execution_contract,
+                    raw_probability_revision=raw_probability_revision,
+                ),
+            )
+        accounting_row["calibration_training_manifest"] = training_manifest
+        accounting_row["calibration_training_manifest_reason"] = training_manifest_reason
         cash = accounting_row["chain_cash"]
         if include_cash_proofs and cash["status"] != "PROVEN":
             from src.state.fill_cash_reader import read_command_fill_cash
@@ -1690,6 +1847,8 @@ def load_canonical_fit_corpus(
             raw_forecast_lineage_reason=raw_forecast_lineage_reason,
             calibration_policy=calibration_policy_payload,
             calibration_policy_reason=calibration_policy_reason,
+            calibration_training_manifest=training_manifest,
+            calibration_training_manifest_reason=training_manifest_reason,
             acting_q=probability(payload.get("q_live")), p0=p0, confirmed_shares=shares,
             fill_available_at=fill_available_at.isoformat(),
             payout=held["payout_numerator"] / held["payout_denominator"],
@@ -2230,7 +2389,8 @@ class CanonicalMarketAnchoredFitProvider:
         corpus_cutoff = _parse_ts(corpus.training_cutoff)
         def fit_current() -> ResidualCalibratorArtifact | None:
             return self._fit_scope(
-                corpus, scope=scope, deadline_monotonic=deadline_monotonic,
+                corpus, scope=scope,
+                deadline_monotonic=deadline_monotonic,
             )
         if corpus_key is None:
             return fit_current()
@@ -2285,10 +2445,12 @@ class CanonicalMarketAnchoredFitProvider:
                                    probability_revision=scope.raw_probability_revision)
             if sum(row.w for row in rows) < self._min_train_rows:
                 return None
+            manifest = corpus.training_manifest(scope=scope)
             artifact = fit(rows, lambda_=self._lambda,
                            training_cutoff=corpus.training_cutoff,
                            lead_calendar_revision=LEAD_CALENDAR_REVISION,
-                           city_timezone_snapshot=self._city_timezone_snapshot)
+                           city_timezone_snapshot=self._city_timezone_snapshot,
+                           training_manifest=manifest)
         except Exception:  # noqa: BLE001 - required-fit callers handle absence
             return None
         return None if self._expired(deadline_monotonic) else artifact

@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused or audited: 2026-09-08
+# Last reused or audited: 2026-09-11
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring, fit provider.
 """Tests for src/calibration/market_anchored_live_fit.py.
@@ -33,7 +33,12 @@ from src.calibration.market_anchored_live_fit import (
     corrected_probability,
     load_fit_rows,
 )
-from src.contracts.payoff_q_correction import CalibrationFitScope, CalibrationPolicySpec
+from src.contracts.payoff_q_correction import (
+    CalibrationFitScope,
+    CalibrationPolicySpec,
+    CanonicalTrainingManifest,
+    PayoffQCorrection,
+)
 from src.calibration.market_anchored_residual import (
     CLIP_D,
     LEGACY_LEAD_BUCKETS,
@@ -1213,7 +1218,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                               child_global_posterior_id=None, child_posterior_identity=None,
                               include_calibration_policy=True, calibration_policy_payload=None,
                               correction_lead_bucket="day1", correction_alpha_lead=None,
-                              unused_large_parent=False, extra_legacy_anchor_edges=False):
+                              unused_large_parent=False, extra_legacy_anchor_edges=False,
+                              correction_extra_fields=None):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1253,6 +1259,8 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
             if calibration_policy_payload is not None
             else _known_policy().as_payload()
         )
+    if correction_extra_fields:
+        corrected_payload.update(correction_extra_fields)
     economics = {
         "payoff_q_point": .52 if corrected else .70,
         "market_anchored_correction": ({} if legacy else
@@ -2549,6 +2557,171 @@ def test_canonical_provider_fits_actual_corpus_without_selected_attribution(monk
         forecast.close()
 
 
+def test_canonical_provider_manifest_commits_exact_rows_without_changing_fit():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        scope = _canonical_scope()
+        artifact = provider.artifact(scope=scope, now=NOW)
+        assert artifact is not None and artifact.training_manifest is not None
+        manifest = artifact.training_manifest
+        payload = manifest.as_payload()
+        assert len(json.dumps(payload, sort_keys=True)) < 2_000
+        assert set(payload) == {
+            "type", "version", "scope_hash", "corpus_revision", "training_cutoff",
+            "row_count", "event_count", "weight_sum", "max_fill_available_at",
+            "max_label_available_at", "availability_upper_bound", "input_hash",
+            "manifest_hash",
+        }
+        assert payload["scope_hash"] == scope.as_payload()["scope_hash"]
+        assert payload["corpus_revision"] == live_fit.CANONICAL_CORPUS_REVISION
+        assert payload["row_count"] == artifact.n_train == 1
+        assert payload["event_count"] == 1
+        assert payload["weight_sum"] == pytest.approx(1.0)
+        assert payload["max_fill_available_at"] < payload["training_cutoff"]
+        assert payload["max_label_available_at"] < payload["training_cutoff"]
+        assert CanonicalTrainingManifest.from_payload(payload) == manifest
+
+        baseline = live_fit.fit(
+            _read_canonical(world, trade, forecast=forecast).fit_rows(
+                metric="high", execution_mode="TAKER_LIMIT",
+                execution_contract="FOK_FULL_OR_ZERO",
+                probability_revision="fixture-revision-v1",
+            ),
+            lambda_=provider.calibration_policy.lambda_,
+            training_cutoff=artifact.training_cutoff,
+            lead_calendar_revision=artifact.lead_calendar_revision,
+            city_timezone_snapshot=artifact.city_timezone_snapshot,
+        )
+        assert (artifact.alpha, artifact.beta, artifact.param_hash) == (
+            baseline.alpha, baseline.beta, baseline.param_hash,
+        )
+
+        correction = PayoffQCorrection(
+            family_key="family", bin_id="bin", side="YES", token_id="11",
+            raw_q=.70, corrected_q=.52, p0=.35, lead_bucket="day1",
+            alpha_lead=artifact.alpha["day1"], beta=artifact.beta,
+            lambda_=artifact.lambda_, training_cutoff=artifact.training_cutoff,
+            n_train=artifact.n_train, param_hash=artifact.param_hash,
+            fit_scope=scope, training_manifest=manifest,
+        )
+        assert correction.as_cert_fields()["training_manifest"] == payload
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_training_manifest_hash_scope_and_cutoff_validation():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        manifest = provider.artifact(scope=_canonical_scope(), now=NOW).training_manifest
+        payload = manifest.as_payload()
+        payload["input_hash"] = "tampered"
+        with pytest.raises(ValueError, match="hash"):
+            CanonicalTrainingManifest.from_payload(payload)
+
+        base = manifest.as_payload()
+        with pytest.raises(ValueError, match="availability"):
+            CanonicalTrainingManifest.build(
+                scope_hash=base["scope_hash"],
+                corpus_revision=base["corpus_revision"],
+                training_cutoff=base["training_cutoff"],
+                row_count=base["row_count"], event_count=base["event_count"],
+                weight_sum=base["weight_sum"],
+                max_fill_available_at=base["training_cutoff"],
+                max_label_available_at=base["max_label_available_at"],
+                input_hash=base["input_hash"],
+            )
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_training_manifest_binds_consumed_order_and_event_weights():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        base = dict(_read_canonical(world, trade, forecast=forecast).records[0])
+        first = dict(base)
+        second = dict(base)
+        first.update(command_id="command-a", certificate_hash="cert-a", confirmed_shares=2.0)
+        second.update(command_id="command-b", certificate_hash="cert-b", confirmed_shares=3.0)
+        corpus = live_fit.CanonicalFitCorpus(
+            (second, first), {}, 2, NOW.isoformat(),
+        )
+        scope = _canonical_scope()
+        manifest = corpus.training_manifest(scope=scope)
+        fit_rows = corpus.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FOK_FULL_OR_ZERO",
+            probability_revision="fixture-revision-v1",
+        )
+        fitted = live_fit.fit(
+            fit_rows, lambda_=10.0, training_cutoff=NOW.isoformat(),
+            lead_calendar_revision=LEAD_CALENDAR_REVISION,
+            city_timezone_snapshot=tuple(sorted(_TEST_CITY_TIMEZONES.items())),
+            training_manifest=manifest,
+        )
+        assert fitted.training_manifest == manifest
+        assert manifest.row_count == 2
+        assert manifest.event_count == 1
+        assert manifest.weight_sum == pytest.approx(1.0)
+        assert manifest == corpus.training_manifest(scope=scope)
+        assert manifest.input_hash != live_fit.CanonicalFitCorpus(
+            (first, second), {}, 2, NOW.isoformat(),
+        ).training_manifest(scope=scope).input_hash
+        assert len(json.dumps(manifest.as_payload(), sort_keys=True)) < 2_000
+        malformed = dict(first, certificate_hash="")
+        with pytest.raises(ValueError, match="aligned"):
+            live_fit.CanonicalFitCorpus(
+                (malformed,), {}, 1, NOW.isoformat(),
+            ).training_manifest(scope=scope)
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_canonical_manifest_scope_binding_and_legacy_none_compatibility():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        provider = _canonical_provider(world, trade, forecast)
+        scope = _canonical_scope()
+        artifact = provider.artifact(scope=scope, now=NOW)
+        manifest = artifact.training_manifest
+        with pytest.raises(ValueError, match="scope"):
+            PayoffQCorrection(
+                family_key="family", bin_id="bin", side="YES", token_id="11",
+                raw_q=.70, corrected_q=.52, p0=.35, lead_bucket="day1",
+                alpha_lead=artifact.alpha["day1"], beta=artifact.beta,
+                lambda_=artifact.lambda_, training_cutoff=artifact.training_cutoff,
+                n_train=artifact.n_train, param_hash=artifact.param_hash,
+                fit_scope=_canonical_scope(metric="low"),
+                training_manifest=manifest,
+            )
+        legacy = PayoffQCorrection(
+            family_key="family", bin_id="bin", side="YES", token_id="11",
+            raw_q=.70, corrected_q=.52, p0=.35, lead_bucket="day1",
+            alpha_lead=0.0, beta=0.0, lambda_=1.0,
+            training_cutoff=NOW.isoformat(), n_train=0, param_hash="legacy",
+        )
+        assert "training_manifest" not in legacy.as_cert_fields()
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
 def test_canonical_provider_keeps_no_geometry_and_backward_cutoff_causal():
     world, trade, _, forecast = _canonical_corpus_fixture(
         side="NO", return_forecast=True, forecast_lineage=True,
@@ -2909,13 +3082,13 @@ def test_canonical_shared_corpus_preserves_cutoff_across_batches_and_scopes(tmp_
         # A new scope first fitted at hour five must retain the hour-zero cutoff.
         late_scope = _canonical_scope(execution_contract="FAK_PARTIAL")
         scoped_corpus = next(iter(corpus_cache._entries.values()))[0]
-        original_rows = live_fit.CanonicalFitCorpus.fit_rows
+        original_selection = live_fit.CanonicalFitCorpus._fit_selection
 
-        def equivalent_rows(self, **kwargs):
+        def equivalent_selection(self, **kwargs):
             kwargs["execution_contract"] = "FOK_FULL_OR_ZERO"
-            return original_rows(self, **kwargs)
+            return original_selection(self, **kwargs)
 
-        monkeypatch.setattr(live_fit.CanonicalFitCorpus, "fit_rows", equivalent_rows)
+        monkeypatch.setattr(live_fit.CanonicalFitCorpus, "_fit_selection", equivalent_selection)
         delayed = provider().artifact(scope=late_scope, now=NOW + timedelta(hours=5))
         assert delayed is not None and delayed.training_cutoff == first.training_cutoff
         # Exactly TTL refreshes both input and artifact; no second TTL extension.
@@ -2990,3 +3163,116 @@ def test_canonical_shared_corpus_is_deeply_detached_and_immutable():
     assert second.records[0]["policy"]["bounds"] == (0, 1)
     assert second.command_accounting[0]["reason"]["codes"] == ("unknown",)
     assert second.unknown == {"missing": 1}
+
+
+def _reader_training_commitment(cutoff, scope=None):
+    scope = scope or _canonical_scope()
+    manifest = CanonicalTrainingManifest.build(
+        scope_hash=scope.as_payload()['scope_hash'],
+        corpus_revision=live_fit.CANONICAL_CORPUS_REVISION,
+        training_cutoff=cutoff.isoformat(), row_count=20, event_count=20,
+        weight_sum=20.0,
+        max_fill_available_at=(cutoff - timedelta(hours=2)).isoformat(),
+        max_label_available_at=(cutoff - timedelta(hours=1)).isoformat(),
+        input_hash='a' * 64,
+    )
+    policy = _known_policy(
+        input_revision=live_fit.CANONICAL_CALIBRATION_INPUT_REVISION,
+        metric_pooling=live_fit.CANONICAL_CALIBRATION_METRIC_POOLING,
+        lead_calendar_revision=LEAD_CALENDAR_REVISION,
+    )
+    correction = dict(
+        applied=True, training_manifest=manifest.as_payload(),
+        fit_scope=scope.as_payload(), training_cutoff=cutoff.isoformat(), n_train=20,
+    )
+    return correction, policy
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+def test_canonical_reader_preserves_sealed_training_commitment_without_qualifying_profit(side):
+    correction, policy = _reader_training_commitment(NOW - timedelta(days=3))
+    world, trade, _ = _canonical_corpus_fixture(
+        side=side, calibration_policy_payload=policy.as_payload(),
+        correction_extra_fields=correction,
+        correction_alpha_lead=math.log(.52 / .48) - math.log(.35 / .65),
+    )
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.command_count == 1 and corpus.unknown == {}
+        record, = corpus.records
+        accounting, = corpus.command_accounting
+        for row in (record, accounting):
+            assert row['calibration_training_manifest'] == correction['training_manifest']
+            assert row['calibration_training_manifest_reason'] is None
+            assert not any('oos_pass' in key or 'qualified' in key for key in row)
+        assert record['acting_q'] == .52
+        assert len(corpus.fit_rows(
+            metric='high', execution_mode='TAKER_LIMIT',
+            execution_contract='FOK_FULL_OR_ZERO', probability_revision='fixture-revision-v1',
+        )) == 1
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize('applied', [True, False])
+def test_missing_training_commitment_stays_explicit_without_deleting_physical_denominator(applied):
+    world, trade, _ = _canonical_corpus_fixture(corrected=applied)
+    try:
+        corpus = _read_canonical(world, trade)
+        assert corpus.command_count == len(corpus.records) == len(corpus.command_accounting) == 1
+        expected = 'CALIBRATION_TRAINING_MANIFEST_MISSING' if applied else 'CALIBRATION_NOT_APPLIED'
+        for row in (*corpus.records, *corpus.command_accounting):
+            assert row['calibration_training_manifest'] is None
+            assert row['calibration_training_manifest_reason'] == expected
+    finally:
+        world.close()
+        trade.close()
+
+
+@pytest.mark.parametrize('mutation,reason', [
+    ('hash', 'INVALID'), ('scope', 'SCOPE_MISMATCH'),
+    ('cutoff', 'CUTOFF_MISMATCH'), ('naive_cutoff', 'CUTOFF_MISMATCH'),
+    ('future', 'DECISION_CLOCK_UNBOUND'), ('naive_decision', 'DECISION_CLOCK_UNBOUND'),
+    ('count', 'COUNT_MISMATCH'), ('boolean_count', 'COUNT_MISMATCH'),
+    ('revision', 'REVISION_MISMATCH'),
+])
+def test_training_commitment_reader_rejects_unbound_provenance(mutation, reason):
+    correction, policy = _reader_training_commitment(NOW)
+    decision = NOW
+    scope = _canonical_scope()
+    if mutation == 'hash':
+        correction['training_manifest']['input_hash'] = 'b' * 64
+    elif mutation == 'scope':
+        scope = _canonical_scope(metric='low')
+    elif mutation == 'cutoff':
+        correction['training_cutoff'] = (NOW - timedelta(seconds=1)).isoformat()
+    elif mutation == 'naive_cutoff':
+        correction['training_cutoff'] = NOW.replace(tzinfo=None).isoformat()
+    elif mutation == 'future':
+        decision = NOW - timedelta(microseconds=1)
+    elif mutation == 'naive_decision':
+        decision = NOW.replace(tzinfo=None)
+    elif mutation == 'count':
+        correction['n_train'] = 19
+    elif mutation == 'boolean_count':
+        correction['n_train'] = True
+    elif mutation == 'revision':
+        policy = _known_policy()
+    manifest, error = live_fit._sealed_training_manifest(
+        correction, calibration_policy=policy.as_payload(), decision_at=decision, scope=scope,
+    )
+    assert manifest is None
+    assert error == 'CALIBRATION_TRAINING_MANIFEST_' + reason
+
+
+def test_training_commitment_reader_accepts_causal_equal_cutoff_in_equivalent_timezone():
+    correction, policy = _reader_training_commitment(NOW)
+    manifest, reason = live_fit._sealed_training_manifest(
+        correction, calibration_policy=policy.as_payload(),
+        decision_at=NOW.astimezone(timezone(timedelta(hours=-5))), scope=_canonical_scope(),
+    )
+    assert manifest == correction['training_manifest'] and reason is None
+    assert live_fit._sealed_training_manifest(
+        correction, calibration_policy=None, decision_at=NOW, scope=_canonical_scope(),
+    ) == (None, 'CALIBRATION_POLICY_UNAVAILABLE')
