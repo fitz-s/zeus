@@ -1546,11 +1546,26 @@ files:
     why: Bulk CDN CSV archive fetcher for Meteostat station files. Parallel-safe, no per-IP rate limit. Replaces ~12-hour
       Ogimet serial fill with <1-min parallel downloads for the 45 WU cities whose ICAO has a Meteostat archive. Bulk archives
       lag real-time by weeks-months; use only for historical range, not live feed.
+  src/data/metar_temperature.py:
+    zone: K2_runtime
+    authority_role: metar_temperature_parse_boundary
+    why: Single METAR temperature parser shared by the Ogimet hourly client, the live daily Ogimet tick, the Ogimet daily
+      backfill and the same-station fast lane. Prefers the remarks T-group (tenths Celsius) and falls back to the whole-degree
+      body group; three drifted body-only copies mis-stated US degF extremes by up to 1.6 degF (T-group law 428/434 vs body
+      336/434 chain-winning bins, 2026-08-23..09-11).
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/ogimet_hourly_client.py
+    - src/data/daily_obs_append.py
+    - src/data/day0_fast_obs.py
+    - scripts/backfill_ogimet_metar.py
   src/data/ogimet_hourly_client.py:
     zone: K2_runtime
     authority_role: ogimet_hourly_metar_boundary
-    why: Ogimet METAR hourly fetch + snap-to-UTC-hour for the 3 noaa-settled cities (Istanbul/Moscow/Tel Aviv). Byte-identical
-      mirror of NOAA's server-rendered HTML endpoint; no unit conversion when settlement_unit=='C'.
+    why: Ogimet METAR hourly fetch + extremum-preserving UTC-hour buckets for every configured NOAA-settled ICAO. Mirror of
+      NOAA's METAR bulletins; temperature parsed through src/data/metar_temperature.py (T-group tenths first); C->F only
+      after aggregation when settlement_unit=='F'.
   src/data/solar_append.py:
     zone: K2_runtime
     authority_role: live_solar_append

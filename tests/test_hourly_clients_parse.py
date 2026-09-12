@@ -1,5 +1,8 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-07-26 (latest-report current-state relationship)
+# Last reused/audited: 2026-09-12 (T-group tenths parser unification)
+# Lifecycle: created=2026-04-21; last_reviewed=2026-09-12; last_reused=2026-09-12
+# Purpose: Networkless parse + aggregate invariants for the WU/Ogimet hourly clients and the shared METAR temperature parser.
+# Reuse: Inspect src/data/metar_temperature.py, src/data/ogimet_hourly_client.py and src/data/wu_hourly_client.py before relying on these assertions.
 # Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
 #                  correction 2026-04-21 (operator).
 """Networkless parse + aggregate tests for WU/Ogimet hourly clients.
