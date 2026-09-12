@@ -100,6 +100,9 @@ DEFAULT_TUNING_FRACTION = 0.4
 
 _IRLS_MAX_ITER = 50
 _IRLS_TOL = 1e-10
+_IRLS_GRAD_TOL = 1e-8
+_IRLS_NEWTON_DECREMENT_TOL = 1e-12
+_IRLS_ARMIJO_C1 = 1e-4
 
 
 def clip_p(p: float) -> float:
@@ -305,21 +308,61 @@ def _fit_irls(
     Minimizes -sum(w * loglik(beta)) + (lambda_/2)*||beta||^2 where
     mu = sigmoid(offset + X @ beta). Zero-initialized (deterministic start);
     the L2 term keeps the Hessian positive-definite even under separable
-    data, so this converges without a rank-deficiency special case. w == 1
-    for every row reproduces the unweighted fit exactly.
+    data, while backtracking keeps each accepted update on a descending path.
+    w == 1 for every row reproduces the unweighted fit exactly.
     """
     n_params = X.shape[1]
     beta = np.zeros(n_params, dtype=np.float64)
     identity = np.eye(n_params)
+
+    def objective(eta: np.ndarray, coefficients: np.ndarray) -> float:
+        # softplus((1 - 2*y) * eta) is the stable Bernoulli loss for y in {0, 1}.
+        loss = np.logaddexp(0.0, (1.0 - 2.0 * y) * eta)
+        return math.fsum(float(value) for value in w * loss) + (
+            lambda_ / 2.0
+        ) * float(np.dot(coefficients, coefficients))
+
     for _ in range(_IRLS_MAX_ITER):
         eta = offset + X @ beta
-        mu = 1.0 / (1.0 + np.exp(-eta))
+        mu = np.exp(-np.logaddexp(0.0, -eta))
         grad = X.T @ (w * (mu - y)) + lambda_ * beta
         wm = w * mu * (1.0 - mu)
         hessian = (X * wm[:, None]).T @ X + lambda_ * identity
         delta = np.linalg.solve(hessian, grad)
-        beta = beta - delta
-        if np.max(np.abs(delta)) < _IRLS_TOL:
+        current_objective = objective(eta, beta)
+        newton_decrement = float(np.dot(grad, delta))
+        step = 1.0
+        accepted = False
+        while step >= 2.0**-60:
+            candidate = beta - step * delta
+            candidate_eta = offset + X @ candidate
+            candidate_objective = objective(candidate_eta, candidate)
+            if (
+                np.isfinite(candidate_objective)
+                and candidate_objective
+                <= current_objective - _IRLS_ARMIJO_C1 * step * newton_decrement
+            ):
+                beta = candidate
+                accepted = True
+                break
+            step *= 0.5
+        if not accepted:
+            if (
+                np.max(np.abs(delta)) <= _IRLS_TOL
+                and (
+                    np.max(np.abs(grad)) <= _IRLS_GRAD_TOL
+                    or newton_decrement <= _IRLS_NEWTON_DECREMENT_TOL
+                )
+            ):
+                break
+            raise FloatingPointError("IRLS line search failed to decrease objective")
+        if (
+            np.max(np.abs(delta)) < _IRLS_TOL
+            and (
+                np.max(np.abs(grad)) <= _IRLS_GRAD_TOL
+                or newton_decrement <= _IRLS_NEWTON_DECREMENT_TOL
+            )
+        ):
             break
     return beta
 

@@ -527,3 +527,45 @@ def test_bound_fit_satisfies_weighted_kkt_and_improves_clamp_only(true_beta, bou
             neighbor = actual.copy()
             neighbor[i] += step
             assert objective(neighbor) > objective(actual)
+
+
+def test_irls_backtracking_minimizes_valid_lambda_grid_case():
+    """Full Newton steps can oscillate on a valid, strongly anchored fit."""
+    import numpy as np
+    from scipy.optimize import minimize_scalar
+    from src.calibration.market_anchored_residual import LAMBDA_GRID, _design_row
+
+    rows = [FitRow(0.005, 0.05, "day1", 1) for _ in range(20)]
+    lambda_ = 10.0
+    assert lambda_ in LAMBDA_GRID
+    artifact = fit(rows, lambda_=lambda_, training_cutoff="2026-09-11T00:00:00Z")
+
+    design = [_design_row(row) for row in rows]
+    X = np.stack([item[0] for item in design])
+    offset = np.array([item[1] for item in design])
+    y = np.array([item[2] for item in design])
+    w = np.array([item[3] for item in design])
+
+    def objective(theta):
+        eta = offset + X @ theta
+        return float(
+            np.sum(w * (np.logaddexp(0.0, eta) - y * eta))
+            + lambda_ / 2.0 * (theta @ theta)
+        )
+
+    actual = np.array([artifact.alpha[bucket] for bucket in LEAD_BUCKETS] + [artifact.beta])
+    result = minimize_scalar(
+        lambda alpha: objective(np.array([0.0, alpha, 0.0, BETA_MAX])),
+        bounds=(-10.0, 10.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    reference = np.array([0.0, result.x, 0.0, BETA_MAX])
+    mu = np.exp(-np.logaddexp(0.0, -(offset + X @ reference)))
+    gradient = X.T @ (w * (mu - y)) + lambda_ * reference
+
+    assert artifact.beta == BETA_MAX
+    assert objective(actual) <= objective(reference) + 1e-9
+    assert artifact.alpha["day1"] == pytest.approx(result.x, abs=1e-7)
+    assert abs(gradient[1]) < 1e-7
+    assert gradient[-1] < 0.0  # KKT sign at the retained upper beta bound.
