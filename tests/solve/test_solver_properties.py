@@ -2989,11 +2989,15 @@ def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
     )
 
 
-def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("held_shares", (Decimal("0"), Decimal("5")))
+def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
+    side, held_shares,
+):
     seed = _global_candidate(
         candidate_id="maker-ask-dust-generation",
         family="maker-ask-dust-generation-family",
-        side="YES",
+        side=side,
         q=0.80,
         levels=(("0.50", "0.5"),),
         min_order="5",
@@ -3012,7 +3016,7 @@ def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
     deterministic_fields = {
         "family_key": seed.family_key,
         "bindings": probability.bindings,
-        "exact_yes_payoffs": (("bin", 1), ("other", 0)),
+        "exact_yes_payoffs": (("bin", int(side == "YES")), ("other", int(side == "NO"))),
         "q_version": probability.q_version,
         "resolution_identity": probability.resolution_identity,
         "topology_identity": probability.topology_identity,
@@ -3051,7 +3055,7 @@ def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
         include_maker=True,
         maker_fill_witness=placeholder,
         asset_epoch_identity=asset_epoch,
-        current_token_shares=Decimal("5"),
+        current_token_shares=held_shares,
     )
     assert provisional_taker.execution_mode == "TAKER_LIMIT"
     assert provisional_maker.execution_mode == "MAKER_REST"
@@ -3065,7 +3069,9 @@ def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
         proposal=provisional_maker.proposal_cost_curve,
         asset_epoch=asset_epoch,
         outcomes=(
-            S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.5"), Decimal("1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.4"), Decimal("0.1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.1"), Decimal("0"), Decimal("0")),
         ),
     )
     taker, maker = S.global_candidates_from_native(
@@ -3078,7 +3084,7 @@ def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
         include_maker=True,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=asset_epoch,
-        current_token_shares=Decimal("5"),
+        current_token_shares=held_shares,
     )
 
     assert taker.execution_mode == "TAKER_LIMIT"
@@ -3092,6 +3098,11 @@ def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
     )
 
     assert decision.candidate is maker
+    assert maker.settlement_locked_exact_payoff is False
+    assert decision.shares * Decimal("0.1") < Decimal("5")
+    assert decision.expected_terminal_wealth.win_probability_mean == 1.0
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    assert decision.expected_growth.expected_delta_log_wealth > 0.0
     assert decision.rejection_reasons[taker.candidate_id] == "DEPTH_INFEASIBLE"
 
 

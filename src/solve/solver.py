@@ -2216,11 +2216,13 @@ def global_candidates_from_native(
                 maker_eligibility_reason = (
                     "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
                 )
-            elif witnessed_token_shares < Decimal(curve.min_order_size):
-                # A resting entry may fill any positive prefix.  Until one exact
-                # token already owns a venue-legal exit lot, that prefix can create
-                # exposure which no SELL command may submit.  The immediate-taker
-                # sibling remains eligible to establish the first lot atomically.
+            elif (
+                witnessed_token_shares < Decimal(curve.min_order_size)
+                and not settlement_locked_exact_payoff
+            ):
+                # Statistical partial fills need an existing legal exit lot.
+                # A typed absorbing winner can retain any prefix to settlement;
+                # its maker proposal still requires current liquidation capacity.
                 maker_eligibility_reason = "MAKER_REST_EXITABILITY_SEED_REQUIRED"
         maker = GlobalSingleOrderCandidate(
             candidate_id=_global_native_candidate_id(

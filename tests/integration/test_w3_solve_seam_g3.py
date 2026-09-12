@@ -4344,7 +4344,24 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     assert exact_taker.settlement_locked_exact_payoff is True
     assert exact_taker.eligibility_reason is None
     assert exact_maker.settlement_locked_exact_payoff is False
-    assert exact_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+    assert exact_maker.eligibility_reason is None
+
+    for held in (None, Decimal("NaN"), Decimal("-1")):
+        _, invalid_holdings_maker = global_candidates_from_native(
+            native,
+            probability_witness=exact_probability,
+            ledger_snapshot_id="ledger",
+            book_captured_at_utc=at,
+            native_bid_levels=asset.bid_levels,
+            include_maker=True,
+            maker_fill_witness=maker_witness,
+            asset_epoch_identity=epoch.witness_identity,
+            current_token_shares=held,
+            neg_risk=False,
+        )
+        assert invalid_holdings_maker.eligibility_reason == (
+            "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
+        )
 
     no_curve = ExecutableCostCurve(
         token_id="no-token",
@@ -4414,9 +4431,21 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     assert exact_no_taker.settlement_locked_exact_payoff is True
     assert exact_no_taker.eligibility_reason is None
     assert exact_no_maker.settlement_locked_exact_payoff is False
-    assert exact_no_maker.eligibility_reason == (
-        "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+    assert exact_no_maker.eligibility_reason is None
+
+    _, losing_yes_maker = global_candidates_from_native(
+        native,
+        probability_witness=exact_no_probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        current_token_shares=Decimal("0"),
+        neg_risk=False,
     )
+    assert losing_yes_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
 
     unwitnessed_candidates = global_candidates_from_native(
         native,
