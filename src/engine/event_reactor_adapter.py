@@ -46679,29 +46679,12 @@ def _validate_day0_causal_bundle_successor(
         receipt_with_capture = dict(receipt)
         receipt_with_capture["capture_equivalence"] = capture_equivalence
         payload[receipt_key] = receipt_with_capture
-        # Probe only the current successor identity.  A positive probe cannot
-        # legalize this invocation's old q: the caller must re-read the
-        # successor bundle on the next bounded cycle.
-        successor = False
-        try:
-            from src.data.replacement_forecast_bundle_reader import (
-                day0_causal_bundle_successor_materialized,
-            )
-
-            successor = bool(
-                conn is not None
-                and day0_causal_bundle_successor_materialized(
-                    conn,
-                    city=str(family.city),
-                    target_date=str(family.target_date),
-                    temperature_metric=str(family.metric),
-                    bundle_identity=str(actual["bundle_identity"]),
-                    decision_time=decision_time,
-                )
-            )
-        except (TypeError, ValueError, sqlite3.Error):
-            successor = False
-        payload[successor_key] = successor
+        # No successor probe here: `actual["bundle_identity"]` names a hybrid
+        # bundle (the expected certificate's cutoff_utc/observation_context
+        # fused with the current capture's vectors) that no writer ever
+        # persists — the materializer always writes cutoff_utc == computed_at.
+        # Probing it is a guaranteed-False DB round trip; raise directly.
+        payload[successor_key] = False
         error = ValueError(str(validation.reason))
         setattr(error, "day0_causal_bundle_validation_receipt", receipt)
         raise error
@@ -47615,10 +47598,40 @@ def _day0_remaining_day_members(
     except Exception as exc:  # noqa: BLE001 — report unavailable vectors at the seam
         import logging as _logging
 
+        detail = ""
+        receipt = getattr(exc, "day0_causal_bundle_validation_receipt", None)
+        if isinstance(receipt, dict):
+            diverged = [
+                field
+                for field in (
+                    "bundle_identity",
+                    "carrier_vector_identity",
+                    "carrier_vector_hash",
+                )
+                if str(receipt.get(f"expected_{field}") or "")
+                != str(receipt.get(f"actual_{field}") or "")
+            ]
+            capture_equivalence = receipt.get("capture_equivalence")
+            capture_status = (
+                str(capture_equivalence.get("reason", capture_equivalence.get("ok")))
+                if isinstance(capture_equivalence, dict)
+                else ""
+            )
+            detail = (
+                " diverged=%s expected_carrier_vector_identity=%s"
+                " actual_carrier_vector_identity=%s capture_equivalence=%s"
+                % (
+                    ",".join(diverged) or "none",
+                    str(receipt.get("expected_carrier_vector_identity") or "")[:12],
+                    str(receipt.get("actual_carrier_vector_identity") or "")[:12],
+                    capture_status,
+                )
+            )
+
         _logging.getLogger("zeus.day0_remaining_day").warning(
-            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s",
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s%s",
             getattr(family, "city", "?"), getattr(family, "target_date", "?"),
-            type(exc).__name__, exc,
+            type(exc).__name__, exc, detail,
         )
         return None
 

@@ -500,7 +500,10 @@ def test_day0_v1_capture_equivalence_runs_through_entry_members_seam(
     )
     if changed_payload:
         assert members is None
-        assert successor_queries == [actual["bundle_identity"]]
+        # The mismatch branch no longer probes a successor: `actual` here is a
+        # hybrid bundle_identity no writer ever persists, so the check is
+        # skipped and the mismatch raises directly.
+        assert successor_queries == []
     else:
         assert members is not None
         assert successor_queries == [expected["bundle_identity"]]
@@ -510,6 +513,107 @@ def test_day0_v1_capture_equivalence_runs_through_entry_members_seam(
         assert payload["_edli_day0_causal_evidence_bundle_validation"][
             "capture_equivalence"
         ]["ok"] is True
+
+
+def test_day0_v1_mismatch_skips_impossible_successor_probe_and_logs_diverged_fields(
+    monkeypatch, caplog
+):
+    """The mismatch branch's `actual` is a hybrid bundle (expected
+    cutoff_utc/observation_context fused with the current capture's vectors)
+    that no writer ever persists, so it must never be probed for a successor;
+    the mismatch still raises with the receipt attached, and the outer
+    `_day0_remaining_day_members` warning names which fields diverged."""
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(changed_payload=True)
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail(
+            "mismatch branch must not probe the impossible hybrid successor "
+            "identity"
+        )
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        fail_if_called,
+    )
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+    base_payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+
+    # (i) + (ii): direct call still raises the same ValueError text with the
+    # receipt attached, and never calls the successor probe (it would fail
+    # the test above if it did).
+    with pytest.raises(
+        ValueError, match="DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH"
+    ) as excinfo:
+        era._validate_day0_causal_bundle_successor(
+            conn=conn,
+            payload=dict(base_payload),
+            family=family,
+            decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+            vector_witness=current_witness,
+            vectors=current_vectors,
+        )
+    receipt = getattr(
+        excinfo.value, "day0_causal_bundle_validation_receipt", None
+    )
+    assert receipt is not None
+    assert receipt["expected_bundle_identity"] == expected["bundle_identity"]
+    assert receipt["actual_bundle_identity"] == actual["bundle_identity"]
+    assert receipt["actual_bundle_identity"] != expected["bundle_identity"]
+
+    # (iii): the outer seam's warning names the diverged fields plus identity
+    # prefixes, without changing the grepped prefix other tooling relies on.
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ("icon_d2",),
+    )
+    monkeypatch.setattr(
+        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
+    )
+    members = era._day0_remaining_day_members(
+        payload=dict(base_payload),
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        forecast_conn=conn,
+        entry_authority=True,
+    )
+    assert members is None
+    assert (
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=Paris "
+        "date=2026-06-10 exc=ValueError"
+    ) in caplog.text
+    assert "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH" in caplog.text
+    assert "diverged=" in caplog.text
+    assert "bundle_identity" in caplog.text
+    assert "carrier_vector_identity" in caplog.text
+    assert "carrier_vector_hash" in caplog.text
+    assert (
+        f"expected_carrier_vector_identity="
+        f"{expected['carrier_vector_identity'][:12]}"
+    ) in caplog.text
+    assert (
+        f"actual_carrier_vector_identity="
+        f"{actual['carrier_vector_identity'][:12]}"
+    ) in caplog.text
 
 
 def test_day0_v1_capture_equivalence_requires_original_successor_visibility(
