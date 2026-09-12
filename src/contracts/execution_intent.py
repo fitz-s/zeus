@@ -255,30 +255,12 @@ def _is_decimal_quantized(value: Decimal, quantum: Decimal) -> bool:
     return value == value.quantize(quantum)
 
 
-# --- SDK-faithful venue amount model ---------------------------------------
-# Authority basis: venue invalid_amount rejection loop 2026-06-10
-#   (live venue_command_events 39517e446ba94b60/5cec15b1de484fbb:
-#    "the market buy orders maker amount supports a max accuracy of 2 decimals,
-#     taker amount a max of 4 decimals").
-#
-# py_clob_client_v2.order_builder.builder.get_order_amounts builds the BUY
-# maker/taker with FLOAT math:
-#     raw_taker = round_down(shares, 2)          # floor(shares*100)/100
-#     raw_maker = raw_taker * round_normal(price, price_dec)
-# floor() on the float product truncates one cent for ~287/5000 cents-grid
-# share values (e.g. round_down(8.7, 2) == 8.69), and the resulting
-# raw_taker*price lands on 3+ decimals -> the venue's market-buy validator
-# (maker <= 2 decimals) rejects it. The PREVIOUS contract modelled
-# maker = Decimal(shares) * Decimal(price) (exact, e.g. 8.7*0.70 == 6.090,
-# cents-aligned) and therefore waved through amounts the SDK actually
-# rejects. We replicate the SDK's float build so the contract's notion of
-# "venue-valid" equals the maker the venue truly receives.
-#
-# round_config.size is 2 for every tick; round_config.price is the tick's
-# decimal count (0.1->1, 0.01->2, 0.001->3, 0.0001->4). The maker grid the
-# venue enforces for a market/marketable BUY is 2 decimals regardless of tick,
-# so the maker check is tick-independent; we use the canonical 0.01 tick for
-# price rounding, which leaves a sub-cent price unchanged for any finer tick.
+# The SDK receives Decimal OrderArgs, then its round helpers return floats.
+# Model that exact sequence: an early float conversion can floor 2.01 shares
+# to 2.00 and falsely approve a maker amount that the real SDK will reject.
+# Immediate BUY requires maker cash with at most 2 decimals and taker shares
+# with at most 4; the limit-order SDK itself floors size to 2 decimals.
+# SDK price/amount rounding additionally depends on the current market tick.
 _SDK_MARKET_SIZE_DECIMALS = 2
 _SDK_MAKER_VENUE_DECIMALS = 2
 _SDK_TAKER_VENUE_DECIMALS = 4
@@ -312,22 +294,22 @@ def _normalize_tick_size(tick_size: Decimal | str | None) -> Decimal:
     return Decimal(str(tick_size))
 
 
-def _sdk_round_down(value: float, decimals: int) -> float:
-    """Replicate py_clob_client_v2.order_builder.helpers.round_down (float floor)."""
+def _sdk_round_down(value: Decimal | float, decimals: int) -> float:
+    """Replicate SDK round_down while retaining Decimal input at the boundary."""
     import math
 
     scale = 10 ** decimals
     return math.floor(value * scale) / scale
 
 
-def _sdk_round_normal(value: float, decimals: int) -> float:
-    """Replicate py_clob_client_v2.order_builder.helpers.round_normal."""
+def _sdk_round_normal(value: Decimal | float, decimals: int) -> float:
+    """Replicate SDK round_normal while retaining Decimal input at the boundary."""
     scale = 10 ** decimals
     return round(value * scale) / scale
 
 
-def _sdk_round_up(value: float, decimals: int) -> float:
-    """Replicate py_clob_client_v2.order_builder.helpers.round_up (float ceil)."""
+def _sdk_round_up(value: Decimal | float, decimals: int) -> float:
+    """Replicate SDK round_up while retaining Decimal input at the boundary."""
     import math
 
     scale = 10 ** decimals
@@ -344,7 +326,7 @@ def _sdk_market_buy_maker_taker(
     final_limit_price: Decimal,
     tick_size: Decimal,
 ) -> tuple[float, float]:
-    """The maker/taker the py_clob_client_v2 BUY LIMIT builder actually constructs.
+    """The maker/taker the SDK BUY LIMIT builder constructs from Decimal inputs.
 
     EXACT replica of OrderBuilder.get_order_amounts (builder.py:61, BUY branch —
     Zeus submits FOK/FAK as LIMIT orders via client.create_order, so the limit
@@ -358,16 +340,17 @@ def _sdk_market_buy_maker_taker(
             if decimal_places(raw_maker) > rc.amount:
                 raw_maker = round_down(raw_maker, rc.amount)
 
-    The round_up(+4) RESCUE step matters in BOTH directions and omitting it was
-    itself a model bug (caught against live fills): it rescues pure float noise
-    on an exact-cents product (5.0*0.72 = 3.5999999999999996 -> 3.6, which the
-    venue ACCEPTED live), and it does NOT rescue a genuinely 3-decimal product
-    (8.69*0.7 -> 6.083, which the venue 400-rejected live). Returns the
-    (raw_maker, raw_taker) floats the SDK signs; the venue's marketable-BUY
+    The round_up(+4) RESCUE step remains part of the SDK model: it rescues pure
+    float noise on an exact-cents product while retaining a genuinely
+    over-precise maker such as Decimal 2.01*0.58 = 1.1658 for the venue's
+    independent maker-grid rejection. Returns the (raw_maker, raw_taker) floats
+    the SDK signs; the venue's marketable-BUY
     validator then enforces maker <= 2 decimals / taker <= 4 decimals on them.
     """
-    shares = float(submitted_shares)
-    price = float(final_limit_price)
+    # Keep Decimal at the SDK boundary. Its round helpers intentionally return
+    # floats after applying their own floor/normal/rescue arithmetic.
+    shares = submitted_shares
+    price = final_limit_price
     price_dec = _sdk_price_decimals_for_tick(tick_size)
     amount_dec = price_dec + 2  # ROUNDING_CONFIG: amount = price decimals + 2 (all ticks)
     raw_price = _sdk_round_normal(price, price_dec)
@@ -390,8 +373,9 @@ def venue_submit_amount_precision_error(
 ) -> str | None:
     """Return why a venue submit amount would be rejected before SDK contact.
 
-    Models the maker/taker the py_clob_client_v2 builder actually sends (FLOAT
-    math), not an idealised Decimal product. See _sdk_market_buy_maker_taker.
+    Models the maker/taker the py_clob_client_v2 builder actually sends from
+    Decimal OrderArgs (including its FLOAT arithmetic), not an idealised
+    Decimal product. See _sdk_market_buy_maker_taker.
     ``tick_size`` defaults to 0.01 (the canonical Polymarket weather-market
     tick); pass the snapshot's ``min_tick_size`` for finer-tick markets so the
     SDK price rounding is matched faithfully.

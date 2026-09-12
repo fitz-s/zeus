@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-09-01
-# Lifecycle: created=2026-05-17; last_reviewed=2026-09-01; last_reused=2026-09-01
+# Last reused/audited: 2026-09-12
+# Lifecycle: created=2026-05-17; last_reviewed=2026-09-12; last_reused=2026-09-12
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -16,9 +16,11 @@
 # of whether the rest of the system treats it as a formal lifecycle state.
 
 import json
+import hashlib
 import math
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -87,6 +89,7 @@ def mem_db():
     conn.execute("""
         CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY,
+            snapshot_id TEXT,
             position_id TEXT NOT NULL,
             token_id TEXT NOT NULL,
             intent_kind TEXT NOT NULL DEFAULT 'EXIT',
@@ -95,8 +98,35 @@ def mem_db():
             price REAL DEFAULT 0,
             venue_order_id TEXT,
             state TEXT NOT NULL,
+            envelope_id TEXT,
             created_at TEXT NOT NULL DEFAULT '2026-05-17T22:13:38',
             updated_at TEXT NOT NULL DEFAULT '2026-05-17T22:13:38'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            question_id TEXT,
+            sdk_version TEXT,
+            canonical_pre_sign_payload_hash TEXT,
+            raw_request_hash TEXT,
+            chain_id INTEGER,
+            funder_address TEXT,
+            selected_outcome_token_id TEXT,
+            side TEXT,
+            price TEXT,
+            size TEXT,
+            order_type TEXT,
+            post_only INTEGER,
+            signed_order_blob BLOB,
+            signed_order_hash TEXT,
+            order_id TEXT,
+            trade_ids_json TEXT,
+            transaction_hashes_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            captured_at TEXT
         )
     """)
     conn.execute("""
@@ -1876,6 +1906,355 @@ def test_other_deterministic_rejection_still_requires_reprice(mem_db):
         now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
     )
 
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+def _insert_persisted_invalid_amount_rejection(
+    conn,
+    *,
+    command_id="cmd-invalid-typed",
+    final_id="final-invalid-typed",
+    token_id=TOKEN_X,
+    size="2.01",
+    price="0.58",
+    post_only=0,
+    order_type="FOK",
+    reason="venue_rejected_400",
+    detail=(
+        "PolyApiException[status_code=400, error_message={'error': "
+        "'invalid amounts, the market buy orders maker amount supports a max "
+        "accuracy of 2 decimals, taker amount a max of 4 decimals'}]"
+    ),
+    final_order_id=None,
+    with_order_fact=False,
+    with_trade_fact=False,
+    remove_final=False,
+    drop_order_facts=False,
+    drop_trade_facts=False,
+):
+    snapshot_id = "snapshot-invalid"
+    canonical_payload = {
+        "command_id": command_id,
+        "snapshot_id": snapshot_id,
+        "token_id": token_id,
+        "side": "BUY",
+        "price": str(Decimal(str(price))),
+        "size": str(Decimal(str(size))),
+        "order_type": order_type,
+        "post_only": bool(post_only),
+        "condition_id": "condition-invalid",
+        "question_id": "question-invalid",
+    }
+    canonical_hash = hashlib.sha256(
+        json.dumps(canonical_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    request_hash = "b" * 64
+    signed_payload = {
+        "makerAmount": "1165800",
+        "side": 0,
+        "takerAmount": "2010000",
+        "tokenId": token_id,
+    }
+    signed_blob = json.dumps(signed_payload, separators=(",", ":")).encode()
+    signed_hash = hashlib.sha256(signed_blob).hexdigest()
+    pre_id = f"pre-submit:{command_id}"
+    conn.execute(
+        """INSERT INTO venue_commands
+           (command_id, snapshot_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, envelope_id, created_at, updated_at)
+           VALUES (?, ?, 'prior-candidate', ?, 'ENTRY', 'BUY', ?, ?,
+                   'local-expected-order', 'REJECTED', ?,
+                   '2026-09-12T19:37:17+00:00', '2026-09-12T19:37:19+00:00')""",
+        (command_id, snapshot_id, token_id, size, price, pre_id),
+    )
+    envelope_values = (
+        pre_id,
+        canonical_hash,
+        request_hash,
+        token_id,
+        "BUY",
+        price,
+        size,
+        order_type,
+        post_only,
+        None,
+        None,
+        None,
+        "[]",
+        "[]",
+        None,
+        None,
+        "2026-09-12T19:37:17+00:00",
+    )
+    conn.execute(
+        """INSERT INTO venue_submission_envelopes
+           (envelope_id, canonical_pre_sign_payload_hash, raw_request_hash,
+            selected_outcome_token_id, side, price, size, order_type, post_only,
+            signed_order_blob, signed_order_hash, order_id, trade_ids_json,
+            transaction_hashes_json, error_code, error_message, captured_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        envelope_values,
+    )
+    conn.execute(
+        """UPDATE venue_submission_envelopes
+           SET condition_id = 'condition-invalid', question_id = 'question-invalid',
+               sdk_version = 'pre-submit'
+         WHERE envelope_id = ?""",
+        (pre_id,),
+    )
+    final_values = (
+        final_id,
+        canonical_hash,
+        request_hash,
+        token_id,
+        "BUY",
+        price,
+        size,
+        order_type,
+        post_only,
+        signed_blob,
+        signed_hash,
+        final_order_id,
+        "[]",
+        "[]",
+        "venue_rejected_400",
+        detail,
+        "2026-09-12T19:37:19+00:00",
+    )
+    if not remove_final:
+        conn.execute(
+            """INSERT INTO venue_submission_envelopes
+               (envelope_id, canonical_pre_sign_payload_hash, raw_request_hash,
+                selected_outcome_token_id, side, price, size, order_type, post_only,
+                signed_order_blob, signed_order_hash, order_id, trade_ids_json,
+                transaction_hashes_json, error_code, error_message, captured_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            final_values,
+        )
+        conn.execute(
+            """UPDATE venue_submission_envelopes
+               SET condition_id = 'condition-invalid', question_id = 'question-invalid',
+                   sdk_version = '1.0.0'
+             WHERE envelope_id = ?""",
+            (final_id,),
+        )
+    conn.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES (?, ?, 3, 'SUBMIT_REJECTED', '2026-09-12T19:37:19+00:00', ?, 'REJECTED')""",
+        (
+            f"event:{command_id}",
+            command_id,
+            json.dumps(
+                {
+                    "reason": reason,
+                    "detail": detail,
+                    "final_submission_envelope_stage": "post_submit_result",
+                    "final_submission_envelope_id": final_id,
+                    "final_submission_envelope_command_id": command_id,
+                }
+            ),
+        ),
+    )
+    if with_order_fact:
+        conn.execute(
+            """INSERT INTO venue_order_facts
+               (fact_id, venue_order_id, command_id, state, remaining_size,
+                matched_size, source, observed_at, local_sequence)
+               VALUES (91, 'local-expected-order', ?, 'REJECTED', '0', '0',
+                       'REST', '2026-09-12T19:37:19+00:00', 1)""",
+            (command_id,),
+        )
+    if with_trade_fact:
+        conn.execute(
+            """INSERT INTO venue_trade_facts
+               (trade_fact_id, trade_id, venue_order_id, command_id, state,
+                filled_size, observed_at, local_sequence)
+               VALUES (92, 'trade-actual', 'local-expected-order', ?, 'MATCHED',
+                       '1', '2026-09-12T19:37:19+00:00', 1)""",
+            (command_id,),
+        )
+    if drop_order_facts:
+        conn.execute("DROP TABLE venue_order_facts")
+    if drop_trade_facts:
+        conn.execute("DROP TABLE venue_trade_facts")
+    conn.commit()
+
+
+@pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+def test_typed_invalid_amount_proof_allows_same_price_corrected_size_after_cooldown(
+    mem_db, order_type,
+):
+    _insert_persisted_invalid_amount_rejection(mem_db, order_type=order_type)
+
+    before_cooldown = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:38:20+00:00"),
+    )
+    assert before_cooldown["allowed"] is False
+    assert before_cooldown["reason"] == "same_token_terminal_no_fill_cooling_down"
+
+    after_cooldown = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
+    assert after_cooldown["allowed"] is True
+    assert after_cooldown["reason"] == "allowed_terminal_invalid_amount_no_fill_redecision"
+    assert after_cooldown["terminal_no_fill_redecision_proof"] == "invalid_amount"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"remove_final": True},
+        {"final_order_id": "0x-real-order"},
+        {"with_order_fact": True},
+        {"with_trade_fact": True},
+        {"post_only": 1},
+        {"post_only": "unknown"},
+        {"order_type": "GTC"},
+        {"drop_order_facts": True},
+        {"drop_trade_facts": True},
+        {"reason": "venue_rejected_400", "detail": "PolyApiException[status_code=400]"},
+    ],
+)
+@pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+def test_typed_invalid_amount_proof_fails_closed_on_incomplete_or_conflicting_evidence(
+    mem_db, kwargs, order_type
+):
+    _insert_persisted_invalid_amount_rejection(mem_db, **{"order_type": order_type, **kwargs})
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
+    assert result["allowed"] is False
+    assert result.get("terminal_no_fill_redecision_proof") != "invalid_amount"
+
+
+def test_typed_invalid_amount_proof_rejects_signed_hash_or_tuple_tamper(mem_db):
+    _insert_persisted_invalid_amount_rejection(mem_db)
+    mem_db.execute(
+        "UPDATE venue_submission_envelopes SET signed_order_hash = ? "
+        "WHERE envelope_id = ?",
+        ("c" * 64, "final-invalid-typed"),
+    )
+    mem_db.commit()
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("canonical_pre_sign_payload_hash", ""),
+        ("raw_request_hash", "not-a-sha256"),
+    ],
+)
+def test_typed_invalid_amount_proof_rejects_empty_or_corrupt_identity(
+    mem_db, field, value
+):
+    _insert_persisted_invalid_amount_rejection(mem_db)
+    mem_db.execute(
+        f"UPDATE venue_submission_envelopes SET {field} = ? "
+        "WHERE envelope_id = ?",
+        (value, "final-invalid-typed"),
+    )
+    mem_db.commit()
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("final_submission_envelope_command_id", "foreign-command"),
+        ("final_submission_envelope_stage", "pre_submit"),
+    ],
+)
+def test_typed_invalid_amount_proof_rejects_foreign_command_or_stage(
+    mem_db, field, value
+):
+    _insert_persisted_invalid_amount_rejection(mem_db)
+    event = mem_db.execute(
+        "SELECT payload_json FROM venue_command_events WHERE command_id = ?",
+        ("cmd-invalid-typed",),
+    ).fetchone()
+    payload = json.loads(event[0])
+    payload[field] = value
+    mem_db.execute(
+        "UPDATE venue_command_events SET payload_json = ? WHERE command_id = ?",
+        (json.dumps(payload), "cmd-invalid-typed"),
+    )
+    mem_db.commit()
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("selected_outcome_token_id", OTHER_TOKEN),
+        ("price", "0.57"),
+        ("size", "2.00"),
+        ("order_type", "FAK"),
+    ],
+)
+def test_typed_invalid_amount_proof_rejects_final_identity_tamper(
+    mem_db, column, value
+):
+    _insert_persisted_invalid_amount_rejection(mem_db)
+    mem_db.execute(
+        f"UPDATE venue_submission_envelopes SET {column} = ? "
+        "WHERE envelope_id = ?",
+        (value, "final-invalid-typed"),
+    )
+    mem_db.commit()
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.58,
+        shares=2.0,
+        now=datetime.fromisoformat("2026-09-12T19:40:00+00:00"),
+    )
     assert result["allowed"] is False
     assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
 

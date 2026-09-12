@@ -1,18 +1,13 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
-# Authority basis: live venue invalid_amount 400 loop 2026-06-10 (venue_command_events
-# 39517e446ba94b60 / 5cec15b1de484fbb: "the market buy orders maker amount supports a
-# max accuracy of 2 decimals, taker amount a max of 4 decimals") + consolidated
-# overhaul K2 (typed contracts at every boundary).
-"""Venue amount-grid contract must model the SDK's FLOAT build, not ideal Decimal.
+# Last reused or audited: 2026-09-12
+# Authority basis: live venue invalid_amount 400 loop 2026-06-10 and the
+# installed SDK's Decimal OrderArgs path.
+"""Venue amount-grid contract must match the SDK's Decimal-input build.
 
-THE INCIDENT: 8.7 shares @ 0.70 is exact-Decimal cents-aligned (6.090) so the old
-contract waved it through — but py_clob_client_v2 builds BUY amounts with float
-math: round_down(8.7, 2) -> 8.69 (float floor truncates a cent), then
-8.69 * 0.7 = 6.0829999... -> the venue's <=2-decimal maker rule 400s it. The
-daemon looped REJECTED on the same LA opportunity every ~9 minutes (22:41,
-22:50, 22:54Z). Code correctness != data semantics: the contract's notion of
-"venue-valid" must equal the maker amount the venue actually receives.
+The SDK receives Decimal price and size from the signed OrderArgs. Its rounding
+helpers then perform their documented float arithmetic and rescue step. A
+contract check that converts to float before those helpers can floor 2.01 to
+2.00 and falsely approve the live 2.01 @ 0.58 order.
 """
 
 from decimal import Decimal
@@ -26,17 +21,36 @@ from src.contracts.execution_intent import (
 
 
 class TestLiveIncidentGoldenCases:
-    def test_rejected_live_order_is_flagged(self):
-        """The venue-400ed sizing (commands 39517e44/5cec15b1, 8.7 @ 0.70) must be
-        ILLEGAL: round_down(8.7, 2) truncates a cent to 8.69 (float 8.7 sits just
-        BELOW the exact value) and 8.69*0.7 -> maker 6.083 (3dp > venue 2dp)."""
+    def test_decimal_2p01_at_0p58_is_flagged_for_fok_and_fak(self):
+        """Decimal 2.01 survives SDK size rounding and creates maker 1.1658."""
+        for order_type in ("FOK", "FAK"):
+            err = venue_submit_amount_precision_error(
+                direction="buy_no",
+                final_limit_price=Decimal("0.58"),
+                submitted_shares=Decimal("2.01"),
+                order_type=order_type,
+            )
+            assert err is not None and "SDK-built" in err
+
+    def test_decimal_2p01_at_0p66_is_also_flagged(self):
+        """The same size remains invalid at a different two-decimal price."""
         err = venue_submit_amount_precision_error(
             direction="buy_no",
-            final_limit_price=Decimal("0.7"),
-            submitted_shares=Decimal("8.7"),
+            final_limit_price=Decimal("0.66"),
+            submitted_shares=Decimal("2.01"),
             order_type="FOK",
         )
         assert err is not None and "SDK-built" in err
+
+    def test_decimal_8p7_at_0p70_is_legal(self):
+        """Decimal input prevents the stale pre-SDK float floor of 8.7."""
+        err = venue_submit_amount_precision_error(
+            direction="buy_no",
+            final_limit_price=Decimal("0.70"),
+            submitted_shares=Decimal("8.7"),
+            order_type="FOK",
+        )
+        assert err is None
 
     def test_dyadic_share_count_survives_the_rescue(self):
         """8.5 is float-exact (dyadic), so round_down keeps 8.5 and the SDK's
@@ -67,15 +81,15 @@ class TestLiveIncidentGoldenCases:
     def test_quantizer_steps_down_to_a_venue_legal_size(self):
         quantized = quantize_submit_shares_for_venue_at_most(
             "buy_no",
-            Decimal("8.7"),
-            final_limit_price=Decimal("0.7"),
+            Decimal("2.01"),
+            final_limit_price=Decimal("0.58"),
             order_type="FOK",
         )
-        assert quantized < Decimal("8.7")
+        assert quantized == Decimal("2.00")
         assert (
             venue_submit_amount_precision_error(
                 direction="buy_no",
-                final_limit_price=Decimal("0.7"),
+                final_limit_price=Decimal("0.58"),
                 submitted_shares=quantized,
                 order_type="FOK",
             )
@@ -117,6 +131,31 @@ class TestModelShape:
         )
         # 100 * 0.055 = 5.5 exactly (float-exact): legal under the fine tick.
         assert err_fine_tick is None
+
+    @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+    @pytest.mark.parametrize("direction", ["sell_yes", "sell_no"])
+    def test_sell_twin_is_unchanged_by_buy_amount_gate(self, direction, order_type):
+        assert (
+            venue_submit_amount_precision_error(
+                direction=direction,
+                final_limit_price=Decimal("0.58"),
+                submitted_shares=Decimal("2.01"),
+                order_type=order_type,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("price", ["0.05", "0.95"])
+    def test_price_boundary_inputs_keep_amount_gate_independent(self, price):
+        assert (
+            venue_submit_amount_precision_error(
+                direction="buy_yes",
+                final_limit_price=Decimal(price),
+                submitted_shares=Decimal("2.00"),
+                order_type="FAK",
+            )
+            is None
+        )
 
     def test_exhaustive_cents_grid_quantizer_never_emits_illegal(self):
         """Property sweep: for every cents-grid share count in [5, 25) at the

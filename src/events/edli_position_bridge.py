@@ -1975,6 +1975,7 @@ def materialize_position_current_from_edli_fill(
         events_batch, projection = build_entry_canonical_write(
             pos,
             phase_after=ACTIVE,
+            decision_id=str(identity.get("actionable_certificate_hash") or "") or None,
             source_module="src.events.edli_position_bridge",
             decision_evidence=decision_evidence,
         )

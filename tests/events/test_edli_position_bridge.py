@@ -263,6 +263,7 @@ def _seed_confirmed_buy_no_aggregate(
     fill_payload_extras: list[dict] | None = None,
     pre_submit_snapshot_id: str | None = "exec-snap-1",
     include_fee: bool = True,
+    pre_submit_extras: dict | None = None,
 ) -> str:
     """Seed a realistic CONFIRMED buy_no aggregate.
 
@@ -292,6 +293,8 @@ def _seed_confirmed_buy_no_aggregate(
     }
     if pre_submit_snapshot_id is not None:
         pre_submit["executable_snapshot_id"] = pre_submit_snapshot_id
+    if pre_submit_extras:
+        pre_submit.update(pre_submit_extras)
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit, source_authority="engine_adapter")
     _insert_edli_event(
         conn, aggregate_id=aggregate_id, sequence=2, event_type="ExecutionCommandCreated",
@@ -845,6 +848,55 @@ def test_green_bridge_materializes_one_correct_position(conn):
         (row["position_id"],),
     ).fetchall()
     assert [r[0] for r in ev] == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"]
+
+
+def test_bridge_materialization_preserves_actionable_certificate_for_held_reader(conn, monkeypatch):
+    from src.calibration.market_anchored_live_fit import load_held_entry_calibration
+    from tests.calibration.test_market_anchored_live_fit import _held_entry_reader_fixture
+
+    trade, world, _artifact, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        aggregate_id = _seed_confirmed_buy_no_aggregate(
+            conn,
+            aggregate_id="agg-held-reader",
+            pre_submit_extras={
+                "expected_edge_source_certificate_hash": "cert-a",
+                "token_id": token,
+                "city": "Warsaw",
+                "target_date": "2026-08-27",
+                "bin_label": "bin-a",
+            },
+        )
+
+        result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+        assert result is not None and result["created"] is True
+        position_id = result["position_id"]
+        bridge_events = conn.execute(
+            """
+            SELECT position_id, event_type, sequence_no, decision_id, payload_json
+              FROM position_events WHERE position_id = ? ORDER BY sequence_no
+            """,
+            (position_id,),
+        ).fetchall()
+        assert bridge_events and {row[3] for row in bridge_events} == {"cert-a"}
+
+        trade.execute("DELETE FROM position_events")
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            [tuple(row) for row in bridge_events],
+        )
+        trade.execute(
+            "UPDATE position_decision_attribution SET position_id = ?",
+            (position_id,),
+        )
+        binding = load_held_entry_calibration(
+            trade, position_id=position_id, token_id=token, side=side, world_conn=world,
+        )
+        assert binding.decision_certificate_hash == "cert-a"
+        assert binding.family_key == correction.family_key
+    finally:
+        trade.close()
+        world.close()
 
 
 # --------------------------------------------------------------------------- #

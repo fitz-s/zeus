@@ -22,7 +22,10 @@ q and is neither calibrated probability nor positive-edge evidence.
 from __future__ import annotations
 
 import sqlite3
+import base64
+import hashlib
 import json
+import zlib
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
@@ -61,6 +64,8 @@ from src.contracts.payoff_q_correction import (
     CalibrationFitScope,
     CalibrationPolicySpec,
     CanonicalTrainingManifest,
+    PayoffQCorrection,
+    PayoffQCorrectionUnavailable,
 )
 
 # One fit serves this long before a refit is attempted. Six hours matches the
@@ -2501,14 +2506,14 @@ class CanonicalMarketAnchoredFitProvider:
 
 # The active provider is monitor-scope state only.  Entry selection uses its
 # batch-local provider and never registers it here.
-_active_provider: ContextVar[MarketAnchoredFitProvider | None] = ContextVar(
+_active_provider: ContextVar[object | None] = ContextVar(
     "market_anchored_active_provider",
     default=None,
 )
 
 
 def register_active_provider(
-    provider: MarketAnchoredFitProvider | None,
+    provider: object | None,
 ) -> Token:
     """Set the current monitor-scope provider and return its reset token."""
 
@@ -2522,7 +2527,7 @@ def reset_active_provider(token: Token) -> None:
 
 
 @contextmanager
-def active_provider_scope(provider: MarketAnchoredFitProvider | None):
+def active_provider_scope(provider: object | None):
     token = register_active_provider(provider)
     try:
         yield provider
@@ -2530,7 +2535,7 @@ def active_provider_scope(provider: MarketAnchoredFitProvider | None):
         reset_active_provider(token)
 
 
-def get_active_provider() -> MarketAnchoredFitProvider | None:
+def get_active_provider() -> object | None:
     """The registered active provider, or None when unset."""
 
     return _active_provider.get()
@@ -2631,3 +2636,610 @@ def corrected_probability(
     if is_no:
         alpha_lead = -alpha_lead
     return corrected, lead_bucket, alpha_lead
+
+
+_ENTRY_AUDIT_ENCODING = "zlib+base64+canonical-json-object-v1"
+_ENTRY_AUDIT_DELTA_ENCODING = "zlib+base64+canonical-json-object-delta-v1"
+_ENTRY_AUDIT_MAX_COMPRESSED_BYTES = 2_000_000
+_ENTRY_AUDIT_MAX_RAW_BYTES = 10_000_000
+_ENTRY_AUDIT_MAX_DELTA_DEPTH = 8
+
+
+def _held_correction_unavailable(reason: str) -> PayoffQCorrectionUnavailable:
+    return PayoffQCorrectionUnavailable(f"HELD_ENTRY_CALIBRATION_{reason}")
+
+
+def _decode_held_audit_payload(value: object, *, expected_hash: str) -> Mapping[str, object]:
+    """Decode one bounded canonical JSON receipt component."""
+
+    try:
+        compressed = base64.b64decode(str(value), validate=True)
+        if len(compressed) > _ENTRY_AUDIT_MAX_COMPRESSED_BYTES:
+            raise ValueError
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, _ENTRY_AUDIT_MAX_RAW_BYTES + 1)
+        if (
+            len(raw) > _ENTRY_AUDIT_MAX_RAW_BYTES
+            or not decoder.eof
+            or decoder.unconsumed_tail
+            or decoder.unused_data
+        ):
+            raise ValueError
+        tail = decoder.flush(_ENTRY_AUDIT_MAX_RAW_BYTES + 1 - len(raw))
+        if tail or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+            raise ValueError
+        if hashlib.sha256(raw).hexdigest() != expected_hash:
+            raise ValueError
+        decoded = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError, zlib.error) as exc:
+        raise _held_correction_unavailable("AUDIT_PAYLOAD_INVALID") from exc
+    if not isinstance(decoded, Mapping):
+        raise _held_correction_unavailable("AUDIT_PAYLOAD_INVALID")
+    return decoded
+
+
+def _receipt_summary(
+    conn: sqlite3.Connection,
+    *,
+    decision_log_id: int,
+    expected_mode: str,
+    expected_receipt_hash: str,
+) -> Mapping[str, object]:
+    """Read and authenticate one exact, already-persisted auction receipt."""
+
+    try:
+        row = conn.execute(
+            "SELECT mode, artifact_json FROM main.decision_log WHERE id = ? LIMIT 1",
+            (decision_log_id,),
+        ).fetchone()
+        if row is None or str(row[0]) != expected_mode:
+            raise ValueError
+        artifact = json.loads(str(row[1] or ""))
+        summary = artifact["summary"]
+        if not isinstance(summary, Mapping):
+            raise ValueError
+        from src.contracts.global_auction_receipt import (
+            assert_global_auction_summary_integrity,
+        )
+
+        assert_global_auction_summary_integrity(summary)
+        if str(summary.get("receipt_hash") or "") != expected_receipt_hash:
+            raise ValueError
+        return summary
+    except (KeyError, TypeError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        raise _held_correction_unavailable("RECEIPT_INVALID") from exc
+
+
+def _load_held_audit_context(
+    conn: sqlite3.Connection,
+    *,
+    decision_log_id: int,
+    expected_mode: str,
+    expected_receipt_hash: str,
+    expected_audit_hash: str | None = None,
+    expected_delta_chain_depth: int | None = None,
+    depth: int = 0,
+    seen_ids: frozenset[int] = frozenset(),
+) -> Mapping[str, object]:
+    """Resolve an audit context through its authenticated compact-receipt chain."""
+
+    if depth > _ENTRY_AUDIT_MAX_DELTA_DEPTH or decision_log_id in seen_ids:
+        raise _held_correction_unavailable("AUDIT_DELTA_DEPTH")
+    if expected_delta_chain_depth is not None and not (
+        0 <= expected_delta_chain_depth <= _ENTRY_AUDIT_MAX_DELTA_DEPTH
+    ):
+        raise _held_correction_unavailable("AUDIT_DELTA_DEPTH")
+    seen_ids = seen_ids | frozenset({decision_log_id})
+    summary = _receipt_summary(
+        conn,
+        decision_log_id=decision_log_id,
+        expected_mode=expected_mode,
+        expected_receipt_hash=expected_receipt_hash,
+    )
+    audit_hash = str(summary.get("audit_context_sha256") or "")
+    if len(audit_hash) != 64 or (
+        expected_audit_hash is not None and audit_hash != expected_audit_hash
+    ):
+        raise _held_correction_unavailable("AUDIT_HASH_INVALID")
+    encoding = str(summary.get("audit_context_encoding") or "")
+    if "audit_context_zlib_b64" in summary:
+        if encoding != _ENTRY_AUDIT_ENCODING or expected_delta_chain_depth not in (None, 0):
+            raise _held_correction_unavailable("AUDIT_ENCODING_INVALID")
+        return _decode_held_audit_payload(
+            summary["audit_context_zlib_b64"], expected_hash=audit_hash
+        )
+
+    if "audit_context_reference_decision_log_id" in summary:
+        try:
+            return _load_held_audit_context(
+                conn,
+                decision_log_id=int(summary["audit_context_reference_decision_log_id"]),
+                expected_mode=str(summary["audit_context_reference_mode"]),
+                expected_receipt_hash=str(summary["audit_context_reference_receipt_hash"]),
+                expected_audit_hash=str(summary["audit_context_reference_sha256"]),
+                expected_delta_chain_depth=expected_delta_chain_depth,
+                depth=depth + 1,
+                seen_ids=seen_ids,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _held_correction_unavailable("AUDIT_REFERENCE_INVALID") from exc
+
+    if "audit_context_delta_zlib_b64" not in summary:
+        raise _held_correction_unavailable("AUDIT_MISSING")
+    if (
+        encoding != _ENTRY_AUDIT_ENCODING
+        or str(summary.get("audit_context_delta_encoding") or "")
+        != _ENTRY_AUDIT_DELTA_ENCODING
+    ):
+        raise _held_correction_unavailable("AUDIT_ENCODING_INVALID")
+    try:
+        delta_hash = str(summary["audit_context_delta_sha256"])
+        base_id = int(summary["audit_context_base_decision_log_id"])
+        base_mode = str(summary["audit_context_base_mode"])
+        base_receipt_hash = str(summary["audit_context_base_receipt_hash"])
+        base_audit_hash = str(summary["audit_context_base_sha256"])
+        declared_depth = int(summary["audit_context_delta_chain_depth"])
+        if (
+            not 1 <= declared_depth <= _ENTRY_AUDIT_MAX_DELTA_DEPTH
+            or (
+                expected_delta_chain_depth is not None
+                and declared_depth != expected_delta_chain_depth
+            )
+        ):
+            raise ValueError
+        delta = _decode_held_audit_payload(
+            summary["audit_context_delta_zlib_b64"], expected_hash=delta_hash
+        )
+        base = _load_held_audit_context(
+            conn,
+            decision_log_id=base_id,
+            expected_mode=base_mode,
+            expected_receipt_hash=base_receipt_hash,
+            expected_audit_hash=base_audit_hash,
+            expected_delta_chain_depth=declared_depth - 1,
+            depth=depth + 1,
+            seen_ids=seen_ids,
+        )
+        # This is the writer's stable object-delta semantics.  Reusing it
+        # avoids accepting a locally interpreted receipt shape.
+        from src.engine.global_batch_runtime import (
+            _apply_json_object_delta,
+            _canonical_json_bytes,
+        )
+
+        resolved = _apply_json_object_delta(base, delta)
+        if hashlib.sha256(_canonical_json_bytes(resolved)).hexdigest() != audit_hash:
+            raise ValueError
+        return resolved
+    except (KeyError, TypeError, ValueError, PayoffQCorrectionUnavailable) as exc:
+        if isinstance(exc, PayoffQCorrectionUnavailable):
+            raise
+        raise _held_correction_unavailable("AUDIT_DELTA_INVALID") from exc
+
+
+def _artifact_from_held_audit(payload: object) -> ResidualCalibratorArtifact:
+    """Rehydrate the immutable artifact recorded by the ENTRY receipt."""
+
+    try:
+        if not isinstance(payload, Mapping):
+            raise ValueError
+        manifest_raw = payload.get("training_manifest")
+        manifest = None
+        if manifest_raw is not None:
+            try:
+                manifest = CanonicalTrainingManifest.from_payload(manifest_raw)
+            except (TypeError, ValueError, KeyError):
+                # The audit writer stores ``asdict(artifact)``.  Its nested
+                # manifest is the immutable dataclass fields without the wire
+                # type/version wrapper, so reconstruct and recheck its hash.
+                if not isinstance(manifest_raw, Mapping):
+                    raise
+                manifest = CanonicalTrainingManifest.build(
+                    scope_hash=str(manifest_raw["scope_hash"]),
+                    corpus_revision=str(manifest_raw["corpus_revision"]),
+                    training_cutoff=str(manifest_raw["training_cutoff"]),
+                    row_count=int(manifest_raw["row_count"]),
+                    event_count=int(manifest_raw["event_count"]),
+                    weight_sum=float(manifest_raw["weight_sum"]),
+                    max_fill_available_at=str(manifest_raw["max_fill_available_at"]),
+                    max_label_available_at=str(manifest_raw["max_label_available_at"]),
+                    input_hash=str(manifest_raw["input_hash"]),
+                )
+                if str(manifest_raw.get("manifest_hash") or "") != manifest.manifest_hash:
+                    raise ValueError
+        artifact = ResidualCalibratorArtifact(
+            alpha=dict(payload["alpha"]),
+            beta=float(payload["beta"]),
+            lambda_=float(payload["lambda_"]),
+            clip_d=float(payload["clip_d"]),
+            p_clip=tuple(float(value) for value in payload["p_clip"]),
+            lead_buckets=tuple(str(value) for value in payload["lead_buckets"]),
+            training_cutoff=str(payload["training_cutoff"]),
+            n_train=int(payload["n_train"]),
+            n_excluded=int(payload["n_excluded"]),
+            excluded_reasons={str(key): int(value) for key, value in dict(payload["excluded_reasons"]).items()},
+            param_hash=str(payload["param_hash"]),
+            lead_calendar_revision=str(payload["lead_calendar_revision"]),
+            city_timezone_snapshot=tuple(
+                (str(city), str(zone)) for city, zone in payload["city_timezone_snapshot"]
+            ),
+            training_manifest=manifest,
+        )
+        from src.calibration.market_anchored_residual import _param_hash
+
+        if artifact.param_hash != _param_hash(
+            alpha=artifact.alpha,
+            beta=artifact.beta,
+            lambda_=artifact.lambda_,
+            clip_d=artifact.clip_d,
+            p_clip=artifact.p_clip,
+            lead_buckets=artifact.lead_buckets,
+            training_cutoff=artifact.training_cutoff,
+            lead_calendar_revision=artifact.lead_calendar_revision,
+            city_timezone_snapshot=artifact.city_timezone_snapshot,
+        ):
+            raise ValueError
+        return artifact
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise _held_correction_unavailable("ARTIFACT_INVALID") from exc
+
+
+@dataclass(frozen=True)
+class HeldEntryCalibrationBinding:
+    """Entry-sealed calibration that may correct a held token's fresh q only."""
+
+    artifact: ResidualCalibratorArtifact
+    fit_scope: CalibrationFitScope
+    calibration_policy: CalibrationPolicySpec
+    position_id: str
+    decision_log_id: int
+    decision_certificate_hash: str
+    family_key: str
+    bin_id: str
+    token_id: str
+    side: str
+
+    def corrected_probability(
+        self,
+        *,
+        family_key: str,
+        bin_id: str,
+        token_id: str,
+        side: str,
+        raw_q: float,
+        p0: float,
+        city: str,
+        target_date: date,
+        decision_at: datetime,
+    ) -> PayoffQCorrection:
+        """Apply the frozen ENTRY artifact to current source-clock q and p0."""
+
+        if (
+            family_key != self.family_key
+            or bin_id != self.bin_id
+            or token_id != self.token_id
+            or side != self.side
+        ):
+            raise _held_correction_unavailable("CANDIDATE_IDENTITY_MISMATCH")
+        applied = corrected_probability(
+            self.artifact,
+            p0=p0,
+            q_raw=raw_q,
+            city=city,
+            target_date=target_date,
+            decision_at=decision_at,
+            side=side,
+        )
+        if applied is None:
+            raise _held_correction_unavailable("CURRENT_Q_UNAVAILABLE")
+        corrected_q, lead_bucket, alpha_lead = applied
+        return PayoffQCorrection(
+            family_key=family_key,
+            bin_id=bin_id,
+            token_id=token_id,
+            side=side,
+            raw_q=float(raw_q),
+            corrected_q=float(corrected_q),
+            p0=float(p0),
+            lead_bucket=lead_bucket,
+            alpha_lead=alpha_lead,
+            beta=float(self.artifact.beta),
+            lambda_=float(self.artifact.lambda_),
+            training_cutoff=self.artifact.training_cutoff,
+            n_train=int(self.artifact.n_train),
+            param_hash=self.artifact.param_hash,
+            calibration_policy=self.calibration_policy,
+            fit_scope=self.fit_scope,
+            training_manifest=self.artifact.training_manifest,
+        )
+
+
+def load_held_entry_calibration(
+    trade_conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    token_id: str,
+    side: str,
+    world_conn: sqlite3.Connection | None = None,
+    world_schema_alias: str = "world",
+) -> HeldEntryCalibrationBinding:
+    """Load one position's immutable ENTRY calibration without fitting or opening DBs."""
+
+    if (
+        not isinstance(trade_conn, sqlite3.Connection)
+        or not isinstance(position_id, str)
+        or not position_id
+        or not isinstance(token_id, str)
+        or not token_id
+        or side not in {"YES", "NO"}
+        or world_schema_alias not in {"main", "world"}
+    ):
+        raise _held_correction_unavailable("REQUEST_INVALID")
+    certificate_conn = world_conn or trade_conn
+    certificate_schema = "main" if world_conn is not None and world_schema_alias == "world" else world_schema_alias
+    try:
+        event_status = trade_conn.execute(
+            """
+            SELECT
+                COUNT(*),
+                SUM(CASE
+                    WHEN typeof(decision_id) != 'text' OR trim(decision_id) = '' THEN 1
+                    ELSE 0
+                END),
+                SUM(CASE
+                    WHEN payload_json IS NULL
+                     OR json_valid(payload_json) = 0
+                     OR json_type(payload_json) != 'object' THEN 1
+                    ELSE 0
+                END),
+                SUM(CASE
+                    WHEN json_valid(payload_json) = 1
+                     AND json_type(payload_json, '$.decision_log_id') IS NOT NULL
+                     AND json_type(payload_json, '$.decision_log_id') != 'integer' THEN 1
+                    ELSE 0
+                END)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+            """,
+            (position_id,),
+        ).fetchone()
+        event_identity_rows = trade_conn.execute(
+            """
+            SELECT DISTINCT decision_id FROM position_events
+             WHERE position_id = ?
+               AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+             LIMIT 3
+            """,
+            (position_id,),
+        ).fetchall()
+        payload_receipt_rows = trade_conn.execute(
+            """
+            SELECT DISTINCT json_extract(payload_json, '$.decision_log_id')
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+               AND json_valid(payload_json) = 1
+               AND json_type(payload_json, '$.decision_log_id') = 'integer'
+             LIMIT 3
+            """,
+            (position_id,),
+        ).fetchall()
+        attribution_rows = trade_conn.execute(
+            """
+            SELECT DISTINCT decision_certificate_hash
+              FROM position_decision_attribution
+             WHERE position_id = ?
+               AND intent_kind = 'ENTRY'
+               AND resolution = 'ATTRIBUTED'
+               AND decision_certificate_hash IS NOT NULL
+             LIMIT 2
+            """,
+            (position_id,),
+        ).fetchall()
+        certificate_hashes = {str(row[0]).strip() for row in attribution_rows if str(row[0]).strip()}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _held_correction_unavailable("ENTRY_PROVENANCE_UNAVAILABLE") from exc
+    if (
+        event_status is None
+        or int(event_status[0] or 0) < 1
+        or int(event_status[1] or 0) > 0
+        or int(event_status[2] or 0) > 0
+        or int(event_status[3] or 0) > 0
+        or not 1 <= len(event_identity_rows) <= 2
+        or len(payload_receipt_rows) > 1
+        or len(certificate_hashes) != 1
+    ):
+        raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+    certificate_hash = next(iter(certificate_hashes))
+    try:
+        certificate_row = certificate_conn.execute(
+            f"""
+            SELECT payload_json, payload_hash FROM {certificate_schema}.decision_certificates
+             WHERE certificate_hash = ?
+               AND certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+             LIMIT 1
+            """,
+            (certificate_hash,),
+        ).fetchone()
+        if certificate_row is None:
+            raise ValueError
+        certificate = json.loads(str(certificate_row[0] or ""))
+        if not isinstance(certificate, Mapping):
+            raise ValueError
+        from src.decision_kernel.canonicalization import stable_hash
+
+        if stable_hash(certificate) != str(certificate_row[1] or ""):
+            raise ValueError
+        receipt_ref_raw = certificate["global_auction_receipt"]
+        from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+
+        receipt_ref = GlobalAuctionReceiptRef.from_payload(receipt_ref_raw)
+    except (KeyError, TypeError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        raise _held_correction_unavailable("CERTIFICATE_INVALID") from exc
+    # Both normal/recovery spellings may refer to the same ENTRY. Authenticate
+    # each against its certificate; a third distinct spelling is invalid.
+    for (event_certificate_hash,) in event_identity_rows:
+        if event_certificate_hash != certificate_hash:
+            parts = event_certificate_hash.split(":")
+            if len(parts) < 5 or parts[0] != "edli_exec_cmd":
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+            event_id = parts[1]
+            command_token = parts[-2]
+            command_direction = parts[-1]
+            final_intent_id = ":".join(parts[2:-2])
+            if (
+                str(certificate.get("event_id") or "").strip() != event_id
+                or str(certificate.get("final_intent_id") or "").strip() != final_intent_id
+                or str(certificate.get("token_id") or "").strip() != command_token
+                or str(certificate.get("direction") or "").strip() != command_direction
+            ):
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+    decision_log_id = receipt_ref.decision_log_id
+    if payload_receipt_rows and payload_receipt_rows[0][0] != decision_log_id:
+        raise _held_correction_unavailable("RECEIPT_BINDING_MISMATCH")
+    economics = certificate.get("qkernel_execution_economics")
+    if economics is not None and not isinstance(economics, Mapping):
+        raise _held_correction_unavailable("CERTIFICATE_INVALID")
+    economics = economics or {}
+
+    def certificate_value(field: str) -> object:
+        outer = certificate.get(field)
+        nested = economics.get(field)
+        if outer not in (None, "") and nested not in (None, "") and outer != nested:
+            raise _held_correction_unavailable("CERTIFICATE_BINDING_MISMATCH")
+        return outer if outer not in (None, "") else nested
+
+    direction = str(certificate_value("direction") or "").lower()
+    cert_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
+    if (
+        cert_side != side
+        or str(certificate_value("token_id") or "") != token_id
+        or str(certificate_value("global_token_id") or "") != token_id
+        or not str(certificate_value("global_family_key") or "").strip()
+        or not str(certificate_value("global_bin_id") or "").strip()
+    ):
+        raise _held_correction_unavailable("TOKEN_OR_SIDE_MISMATCH")
+    correction = certificate_value("market_anchored_correction")
+    try:
+        if not isinstance(correction, Mapping) or correction.get("applied") is not True:
+            raise ValueError
+        policy = CalibrationPolicySpec.from_payload(correction["calibration_policy"])
+        scope = CalibrationFitScope.from_payload(correction["fit_scope"])
+        param_hash = str(correction["param_hash"])
+        if (
+            policy.input_revision != CANONICAL_CALIBRATION_INPUT_REVISION
+            or policy.metric_pooling != CANONICAL_CALIBRATION_METRIC_POOLING
+            or scope.metric not in {"high", "low"}
+            or len(param_hash) != 64
+        ):
+            raise ValueError
+        audit_context = _load_held_audit_context(
+            trade_conn,
+            decision_log_id=receipt_ref.decision_log_id,
+            expected_mode=receipt_ref.decision_log_mode,
+            expected_receipt_hash=receipt_ref.receipt_hash,
+        )
+        audit = audit_context.get("market_anchored_fit_artifact_audit")
+        if not isinstance(audit, Mapping):
+            raise ValueError
+        if audit.get("revision") != "canonical_entry_fit_artifact_audit_v1":
+            raise ValueError
+        consulted = audit.get("consulted_scopes")
+        if not isinstance(consulted, Mapping):
+            raise ValueError
+        matches = [
+            entry for entry in consulted.values()
+            if isinstance(entry, Mapping)
+            and entry.get("status") == "AVAILABLE"
+            and str(entry.get("param_hash") or "") == param_hash
+            and entry.get("scope") == scope.as_payload()
+            and entry.get("policy") == policy.as_payload()
+        ]
+        if len(matches) != 1:
+            raise ValueError
+        artifact = _artifact_from_held_audit(matches[0].get("artifact"))
+        reproduced = _reproduced_policy_probability(
+            policy,
+            raw_q=correction["q_raw"],
+            p0=correction["p0"],
+            alpha_lead=correction["alpha_lead"],
+            beta=correction["beta"],
+            lead_bucket=correction["lead_bucket"],
+            side=side,
+        )
+        if (
+            artifact.param_hash != param_hash
+            or not math.isclose(float(correction["beta"]), artifact.beta, rel_tol=0.0, abs_tol=1e-12)
+            or not math.isclose(float(correction["lambda"]), artifact.lambda_, rel_tol=0.0, abs_tol=1e-12)
+            or str(correction["training_cutoff"]) != artifact.training_cutoff
+            or int(correction["n_train"]) != artifact.n_train
+            or not isinstance(correction.get("lead_bucket"), str)
+            or correction["lead_bucket"] not in artifact.alpha
+            or not math.isclose(
+                float(correction["alpha_lead"]),
+                -float(artifact.alpha[correction["lead_bucket"]]) if side == "NO" else float(artifact.alpha[correction["lead_bucket"]]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or reproduced is None
+            or not math.isclose(float(correction["q_corrected"]), reproduced, rel_tol=0.0, abs_tol=1e-12)
+        ):
+            raise ValueError
+        correction_manifest = correction.get("training_manifest")
+        if (
+            artifact.training_manifest is None
+            or correction_manifest != artifact.training_manifest.as_payload()
+            or artifact.training_manifest.scope_hash != scope.as_payload()["scope_hash"]
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise _held_correction_unavailable("CORRECTION_BINDING_INVALID") from exc
+    return HeldEntryCalibrationBinding(
+        artifact=artifact,
+        fit_scope=scope,
+        calibration_policy=policy,
+        position_id=position_id,
+        decision_log_id=decision_log_id,
+        decision_certificate_hash=certificate_hash,
+        family_key=str(certificate_value("global_family_key")),
+        bin_id=str(certificate_value("global_bin_id")),
+        token_id=token_id,
+        side=side,
+    )
+
+
+class HeldEntryCalibrationProvider:
+    """Monitor-scoped reader over already-open trade/world handles."""
+
+    def __init__(
+        self,
+        trade_conn: sqlite3.Connection,
+        *,
+        world_conn: sqlite3.Connection | None = None,
+        world_schema_alias: str = "world",
+    ) -> None:
+        self._trade_conn = trade_conn
+        self._world_conn = world_conn
+        self._world_schema_alias = world_schema_alias
+
+    def load(
+        self, *, position_id: str, token_id: str, side: str,
+    ) -> HeldEntryCalibrationBinding:
+        return load_held_entry_calibration(
+            self._trade_conn,
+            position_id=position_id,
+            token_id=token_id,
+            side=side,
+            world_conn=self._world_conn,
+            world_schema_alias=self._world_schema_alias,
+        )
+
+
+class UnavailableHeldEntryCalibrationProvider:
+    """Explicit live-monitor sentinel; required ENTRY proof cannot become raw q."""
+
+    def load(self, **_kwargs) -> HeldEntryCalibrationBinding:
+        raise _held_correction_unavailable("READER_UNAVAILABLE")

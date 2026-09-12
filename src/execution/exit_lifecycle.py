@@ -3308,6 +3308,33 @@ class GlobalSellExecutionAuthority:
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
         proposal = jit_candidate.economic_sell_curve
+        correction = getattr(decision, "payoff_q_correction", None)
+        if correction is not None:
+            from src.solve.solver import family_payoff_point_q
+
+            raw_q = family_payoff_point_q(
+                actuation.probability_witness,
+                bin_id=selected.bin_id,
+                side=selected.side,
+            )
+            if (
+                not mean_sell
+                or not correction.matches(
+                    family_key=selected.family_key,
+                    bin_id=selected.bin_id,
+                    side=selected.side,
+                    token_id=selected.token_id,
+                )
+                or raw_q is None
+                or not math.isclose(correction.raw_q, raw_q, rel_tol=0.0, abs_tol=1e-12)
+                or Decimal(str(correction.p0)) != proposal.levels[0].price
+                or not math.isclose(
+                    correction.corrected_q,
+                    expected_terminal.held_probability_mean,
+                    rel_tol=0.0, abs_tol=1e-12,
+                )
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED")
         proceeds, _vwap, limit = proposal.proceeds_for_shares(decision.shares)
         if proceeds < decision.cash_proceeds_usd or limit < decision.limit_price:
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_WORSENED")

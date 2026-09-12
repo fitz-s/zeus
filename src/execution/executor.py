@@ -526,6 +526,12 @@ def _entry_terminal_no_fill_redecision_proof(
         return None
     if not isinstance(payload, dict):
         return None
+    if _entry_invalid_amount_no_fill_proof(
+        conn,
+        command_id=command_id,
+        payload=payload,
+    ):
+        return "invalid_amount"
     rejection_reason = str(payload.get("reason") or "")
     pre_submit_redecision_proof = (
         "pre_submit_transport"
@@ -586,6 +592,234 @@ def _entry_terminal_no_fill_redecision_proof(
     ):
         return "fok"
     return None
+
+
+def _entry_invalid_amount_no_fill_proof(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    payload: Mapping[str, object],
+) -> bool:
+    try:
+        return _entry_invalid_amount_no_fill_proof_unchecked(
+            conn,
+            command_id=command_id,
+            payload=payload,
+        )
+    except (sqlite3.Error, TypeError, ValueError, InvalidOperation, UnicodeError):
+        return False
+
+
+def _entry_invalid_amount_no_fill_proof_unchecked(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    payload: Mapping[str, object],
+) -> bool:
+    """Rebuild a typed no-fill proof from a persisted invalid-amount submit.
+
+    The result-success-false path predates the typed rejection fields, so this
+    validator deliberately reconstructs them from the final envelope and the
+    command-bound canonical tables.  A local expected ``venue_order_id`` is
+    not treated as a venue order; any persisted order/trade fact still fails
+    closed.
+    """
+
+    reason = str(payload.get("reason") or "")
+    if reason not in {"venue_rejected_400", "venue_rejected_invalid_amount_400"}:
+        return False
+    detail = " ".join(str(payload.get("detail") or "").lower().split())
+    required_detail = (
+        "status_code=400",
+        "invalid amounts",
+        "maker amount supports a max accuracy of 2 decimals",
+        "taker amount a max of 4 decimals",
+    )
+    if any(marker not in detail for marker in required_detail):
+        return False
+    if str(payload.get("final_submission_envelope_command_id") or "") != command_id:
+        return False
+    final_id = str(payload.get("final_submission_envelope_id") or "").strip()
+    if (
+        not final_id
+        or payload.get("final_submission_envelope_stage") != "post_submit_result"
+        or not _table_exists(conn, "venue_submission_envelopes")
+        or not _table_exists(conn, "venue_commands")
+    ):
+        return False
+    command_row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ? LIMIT 1",
+        (command_id,),
+    ).fetchone()
+    final_row = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ? LIMIT 1",
+        (final_id,),
+    ).fetchone()
+    if command_row is None or final_row is None:
+        return False
+    command = dict(command_row)
+    final = dict(final_row)
+    order_type = str(final.get("order_type") or "").upper()
+    pre_id = str(command.get("envelope_id") or "").strip()
+    if pre_id != f"pre-submit:{command_id}":
+        return False
+    pre_row = conn.execute(
+        "SELECT * FROM venue_submission_envelopes WHERE envelope_id = ? LIMIT 1",
+        (pre_id,),
+    ).fetchone()
+    if pre_row is None:
+        return False
+    pre = dict(pre_row)
+
+    def _same_decimal(left: object, right: object) -> bool:
+        try:
+            return Decimal(str(left)) == Decimal(str(right))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+
+    def _is_false_flag(value: object) -> bool:
+        return value is False or value == 0 or value == "0"
+
+    def _empty_json_list(value: object) -> bool:
+        try:
+            parsed = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(parsed, list) and not parsed
+
+    final_detail = " ".join(str(final.get("error_message") or "").lower().split())
+    if any(marker not in final_detail for marker in required_detail):
+        return False
+
+    def _is_sha256(value: object) -> bool:
+        text = str(value or "").lower()
+        if len(text) != 64:
+            return False
+        try:
+            int(text, 16)
+        except ValueError:
+            return False
+        return True
+
+    if (
+        pre.get("sdk_version") != "pre-submit"
+        or not final.get("sdk_version")
+        or final.get("sdk_version") == "pre-submit"
+        or final_id == pre_id
+        or str(command.get("intent_kind") or "").upper() != "ENTRY"
+        or str(command.get("side") or "").upper() != "BUY"
+        or (
+            "order_type" in command
+            and str(command.get("order_type") or "").upper() != order_type
+        )
+        or (
+            "post_only" in command
+            and not _is_false_flag(command.get("post_only"))
+        )
+        or not _is_sha256(pre.get("canonical_pre_sign_payload_hash"))
+        or not _is_sha256(pre.get("raw_request_hash"))
+        or not _is_sha256(final.get("canonical_pre_sign_payload_hash"))
+        or not _is_sha256(final.get("raw_request_hash"))
+        or not pre.get("condition_id")
+        or not pre.get("question_id")
+        or pre.get("canonical_pre_sign_payload_hash")
+        != final.get("canonical_pre_sign_payload_hash")
+        or pre.get("raw_request_hash") != final.get("raw_request_hash")
+    ):
+        return False
+    canonical_payload = {
+        "command_id": command_id,
+        "snapshot_id": command.get("snapshot_id"),
+        "token_id": pre.get("selected_outcome_token_id"),
+        "side": pre.get("side"),
+        "price": str(Decimal(str(pre.get("price")))),
+        "size": str(Decimal(str(pre.get("size")))),
+        "order_type": pre.get("order_type"),
+        "post_only": not _is_false_flag(pre.get("post_only")),
+        "condition_id": pre.get("condition_id"),
+        "question_id": pre.get("question_id"),
+    }
+    expected_payload_hash = hashlib.sha256(
+        json.dumps(canonical_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if (
+        not command.get("snapshot_id")
+        or expected_payload_hash != str(pre.get("canonical_pre_sign_payload_hash"))
+    ):
+        return False
+
+    if (
+        str(final.get("error_code") or "")
+        not in {"venue_rejected_400", "venue_rejected_invalid_amount_400"}
+        or final.get("order_id") not in (None, "")
+        or order_type not in {"FOK", "FAK"}
+        or str(final.get("side") or "").upper() != "BUY"
+        or not _is_false_flag(final.get("post_only"))
+        or str(final.get("selected_outcome_token_id") or "")
+        != str(command.get("token_id") or "")
+        or str(pre.get("selected_outcome_token_id") or "")
+        != str(final.get("selected_outcome_token_id") or "")
+        or str(pre.get("side") or "").upper() != "BUY"
+        or str(pre.get("order_type") or "").upper() != order_type
+        or not _is_false_flag(pre.get("post_only"))
+        or not _same_decimal(final.get("size"), command.get("size"))
+        or not _same_decimal(final.get("price"), command.get("price"))
+        or not _same_decimal(pre.get("size"), final.get("size"))
+        or not _same_decimal(pre.get("price"), final.get("price"))
+        or str(pre.get("canonical_pre_sign_payload_hash") or "")
+        != str(final.get("canonical_pre_sign_payload_hash") or "")
+        or str(pre.get("raw_request_hash") or "")
+        != str(final.get("raw_request_hash") or "")
+        or not _empty_json_list(final.get("trade_ids_json"))
+        or not _empty_json_list(final.get("transaction_hashes_json"))
+    ):
+        return False
+
+    blob = final.get("signed_order_blob")
+    signed_hash = str(final.get("signed_order_hash") or "").lower()
+    if not blob or len(signed_hash) != 64:
+        return False
+    try:
+        blob_bytes = (
+            bytes(blob)
+            if isinstance(blob, (bytes, bytearray, memoryview))
+            else str(blob).encode()
+        )
+        if hashlib.sha256(blob_bytes).hexdigest() != signed_hash:
+            return False
+        signed = json.loads(blob_bytes.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(signed, Mapping):
+        return False
+    try:
+        signed_size = Decimal(str(signed["takerAmount"])) / Decimal("1000000")
+        signed_cost = Decimal(str(signed["makerAmount"])) / Decimal("1000000")
+    except (KeyError, InvalidOperation, TypeError, ValueError):
+        return False
+    if (
+        str(signed.get("tokenId") or "")
+        != str(final.get("selected_outcome_token_id") or "")
+        or str(signed.get("side")) != "0"
+        or not signed_size.is_finite()
+        or not signed_cost.is_finite()
+        or not _same_decimal(signed_size, final.get("size"))
+        or not _same_decimal(
+            signed_cost, signed_size * Decimal(str(final.get("price")))
+        )
+    ):
+        return False
+
+    for table in ("venue_order_facts", "venue_trade_facts"):
+        if not _table_exists(conn, table) or "command_id" not in _table_column_names(
+            conn, table
+        ):
+            return False
+        if conn.execute(
+            f"SELECT 1 FROM {table} WHERE command_id = ? LIMIT 1", (command_id,)
+        ).fetchone() is not None:
+            return False
+    return True
 
 
 def _pending_entry_terminal_no_fill_allows_entry(

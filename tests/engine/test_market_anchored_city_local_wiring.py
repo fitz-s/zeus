@@ -402,7 +402,17 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch,
 
     monkeypatch.setattr(portfolio_module, "datetime", FixedDateTime)
     provider = StubProvider(None, city_timezones={})
-    monkeypatch.setattr(provider, "artifact", lambda *, now: artifact)
+    def apply_held(**kwargs):
+        corrected = corrected_probability(
+            artifact, p0=kwargs["p0"], q_raw=kwargs["raw_q"],
+            city=kwargs["city"], target_date=kwargs["target_date"],
+            decision_at=kwargs["decision_at"], side=kwargs["side"],
+        )
+        return SimpleNamespace(corrected_q=corrected[0])
+
+    provider.load = lambda **kwargs: SimpleNamespace(
+        family_key="family", bin_id="b", corrected_probability=apply_held,
+    )
     register_active_provider(provider)
     context = ExitContext(
         fresh_prob=0.9,
@@ -515,15 +525,18 @@ def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(m
     finally:
         conn.close()
     assert len(observed) == 1
-    assert isinstance(observed[0], MarketAnchoredFitProvider)
-    assert observed[0]._schema_alias == "world"
+    from src.calibration.market_anchored_live_fit import HeldEntryCalibrationProvider
+
+    assert isinstance(observed[0], HeldEntryCalibrationProvider)
+    assert observed[0]._trade_conn is conn
+    assert observed[0]._world_schema_alias == "world"
     assert get_active_provider() is None
 
 
-def test_legacy_monitor_warm_close_then_refits_on_attached_trade(
+def test_unscoped_legacy_fit_cannot_authorize_current_held_exit(
     monkeypatch, tmp_path
 ):
-    """The legacy monitor refits its own expired artifact from fresh WORLD."""
+    """A usable attribution fit cannot substitute for the held ENTRY policy."""
 
     entry_at = datetime.now(timezone.utc) - timedelta(hours=7)
     target_date = entry_at.date() + timedelta(days=1)
@@ -616,8 +629,8 @@ def test_legacy_monitor_warm_close_then_refits_on_attached_trade(
         trade.close()
 
     assert len(observed) == 1
-    assert observed[0][2] == "market_anchored"
-    assert observed[0][0] != 0.9
+    assert observed[0][2] == "entry_calibration_unavailable"
+    assert observed[0][1] is False
     assert get_active_provider() is None
 
 
@@ -630,11 +643,8 @@ def test_cycle_runner_monitor_budget_includes_provider_setup_time(monkeypatch):
         def __init__(self, *args, **kwargs):
             time.sleep(0.03)
 
-        def warm(self, *, now, deadline_monotonic):
-            observed["warm_remaining"] = deadline_monotonic - time.monotonic()
-
     monkeypatch.setattr(
-        "src.calibration.market_anchored_live_fit.MarketAnchoredFitProvider",
+        "src.calibration.market_anchored_live_fit.HeldEntryCalibrationProvider",
         StubProvider,
     )
     monkeypatch.setattr(
@@ -662,7 +672,6 @@ def test_cycle_runner_monitor_budget_includes_provider_setup_time(monkeypatch):
     finally:
         conn.close()
 
-    assert observed["warm_remaining"] < 0.04
     assert observed["runtime_budget"] < 0.04
     assert get_active_provider() is None
 
@@ -1104,3 +1113,95 @@ def test_entry_warm_does_not_bind_scope_or_grant_fit_authority(monkeypatch, warm
     with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
         resolver(SimpleNamespace(family_key="one", side="YES", execution_mode="TAKER_LIMIT", action="BUY"), .8, .4, at)
     assert calls == ["provider", "warm", "scope", "artifact"]
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('sell_mode', ['TAKER_LIMIT', 'MAKER_REST'])
+def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, sell_mode):
+    from src.calibration import market_anchored_live_fit as live_fit
+    from src.contracts.payoff_q_correction import PayoffQCorrection
+
+    entry_scope = CalibrationFitScope('high', 'TAKER_LIMIT', 'FOK_FULL_OR_ZERO', 'entry-revision')
+    policy = live_fit.CanonicalMarketAnchoredFitProvider(
+        lambda: (None, None, None), city_timezones={'Tokyo': 'Asia/Tokyo'},
+    ).calibration_policy
+    artifact = _artifact(snapshot=(('Tokyo', 'Asia/Tokyo'),))
+    calls = []
+
+    def apply(**kwargs):
+        calls.append(kwargs)
+        q, lead, alpha = corrected_probability(
+            artifact, p0=kwargs['p0'], q_raw=kwargs['raw_q'],
+            target_date=kwargs['target_date'], side=kwargs['side'],
+            city=kwargs['city'], decision_at=kwargs['decision_at'],
+        )
+        return PayoffQCorrection(
+            family_key=kwargs['family_key'], bin_id=kwargs['bin_id'],
+            token_id=kwargs['token_id'], side=kwargs['side'],
+            raw_q=kwargs['raw_q'], corrected_q=q, p0=kwargs['p0'],
+            lead_bucket=lead, alpha_lead=alpha, beta=artifact.beta,
+            lambda_=artifact.lambda_, training_cutoff=artifact.training_cutoff,
+            n_train=artifact.n_train, param_hash=artifact.param_hash,
+            calibration_policy=policy, fit_scope=entry_scope,
+        )
+
+    binding = SimpleNamespace(
+        fit_scope=entry_scope, calibration_policy=policy, artifact=artifact,
+        corrected_probability=apply,
+    )
+    trade, world = object(), object()
+    loaded = []
+
+    def load(conn, **kwargs):
+        loaded.append((conn, kwargs))
+        return binding
+
+    monkeypatch.setattr(live_fit, 'load_held_entry_calibration', load, raising=False)
+    def unavailable_fit(*args, **kwargs):
+        raise ValueError('current refit is not held-entry policy')
+    monkeypatch.setattr(live_fit, 'CanonicalMarketAnchoredFitProvider', unavailable_fit)
+    audit = {}
+    resolver = _entry_resolver(
+        world, trade_conn=trade,
+        target_context_by_family={'family': ('Tokyo', date(2026, 1, 2))},
+        market_anchored_fit_artifact_audit=audit,
+    )
+    candidate = SimpleNamespace(
+        action='SELL', family_key='family', bin_id='bin', token_id='held-token',
+        position_id='held-position', side=side, execution_mode=sell_mode,
+    )
+    now = datetime(2026, 1, 1, 15, 30, tzinfo=timezone.utc)
+    correction = resolver(candidate, 0.83, 0.42, now)
+    assert correction.raw_q == 0.83
+    assert correction.p0 == 0.42
+    assert correction.fit_scope is entry_scope
+    assert correction.calibration_policy is policy
+    assert correction.corrected_q == pytest.approx(corrected_probability(
+        artifact, p0=0.42, q_raw=0.83, city='Tokyo', target_date=date(2026, 1, 2),
+        decision_at=now, side=side,
+    )[0])
+    assert calls[0]['decision_at'] == now
+    assert loaded == [(trade, {
+        'position_id': 'held-position', 'token_id': 'held-token',
+        'side': side, 'world_conn': world,
+    })]
+    recorded = next(iter(audit['consulted_scopes'].values()))
+    assert recorded['scope'] == entry_scope.as_payload()
+    assert recorded['policy'] == policy.as_payload()
+
+
+def test_held_sell_missing_entry_policy_cannot_fall_back_to_raw(monkeypatch):
+    from src.calibration import market_anchored_live_fit as live_fit
+
+    def missing(*args, **kwargs):
+        raise PayoffQCorrectionUnavailable('ENTRY_BINDING_MISSING')
+
+    monkeypatch.setattr(live_fit, 'load_held_entry_calibration', missing, raising=False)
+    resolver = _entry_resolver(object(), target_context_by_family={
+        'family': ('Tokyo', date(2026, 1, 2)),
+    })
+    candidate = SimpleNamespace(
+        action='SELL', family_key='family', bin_id='bin', token_id='held-token',
+        position_id='held-position', side='NO', execution_mode='TAKER_LIMIT',
+    )
+    with pytest.raises(PayoffQCorrectionUnavailable, match='ENTRY_BINDING_MISSING'):
+        resolver(candidate, 0.1, 0.9, datetime(2026, 1, 1, tzinfo=timezone.utc))

@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
 from src.calibration.market_anchored_live_fit import (
-    MarketAnchoredFitProvider,
+    corrected_probability,
     get_active_provider,
     register_active_provider,
 )
@@ -57,15 +57,34 @@ def _stub_artifact(*, alpha_day0: float = 0.09, beta: float = 0.0) -> ResidualCa
     )
 
 
-class _StubProvider:
-    """A pre-warmed provider that never touches a database — used to prove
-    the exit path only needs `.artifact(now=...)`, never a connection."""
+class _StubBinding:
+    family_key = "Warsaw|2026-09-04|high"
+    bin_id = "20-21C"
 
-    def __init__(self, artifact: ResidualCalibratorArtifact | None) -> None:
+    def __init__(self, artifact: ResidualCalibratorArtifact) -> None:
         self._artifact = artifact
 
-    def artifact(self, *, now: datetime) -> ResidualCalibratorArtifact | None:
-        return self._artifact
+    def corrected_probability(self, **kwargs):
+        applied = corrected_probability(
+            self._artifact,
+            p0=kwargs["p0"], q_raw=kwargs["raw_q"], city=kwargs["city"],
+            target_date=kwargs["target_date"], decision_at=kwargs["decision_at"],
+            side=kwargs["side"],
+        )
+        assert applied is not None
+        return type("Correction", (), {"corrected_q": applied[0]})()
+
+
+class _StubProvider:
+    """A pre-bound ENTRY reader that cannot fit or open a connection."""
+
+    def __init__(self, artifact: ResidualCalibratorArtifact | None) -> None:
+        self._binding = None if artifact is None else _StubBinding(artifact)
+
+    def load(self, **_kwargs):
+        if self._binding is None:
+            raise RuntimeError("entry proof unavailable")
+        return self._binding
 
 
 def _held_position(direction: str = "buy_yes", *, target_date: str = "2026-09-04") -> Position:
@@ -82,6 +101,8 @@ def _held_position(direction: str = "buy_yes", *, target_date: str = "2026-09-04
         shares=40.0,
         cost_basis_usd=20.0,
         p_posterior=0.50,
+        token_id="yes-token",
+        no_token_id="no-token",
     )
 
 
@@ -176,7 +197,7 @@ def test_no_provider_registered_falls_back_to_raw_q():
     assert "exit_q:market_anchored" not in decision.applied_validations
 
 
-def test_provider_returning_none_artifact_falls_back_to_raw_q():
+def test_missing_entry_proof_makes_statistical_exit_evidence_unavailable():
     register_active_provider(_StubProvider(None))
     today = datetime.now(timezone.utc).date().isoformat()
     pos = _held_position(direction="buy_yes", target_date=today)
@@ -184,103 +205,44 @@ def test_provider_returning_none_artifact_falls_back_to_raw_q():
 
     q_mean, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
 
-    assert evidence_ok is True
-    assert source == "raw"
+    assert evidence_ok is False
+    assert source == "entry_calibration_unavailable"
     assert float(q_mean) == pytest.approx(0.50, abs=1e-9)
+
+
+def test_live_reader_unavailable_never_reverts_to_raw_statistical_q():
+    from src.calibration.market_anchored_live_fit import UnavailableHeldEntryCalibrationProvider
+
+    register_active_provider(UnavailableHeldEntryCalibrationProvider())
+    today = datetime.now(timezone.utc).date().isoformat()
+    pos = _held_position(direction="buy_yes", target_date=today)
+    ctx = _exit_context(fresh_prob=0.50, current_market_price=0.20, best_bid=0.15)
+
+    q_mean, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
+
+    assert float(q_mean) == pytest.approx(0.50, abs=1e-9)
+    assert evidence_ok is False
+    assert source == "entry_calibration_unavailable"
 
 
 # --- (d) evaluate_exit never opens its own DB connection ---------------------
 
 
-def _seed_conn_for_real_provider() -> sqlite3.Connection:
-    """A real, in-process sqlite connection with enough DISTINCT claims (one
-    per row: unique city/bin) to clear MIN_TRAIN_ROWS=20 under the claim-count
-    weighting from the sibling fix, fitted BEFORE sqlite3.connect is
-    monkeypatched — proving the exit path only ever reuses this
-    already-open connection (or the provider's TTL cache), never dials a
-    fresh one itself.
-    """
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE settlement_attribution (
-            attribution_id TEXT, q_in_bin REAL, market_in_bin_prob REAL,
-            settled_in_bin INTEGER, direction TEXT,
-            decision_posterior_computed_at TEXT, target_date TEXT,
-            settled_at TEXT, graded_at TEXT, city TEXT,
-            temperature_metric TEXT, traded_bin_label TEXT
-        )
-        """
-    )
-    decision_day = date(2026, 8, 20)
-    target_day = decision_day + timedelta(days=1)
-    settled_at = datetime.combine(
-        target_day, datetime.min.time(), tzinfo=timezone.utc
-    ) + timedelta(hours=6)
-    rows = [
-        {
-            "attribution_id": f"row-{i}",
-            "q_in_bin": 0.6,
-            "market_in_bin_prob": 0.35,
-            "settled_in_bin": i % 2,
-            "direction": "buy_yes",
-            "decision_posterior_computed_at": datetime.combine(
-                decision_day, datetime.min.time(), tzinfo=timezone.utc
-            ).isoformat(),
-            "target_date": target_day.isoformat(),
-            "settled_at": settled_at.isoformat(),
-            "graded_at": settled_at.isoformat(),
-            "city": f"city-{i}",
-            "temperature_metric": "high",
-            "traded_bin_label": f"bin-{i}",
-        }
-        for i in range(30)
-    ]
-    conn.executemany(
-        """
-        INSERT INTO settlement_attribution (
-            attribution_id, q_in_bin, market_in_bin_prob, settled_in_bin,
-            direction, decision_posterior_computed_at, target_date,
-            settled_at, graded_at, city, temperature_metric, traded_bin_label
-        ) VALUES (
-            :attribution_id, :q_in_bin, :market_in_bin_prob, :settled_in_bin,
-            :direction, :decision_posterior_computed_at, :target_date,
-            :settled_at, :graded_at, :city, :temperature_metric, :traded_bin_label
-        )
-        """,
-        rows,
-    )
-    conn.commit()
-    return conn
-
-
 def test_evaluate_exit_never_opens_its_own_db_connection(monkeypatch):
-    conn = _seed_conn_for_real_provider()
-    provider = MarketAnchoredFitProvider(
-        lambda: conn,
-        min_train_rows=20,
-        city_timezones={f"city-{i}": "UTC" for i in range(30)},
-    )
-    # Warm the TTL cache now (real wall-clock "now"), BEFORE sqlite3.connect
-    # is sabotaged below — the exit path's own `now` a moment later is well
-    # inside the 6h TTL, so it must never call `_connect()` again.
-    warm_artifact = provider.artifact(now=datetime.now(timezone.utc))
-    assert warm_artifact is not None
-    register_active_provider(provider)
+    register_active_provider(_StubProvider(_stub_artifact()))
 
     def _explode(*_args, **_kwargs):
         raise AssertionError("evaluate_exit must never open its own DB connection")
 
     monkeypatch.setattr(sqlite3, "connect", _explode)
 
-    pos = _held_position(direction="buy_yes", target_date="2026-08-21")
+    pos = _held_position(
+        direction="buy_yes", target_date=datetime.now(timezone.utc).date().isoformat()
+    )
     ctx = _exit_context(fresh_prob=0.50, current_market_price=0.20, best_bid=0.15)
 
-    # Must not raise: no new connection, cache still warm (within its 6h TTL
-    # relative to `now=datetime.now(timezone.utc)` inside the exit path, or a
-    # cache miss that fails open to "raw" rather than dialing sqlite).
+    # Must not raise: only the immutable ENTRY binding is consulted.
     decision = pos.evaluate_exit(ctx)
     assert decision.trigger in {"HOLD", "SELL_REVERSAL", "EVIDENCE_UNAVAILABLE"}
     applied = set(decision.applied_validations)
-    assert "exit_q:market_anchored" in applied or "exit_q:raw" in applied
+    assert "exit_q:market_anchored" in applied

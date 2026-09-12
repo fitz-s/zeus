@@ -77,7 +77,10 @@ from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
-from src.contracts.payoff_q_correction import PayoffQCorrection, PayoffQCorrectionUnavailable
+from src.contracts.payoff_q_correction import (
+    PayoffQCorrection,
+    PayoffQCorrectionUnavailable,
+)
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -7314,41 +7317,58 @@ def select_global_single_order(
         raw_q: float,
         witness: FamilyPayoffWitness,
     ) -> PayoffQCorrection | None:
-        """Market-anchored correction for one BUY leg, or None to keep raw q.
+        """Market-anchored correction for one BUY or SELL leg, or raw q.
 
-        Excluded by construction: SELL legs (the calibrator is fitted on entry
-        decisions only) and any candidate whose payoff is a PROVED 0/1 Day0
-        fact — shrinking a settled truth toward the market price would corrupt
-        a certainty into a guess. Optional legacy resolvers may return None;
-        the canonical ENTRY resolver raises PayoffQCorrectionUnavailable when
-        its required fit is missing, so this proposal cannot size on raw q.
+        SELL uses its executable bid curve because the first bid is the gross
+        price of the held token being released. A proved 0/1 Day0 payoff never
+        enters calibration. Optional legacy resolvers may return None; the
+        canonical resolver raises PayoffQCorrectionUnavailable when its
+        required fit is missing, so that proposal cannot size on raw q.
         """
 
         if (
             payoff_q_correction_resolver is None
-            or not isinstance(candidate, GlobalSingleOrderCandidate)
+            or not isinstance(
+                candidate,
+                (GlobalSingleOrderCandidate, GlobalSingleOrderSellCandidate),
+            )
             or family_exact_yes_payoff(witness, bin_id=candidate.bin_id) is not None
-            or candidate.settlement_locked_exact_payoff
+            or getattr(candidate, "settlement_locked_exact_payoff", False)
         ):
             return None
         # p0 is the decision-time gross unit fill price of THIS token: the
         # market's probability anchor for the claim. Fees stay on the economic
         # cost curve and are excluded from the calibrator's logit residual.
-        curve = candidate.economic_cost_curve
+        curve = (
+            candidate.economic_sell_curve
+            if isinstance(candidate, GlobalSingleOrderSellCandidate)
+            else candidate.economic_cost_curve
+        )
         if not curve.levels:
             return None
         p0 = float(curve.levels[0].price)
         if not math.isfinite(p0) or not 0.0 < p0 < 1.0:
             return None
+        is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
         try:
             correction = payoff_q_correction_resolver(
                 candidate, float(raw_q), p0, decision_at_utc
             )
         except PayoffQCorrectionUnavailable:
             raise
-        except Exception:  # noqa: BLE001 - optional legacy correction keeps raw q
+        except Exception as exc:  # noqa: BLE001 - BUY legacy fallback only
+            if is_sell:
+                raise PayoffQCorrectionUnavailable(
+                    f"SELL correction resolver failed: {exc}"
+                ) from exc
             return None
         if correction is None:
+            return None
+        if not isinstance(correction, PayoffQCorrection):
+            if is_sell:
+                raise PayoffQCorrectionUnavailable(
+                    "SELL correction result has invalid type"
+                )
             return None
         if not correction.matches(
             family_key=candidate.family_key,
@@ -7361,7 +7381,15 @@ def select_global_single_order(
             # A record sealed against a different leg or a superseded raw q
             # cannot describe this sizing; acting on it would break the
             # certificate's raw-q supersession check.
+            if is_sell:
+                raise PayoffQCorrectionUnavailable(
+                    "SELL correction identity or raw q mismatch"
+                )
             return None
+        if is_sell and not math.isclose(
+            correction.p0, p0, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise PayoffQCorrectionUnavailable("SELL correction p0 mismatch")
         return correction
 
     def bind_capital_horizon(
@@ -7601,6 +7629,30 @@ def select_global_single_order(
                 bin_id=candidate.bin_id,
                 side=candidate.side,
             )
+            sell_correction = None
+            scoring_point_q = point_q
+            if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+                if point_q is None:
+                    rejections[candidate.candidate_id] = (
+                        "POINT_PROBABILITY_UNAVAILABLE"
+                    )
+                    continue
+                try:
+                    sell_correction = resolve_payoff_q_correction(
+                        candidate,
+                        raw_q=point_q,
+                        witness=probability_witness,
+                    )
+                except PayoffQCorrectionUnavailable as exc:
+                    # SCOPE: this SELL proposal only. DRAIN: retry its sealed
+                    # ENTRY fit on the next solve cut. RESET: the parent
+                    # resolver supplies a current position-scoped fit.
+                    rejections[candidate.candidate_id] = (
+                        f"CALIBRATED_PAYOFF_Q_UNAVAILABLE:{exc}"
+                    )
+                    continue
+                if sell_correction is not None:
+                    scoring_point_q = sell_correction.corrected_q
             try:
                 sell_endowment = resolve_candidate_endowment(
                     candidate,
@@ -7637,7 +7689,7 @@ def select_global_single_order(
                 try:
                     point_counterfactual = _score_global_sell_point_counterfactual(
                         candidate,
-                        point_held_payoff_q=point_q,
+                        point_held_payoff_q=scoring_point_q,
                         probability_witness_identity=(
                             probability_witness.witness_identity
                         ),
@@ -7668,14 +7720,9 @@ def select_global_single_order(
                 point_counterfactual
             )
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
-                if point_q is None:
-                    rejections[candidate.candidate_id] = (
-                        "POINT_PROBABILITY_UNAVAILABLE"
-                    )
-                    continue
                 score = _score_global_single_order_sell_expected(
                     candidate,
-                    held_probability_mean=point_q,
+                    held_probability_mean=scoring_point_q,
                     sample_count=q_samples.size,
                     band_alpha=band_alpha,
                     endowment=sell_endowment,
@@ -7709,6 +7756,8 @@ def select_global_single_order(
             if score is None:
                 assert horizon_reason is not None
                 return superseded_decision(candidate.candidate_id, horizon_reason)
+            if sell_correction is not None and score.candidate is not None:
+                score = replace(score, payoff_q_correction=sell_correction)
             scored.append(score)
             rejections.update(score.rejection_reasons)
             continue

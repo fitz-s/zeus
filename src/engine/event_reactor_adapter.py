@@ -13614,6 +13614,14 @@ def _global_sell_execution_economics_drift(
     )
     if curve_drift:
         return f"fields={','.join(curve_drift)}"
+    correction = getattr(decision, "payoff_q_correction", None)
+    if correction is not None and (
+        Decimal(str(correction.p0))
+        != current_candidate.economic_sell_curve.levels[0].price
+    ):
+        # SCOPE: this calibrated SELL proposal. DRAIN: re-auction on the new
+        # quote. RESET: the sealed probability uses that same price anchor.
+        return "calibration_price_anchor"
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     selected_proceeds = Decimal(
         str(getattr(decision, "cash_proceeds_usd", "0") or "0")
@@ -13702,6 +13710,55 @@ def _global_sell_probability_receipt(
         "probability_content_identity": content_identity,
         "source_truth_identity": source_truth_identity,
     }
+
+
+def _revalidate_global_sell_calibration(
+    trade_conn, world_conn, *, actuation, position,
+):
+    """Reproduce the selected held q from its entry policy before SELL."""
+
+    decision = actuation.decision
+    correction = getattr(decision, "payoff_q_correction", None)
+    if correction is None:
+        return
+    from src.calibration.market_anchored_live_fit import load_held_entry_calibration
+    from src.solve.solver import family_payoff_point_q
+    candidate = decision.candidate
+    raw_q = family_payoff_point_q(
+        actuation.probability_witness, bin_id=candidate.bin_id, side=candidate.side,
+    )
+    if raw_q is None or candidate.probability_functional != "POSTERIOR_PREDICTIVE_MEAN":
+        raise ValueError("GLOBAL_SELL_CALIBRATION_PROBABILITY_INVALID")
+    binding = load_held_entry_calibration(
+        trade_conn,
+        position_id=candidate.position_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        world_conn=world_conn,
+    )
+    reproduced = binding.corrected_probability(
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        raw_q=raw_q,
+        p0=float(candidate.economic_sell_curve.levels[0].price),
+        city=position.city,
+        target_date=date.fromisoformat(str(position.target_date)[:10]),
+        decision_at=actuation.decision_at_utc,
+    )
+    terminal = decision.expected_terminal_wealth
+    if (
+        reproduced != correction
+        or terminal is None
+        or not math.isclose(
+            terminal.held_probability_mean, correction.corrected_q,
+            rel_tol=0.0, abs_tol=1e-12,
+        )
+    ):
+        # SCOPE: this holding's statistical SELL. DRAIN: rebuild from its
+        # authenticated entry policy next cut. RESET: exact reproduction.
+        raise ValueError("GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED")
 
 
 def _durable_global_sell_market_authority(
@@ -13989,6 +14046,10 @@ def _submit_current_global_sell(
         if wealth_block is not None:
             raise ValueError(wealth_block)
         portfolio, position = _current_global_sell_position(trade_conn, candidate)
+        _revalidate_global_sell_calibration(
+            trade_conn, global_claim_conn,
+            actuation=global_actuation, position=position,
+        )
     except Exception as exc:  # noqa: BLE001 - any current authority loss vetoes SELL
         return _global_sell_receipt(
             event,
@@ -14352,6 +14413,10 @@ def _submit_current_global_sell(
                     "utility_basis": expected_growth.utility_basis,
                 }
             )
+            probability_receipt["held_side_probability"] = held_q
+            correction = getattr(decision, "payoff_q_correction", None)
+            if correction is not None:
+                probability_receipt["payoff_q_correction"] = correction.as_cert_fields()
             exit_context = ExitContext(
                 exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
                 fresh_prob=held_q,
@@ -14360,6 +14425,7 @@ def _submit_current_global_sell(
                 current_market_price_is_fresh=True,
                 best_bid=best_bid,
                 position_state=position_state,
+                probability_receipt=probability_receipt,
             )
             exit_intent = ExitIntent(
                 trade_id=str(getattr(position, "trade_id", "") or ""),

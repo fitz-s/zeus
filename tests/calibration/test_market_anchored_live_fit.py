@@ -12,10 +12,14 @@ expires.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import sqlite3
 import json
 import math
 import time
+import zlib
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -26,6 +30,9 @@ from src.calibration.market_anchored_live_fit import (
     CALIBRATION_ALGORITHM_REVISION,
     CALIBRATION_INPUT_REVISION,
     CALIBRATION_METRIC_POOLING,
+    CANONICAL_CALIBRATION_INPUT_REVISION,
+    CANONICAL_CALIBRATION_METRIC_POOLING,
+    CANONICAL_CORPUS_REVISION,
     CanonicalMarketAnchoredFitProvider,
     MarketAnchoredArtifactCache,
     MarketAnchoredFitProvider,
@@ -48,7 +55,10 @@ from src.calibration.market_anchored_residual import (
     P_CLIP_HI,
     P_CLIP_LO,
     ResidualCalibratorArtifact,
+    _param_hash,
 )
+from src.engine.lifecycle_events import ACTIVE, build_entry_canonical_write
+from src.state.portfolio import Position
 
 NOW = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
 _TEST_CITY_TIMEZONES = {
@@ -3393,3 +3403,285 @@ def test_training_commitment_reader_accepts_causal_equal_cutoff_in_equivalent_ti
     assert live_fit._sealed_training_manifest(
         correction, calibration_policy=None, decision_at=NOW, scope=_canonical_scope(),
     ) == (None, 'CALIBRATION_POLICY_UNAVAILABLE')
+
+
+def _held_entry_reader_fixture(monkeypatch, *, side="NO"):
+    """Exact ENTRY event/certificate/audit evidence; no corpus tables exist."""
+
+    trade = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    trade.execute("CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER, decision_id TEXT, payload_json TEXT)")
+    trade.execute("CREATE TABLE position_decision_attribution (position_id TEXT, intent_kind TEXT, resolution TEXT, decision_certificate_hash TEXT)")
+    world.execute("CREATE TABLE decision_certificates (certificate_hash TEXT, certificate_type TEXT, mode TEXT, verifier_status TEXT, payload_json TEXT, payload_hash TEXT)")
+    scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "raw-revision-v1")
+    policy = CalibrationPolicySpec(
+        algorithm_revision=CALIBRATION_ALGORITHM_REVISION,
+        input_revision=CANONICAL_CALIBRATION_INPUT_REVISION,
+        metric_pooling=CANONICAL_CALIBRATION_METRIC_POOLING,
+        lead_calendar_revision=LEAD_CALENDAR_REVISION,
+        lambda_=10.0, min_train_weight=20, beta_bounds=(0.0, 1.0),
+        logit_clip=CLIP_D, probability_clip=(P_CLIP_LO, P_CLIP_HI), refit_seconds=21600.0,
+    )
+    manifest = CanonicalTrainingManifest.build(
+        scope_hash=scope.as_payload()["scope_hash"], corpus_revision=CANONICAL_CORPUS_REVISION,
+        training_cutoff="2026-08-25T00:00:00+00:00", row_count=20, event_count=20,
+        weight_sum=20.0, max_fill_available_at="2026-08-24T00:00:00+00:00",
+        max_label_available_at="2026-08-24T00:00:00+00:00", input_hash="a" * 64,
+    )
+    artifact = ResidualCalibratorArtifact(
+        alpha={"day0": 0.17, "day1": 0.09, "day2plus": 0.01}, beta=0.4,
+        lambda_=10.0, clip_d=CLIP_D, p_clip=(P_CLIP_LO, P_CLIP_HI),
+        lead_buckets=LEAD_BUCKETS, training_cutoff=manifest.training_cutoff,
+        n_train=20, n_excluded=0, excluded_reasons={}, param_hash="",
+        lead_calendar_revision=LEAD_CALENDAR_REVISION,
+        city_timezone_snapshot=(("Warsaw", "Europe/Warsaw"),), training_manifest=manifest,
+    )
+    artifact = replace(artifact, param_hash=_param_hash(
+        alpha=artifact.alpha, beta=artifact.beta, lambda_=artifact.lambda_, clip_d=artifact.clip_d,
+        p_clip=artifact.p_clip, lead_buckets=artifact.lead_buckets,
+        training_cutoff=artifact.training_cutoff, lead_calendar_revision=artifact.lead_calendar_revision,
+        city_timezone_snapshot=artifact.city_timezone_snapshot,
+    ))
+    entry_at = datetime(2026, 8, 26, 12, tzinfo=timezone.utc)
+    entry = corrected_probability(
+        artifact, p0=0.30, q_raw=0.60, city="Warsaw", target_date=date(2026, 8, 27),
+        decision_at=entry_at, side=side,
+    )
+    assert entry is not None
+    token = "no-token" if side == "NO" else "yes-token"
+    correction = PayoffQCorrection(
+        family_key="Warsaw|2026-08-27|high", bin_id="bin-a", token_id=token, side=side,
+        raw_q=0.60, corrected_q=entry[0], p0=0.30, lead_bucket=entry[1], alpha_lead=entry[2],
+        beta=artifact.beta, lambda_=artifact.lambda_, training_cutoff=artifact.training_cutoff,
+        n_train=artifact.n_train, param_hash=artifact.param_hash, calibration_policy=policy,
+        fit_scope=scope, training_manifest=manifest,
+    )
+    receipt = {
+        "decision_log_id": 7, "decision_log_mode": "global_single_order_auction",
+        "receipt_hash": "b" * 64, "execution_binding_hash": "c" * 64,
+        "artifact_summary_hash": "d" * 64, "schema_version": 22, "winner_event_id": "event-a",
+        "winner_candidate_id": "candidate-a", "winner_actuation_identity": "actuation-a",
+        "selection_epoch_identity": "epoch-a",
+    }
+    certificate = {
+        "global_auction_receipt": receipt, "direction": "buy_no" if side == "NO" else "buy_yes",
+        "token_id": token, "global_token_id": token, "global_family_key": correction.family_key,
+        "global_bin_id": correction.bin_id, "market_anchored_correction": correction.as_cert_fields(),
+        "event_id": "event-a", "final_intent_id": "intent-a",
+    }
+    trade.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?)",
+        ("position-a", "ENTRY_ORDER_FILLED", 1, "cert-a", json.dumps({"decision_log_id": 7})),
+    )
+    trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?)", ("position-a", "ENTRY", "ATTRIBUTED", "cert-a"))
+    from src.decision_kernel.canonicalization import stable_hash
+
+    world.execute(
+        "INSERT INTO decision_certificates VALUES (?,?,?,?,?,?)",
+        ("cert-a", "ActionableTradeCertificate", "LIVE", "VERIFIED", json.dumps(certificate), stable_hash(certificate)),
+    )
+    audit = {
+        "revision": "canonical_entry_fit_artifact_audit_v1",
+        "consulted_scopes": {f"{scope.as_payload()['scope_hash']}:{artifact.param_hash}": {
+            "status": "AVAILABLE", "param_hash": artifact.param_hash, "artifact": asdict(artifact),
+            "scope": scope.as_payload(), "policy": policy.as_payload(),
+        }},
+        "unavailable_scopes": {},
+    }
+    monkeypatch.setattr(
+        live_fit,
+        "_load_held_audit_context",
+        lambda *_args, **_kwargs: {"market_anchored_fit_artifact_audit": audit},
+    )
+    return trade, world, artifact, token, side, correction
+
+
+def test_held_entry_reader_binds_entry_provenance_and_applies_current_no_q(monkeypatch):
+    trade, world, artifact, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            sqlite3, "connect",
+            lambda *_args, **_kwargs: pytest.fail("held reader must borrow its handles"),
+        )
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert binding.fit_scope.execution_contract == "FOK_FULL_OR_ZERO"
+        assert binding.artifact.param_hash == correction.param_hash
+        current = binding.corrected_probability(
+            family_key=correction.family_key, bin_id=correction.bin_id, token_id=token, side=side,
+            raw_q=0.40, p0=0.20, city="Warsaw", target_date=date(2026, 8, 26),
+            decision_at=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+        )
+        assert current.raw_q == pytest.approx(0.40)
+        assert current.corrected_q != pytest.approx(correction.corrected_q)
+        assert current.alpha_lead == pytest.approx(-artifact.alpha["day0"])
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_accepts_normal_entry_writer_provenance(monkeypatch):
+    trade, world, _artifact, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("DELETE FROM position_events")
+        position = Position(
+            trade_id="position-a", market_id="market-a", city="Warsaw", cluster="cluster-a",
+            target_date="2026-08-27", bin_label="bin-a", direction="buy_no",
+            entered_at="2026-08-26T12:00:00+00:00", order_posted_at="2026-08-26T12:00:00+00:00",
+            strategy_key="market_anchored", env="live",
+        )
+        events, _projection = build_entry_canonical_write(
+            position, phase_after=ACTIVE, decision_id="cert-a",
+        )
+        assert all("decision_log_id" not in json.loads(event["payload_json"]) for event in events)
+        trade.executemany(
+            """
+            INSERT INTO position_events (position_id, event_type, sequence_no, decision_id, payload_json)
+            VALUES (:position_id, :event_type, :sequence_no, :decision_id, :payload_json)
+            """,
+            events,
+        )
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert binding.decision_log_id == 7
+        assert binding.decision_certificate_hash == "cert-a"
+        assert binding.family_key == correction.family_key
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_allows_unbounded_repeated_entry_identity(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            [
+                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}")
+                for sequence in range(2, 22)
+            ],
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize("mixed_writer_and_recovery", [False, True])
+def test_held_entry_reader_authenticates_edli_opening_decision_identity(monkeypatch, mixed_writer_and_recovery):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        decision_id = f"edli_exec_cmd:event-a:intent-a:{token}:buy_no"
+        trade.execute("DELETE FROM position_events")
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            [
+                ("position-a", event_type, sequence, "cert-a" if mixed_writer_and_recovery and sequence == 1 else decision_id, "{}")
+                for sequence, event_type in enumerate(
+                    ("POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"), start=1,
+                )
+            ],
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_log_id == 7
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_ninth_conflicting_entry_identity(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            [
+                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}")
+                for sequence in range(2, 10)
+            ] + [("position-a", "ENTRY_ORDER_FILLED", 10, "other-cert", "{}")],
+        )
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_malformed_optional_receipt_identity(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "UPDATE position_events SET payload_json = ? WHERE position_id = ?",
+            (json.dumps({"decision_log_id": "7"}), "position-a"),
+        )
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize(("encoded", "raw_limit"), [
+    (zlib.compress(b"x" * 9), 8),
+    (zlib.compress(b"{}") + b"trailing-data", None),
+])
+def test_held_audit_decoder_rejects_bounded_and_trailing_compressed_payloads(
+    monkeypatch, encoded, raw_limit,
+):
+    if raw_limit is not None:
+        monkeypatch.setattr(live_fit, "_ENTRY_AUDIT_MAX_RAW_BYTES", raw_limit)
+    with pytest.raises(live_fit.PayoffQCorrectionUnavailable):
+        live_fit._decode_held_audit_payload(
+            base64.b64encode(encoded).decode(), expected_hash=hashlib.sha256(b"{}").hexdigest(),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["token", "scope", "param", "correction"])
+def test_held_entry_reader_rejects_any_unbound_entry_proof(monkeypatch, mutation):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        if mutation == "token":
+            token = "wrong-token"
+        elif mutation == "scope":
+            audit = live_fit._load_held_audit_context(None)["market_anchored_fit_artifact_audit"]
+            next(iter(audit["consulted_scopes"].values()))["scope"]["metric"] = "low"
+        elif mutation == "param":
+            audit = live_fit._load_held_audit_context(None)["market_anchored_fit_artifact_audit"]
+            next(iter(audit["consulted_scopes"].values()))["param_hash"] = "f" * 64
+        else:
+            payload = json.loads(world.execute("SELECT payload_json FROM decision_certificates").fetchone()[0])
+            payload["market_anchored_correction"]["q_corrected"] = 0.01
+            world.execute("UPDATE decision_certificates SET payload_json = ?", (json.dumps(payload),))
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable):
+            live_fit.load_held_entry_calibration(trade, position_id="position-a", token_id=token, side=side, world_conn=world)
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_audit_delta_reconstructs_only_authenticated_parent(monkeypatch):
+    base = {"revision": "canonical_entry_fit_artifact_audit_v1", "consulted_scopes": {}, "unavailable_scopes": {}}
+    middle = {**base, "consulted_scopes": {"scope:param": {"param_hash": "param"}}}
+    current = {**middle, "unavailable_scopes": {"scope:unavailable": {"reason": "missing"}}}
+    base_bytes = live_fit._canonical_json_bytes(base) if hasattr(live_fit, "_canonical_json_bytes") else json.dumps(base, sort_keys=True, separators=(",", ":")).encode()
+    middle_delta = {"removed_keys": [], "replacements": {"consulted_scopes": middle["consulted_scopes"]}}
+    middle_delta_bytes = json.dumps(middle_delta, sort_keys=True, separators=(",", ":")).encode()
+    current_delta = {"removed_keys": [], "replacements": {"unavailable_scopes": current["unavailable_scopes"]}}
+    current_delta_bytes = json.dumps(current_delta, sort_keys=True, separators=(",", ":")).encode()
+    middle_bytes = json.dumps(middle, sort_keys=True, separators=(",", ":")).encode()
+    current_bytes = json.dumps(current, sort_keys=True, separators=(",", ":")).encode()
+    summaries = {
+        1: {"audit_context_encoding": "zlib+base64+canonical-json-object-v1", "audit_context_sha256": hashlib.sha256(base_bytes).hexdigest(), "audit_context_zlib_b64": base64.b64encode(zlib.compress(base_bytes)).decode()},
+        2: {"audit_context_encoding": "zlib+base64+canonical-json-object-v1", "audit_context_delta_encoding": "zlib+base64+canonical-json-object-delta-v1", "audit_context_sha256": hashlib.sha256(middle_bytes).hexdigest(), "audit_context_delta_sha256": hashlib.sha256(middle_delta_bytes).hexdigest(), "audit_context_delta_zlib_b64": base64.b64encode(zlib.compress(middle_delta_bytes)).decode(), "audit_context_base_decision_log_id": 1, "audit_context_base_mode": "global_single_order_auction", "audit_context_base_receipt_hash": "base", "audit_context_base_sha256": hashlib.sha256(base_bytes).hexdigest(), "audit_context_delta_chain_depth": 1},
+        3: {"audit_context_encoding": "zlib+base64+canonical-json-object-v1", "audit_context_delta_encoding": "zlib+base64+canonical-json-object-delta-v1", "audit_context_sha256": hashlib.sha256(current_bytes).hexdigest(), "audit_context_delta_sha256": hashlib.sha256(current_delta_bytes).hexdigest(), "audit_context_delta_zlib_b64": base64.b64encode(zlib.compress(current_delta_bytes)).decode(), "audit_context_base_decision_log_id": 2, "audit_context_base_mode": "global_single_order_auction_delta", "audit_context_base_receipt_hash": "middle", "audit_context_base_sha256": hashlib.sha256(middle_bytes).hexdigest(), "audit_context_delta_chain_depth": 2},
+    }
+    monkeypatch.setattr(live_fit, "_receipt_summary", lambda _conn, *, decision_log_id, **_kwargs: summaries[decision_log_id])
+    assert live_fit._load_held_audit_context(None, decision_log_id=3, expected_mode="global_single_order_auction_delta", expected_receipt_hash="child") == current

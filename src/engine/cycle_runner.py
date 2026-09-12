@@ -12,7 +12,6 @@ import math
 import sqlite3
 import sys
 import time
-from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
@@ -607,9 +606,9 @@ def _execute_monitoring_phase(
     )
     overall_deadline = provider_setup_started + monitor_budget
     from src.calibration.market_anchored_live_fit import (
-        MarketAnchoredFitProvider,
+        HeldEntryCalibrationProvider,
+        UnavailableHeldEntryCalibrationProvider,
         active_provider_scope,
-        get_shared_artifact_cache,
     )
 
     if isinstance(conn, sqlite3.Connection):
@@ -621,39 +620,12 @@ def _execute_monitoring_phase(
         # commit so SQLite cannot overrun the held-position decision deadline.
         conn.execute("PRAGMA wal_autocheckpoint = 0")
         summary["held_monitor_wal_autocheckpoint"] = "disabled"
-    provider = None
+    provider = UnavailableHeldEntryCalibrationProvider()
     try:
-        from src.config import runtime_cities_by_name
-
-        runtime_city_configs = runtime_cities_by_name()
-        if not isinstance(runtime_city_configs, Mapping):
-            raise TypeError("runtime city registry is not a mapping")
-        city_timezones = {
-            city: getattr(config, "timezone", "")
-            for city, config in runtime_city_configs.items()
-        }
-        provider = MarketAnchoredFitProvider(
-            lambda: conn,
-            city_timezones=city_timezones,
-            schema_alias="world",
-            cache=get_shared_artifact_cache(),
-            cache_only=True,
-        )
-        from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
-
-        provider.warm(
-            now=datetime.now(timezone.utc),
-            deadline_monotonic=(
-                min(
-                    overall_deadline,
-                    time.monotonic()
-                    + float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS),
-                )
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 - calibration remains fail-open to raw q
+        provider = HeldEntryCalibrationProvider(conn, world_schema_alias="world")
+    except Exception as exc:  # noqa: BLE001 - statistical exit evidence fails closed
         logging.getLogger(__name__).warning(
-            "market-anchored monitor provider unavailable: %s",
+            "held entry calibration reader unavailable: %s",
             type(exc).__name__,
         )
 

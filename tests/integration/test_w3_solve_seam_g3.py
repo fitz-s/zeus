@@ -39887,3 +39887,88 @@ def test_joint_exact_fact_is_not_reissued_by_probability_cache(monkeypatch):
             prepared, event_id="event", causal_snapshot_id="snapshot",
             family_binding_hash="binding", captured_at_utc=parent.captured_at_utc,
         )
+
+
+def _calibrated_sell_actuation_fixture():
+    from src.contracts.payoff_q_correction import PayoffQCorrection
+
+    event = _global_scope_event(city='Alpha', source_run_id='entry-policy-sell')
+    actuation = _adapter_sell_actuation(
+        event, selected_shares='5', probability_functional='POSTERIOR_PREDICTIVE_MEAN',
+    )
+    candidate = actuation.decision.candidate
+    held_q = actuation.decision.expected_terminal_wealth.held_probability_mean
+    actuation.probability_witness.yes_point_q = (held_q,)
+    correction = PayoffQCorrection(
+        family_key=candidate.family_key, bin_id=candidate.bin_id,
+        side=candidate.side, token_id=candidate.token_id,
+        raw_q=held_q, corrected_q=held_q,
+        p0=float(candidate.economic_sell_curve.levels[0].price),
+        lead_bucket='day1', alpha_lead=0.0, beta=1.0, lambda_=1.0,
+        training_cutoff='2026-07-12T00:00:00Z', n_train=25, param_hash='entry-fit',
+    )
+    return replace(actuation, decision=replace(actuation.decision, payoff_q_correction=correction))
+
+
+@pytest.mark.parametrize('tamper', [None, 'raw_q', 'corrected_q', 'p0', 'token_id'])
+def test_global_sell_sdk_authority_binds_entry_calibrated_probability(tamper):
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    actuation = _calibrated_sell_actuation_fixture()
+    candidate = actuation.decision.candidate
+    if tamper:
+        correction = actuation.decision.payoff_q_correction
+        value = 'other-token' if tamper == 'token_id' else getattr(correction, tamper) + 0.01
+        actuation = replace(actuation, decision=replace(
+            actuation.decision, payoff_q_correction=replace(correction, **{tamper: value}),
+        ))
+        with pytest.raises(ValueError, match='GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED'):
+            GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=candidate)
+    else:
+        authority = GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=candidate)
+        assert authority.limit_price() == actuation.decision.limit_price
+
+
+@pytest.mark.parametrize('changed_policy', [False, True])
+def test_global_sell_revalidates_sealed_entry_policy_on_current_raw_q(monkeypatch, changed_policy):
+    from src.calibration import market_anchored_live_fit as live_fit
+
+    actuation = _calibrated_sell_actuation_fixture()
+    correction = actuation.decision.payoff_q_correction
+    calls = []
+    def apply(**kwargs):
+        calls.append(kwargs)
+        return replace(correction, param_hash='other-policy') if changed_policy else correction
+    def load(conn, **kwargs):
+        assert kwargs['position_id'] == actuation.decision.candidate.position_id
+        assert kwargs['token_id'] == actuation.decision.candidate.token_id
+        return SimpleNamespace(corrected_probability=apply)
+    monkeypatch.setattr(live_fit, 'load_held_entry_calibration', load, raising=False)
+    position = SimpleNamespace(city='Alpha', target_date='2026-07-14')
+    if changed_policy:
+        with pytest.raises(ValueError, match='GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED'):
+            era._revalidate_global_sell_calibration(None, None, actuation=actuation, position=position)
+    else:
+        era._revalidate_global_sell_calibration(None, None, actuation=actuation, position=position)
+    assert calls[0]['raw_q'] == correction.raw_q
+    assert calls[0]['p0'] == correction.p0
+    assert calls[0]['decision_at'] == actuation.decision_at_utc
+
+
+def test_calibrated_sell_reauctions_when_better_bid_changes_probability_anchor():
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    actuation = _calibrated_sell_actuation_fixture()
+    candidate = actuation.decision.candidate
+    jit = era._global_sell_candidate_from_raw_book(
+        candidate,
+        {'asset_id': candidate.token_id, 'tick_size': '0.01', 'min_order_size': '5',
+         'bids': [{'price': '0.61', 'size': '10'}], 'asks': []},
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(candidate, tick='0.01', min_order_size='5'),
+    )
+    assert era._global_sell_execution_economics_drift(
+        decision=actuation.decision, current_candidate=jit,
+    ) == 'calibration_price_anchor'
+    with pytest.raises(ValueError, match='GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED'):
+        GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=jit)

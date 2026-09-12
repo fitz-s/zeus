@@ -7424,25 +7424,211 @@ def test_calibrated_family_rejects_mismatched_endowment_authority():
     )
 
 
-def test_family_calibration_does_not_change_sell_path():
+def test_family_calibration_changes_mean_sell_hold_decision():
     sell = _global_sell_candidate(
-        candidate_id="calibrated-sell-unchanged",
-        family="calibrated-sell-unchanged",
+        candidate_id="calibrated-sell-mean",
+        family="calibrated-sell-mean",
         side="YES",
         held_q=0.30,
         bids=(("0.60", "10"),),
         shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
     )
     plain = _global_select((sell,))
+    correction = _correction_for(sell, raw_q=0.30, corrected_q=0.60, p0=0.60)
     with_family_resolver = _global_select(
         (sell,),
         family_portfolio_endowment_resolver=lambda _: _family_endowment(sell),
-        payoff_q_correction_resolver=lambda *_args: pytest.fail(
-            "SELL must not call the BUY calibration resolver"
-        ),
+        payoff_q_correction_resolver=lambda *_args: correction,
     )
 
-    assert with_family_resolver == plain
+    assert plain.candidate is sell
+    assert plain.expected_terminal_wealth is not None
+    assert plain.expected_terminal_wealth.held_probability_mean == pytest.approx(0.30)
+    assert with_family_resolver.candidate is None
+    assert with_family_resolver.rejection_reasons[sell.candidate_id] == (
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    )
+
+
+def test_mean_buy_and_sell_share_expected_axis_and_sell_correction_carries():
+    buy = _global_candidate(
+        candidate_id="mean-axis-buy",
+        family="mean-axis-buy-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.40", "1000"),),
+    )
+    sell = _global_sell_candidate(
+        candidate_id="mean-axis-sell",
+        family="mean-axis-sell-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    correction = _correction_for(sell, raw_q=0.20, corrected_q=0.30, p0=0.60)
+    buy_decision = _global_select((buy,))
+    sell_decision = _global_select(
+        (sell,), payoff_q_correction_resolver=lambda *_args: correction
+    )
+
+    assert buy_decision.expected_growth is not None
+    assert sell_decision.expected_growth is not None
+    assert (
+        buy_decision.expected_growth.probability_basis
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert (
+        sell_decision.expected_growth.probability_basis
+        == "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert sell_decision.payoff_q_correction is correction
+    assert sell_decision.expected_terminal_wealth is not None
+    assert sell_decision.expected_terminal_wealth.held_probability_mean == pytest.approx(
+        0.30
+    )
+
+
+def test_required_sell_correction_unavailable_rejects_sell_without_raw_fallback():
+    buy = _global_candidate(
+        candidate_id="sell-fit-missing-buy",
+        family="sell-fit-missing-buy-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.40", "1000"),),
+    )
+    sell = _global_sell_candidate(
+        candidate_id="sell-fit-missing-sell",
+        family="sell-fit-missing-sell-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+
+    from src.contracts.payoff_q_correction import PayoffQCorrectionUnavailable
+
+    def resolver(candidate, *_args):
+        if isinstance(candidate, S.GlobalSingleOrderSellCandidate):
+            raise PayoffQCorrectionUnavailable("sealed ENTRY fit missing")
+        return None
+
+    decision = _global_select((sell, buy), payoff_q_correction_resolver=resolver)
+
+    assert decision.candidate is buy
+    assert decision.rejection_reasons[sell.candidate_id] == (
+        "CALIBRATED_PAYOFF_Q_UNAVAILABLE:sealed ENTRY fit missing"
+    )
+    assert buy.candidate_id not in decision.rejection_reasons
+
+
+def test_exact_sell_fact_bypasses_market_correction_and_keeps_exact_q():
+    sell = _global_sell_candidate(
+        candidate_id="exact-sell-correction-bypass",
+        family="exact-sell-correction-bypass-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    statistical = _global_probability_witness(sell)
+    exact_fields = {
+        "family_key": sell.family_key,
+        "bindings": statistical.bindings,
+        "exact_yes_payoffs": ((sell.bin_id, 0),),
+        "q_version": statistical.q_version,
+        "resolution_identity": statistical.resolution_identity,
+        "topology_identity": statistical.topology_identity,
+        "posterior_identity_hash": statistical.posterior_identity_hash,
+        "source_truth_identity": statistical.source_truth_identity,
+        "authority_certificate_hash": statistical.authority_certificate_hash,
+        "band_alpha": statistical.band_alpha,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": statistical.captured_at_utc,
+    }
+    exact = S.DeterministicBinPayoffWitness(
+        **exact_fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=S.deterministic_bin_payoff_witness_identity(
+            **exact_fields
+        ),
+    )
+    candidate = replace(
+        sell,
+        probability_witness_identity=exact.witness_identity,
+    )
+
+    calls = []
+
+    def resolver(*args):
+        calls.append(args)
+        raise AssertionError("exact Day0 payoff must not be calibrated")
+
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={candidate.family_key: exact},
+        payoff_q_correction_resolver=resolver,
+    )
+
+    assert decision.candidate is candidate
+    assert calls == []
+    assert decision.payoff_q_correction is None
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.held_probability_mean == 0.0
+
+
+def test_sell_correction_rejects_invalid_result_without_raw_fallback():
+    buy = _global_candidate(
+        candidate_id="sell-correction-seal-buy",
+        family="sell-correction-seal-buy-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.40", "1000"),),
+    )
+    sell = _global_sell_candidate(
+        candidate_id="sell-correction-seal",
+        family="sell-correction-seal-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    foreign = replace(
+        _correction_for(sell, raw_q=0.30, corrected_q=0.40, p0=0.60),
+        token_id="foreign-token",
+    )
+    stale = _correction_for(sell, raw_q=0.31, corrected_q=0.40, p0=0.60)
+
+    def raises_unexpected(*_args):
+        raise RuntimeError("fit exploded")
+
+    cases = (
+        (lambda *_args: foreign, "SELL correction identity or raw q mismatch"),
+        (lambda *_args: stale, "SELL correction identity or raw q mismatch"),
+        (
+            lambda *_args: _correction_for(
+                sell, raw_q=0.30, corrected_q=0.40, p0=0.59
+            ),
+            "SELL correction p0 mismatch",
+        ),
+        (lambda *_args: object(), "SELL correction result has invalid type"),
+        (raises_unexpected, "SELL correction resolver failed: fit exploded"),
+    )
+
+    for resolver, detail in cases:
+        decision = _global_select(
+            (sell, buy), payoff_q_correction_resolver=resolver
+        )
+        assert decision.candidate is buy
+        assert decision.rejection_reasons[sell.candidate_id] == (
+            f"CALIBRATED_PAYOFF_Q_UNAVAILABLE:{detail}"
+        )
+        assert buy.candidate_id not in decision.rejection_reasons
 
 
 def test_calibrated_family_keeps_maker_and_taker_as_distinct_fixed_proposals():

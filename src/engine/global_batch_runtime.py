@@ -6270,7 +6270,7 @@ def _market_anchored_correction_resolver(
         tuple[int, str, str], tuple[object, dict[str, object]]
     ] = {}
 
-    def record_artifact(scope, artifact) -> None:
+    def record_artifact(scope, artifact, *, policy=None) -> None:
         if market_anchored_fit_artifact_audit is None or artifact is None:
             return
         scope_payload = scope.as_payload()
@@ -6285,7 +6285,7 @@ def _market_anchored_correction_resolver(
                 "status": "AVAILABLE",
                 "artifact": asdict(artifact),
                 "scope": scope_payload,
-                "policy": provider.calibration_policy.as_payload(),
+                "policy": (policy or provider.calibration_policy).as_payload(),
             }
             # Retain the object too: an integer id may be reused after refits.
             artifact_audit_by_object[cache_key] = (artifact, entry)
@@ -6333,6 +6333,42 @@ def _market_anchored_correction_resolver(
             _LOG.debug("CANONICAL_ENTRY_CORPUS_WARM_UNAVAILABLE:%s", type(exc).__name__)
 
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+        if str(getattr(candidate, "action", "BUY")) == "SELL":
+            from src.calibration.market_anchored_live_fit import (
+                load_held_entry_calibration,
+            )
+
+            target_context = target_context_by_family.get(str(candidate.family_key))
+            if target_context is None:
+                raise PayoffQCorrectionUnavailable("TARGET_CONTEXT_UNAVAILABLE")
+            # The SELL execution mode does not change the population or policy
+            # which admitted this holding. Reapply its immutable entry fit to
+            # the current probability and executable price, without refitting.
+            binding = load_held_entry_calibration(
+                trade_conn,
+                position_id=candidate.position_id,
+                token_id=candidate.token_id,
+                side=candidate.side,
+                world_conn=world_conn,
+            )
+            city, target_date = target_context
+            correction = binding.corrected_probability(
+                family_key=candidate.family_key,
+                bin_id=candidate.bin_id,
+                token_id=candidate.token_id,
+                side=candidate.side,
+                raw_q=raw_q,
+                p0=p0,
+                city=city,
+                target_date=target_date,
+                decision_at=decision_at_utc,
+            )
+            record_artifact(
+                binding.fit_scope,
+                binding.artifact,
+                policy=binding.calibration_policy,
+            )
+            return correction
         if provider is None:
             record_unavailable(candidate, "PROVIDER_UNAVAILABLE")
             raise PayoffQCorrectionUnavailable("PROVIDER_UNAVAILABLE")

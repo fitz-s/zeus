@@ -943,31 +943,24 @@ class Position:
     def _exit_q_mean_and_source(
         self, exit_context: ExitContext
     ) -> tuple[Decimal, bool, str]:
-        """Held-side q for the exit stop, preferring the market-anchored
-        correction over the raw posterior-predictive point.
+        """Held-side q for the exit stop using the immutable ENTRY artifact.
 
-        Entries act on the market-anchored corrected probability
-        (src.calibration.market_anchored_live_fit.corrected_probability); the
-        exit stop compared the raw point instead, which is measured +0.170
-        over-biased on filled positions (0.55 predicted vs 0.38 realised) and
-        so essentially never fires. This applies the SAME correction to the
-        held-side point so entry and exit act on one calibrated probability.
+        A live monitor may only correct current raw q/p0 with the exact
+        calibration artifact sealed by this position's ENTRY certificate. A
+        missing or malformed binding makes statistical probability evidence
+        unavailable for this position; it cannot silently substitute the
+        legacy attribution fit or the raw point. Deterministic Day0 facts and
+        RED are evaluated by their independent laws after this method returns.
 
-        Fail-open, identical to pre-fix behavior, whenever: evidence is not
-        ok, no provider is registered (this batch cycle wired none), the
-        held-side market price is unavailable, the target date does not
-        parse, or the correction is unavailable/non-finite/out of (0, 1).
-        The registered provider lends an ALREADY-OPEN connection (or serves
-        from its TTL cache) — this never opens a new DB connection itself.
+        A missing provider remains the offline/test compatibility path. The
+        live cycle always installs the entry-bound reader over its borrowed
+        trade/world connection.
         """
         q_raw, evidence_ok = self._held_side_point_with_confidence(exit_context)
         if not evidence_ok:
             return q_raw, evidence_ok, "raw"
 
-        from src.calibration.market_anchored_live_fit import (
-            corrected_probability,
-            get_active_provider,
-        )
+        from src.calibration.market_anchored_live_fit import get_active_provider
 
         provider = get_active_provider()
         if provider is None:
@@ -981,34 +974,39 @@ class Position:
         ):
             p0 = (float(exit_context.best_bid) + float(exit_context.best_ask)) / 2.0
         if p0 is None:
-            return q_raw, evidence_ok, "raw"
+            return q_raw, False, "entry_calibration_unavailable"
 
         try:
             target_date = date.fromisoformat(str(self.target_date)[:10])
         except (TypeError, ValueError):
-            return q_raw, evidence_ok, "raw"
+            return q_raw, False, "entry_calibration_unavailable"
 
         now_utc = datetime.now(timezone.utc)
         try:
-            artifact = provider.artifact(now=now_utc)
-            applied = corrected_probability(
-                artifact,
+            side = "YES" if self.direction.value == "buy_yes" else "NO"
+            token_id = self.token_id if side == "YES" else self.no_token_id
+            binding = provider.load(
+                position_id=self.trade_id,
+                token_id=token_id,
+                side=side,
+            )
+            applied = binding.corrected_probability(
+                family_key=binding.family_key,
+                bin_id=binding.bin_id,
+                token_id=token_id,
+                side=side,
                 p0=p0,
-                q_raw=float(q_raw),
+                raw_q=float(q_raw),
                 city=self.city,
                 decision_at=now_utc,
                 target_date=target_date,
-                side=self.direction.value,
             )
-        except Exception:  # noqa: BLE001 - correction unavailable, keep raw q
-            return q_raw, evidence_ok, "raw"
+        except Exception:  # noqa: BLE001 - required ENTRY proof is unavailable
+            return q_raw, False, "entry_calibration_unavailable"
 
-        if applied is None:
-            return q_raw, evidence_ok, "raw"
-
-        corrected_q = applied[0]
+        corrected_q = applied.corrected_q
         if not (math.isfinite(corrected_q) and 0.0 < corrected_q < 1.0):
-            return q_raw, evidence_ok, "raw"
+            return q_raw, False, "entry_calibration_unavailable"
 
         return Decimal(str(corrected_q)), evidence_ok, "market_anchored"
 

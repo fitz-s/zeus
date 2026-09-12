@@ -1,15 +1,9 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
-# Authority basis: venue invalid_amount rejection loop 2026-06-10
-#   (live venue_command_events 39517e446ba94b60/5cec15b1de484fbb:
-#    "the market buy orders maker amount supports a max accuracy of 2 decimals,
-#     taker amount a max of 4 decimals"). py_clob_client_v2 builds maker/taker
-#    with FLOAT round_down(shares,2)*round(price); the pre-submit precision
-#    contract previously modelled maker as exact Decimal(shares)*Decimal(price)
-#    and waved through shares (e.g. 8.7) that the SDK truncates to 8.69 -> a
-#    3-decimal maker the venue rejects. These RELATIONSHIP tests pin the
-#    cross-module invariant: the contract's notion of a venue-valid maker MUST
-#    equal the maker the SDK actually sends.
+# Last reused or audited: 2026-09-12
+# Authority basis: venue invalid_amount rejection loop 2026-06-10 and the
+# installed SDK's Decimal OrderArgs path. These RELATIONSHIP tests pin the
+# cross-module invariant: the contract's notion of a venue-valid maker MUST
+# equal the maker the SDK actually sends.
 """Relationship tests: pre-submit amount grid == SDK-actual venue payload.
 
 Cross-module invariant under test:
@@ -32,15 +26,10 @@ from src.contracts.execution_intent import (
     venue_submit_amount_precision_error,
 )
 
-# SDK-actual maker/taker builder (limit BUY path get_order_amounts), replicated
-# from py_clob_client_v2.order_builder.builder.get_order_amounts for tick->config.
-# Imported from the installed SDK so the test tracks the real venue-facing math.
-from py_clob_client_v2.order_builder.helpers import (
-    round_down as _sdk_round_down,
-    round_normal as _sdk_round_normal,
-    round_up as _sdk_round_up,
-    decimal_places as _sdk_decimal_places,
-)
+# SDK-actual maker/taker builder (limit BUY path get_order_amounts), using the
+# installed SDK directly so the test tracks its Decimal OrderArgs behavior.
+from py_clob_client_v2.clob_types import RoundConfig
+from py_clob_client_v2.order_builder.builder import OrderBuilder
 
 # tick_size -> (price_dec, size_dec, amount_dec) from the SDK ROUNDING_CONFIG.
 _SDK_ROUND_CONFIG = {
@@ -51,42 +40,45 @@ _SDK_ROUND_CONFIG = {
 }
 
 
-def _sdk_limit_buy_maker_taker(shares: float, price: float, tick: str) -> tuple[float, float]:
-    """Replicate py_clob_client_v2 get_order_amounts(BUY) -> (raw_maker, raw_taker)."""
+def _sdk_limit_buy_maker_taker(
+    shares: Decimal, price: Decimal, tick: str
+) -> tuple[int, int]:
+    """Return actual SDK token amounts for Decimal BUY OrderArgs."""
     price_dec, size_dec, amount_dec = _SDK_ROUND_CONFIG[tick]
-    raw_price = _sdk_round_normal(price, price_dec)
-    raw_taker = _sdk_round_down(shares, size_dec)
-    raw_maker = raw_taker * raw_price
-    if _sdk_decimal_places(raw_maker) > amount_dec:
-        raw_maker = _sdk_round_up(raw_maker, amount_dec + 4)
-        if _sdk_decimal_places(raw_maker) > amount_dec:
-            raw_maker = _sdk_round_down(raw_maker, amount_dec)
-    return raw_maker, raw_taker
-
-
-def _sdk_maker_taker_venue_valid(shares: float, price: float, tick: str) -> bool:
-    """True iff the SDK-built maker has <=2 decimals and taker <=4 decimals."""
-    raw_maker, raw_taker = _sdk_limit_buy_maker_taker(shares, price, tick)
-    return _sdk_decimal_places(raw_maker) <= 2 and _sdk_decimal_places(raw_taker) <= 4
-
-
-def test_regression_8p7_at_0p70_is_rejected_by_contract():
-    """The exact live loop: 8.7 shares @ 0.70 must NOT be called venue-valid.
-
-    SDK builds maker = round_down(8.7,2)*0.70 = 8.69*0.70 = 6.083 (3 decimals)
-    -> venue_rejected_invalid_amount_400. The contract must reject it pre-submit.
-    """
-    # Sanity: the SDK genuinely truncates 8.7 -> 8.69 and yields a 3-dec maker.
-    assert _sdk_round_down(8.7, 2) == 8.69
-    assert not _sdk_maker_taker_venue_valid(8.7, 0.70, "0.01")
-
-    err = venue_submit_amount_precision_error(
-        direction="buy_no",
-        final_limit_price=Decimal("0.70"),
-        submitted_shares=Decimal("8.7"),
-        order_type="FOK",
+    _side, maker_amount, taker_amount = OrderBuilder(None).get_order_amounts(
+        "BUY",
+        shares,
+        price,
+        RoundConfig(price=price_dec, size=size_dec, amount=amount_dec),
     )
-    assert err is not None, "contract must reject SDK-truncated 8.7@0.70 maker"
+    return maker_amount, taker_amount
+
+
+def _sdk_maker_taker_venue_valid(
+    shares: Decimal, price: Decimal, tick: str
+) -> bool:
+    """True iff actual SDK token amounts fit maker (2dp) and taker (4dp)."""
+    maker_amount, taker_amount = _sdk_limit_buy_maker_taker(shares, price, tick)
+    return maker_amount % 10_000 == 0 and taker_amount % 100 == 0
+
+
+def test_decimal_inputs_preserve_8p7_at_0p70_sdk_amounts():
+    """Decimal OrderArgs keep 8.7 shares and produce the legal 6.09 maker."""
+    assert _sdk_limit_buy_maker_taker(
+        Decimal("8.7"), Decimal("0.70"), "0.01"
+    ) == (6_090_000, 8_700_000)
+    assert _sdk_maker_taker_venue_valid(
+        Decimal("8.7"), Decimal("0.70"), "0.01"
+    )
+    assert (
+        venue_submit_amount_precision_error(
+            direction="buy_no",
+            final_limit_price=Decimal("0.70"),
+            submitted_shares=Decimal("8.7"),
+            order_type="FOK",
+        )
+        is None
+    )
 
 
 def test_quantize_8p7_at_0p70_steps_down_to_sdk_valid_amount():
@@ -97,7 +89,7 @@ def test_quantize_8p7_at_0p70_steps_down_to_sdk_valid_amount():
         final_limit_price=Decimal("0.70"),
         order_type="FOK",
     )
-    assert quantized <= Decimal("8.7")
+    assert quantized == Decimal("8.7")
     assert quantized > Decimal("0")
     # Contract agrees it is valid...
     assert (
@@ -110,24 +102,35 @@ def test_quantize_8p7_at_0p70_steps_down_to_sdk_valid_amount():
         is None
     )
     # ...AND the SDK actually builds a venue-valid maker/taker for it.
-    assert _sdk_maker_taker_venue_valid(float(quantized), 0.70, "0.01")
+    assert _sdk_maker_taker_venue_valid(
+        quantized, Decimal("0.70"), "0.01"
+    )
 
 
-def test_rejection_no_verbatim_retry_is_structurally_impossible():
-    """K2: a same-class invalid_amount candidate cannot be re-derived verbatim.
+def test_decimal_2p01_amount_is_rejected_and_quantized_at_most():
+    """Decimal 2.01 survives SDK size rounding and exposes the maker 3dp."""
+    price = Decimal("0.58")
+    raw_shares = Decimal("2.01")
 
-    The live loop re-derived the SAME 8.7@0.70 intent every redecision cycle.
-    With the SDK-faithful grid, deriving the venue size from the SAME
-    (collateral, price) is deterministic AND always venue-legal, so the exact
-    rejected payload (8.7@0.70 -> SDK maker 6.083) can never be reconstructed.
+    assert _sdk_limit_buy_maker_taker(raw_shares, price, "0.01") == (
+        1_165_800,
+        2_010_000,
+    )
+    assert not _sdk_maker_taker_venue_valid(raw_shares, price, "0.01")
+    assert (
+        venue_submit_amount_precision_error(
+            direction="buy_yes",
+            final_limit_price=price,
+            submitted_shares=raw_shares,
+            order_type="FOK",
+            tick_size="0.01",
+        )
+        is not None
+    )
 
-    Invariant: for the live (stake=6.09, price=0.70) inputs, the quantized
-    share amount is venue-valid, is NOT the rejected 8.7, and is stable across
-    repeated derivations (no oscillation that could resurrect the bad amount).
-    """
-    stake = Decimal("6.09")
-    price = Decimal("0.70")
-    raw_shares = stake / price  # 8.7 exactly -> the rejected amount
+    assert _sdk_limit_buy_maker_taker(
+        raw_shares, Decimal("0.66"), "0.01"
+    ) == (1_326_600, 2_010_000)
 
     derived = [
         quantize_submit_shares_for_venue_at_most(
@@ -142,16 +145,16 @@ def test_rejection_no_verbatim_retry_is_structurally_impossible():
     # Deterministic across cycles (no verbatim-vs-corrected oscillation).
     assert len(set(derived)) == 1
     quantized = derived[0]
-    # The rejected amount is structurally unreachable.
-    assert quantized != Decimal("8.7")
+    # The rejected amount is structurally unreachable after the at-most repair.
+    assert quantized == Decimal("2.00")
     assert quantized <= raw_shares
     # And what IS derived is venue-legal in the real SDK builder.
-    assert _sdk_maker_taker_venue_valid(float(quantized), 0.70, "0.01")
+    assert _sdk_maker_taker_venue_valid(quantized, price, "0.01")
     assert (
         venue_submit_amount_precision_error(
             direction="buy_no",
             final_limit_price=price,
-            submitted_shares=Decimal("8.7"),
+            submitted_shares=raw_shares,
             order_type="FOK",
             tick_size="0.01",
         )
@@ -164,7 +167,7 @@ def test_contract_validity_implies_sdk_validity_property(tick: str):
     """RELATIONSHIP: contract-valid shares => SDK-built amounts are venue-valid.
 
     Random (shares, price) on each tick grid. Any (shares, price) the contract
-    calls valid must also be valid in the SDK's float builder. This is the
+    calls valid must also be valid in the SDK's Decimal-input builder. This is the
     cross-module invariant whose violation produced the live rejection loop.
     """
     rng = random.Random(20260610)
@@ -190,7 +193,9 @@ def test_contract_validity_implies_sdk_validity_property(tick: str):
         if err is not None:
             continue  # contract already rejects -> nothing to prove
         checked += 1
-        assert _sdk_maker_taker_venue_valid(shares, price, tick), (
+        assert _sdk_maker_taker_venue_valid(
+            Decimal(str(shares)), Decimal(str(price)), tick
+        ), (
             f"contract called shares={shares} price={price} tick={tick} valid "
             f"but SDK builds an invalid maker/taker"
         )
@@ -227,5 +232,7 @@ def test_quantizer_output_is_always_sdk_valid_property(tick: str):
         produced += 1
         assert quantized <= raw_shares  # never widen / never overspend
         assert quantized > Decimal("0")
-        assert _sdk_maker_taker_venue_valid(float(quantized), price, tick)
+        assert _sdk_maker_taker_venue_valid(
+            quantized, Decimal(str(price)), tick
+        )
     assert produced > 0
