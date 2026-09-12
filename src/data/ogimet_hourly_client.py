@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import errno
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -42,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from src.data.metar_temperature import metar_temperature_c
 from src.data.wu_hourly_client import HourlyObservation
 from src.types.temperature import Celsius, CelsiusBox, c_to_f
 
@@ -90,13 +90,6 @@ def wait_for_ogimet_request_slot() -> None:
             time.sleep(remaining)
         _last_ogimet_request_at = time.monotonic()
 
-# METAR temp/dewpoint group regex. Copied from
-# scripts/backfill_ogimet_metar.py::_METAR_TEMP_RE so a single-file change
-# to one parser doesn't silently diverge the other; the A7 antibody test
-# pins source_tag consistency separately.
-_METAR_TEMP_RE = re.compile(r"\s(M?\d{1,2})/(M?\d{1,2})\s")
-
-
 @dataclass(frozen=True)
 class OgimetHourlyFetchResult:
     """Structured result of one ``fetch_ogimet_hourly`` call."""
@@ -121,20 +114,15 @@ def _parse_metar_temp_c(metar_body: str) -> Optional[Celsius]:
     """Extract temperature in °C from a raw METAR body, or None if absent.
 
     # F3 PR 2/3: typed unit per Path A — see src/types/temperature.py
-    METAR format is always native °C; result tagged as Celsius at the parse boundary.
+    Prefers the remarks T-group (tenths precision) over the whole-degree body
+    group; see src/data/metar_temperature.py for the shared parser.
     """
-    match = _METAR_TEMP_RE.search(" " + metar_body + " ")
-    if not match:
-        return None
-    raw = match.group(1)
-    negative = raw.startswith("M")
-    try:
-        value = int(raw[1:] if negative else raw)
-    except ValueError:
+    value = metar_temperature_c(metar_body)
+    if value is None:
         return None
     # F3 PR 4: CelsiusBox as unit witness at parse boundary; value extracted for
     # container compat (row containers stay list[tuple[datetime, Celsius]]).
-    return Celsius(CelsiusBox(float(-value if negative else value)).value)
+    return Celsius(CelsiusBox(value).value)
 
 
 def _parse_metar_csv_line(line: str) -> Optional[tuple[datetime, Celsius]]:

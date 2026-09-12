@@ -59,6 +59,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+from src.data.metar_temperature import (
+    _T_GROUP_RE,
+    metar_t_group_temperature_c,
+    metar_temperature_c,
+)
 from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
 
 logger = logging.getLogger(__name__)
@@ -86,11 +91,7 @@ class Day0PublicationLedgerUnavailable(RuntimeError):
     """Raised when an event cannot bind its causal publication state."""
 
 
-#: T-group (temperature to tenths C) presence in the raw METAR remarks,
-#: e.g. "T02110150". Required for F-settled extreme tracking (see module doc).
-_T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 _CYCLE_DATE_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}$")
-_METAR_TEMP_RE = re.compile(r"(?:^|\s)(M?\d{2})/(?:M?\d{2}|//)(?:\s|$)")
 _METAR_VALID_TIME_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
 #: Standalone-emitter throttle. The scheduled ingest lane sets this to zero
@@ -844,28 +845,6 @@ def parse_metar_api_payload(payload: object) -> list[MetarReport]:
     return out
 
 
-def metar_t_group_temperature_c(raw: str) -> float | None:
-    """Return the precise tenths-Celsius METAR T-group value, if present."""
-
-    groups = _T_GROUP_RE.findall(raw)
-    if not groups:
-        return None
-    token = groups[-1]
-    sign = -1.0 if token[1] == "1" else 1.0
-    return sign * int(token[2:5]) / 10.0
-
-
-def _temperature_from_raw_metar(raw: str) -> float | None:
-    precise = metar_t_group_temperature_c(raw)
-    if precise is not None:
-        return precise
-    match = _METAR_TEMP_RE.search(raw)
-    if match is None:
-        return None
-    token = match.group(1)
-    return float(-int(token[1:]) if token.startswith("M") else int(token))
-
-
 def parse_noaa_metar_cycle_payload(
     payload: bytes | str,
     *,
@@ -903,7 +882,7 @@ def parse_noaa_metar_cycle_payload(
             observed = datetime.strptime(stamp, "%Y/%m/%d %H:%M").replace(
                 tzinfo=UTC
             )
-            temp_c = _temperature_from_raw_metar(raw)
+            temp_c = metar_temperature_c(raw)
         except (TypeError, ValueError):
             continue
         report = MetarReport(

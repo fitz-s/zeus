@@ -50,6 +50,23 @@ from src.data.wu_hourly_client import (
         ("METAR LLBG 211830Z 34008KT 9999 FEW020 M05/M08 Q1020", -5.0),
         ("METAR EGLC 211830Z CALM 9999 SCT015 M01/02 Q1018", -1.0),
         ("METAR RJTT 211830Z 08010KT CAVOK 25/20 Q1013", 25.0),
+        # T-group present: tenths-Celsius precision wins over the whole-degree
+        # body group (28/17 -> 28.0 body, T02830167 -> 28.3 precise).
+        (
+            "METAR KATL 211830Z 10004MPS 9999 FEW030 28/17 A2985 "
+            "RMK AO2 SLP108 T02830167=",
+            28.3,
+        ),
+        # Negative T-group sign digit; body group also negative (M02/M05).
+        (
+            "METAR KORD 211830Z 10004MPS 9999 FEW030 M02/M05 A2985 "
+            "RMK AO2 SLP108 T10210054",
+            -2.1,
+        ),
+        # Missing dewpoint ("//") does not invalidate the temperature half.
+        ("METAR KAUS 211830Z 10004MPS 9999 FEW030 22/// Q1013", 22.0),
+        # COR (corrected) report: body fallback still parses.
+        ("METAR COR KJFK 211830Z 10004MPS 9999 FEW030 12/09 Q1013", 12.0),
     ],
 )
 def test_parse_metar_temp(body, expected):
@@ -60,8 +77,28 @@ def test_parse_metar_temp_missing_group():
     assert _parse_metar_temp_c("METAR UUWW 211830Z NOSIG") is None
 
 
+def test_parse_metar_temp_last_valid_t_group_wins():
+    """An earlier T-like token that isn't a valid 8-digit T-group is ignored;
+
+    among multiple valid T-groups, the LAST one in the report is authoritative.
+    """
+    # "T0283" is not a valid T-group (only 4 digits) and must be skipped.
+    body = (
+        "METAR KDAL 211830Z 10004MPS 9999 FEW030 28/17 A2985 "
+        "RMK AO2 T0283 SLP108 T02830167="
+    )
+    assert _parse_metar_temp_c(body) == 28.3
+
+    # Two fully valid T-groups: the last one wins.
+    body_two_valid = (
+        "METAR KHOU 211830Z 10004MPS 9999 FEW030 10/08 RMK "
+        "T01890144 CORRECTED T01940139="
+    )
+    assert _parse_metar_temp_c(body_two_valid) == 19.4
+
+
 # ----------------------------------------------------------------------
-# CSV line parse (Ogimet format, unchanged)
+# CSV line parse (Ogimet format)
 # ----------------------------------------------------------------------
 
 
@@ -71,6 +108,17 @@ def test_parse_csv_line_valid():
     assert parsed is not None
     assert parsed[0] == datetime(2024, 1, 15, 14, 30, tzinfo=timezone.utc)
     assert parsed[1] == 5.0
+
+
+def test_parse_csv_line_prefers_t_group_precision():
+    line = (
+        "KATL,2024,01,15,14,30,METAR KATL 151430Z 10004MPS 9999 FEW030 "
+        "28/17 A2985 RMK AO2 SLP108 T02830167="
+    )
+    parsed = _parse_metar_csv_line(line)
+    assert parsed is not None
+    assert parsed[0] == datetime(2024, 1, 15, 14, 30, tzinfo=timezone.utc)
+    assert parsed[1] == 28.3
 
 
 def test_parse_csv_line_missing_temp_group_returns_none():
@@ -291,6 +339,24 @@ def test_ogimet_aggregate_converts_to_fahrenheit_on_request():
     )
     assert bucket.hour_max_temp == 32.0
     assert bucket.temp_unit == "F"
+
+
+def test_ogimet_aggregate_preserves_tenths_precision_in_fahrenheit():
+    """T-group tenths precision must survive C->F conversion, not get rounded
+
+    to whole-degree C first. 27.2C and 26.7C -> 80.96F and 80.06F exactly.
+    """
+    rows = [
+        (datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 27.2),
+        (datetime(2024, 1, 15, 14, 30, tzinfo=timezone.utc), 26.7),
+    ]
+    [bucket] = ogimet_aggregate(
+        rows, station="KATL", unit_out="F", timezone_name="America/New_York",
+        city_name="Atlanta", source_tag="ogimet_metar_katl",
+        start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert bucket.hour_max_temp == pytest.approx(80.96)
+    assert bucket.hour_min_temp == pytest.approx(80.06)
 
 
 def test_ogimet_aggregate_filters_by_local_date_window():

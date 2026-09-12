@@ -57,6 +57,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import City, cities_by_name, load_cities  # noqa: E402
+from src.data.metar_temperature import metar_temperature_c  # noqa: E402
 from src.data.ogimet_hourly_client import wait_for_ogimet_request_slot  # noqa: E402
 from src.state.db import ZEUS_WORLD_DB_PATH, get_world_connection, init_schema  # noqa: E402
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
@@ -160,23 +161,12 @@ def _fetch_window(
 # METAR parser
 # ---------------------------------------------------------------------------
 
-# METAR temp/dewpoint group: one or two digits (optionally prefixed with M
-# for negative) separated by /. Examples: "10/08", "M05/M08", "M10/08".
-_METAR_TEMP_RE = re.compile(r"\s(M?\d{1,2})/(M?\d{1,2})\s")
-
-
 def _parse_metar_temp(metar_body: str) -> Optional[float]:
-    """Extract temperature in °C from a raw METAR body, or None if absent."""
-    m = _METAR_TEMP_RE.search(" " + metar_body + " ")
-    if not m:
-        return None
-    raw = m.group(1)
-    negative = raw.startswith("M")
-    try:
-        v = int(raw[1:] if negative else raw)
-    except ValueError:
-        return None
-    return float(-v if negative else v)
+    """Extract temperature in °C, preferring the tenths-precision T-group.
+
+    See src/data/metar_temperature.py for the shared parser.
+    """
+    return metar_temperature_c(metar_body)
 
 
 def _parse_metar_line(line: str) -> Optional[tuple[datetime, float]]:

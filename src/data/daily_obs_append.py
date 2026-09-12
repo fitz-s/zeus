@@ -62,7 +62,6 @@ import json
 import logging
 import math
 import os
-import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -80,6 +79,7 @@ from src.data.daily_observation_writer import (
     write_daily_observation_with_revision,
 )
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected
+from src.data.metar_temperature import metar_temperature_c
 from src.types.temperature import Temperature
 # G10 helper-extraction (2026-04-26, con-nyx MAJOR #1): import from canonical
 # location to avoid transitively pulling src.signal into the ingest lane.
@@ -1664,21 +1664,12 @@ _OGIMET_HEADERS = {"User-Agent": "zeus-ogimet-live/1.0 (research; contact via re
 _OGIMET_RETRY_COUNT = 2
 _OGIMET_RETRY_BACKOFF_SEC = 5.0
 
-# METAR temp/dewpoint group: "10/08", "M05/M08"
-_METAR_TEMP_RE = re.compile(r"\s(M?\d{1,2})/(M?\d{1,2})\s")
-
-
 def _parse_metar_temp(metar_body: str) -> float | None:
-    m = _METAR_TEMP_RE.search(" " + metar_body + " ")
-    if not m:
-        return None
-    raw = m.group(1)
-    negative = raw.startswith("M")
-    try:
-        v = int(raw[1:] if negative else raw)
-    except ValueError:
-        return None
-    return float(-v if negative else v)
+    """Extract temperature in °C, preferring the tenths-precision T-group.
+
+    See src/data/metar_temperature.py for the shared parser.
+    """
+    return metar_temperature_c(metar_body)
 
 
 def _wait_for_ogimet_request_slot() -> None:
