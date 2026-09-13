@@ -215,3 +215,91 @@ def native_holdings_snapshot_from_positions(
         holdings=tuple(holdings),
         pending_endowments=tuple(pending),
     )
+
+
+def unbound_native_holdings_snapshot_from_positions(
+    *,
+    family_key: str,
+    omega,
+    positions,
+    ledger_snapshot_id: str,
+    token_shares_by_id: Mapping[str, Decimal] | None = None,
+) -> NativeHoldingsSnapshot:
+    """Best-effort holdings for a family whose native token identities this
+    cut are already known unreliable.
+
+    Called only after ``native_holdings_snapshot_from_positions`` has already
+    raised for this family (an untokenized or duplicated bin elsewhere in the
+    same MECE outcome space) -- the family's aggregate token-uniqueness
+    invariant is broken, but a held position's own condition_id -> bin_id
+    lookup and its own recorded token id do not depend on that break. Every
+    holding here trusts the position's own token_id/no_token_id field
+    directly instead of cross-checking it against the (currently unreliable)
+    omega binding, mirroring how
+    global_single_order_auction.unbound_excluded_holding_coverage_row builds
+    its EXCLUDED coverage row from a holding's own raw fields rather than
+    re-deriving the unreliable binding.
+
+    Never raises: any position that cannot be confidently placed (unknown
+    bin, missing/invalid token id or share count, unsupported direction) is
+    skipped rather than failing the whole family a second time. Pending
+    entry endowments are not resolved here -- matching them to a side
+    requires the same unreliable token-uniqueness map this function exists
+    to avoid, so they are left empty for this cut.
+    """
+
+    bin_id_by_condition_id = {
+        str(outcome.condition_id or ""): str(outcome.bin_id)
+        for outcome in omega.bins
+    }
+    holdings: list[NativeHolding] = []
+    for position in tuple(positions or ()):
+        condition_id = str(getattr(position, "condition_id", "") or "")
+        bin_id = bin_id_by_condition_id.get(condition_id)
+        if not bin_id:
+            continue
+        direction_raw = getattr(position, "direction", "")
+        direction = str(getattr(direction_raw, "value", direction_raw) or "").lower()
+        if direction == "buy_yes":
+            side: NativeHoldingSide = "YES"
+            token_id = str(getattr(position, "token_id", "") or "")
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "")
+        else:
+            continue
+        if not token_id:
+            continue
+        uses_ledger_balance = token_shares_by_id is not None
+        try:
+            shares = Decimal(
+                token_shares_by_id.get(token_id, Decimal("0"))
+                if uses_ledger_balance
+                else str(getattr(position, "chain_shares", 0) or 0)
+            )
+        except Exception:
+            continue
+        if not shares.is_finite() or shares <= 0:
+            continue
+        try:
+            holding = NativeHolding(
+                position_id=str(
+                    getattr(position, "position_id", "")
+                    or getattr(position, "trade_id", "")
+                    or ""
+                ),
+                family_key=family_key,
+                bin_id=bin_id,
+                side=side,
+                token_id=token_id,
+                shares=shares,
+            )
+        except ValueError:
+            continue
+        holdings.append(holding)
+    return NativeHoldingsSnapshot(
+        family_key=family_key,
+        ledger_snapshot_id=ledger_snapshot_id,
+        holdings=tuple(holdings),
+        pending_endowments=(),
+    )

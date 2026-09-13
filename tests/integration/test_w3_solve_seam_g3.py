@@ -26683,6 +26683,306 @@ def test_global_book_asset_materialization_failure_excludes_only_its_family(
     assert "ValueError" in combined
 
 
+def test_native_holdings_binding_failure_still_covers_a_held_position_in_that_family():
+    """R-J P0 on the native-holdings-binding-failure exclusion: a family
+    excluded because its own binding failed can still HOLD a real position.
+    _bind_selection_holdings must give it a real (non-vacuous) holding via
+    unbound_native_holdings_snapshot_from_positions, and
+    select_prepared_global_auction's SELL loop must route it through
+    unbound_excluded_holding_coverage_row (seeded via
+    materialization_excluded_by_family) rather than re-deriving the
+    unreliable binding -- otherwise the held obligation gets zero coverage
+    rows, and _complete_holding_coverage /
+    _publish_global_holding_coverage's completeness partition raises
+    GLOBAL_HOLDING_COVERAGE_(SCOPE|PARTITION|PUBLISH_INCOMPLETE), aborting
+    the whole epoch through a different door than the original defect.
+    """
+    family, proofs, payload = _corpus()[0]
+    decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    captured_at = "2026-06-13T11:59:59.900000+00:00"
+    proofs = tuple(
+        replace(proof, row={**proof.row, "captured_at": captured_at})
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    current_scope = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Chicago", source_run_id="posterior-chicago-current"
+            ),
+            _global_scope_event(
+                city="London", source_run_id="posterior-london-current"
+            ),
+            _global_scope_event(
+                city="Denver", source_run_id="posterior-denver-current"
+            ),
+        ),
+        captured_at_utc=decision_at,
+    )
+    bad_family_key = current_scope.family_keys[2]
+
+    prepared_by_event = {}
+    for suffix, family_key in zip(("a", "b", "bad"), current_scope.family_keys):
+        scoped_family = replace(
+            family,
+            family_id=family_key,
+            event_id=f"event-{suffix}",
+        )
+        result = bridge.decide_family_via_spine(
+            family=scoped_family,
+            payload=payload,
+            proofs=proofs,
+            decision_time=decision_at,
+            native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+            global_native_side_candidate_from_proof=(
+                era._full_depth_native_side_candidate_from_proof
+            ),
+            require_global_probability_witness=True,
+            global_probability_max_age=_dt.timedelta(seconds=1),
+            candidate_bin_id=era._candidate_bin_id,
+            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+            exposure_builder=era._robust_marginal_utility_exposure,
+            baseline_usd_provider=lambda: Decimal("1000"),
+            per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+            extra_exposure_by_bin_id=None,
+        )
+        assert result.global_family is not None
+        prepared_by_event[f"event-{suffix}"] = result.global_family
+
+    # Corrupt one bin of the Denver family (a fresh, not-yet-tokenized Day0
+    # extreme, per T-omega) -- bindings[0]. The held position below sits in
+    # a DIFFERENT bin of the same family, bindings[1], which is perfectly
+    # fine: this is the dominant live shape (an untradeable, never-held bin
+    # breaks the family's aggregate token-uniqueness check even though the
+    # position's own bin and token are completely healthy).
+    #
+    # All three scoped families share one corpus family template, so their
+    # raw bindings carry identical condition_ids. Give Denver's bindings
+    # family-unique condition_ids first, so a position held in Denver's
+    # bin cannot also be matched into the good families' identically-
+    # numbered bins by _bind_selection_holdings (which checks every family
+    # against the same positions tuple, independently, by condition_id).
+    bad_witness = prepared_by_event["event-bad"].probability_witness
+    renamed_bindings = tuple(
+        replace(binding, condition_id=f"denver-{binding.condition_id}")
+        for binding in bad_witness.bindings
+    )
+    held_binding = renamed_bindings[1]
+    corrupted_bindings = tuple(
+        replace(binding, no_token_id=None) if i == 0 else binding
+        for i, binding in enumerate(renamed_bindings)
+    )
+    corrupted_witness_identity = joint_probability_witness_identity(
+        family_key=bad_witness.family_key,
+        bindings=corrupted_bindings,
+        q_version=bad_witness.q_version,
+        resolution_identity=bad_witness.resolution_identity,
+        topology_identity=bad_witness.topology_identity,
+        posterior_identity_hash=bad_witness.posterior_identity_hash,
+        source_truth_identity=bad_witness.source_truth_identity,
+        authority_certificate_hash=bad_witness.authority_certificate_hash,
+        band_alpha=bad_witness.band_alpha,
+        band_basis=bad_witness.band_basis,
+        yes_point_q=bad_witness.yes_point_q,
+        yes_q_samples=bad_witness.yes_q_samples,
+        captured_at_utc=bad_witness.captured_at_utc,
+        exact_payoff_witness=bad_witness.exact_payoff_witness,
+    )
+    prepared_by_event["event-bad"] = replace(
+        prepared_by_event["event-bad"],
+        probability_witness=replace(
+            bad_witness,
+            bindings=corrupted_bindings,
+            witness_identity=corrupted_witness_identity,
+        ),
+    )
+
+    held_position = SimpleNamespace(
+        position_id="held-position-bad",
+        condition_id=held_binding.condition_id,
+        direction="buy_yes",
+        token_id=held_binding.yes_token_id,
+        no_token_id=held_binding.no_token_id,
+        chain_shares=Decimal("12.5"),
+    )
+    wealth = _test_wealth_witness(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        native_holdings_micro=((held_binding.yes_token_id, 12_500_000),),
+    )
+
+    binding_failures: dict[str, str] = {}
+    prepared_by_event = global_batch_runtime._bind_selection_holdings(
+        prepared_by_event,
+        portfolio_state=SimpleNamespace(positions=(held_position,)),
+        wealth_witness=wealth,
+        binding_failure_reason_by_family=binding_failures,
+    )
+    assert set(binding_failures) == {bad_family_key}
+    from src.engine.native_holdings import NativeHolding
+
+    bad_snapshot = prepared_by_event["event-bad"].holdings_snapshot
+    assert bad_snapshot.holdings == (
+        NativeHolding(
+            position_id="held-position-bad",
+            family_key=bad_family_key,
+            bin_id=held_binding.bin_id,
+            side="YES",
+            token_id=held_binding.yes_token_id,
+            shares=Decimal("12.5"),
+        ),
+    )
+
+    assets = tuple(
+        CurrentGlobalBookAsset(
+            family_key=prepared.probability_witness.family_key,
+            bin_id=seed.native_candidate.bin_id,
+            condition_id=seed.native_candidate.condition_id,
+            gamma_market_id=f"gamma-{seed.native_candidate.condition_id}",
+            market_event_id=f"market-event-{prepared.probability_witness.family_key}",
+            side=seed.native_candidate.side,
+            token_id=seed.native_candidate.token_id,
+            curve=seed.native_candidate.executable_cost_curve,
+            bid_levels=(
+                BidBookLevel(price=Decimal("0.06"), size=Decimal("1000")),
+            ),
+            captured_at_utc=decision_at,
+            neg_risk=True,
+        )
+        for prepared in prepared_by_event.values()
+        if prepared.probability_witness.family_key != bad_family_key
+        for seed in prepared.candidate_seeds
+    )
+    asset_states = tuple(
+        (
+            asset.family_key,
+            asset.bin_id,
+            asset.condition_id,
+            asset.side,
+            asset.token_id,
+            "EXECUTABLE",
+            asset.curve.book_hash,
+            asset.market_event_id,
+            asset.gamma_market_id,
+            str(asset.neg_risk),
+        )
+        for asset in assets
+    )
+    book_venue_identity = current_global_book_epoch_identity(
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+    )
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=assets,
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=book_venue_identity,
+    )
+
+    def current_capital_limit(
+        candidate, gamma_market_id, market_event_id, owner_event_id
+    ):
+        return Decimal("100")
+
+    probabilities = {
+        prepared.probability_witness.family_key: prepared.probability_witness
+        for prepared in prepared_by_event.values()
+    }
+    selected = select_prepared_global_auction(
+        prepared_by_event,
+        selection_epoch_identity="selection-epoch-current",
+        selection_cut_at_utc=decision_at,
+        current_scope=current_scope,
+        current_scope_identity_resolver=lambda: current_scope.scope_identity,
+        venue_universe_identity=book_venue_identity,
+        current_venue_universe_identity_resolver=lambda: book_venue_identity,
+        universe_max_age=_dt.timedelta(seconds=1),
+        current_probability_resolver=lambda key: (
+            CurrentFamilyProbabilityAuthority.from_witness(probabilities[key])
+            if key in probabilities
+            else None
+        ),
+        current_execution_resolver=lambda candidate: CurrentExecutionAuthority(
+            token_id=candidate.token_id,
+            side=candidate.side,
+            book_snapshot_id=candidate.book_snapshot_id,
+            execution_curve_identity=candidate.execution_curve_identity,
+            action=getattr(candidate, "action", "BUY"),
+            neg_risk=candidate.neg_risk,
+        ),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth,
+        capital_limit_usd=Decimal("100"),
+        decision_at_utc=decision_at,
+        book_epoch=book_epoch,
+        current_capital_limit_resolver=current_capital_limit,
+        preflight_excluded_by_family=binding_failures,
+    )
+    assert selected.decision.candidate is not None, selected.decision.no_trade_reason
+    assert selected.decision.candidate.family_key != bad_family_key
+
+    # The held obligation in the excluded family got a real EXCLUDED
+    # coverage row (unbound_excluded_holding_coverage_row), not zero rows.
+    bad_family_rows = tuple(
+        row
+        for row in selected.holding_coverage
+        if row.family_key == bad_family_key
+    )
+    assert len(bad_family_rows) == 1
+    assert bad_family_rows[0].position_id == "held-position-bad"
+    assert bad_family_rows[0].status == "EXCLUDED"
+    assert bad_family_rows[0].reason.startswith(
+        "GLOBAL_NATIVE_HOLDINGS_BINDING_FAILED:"
+    )
+    assert bad_family_key in selected.materialization_excluded_by_family
+
+    # This is the exact live-defect shape being closed: _complete_holding_
+    # coverage / _publish_global_holding_coverage, called the way select_
+    # once calls them (unbindable_family_keys derived from
+    # materialization_excluded_by_family), must not raise
+    # GLOBAL_HOLDING_COVERAGE_(SCOPE|PARTITION|PUBLISH_INCOMPLETE) for the
+    # held position in the excluded family.
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="held-position-bad",
+        family_key=bad_family_key,
+        bin_label=str(held_binding.bin_id),
+        condition_id=held_binding.condition_id,
+        side="YES",
+        token_id=held_binding.yes_token_id,
+        held_shares=Decimal("12.5"),
+    )
+    unbindable_family_keys = frozenset(selected.materialization_excluded_by_family)
+    completed_coverage = global_batch_runtime._complete_holding_coverage(
+        selected.holding_coverage,
+        obligations=(obligation,),
+        probability_witnesses=probabilities,
+        ineligible_by_family={},
+        ledger_snapshot_id=wealth.ledger_snapshot_id,
+        wealth_economic_identity=wealth.economic_identity,
+        selection_epoch_identity="selection-epoch-current",
+        book_epoch_identity=book_venue_identity,
+        selection_cut_at_utc=decision_at,
+        decision_at_utc=decision_at,
+        book_deadline_at_utc=decision_at + _dt.timedelta(seconds=1),
+        unbindable_family_keys=unbindable_family_keys,
+    )
+    global_batch_runtime._publish_global_holding_coverage(
+        completed_coverage,
+        expected_obligations=(obligation,),
+        probability_witnesses=probabilities,
+        decision_log_id=1,
+        unbindable_family_keys=unbindable_family_keys,
+    )
+
+
 def test_global_sell_holding_materialization_failure_excludes_only_its_family(
     caplog,
 ):

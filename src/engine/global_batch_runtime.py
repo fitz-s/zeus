@@ -669,7 +669,20 @@ def _current_held_obligations(
 def _expected_holding_coverage_key(
     obligation: _CurrentHeldObligation,
     probability_witnesses: Mapping[str, object],
+    *,
+    unbindable_family_keys: frozenset[str] = frozenset(),
 ) -> tuple[object, ...]:
+    """The coverage row this obligation must appear as.
+
+    A family in ``unbindable_family_keys`` has a native token binding this
+    cut already known unreliable (see native_holdings.py and
+    _bind_selection_holdings): its condition_id -> bin_id lookup is still
+    trusted here (that lookup does not depend on token identity), but the
+    token match below is skipped rather than raised on, matching the unbound
+    row global_single_order_auction.unbound_excluded_holding_coverage_row
+    builds for it (repaired to the obligation's own condition_id by
+    _complete_holding_coverage below).
+    """
     witness = probability_witnesses.get(obligation.family_key)
     bin_id = ""
     if witness is not None:
@@ -683,13 +696,17 @@ def _expected_holding_coverage_key(
             raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_AMBIGUOUS")
         binding = matches[0]
         bin_id = str(getattr(binding, "bin_id", "") or "").strip()
-        expected_token = (
-            getattr(binding, "yes_token_id", None)
-            if obligation.side == "YES"
-            else getattr(binding, "no_token_id", None)
-        )
-        if not bin_id or str(expected_token or "") != obligation.token_id:
-            raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_MISMATCH")
+        if obligation.family_key in unbindable_family_keys:
+            if not bin_id:
+                raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_MISMATCH")
+        else:
+            expected_token = (
+                getattr(binding, "yes_token_id", None)
+                if obligation.side == "YES"
+                else getattr(binding, "no_token_id", None)
+            )
+            if not bin_id or str(expected_token or "") != obligation.token_id:
+                raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_MISMATCH")
     return (
         obligation.position_id,
         obligation.family_key,
@@ -836,10 +853,15 @@ def _holding_coverage_partition_complete(
     *,
     obligations: Sequence[_CurrentHeldObligation],
     probability_witnesses: Mapping[str, object],
+    unbindable_family_keys: frozenset[str] = frozenset(),
 ) -> bool:
     rows = tuple(coverage)
     expected = tuple(
-        _expected_holding_coverage_key(obligation, probability_witnesses)
+        _expected_holding_coverage_key(
+            obligation,
+            probability_witnesses,
+            unbindable_family_keys=unbindable_family_keys,
+        )
         for obligation in obligations
     )
     actual = tuple(_holding_coverage_key(row) for row in rows)
@@ -898,6 +920,7 @@ def _complete_holding_coverage(
     book_deadline_at_utc: datetime,
     unavailable_book_by_position: Mapping[str, str] | None = None,
     selection_no_trade_reason: str = "",
+    unbindable_family_keys: frozenset[str] = frozenset(),
 ) -> tuple[GlobalHoldingAuctionCoverage, ...]:
     """Build one typed row for every exact held obligation, never by id alone."""
 
@@ -910,6 +933,7 @@ def _complete_holding_coverage(
         expected_key = _expected_holding_coverage_key(
             obligation,
             probability_witnesses,
+            unbindable_family_keys=unbindable_family_keys,
         )
         row = by_position.get(obligation.position_id)
         if row is None:
@@ -979,6 +1003,15 @@ def _complete_holding_coverage(
             row = replace(
                 row,
                 bin_label=obligation.bin_label,
+                # A row built by unbound_excluded_holding_coverage_row (an
+                # unbindable family's own binding is unreliable) carries a
+                # synthetic condition_id -- UNRESOLVED_BINDING:<bin_id> --
+                # since it never re-derives the binding. The obligation's
+                # own condition_id is reliable regardless (it comes straight
+                # off the position, not off any binding lookup), so it is
+                # always the canonical value here; this is a no-op for a
+                # normally-bound row, which already carries this same value.
+                condition_id=obligation.condition_id,
                 canonical_bin_identity=f"condition:{obligation.condition_id}",
             )
         completed.append(row)
@@ -987,6 +1020,7 @@ def _complete_holding_coverage(
         out,
         obligations=obligations,
         probability_witnesses=probability_witnesses,
+        unbindable_family_keys=unbindable_family_keys,
     ):
         raise ValueError("GLOBAL_HOLDING_COVERAGE_PARTITION_INCOMPLETE")
     return out
@@ -1009,6 +1043,7 @@ def _publish_global_holding_coverage(
     expected_obligations: Sequence[_CurrentHeldObligation],
     probability_witnesses: Mapping[str, object],
     decision_log_id: int,
+    unbindable_family_keys: frozenset[str] = frozenset(),
 ) -> None:
     """Publish only a committed, exact partition of current held obligations."""
 
@@ -1017,6 +1052,7 @@ def _publish_global_holding_coverage(
         rows,
         obligations=expected_obligations,
         probability_witnesses=probability_witnesses,
+        unbindable_family_keys=unbindable_family_keys,
     )
     if (
         decision_log_id <= 0
@@ -1531,15 +1567,22 @@ def _bind_selection_holdings(
     A family whose outcome space cannot be bound to native token identities
     this cut (for example a not-yet-tokenized Day0 extreme bin) cannot be
     evaluated. When ``binding_failure_reason_by_family`` is supplied, that
-    family is still returned with a vacuous holdings snapshot and its reason
-    is recorded there for the caller to fold into ``excluded_by_family``,
-    instead of this raising and aborting the whole selection attempt. Callers
-    that omit the dict keep the original fail-closed behavior.
+    family is still returned -- with a best-effort holdings snapshot built
+    from its held positions' own raw fields when it has any (see
+    ``unbound_native_holdings_snapshot_from_positions``; a family with no
+    held positions gets a vacuous one), never re-deriving the unreliable
+    binding -- and its reason is recorded for the caller to fold into
+    ``excluded_by_family``, instead of this raising and aborting the whole
+    selection attempt. A held position needs a real (non-vacuous) row here:
+    the SELL-side holding-coverage partition check requires every current
+    obligation to appear, excluded or not. Callers that omit the dict keep
+    the original fail-closed behavior.
     """
 
     from src.engine.native_holdings import (
         NativeHoldingsSnapshot,
         native_holdings_snapshot_from_positions,
+        unbound_native_holdings_snapshot_from_positions,
     )
 
     positions = tuple(getattr(portfolio_state, "positions", ()) or ())
@@ -1589,10 +1632,19 @@ def _bind_selection_holdings(
             binding_failure_reason_by_family[family_key] = (
                 f"GLOBAL_NATIVE_HOLDINGS_BINDING_FAILED:{exc}"
             )
-            holdings = NativeHoldingsSnapshot(
-                family_key=family_key,
-                ledger_snapshot_id=ledger_snapshot_id,
-            )
+            try:
+                holdings = unbound_native_holdings_snapshot_from_positions(
+                    family_key=family_key,
+                    omega=SimpleNamespace(bins=bindings),
+                    positions=positions,
+                    ledger_snapshot_id=ledger_snapshot_id,
+                    token_shares_by_id=token_shares_by_id,
+                )
+            except Exception:
+                holdings = NativeHoldingsSnapshot(
+                    family_key=family_key,
+                    ledger_snapshot_id=ledger_snapshot_id,
+                )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound
 
@@ -8425,6 +8477,10 @@ def process_current_global_batch(
                     expected_obligations=holding_obligations,
                     probability_witnesses=probability_witnesses,
                     decision_log_id=rebound_row_id,
+                    unbindable_family_keys=frozenset(
+                        getattr(selected, "materialization_excluded_by_family", ())
+                        or ()
+                    ),
                 )
             return selected
         # Selection is a comparison over one immutable information vector.  Scope and
@@ -8432,6 +8488,12 @@ def process_current_global_batch(
         # witnesses join that vector below.  A later family update belongs to the next
         # epoch.  Only the selected winner is allowed to cross into the side-effect
         # path, where probability, exact book/curve, and free cash are rebuilt JIT.
+        # Cut-scoped (not per-call): select_once can run more than once in the
+        # same cut via the preflight fallthrough retry loop below, and the
+        # underlying token data does not change between those attempts, so a
+        # family's binding failure would otherwise log once per attempt.
+        warned_holdings_binding_failure_families: set[str] = set()
+
         def select_once(
             attempt_probabilities: Mapping[str, object],
             attempt_book_epoch: CurrentGlobalBookEpoch | None,
@@ -8499,6 +8561,9 @@ def process_current_global_batch(
                     for family_key, reason in (
                         holdings_binding_failure_by_family.items()
                     ):
+                        if family_key in warned_holdings_binding_failure_families:
+                            continue
+                        warned_holdings_binding_failure_families.add(family_key)
                         _LOG.warning(
                             "global batch native holdings binding failed, "
                             "family excluded: family=%s event=%s reason=%s",
@@ -8792,6 +8857,12 @@ def process_current_global_batch(
                             if attempt_book_epoch is not None
                             else selection_at
                         ),
+                        unbindable_family_keys=frozenset(
+                            getattr(
+                                selected, "materialization_excluded_by_family", ()
+                            )
+                            or ()
+                        ),
                     ),
                 )
             _LOG.info(
@@ -9058,6 +9129,10 @@ def process_current_global_batch(
                     expected_obligations=holding_obligations,
                     probability_witnesses=attempt_probabilities,
                     decision_log_id=receipt_row_id,
+                    unbindable_family_keys=frozenset(
+                        getattr(selected, "materialization_excluded_by_family", ())
+                        or ()
+                    ),
                 )
             return selected
 

@@ -1017,7 +1017,19 @@ def select_prepared_global_auction(
             )
 
         candidates = []
-        materialization_excluded_by_family: dict[str, str] = {}
+        # A caller-supplied preflight exclusion whose reason names a native
+        # holdings-binding failure (see global_batch_runtime._bind_selection_
+        # holdings) carries the same "this family's binding is unreliable,
+        # never re-derive it" defect as a materialization failure discovered
+        # below -- seed it here so the SELL loop's "family_key in excluded"
+        # branch routes it through unbound_excluded_holding_coverage_row too,
+        # instead of re-deriving the binding via coverage_row() and risking
+        # the exact re-raise this mechanism exists to avoid.
+        materialization_excluded_by_family: dict[str, str] = {
+            family_key: reason
+            for family_key, reason in excluded_by_family.items()
+            if reason.startswith("GLOBAL_NATIVE_HOLDINGS_BINDING_FAILED:")
+        }
 
         def maker_witness_for(
             *,
