@@ -15836,6 +15836,50 @@ def test_global_book_epoch_cache_reduce_only_extends_broad_entry_without_narrowi
     conn.close()
 
 
+def test_global_book_epoch_cache_extend_without_scope_inherits_entry_scope(
+    monkeypatch,
+):
+    """A caller of `_extend_global_book_epoch_cache` that omits `scope`
+    entirely must not thereby claim "full" over a cache the fix flagged
+    "reduce_only" -- that would reintroduce the bug this seam exists to
+    close. Mirrors `_store_global_book_epoch`'s inherit-by-default."""
+
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    held_families = ["family-a", "family-b"]
+    held_probabilities = {
+        family: _book_epoch_probability(family) for family in held_families
+    }
+    held_epoch = _book_epoch_for_families(held_families, at, "seed")
+    assert (
+        era._store_global_book_epoch(
+            conn,
+            held_probabilities,
+            held_epoch,
+            checked_at=at,
+            scope="reduce_only",
+        )
+        == "stored"
+    )
+    assert era._GLOBAL_BOOK_EPOCH_CACHE.scope == "reduce_only"
+
+    later = at + _dt.timedelta(seconds=1)
+    refreshed_epoch = _book_epoch_for_families(held_families, later, "refresh")
+    # No `scope` kwarg at all -- the omitted-default case.
+    probabilities, merged, _, status = era._extend_global_book_epoch_cache(
+        conn,
+        held_probabilities,
+        refreshed_epoch,
+        checked_at=later,
+    )
+    assert status == "extended"
+    assert set(probabilities) == set(held_families)
+    assert era._GLOBAL_BOOK_EPOCH_CACHE.scope == "reduce_only"
+    conn.close()
+
+
 def test_global_book_epoch_delta_preserves_earliest_expiry():
     at = _dt.datetime.now(_dt.timezone.utc)
 

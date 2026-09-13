@@ -3745,7 +3745,7 @@ def _extend_global_book_epoch_cache(
     metadata_by_key: Mapping[
         tuple[str, str], Mapping[str, object]
     ] | None = None,
-    scope: str = "full",
+    scope: str | None = None,
 ) -> tuple[
     dict[str, object],
     object,
@@ -3756,10 +3756,13 @@ def _extend_global_book_epoch_cache(
 
     `scope` names what `bound_probabilities` itself covers: "full" if this
     capture requested everything the cut needed, "reduce_only" if it was
-    narrowed to held tokens only. The merged entry's scope stays
-    "reduce_only" (never silently upgrades to "full") unless this call's own
-    capture is "full" -- a reduce-only capture merging into a reduce-only
-    seed must not be mistaken for proof the wider universe was seen.
+    narrowed to held tokens only. A caller that omits it (mirroring
+    `_store_global_book_epoch`'s inherit-by-default) does not thereby claim
+    "full" -- the merged entry keeps the existing cached entry's scope. The
+    merged entry's scope stays "reduce_only" (never silently upgrades to
+    "full") unless this call's own capture explicitly says "full" -- a
+    reduce-only capture merging into a reduce-only seed must not be
+    mistaken for proof the wider universe was seen.
     """
 
     global _GLOBAL_BOOK_EPOCH_CACHE
@@ -3834,7 +3837,9 @@ def _extend_global_book_epoch_cache(
                 current_metadata,
                 "merged_topology_unavailable",
             )
-        merged_scope = "full" if scope == "full" else entry.scope
+        merged_scope = (
+            entry.scope if scope is None else ("full" if scope == "full" else entry.scope)
+        )
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
