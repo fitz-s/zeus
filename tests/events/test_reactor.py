@@ -52,6 +52,7 @@ from src.events.reactor import (
     _held_position_monitor_preemption_pending,
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
+    _qkernel_regret_economics,
     _rank_forecast_wake_events,
     _is_explicitly_transient_money_path_reason,
     _is_transient_money_path_reason,
@@ -14448,6 +14449,117 @@ def test_all_candidates_rejected_writes_structured_candidate_rows_from_receipt_b
     assert candidate[6:11] == (0.972, 0.9616, 0.6712, 1.0, 0.4327)
     assert candidate[11] == 1
     assert candidate[12] == "exec-1"
+
+
+def test_qkernel_regret_economics_projects_mean_edge_for_posterior_predictive_mean():
+    # A mean-action route is admitted on edge_expected = payoff_q_point - cost
+    # (decision_kernel/canonicalization.py gates on edge_expected > 0, not
+    # edge_lcb), so the regret row's trade_score must reflect that edge, not
+    # the unused robust edge_lcb.
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="mean-route",
+        qkernel_execution_economics={
+            "payoff_q_point": 0.779,
+            "payoff_q_lcb": 0.748,
+            "cost": 0.74962,
+            "edge_lcb": -0.00162,
+            "edge_expected": 0.02938,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+    economics = _qkernel_regret_economics(receipt)
+    assert economics is not None
+    assert economics["trade_score"] == pytest.approx(0.02938)
+    assert economics["objective"] == "POSTERIOR_PREDICTIVE_MEAN"
+    assert economics["q_live"] == pytest.approx(0.779)
+    assert economics["q_lcb_5pct"] == pytest.approx(0.748)
+
+
+def test_qkernel_regret_economics_keeps_edge_lcb_for_robust_functional():
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="robust-route",
+        qkernel_execution_economics={
+            "payoff_q_point": 0.779,
+            "payoff_q_lcb": 0.748,
+            "cost": 0.74962,
+            "edge_lcb": -0.00162,
+            "edge_expected": 0.02938,
+            "global_probability_functional": "LOWER_CVAR_PARAMETER_DRAWS",
+        },
+    )
+    economics = _qkernel_regret_economics(receipt)
+    assert economics is not None
+    assert economics["trade_score"] == pytest.approx(-0.00162)
+    assert economics["objective"] == "ROBUST"
+
+
+def test_qkernel_regret_economics_falls_back_to_point_minus_cost_without_edge_expected():
+    # Older certs may not carry edge_expected; the mean branch must still
+    # recompute the deciding edge rather than silently keeping edge_lcb.
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="mean-route-legacy-cert",
+        qkernel_execution_economics={
+            "payoff_q_point": 0.779,
+            "payoff_q_lcb": 0.748,
+            "cost": 0.74962,
+            "edge_lcb": -0.00162,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+    economics = _qkernel_regret_economics(receipt)
+    assert economics is not None
+    assert economics["trade_score"] == pytest.approx(0.779 - 0.74962)
+    assert economics["objective"] == "POSTERIOR_PREDICTIVE_MEAN"
+
+
+def test_write_regret_stamps_objective_marker_in_envelope_json_for_mean_route():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        qkernel_execution_economics={
+            "payoff_q_point": 0.779,
+            "payoff_q_lcb": 0.748,
+            "cost": 0.74962,
+            "edge_lcb": -0.00162,
+            "edge_expected": 0.02938,
+            "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        receipt=receipt,
+        decision_time=datetime(2026, 6, 25, 5, 24, tzinfo=timezone.utc),
+    )
+
+    row = conn.execute(
+        "SELECT trade_score, envelope_json FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    trade_score, envelope_json = row
+    assert trade_score == pytest.approx(0.02938)
+    assert envelope_json is not None
+    materials = json.loads(envelope_json)
+    assert materials["rejection"]["objective"] == "POSTERIOR_PREDICTIVE_MEAN"
 
 
 def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():

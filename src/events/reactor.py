@@ -4298,8 +4298,17 @@ class OpportunityEventReactor:
             )
 
         payload = _payload_dict(event)
+        qkernel_economics = (
+            _qkernel_regret_economics(receipt) if receipt is not None else None
+        )
         envelope_json = self._build_regret_envelope_json(
-            event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
+            event,
+            stage,
+            reason,
+            receipt=receipt,
+            decision_time=decision_time,
+            payload=payload,
+            objective=(qkernel_economics or {}).get("objective"),
         )
         reason_text = str(reason or "")
         family_level_all_rejected = reason_text.startswith(
@@ -4328,13 +4337,11 @@ class OpportunityEventReactor:
         executable_snapshot_id = _receipt_or_payload(
             receipt, payload, "executable_snapshot_id"
         )
-        if receipt is not None:
-            qkernel_economics = _qkernel_regret_economics(receipt)
-            if qkernel_economics is not None:
-                q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
-                c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
-                c_cost_95pct = qkernel_economics["c_cost_95pct"]
-                trade_score = qkernel_economics["trade_score"]
+        if qkernel_economics is not None:
+            q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
+            c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
+            c_cost_95pct = qkernel_economics["c_cost_95pct"]
+            trade_score = qkernel_economics["trade_score"]
         if family_level_no_trade:
             condition_id = None
             token_id = None
@@ -4444,6 +4451,7 @@ class OpportunityEventReactor:
         receipt: EventSubmissionReceipt | None,
         decision_time: datetime | None,
         payload: dict[str, Any],
+        objective: str | None = None,
     ) -> str | None:
         """Fail-soft DecisionProvenanceEnvelope JSON for a rejection (operator law 2026-06-11).
 
@@ -4456,6 +4464,10 @@ class OpportunityEventReactor:
         live) and attached them as receipt.envelope_json. Here we only MERGE the final rejection
         {stage, reason FULL TEXT} into those materials.
 
+        ``objective`` (when given) is the ``global_probability_functional`` that decided the
+        route this rejection concerns (``POSTERIOR_PREDICTIVE_MEAN`` or ``ROBUST``) — a queryable
+        marker so a reader can tell which edge the row's ``trade_score`` reflects.
+
         FALLBACK path: receipts without an attached envelope (pre-receipt rejections, foreign
         receipt builders) get the minimal envelope built from what the reactor can reach.
         """
@@ -4465,12 +4477,16 @@ class OpportunityEventReactor:
                 envelope_to_json,
             )
 
+            rejection = {"stage": stage, "reason": reason}
+            if objective is not None:
+                rejection["objective"] = objective
+
             if receipt is not None and getattr(receipt, "envelope_json", None):
                 try:
                     materials = json.loads(receipt.envelope_json)
                     if isinstance(materials, dict):
                         # FULL TEXT — storage never truncates (operator law).
-                        materials["rejection"] = {"stage": stage, "reason": reason}
+                        materials["rejection"] = rejection
                         return json.dumps(materials, sort_keys=True, separators=(",", ":"), default=str)
                 except (ValueError, TypeError):
                     pass  # unreadable materials -> rebuild minimally below
@@ -4522,7 +4538,7 @@ class OpportunityEventReactor:
                 executable_snapshot_row=snapshot_row,
                 economics=economics,
                 direction=_receipt_or_payload(receipt, payload, "direction"),
-                rejection={"stage": stage, "reason": reason},
+                rejection=rejection,
                 # city/target_date from the event payload so time-to-settlement is populated even
                 # for early-stage rejections (EVENT_FILTER / SOURCE_TRUTH) that have no bundle yet.
                 city=_receipt_or_payload(receipt, payload, "city"),
@@ -4778,7 +4794,32 @@ def _all_candidates_rejected_candidate_rows(
     return out
 
 
-def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, float] | None:
+def _qkernel_regret_trade_score(
+    cert: Mapping[str, Any], *, payoff_q_point: float, cost: float, edge_lcb: float
+) -> tuple[float, str] | None:
+    """The edge the objective actually acted on, plus which objective decided.
+
+    A mean-action route is admitted on ``edge_expected = payoff_q_point - cost``
+    (``decision_kernel/canonicalization.py`` gates on ``edge_expected > 0``, and
+    ``event_reactor_adapter.py`` stamps that field on the cert); ``edge_lcb`` is
+    recorded but never gates a mean route. A robust-action route is admitted on
+    ``edge_lcb``. Returns ``None`` when the deciding edge cannot be resolved.
+    """
+    if cert.get("global_probability_functional") != "POSTERIOR_PREDICTIVE_MEAN":
+        return edge_lcb, "ROBUST"
+    edge_expected_raw = cert.get("edge_expected")
+    try:
+        edge_expected = (
+            float(edge_expected_raw) if edge_expected_raw is not None else payoff_q_point - cost
+        )
+    except (TypeError, ValueError):
+        edge_expected = payoff_q_point - cost
+    if not math.isfinite(edge_expected):
+        return None
+    return edge_expected, "POSTERIOR_PREDICTIVE_MEAN"
+
+
+def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     cert = raw.get("qkernel_execution_economics")
     if not isinstance(cert, Mapping):
         return None
@@ -4793,16 +4834,23 @@ def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, flo
         return None
     if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
+    resolved = _qkernel_regret_trade_score(
+        cert, payoff_q_point=payoff_q_point, cost=cost, edge_lcb=edge_lcb
+    )
+    if resolved is None:
+        return None
+    trade_score, objective = resolved
     return {
         "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,
-        "trade_score": edge_lcb,
+        "trade_score": trade_score,
+        "objective": objective,
     }
 
 
-def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:
+def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, Any] | None:
     """Queryable no-trade columns for qkernel-selected receipts.
 
     ``q_live`` / ``q_lcb_5pct`` on the receipt are selected-side probability
@@ -4810,7 +4858,9 @@ def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, floa
     payoff-space certificate: ``payoff_q_point``, ``payoff_q_lcb``, ``cost`` and
     ``edge_lcb``. Project those values into the regret table's scalar economic columns
     so operators and continuous-redecision screens do not compare preserved proof
-    probabilities against a qkernel route score.
+    probabilities against a qkernel route score. ``trade_score`` projects the edge
+    the route's own objective acted on (mean action -> ``edge_expected``, robust
+    action -> ``edge_lcb``); ``objective`` records which one.
     """
 
     cert = receipt.qkernel_execution_economics
@@ -4827,12 +4877,19 @@ def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, floa
         return None
     if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
+    resolved = _qkernel_regret_trade_score(
+        cert, payoff_q_point=payoff_q_point, cost=cost, edge_lcb=edge_lcb
+    )
+    if resolved is None:
+        return None
+    trade_score, objective = resolved
     return {
         "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,
-        "trade_score": edge_lcb,
+        "trade_score": trade_score,
+        "objective": objective,
     }
 
 

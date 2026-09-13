@@ -358,8 +358,9 @@ def build_decision_provenance_envelope(
     provenance_json / dependency_json / source_cycle_time / source_available_at / computed_at).
     `executable_snapshot_row` is an executable_market_snapshots row (sqlite3.Row / Mapping).
     `economics` carries the decision economics (q_live / q_lcb / price / trade_score / kelly_size_usd).
-    `rejection` carries {"stage": ..., "reason": <FULL text, never truncated>} for REJECTED receipts;
-    None / absent for ACCEPTED receipts.
+    `rejection` carries {"stage": ..., "reason": <FULL text, never truncated>, "objective": <optional
+    global_probability_functional that decided the route, when known>} for REJECTED receipts; None /
+    absent for ACCEPTED receipts.
 
     Returns a dict. NEVER raises: any sub-truth that cannot be assembled becomes an
     "UNAVAILABLE: <why>" string in its slot.
@@ -407,6 +408,9 @@ def build_decision_provenance_envelope(
             "stage": rejection.get("stage"),
             "reason": rejection.get("reason"),
         }
+        objective = rejection.get("objective")
+        if objective is not None:
+            rejection_field["objective"] = objective
 
     envelope: dict[str, Any] = {
         "envelope_version": 1,
