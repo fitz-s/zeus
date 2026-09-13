@@ -146,13 +146,20 @@ margin, this does not change the DDL-vs-migration-script decision.
 
 Concurrent writers: `collateral_ledger_snapshots` is written by the daemon's
 own 30 s collateral refresh plus `exchange_reconcile`/`wallet_balance_head`.
-`scripts/deploy_live.py`'s `LIVE_TRADING_PREREQUISITE_LABELS` stops
-`post-trade-capital` and `riskguard-live` (writers to this DB) ahead of a
-live-trading restart, narrowing the window `init_schema_trade_only` runs in,
-though the exact statement-level interleaving inside `_cmd_restart_locked` was
-not traced end-to-end. Given the measured ~0.17 s build cost, any residual
-write-lock contention during a restart is bounded by that, not by an unbounded
-or minutes-scale hold — the concern the fencing precedent exists for.
+On the routine (warm) restart path, `scripts/deploy_live.py` does **not** stop
+these writers: `LIVE_TRADING_PREREQUISITE_LABELS` (including
+`post-trade-capital`/`riskguard-live`) are dependencies kept *running*, not
+processes stopped around a restart, and the one function that does quiesce
+them (`_run_restart_recovery_with_quiesced_prerequisites`) only fires on the
+cold path, gated on a registered migration target going stale — this index is
+ordinary `_TRADE_CLASS_DDL` idempotent bootstrap, not a registered
+`RESTART_TRADE_MIGRATION_TARGETS` entry, so that gate reads current and the
+warm path (no quiesce) runs. `src/main.py`'s unconditional boot will run
+`init_schema_trade_only`'s `CREATE INDEX` while the 30 s collateral refresh
+subprocess is live. Safety here rests entirely on the measured build cost
+(~0.17-0.20 s, independently reproduced) being far below any contention
+window a 30 s-cadence writer could present — not on any mechanism stopping
+those writers, because on the routine restart path nothing does.
 
 ### Not measured / not done in this change
 
