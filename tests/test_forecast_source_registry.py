@@ -41,6 +41,7 @@ def _city() -> City:
         settlement_unit="F",
         cluster="test",
         wu_station="KAAA",
+        settlement_source_type="wu_icao",
     )
 
 
@@ -351,6 +352,7 @@ def test_forecasts_daily_tick_aborts_city_loop_on_openmeteo_quota(monkeypatch) -
                     settlement_unit="F",
                     cluster="test",
                     wu_station="KBBB",
+                    settlement_source_type="wu_icao",
                 ),
             ),
             past_days=0,

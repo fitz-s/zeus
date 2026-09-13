@@ -104,6 +104,7 @@ def test_get_calibrator_uses_attached_world_platt_model(tmp_path):
         settlement_unit="C",
         cluster="London",
         wu_station="EGLL",
+        settlement_source_type="wu_icao",
     )
 
     cal, level = get_calibrator(

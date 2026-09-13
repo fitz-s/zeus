@@ -1200,6 +1200,7 @@ class TestSourceContractGate:
             airport_name="Paris-Charles de Gaulle Airport",
             settlement_source="https://www.wunderground.com/history/daily/fr/paris/LFPG",
             country_code="FR",
+            settlement_source_type="wu_icao",
         )
         swapped = [
             pre_migration_paris if c.name == "Paris" else c for c in live
@@ -1389,6 +1390,7 @@ class TestSourceContractGate:
             airport_name="Reload Test Airport",
             settlement_source="https://www.wunderground.com/history/daily/xx/reload/TEST",
             country_code="XX",
+            settlement_source_type="wu_icao",
         )
         monkeypatch.setattr(ms.runtime_config, "runtime_cities", lambda: [live_city])
 
@@ -1420,6 +1422,7 @@ class TestSourceContractGate:
             airport_name="Hot Reload Airport",
             settlement_source="https://www.wunderground.com/history/daily/xx/hot/HOT1",
             country_code="XX",
+            settlement_source_type="wu_icao",
         )
         try:
             monkeypatch.setattr(runtime_config, "load_cities", lambda path=None: [reloaded_city])

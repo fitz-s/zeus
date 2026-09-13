@@ -34,6 +34,7 @@ NYC = City(
     cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 
 TEST_FETCH_TIME = datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc)

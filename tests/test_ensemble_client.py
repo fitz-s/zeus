@@ -21,6 +21,7 @@ NYC = City(
     cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 
 

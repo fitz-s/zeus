@@ -277,6 +277,7 @@ NYC = City(
     cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 
 
@@ -9555,6 +9556,7 @@ def test_evaluate_candidate_rejects_unclassified_strategy_key(monkeypatch):
         name="Chicago", lat=41.8781, lon=-87.6298,
         timezone="America/Chicago", cluster="US",
         settlement_unit="F", wu_station="KORD",
+        settlement_source_type="wu_icao",
     )
     # Patch fetch_ensemble to avoid real network calls
     now = datetime.now(timezone.utc)
@@ -13496,6 +13498,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
         cluster="NYC",
         settlement_unit="F",
         wu_station="KLGA",
+        settlement_source_type="wu_icao",
     )
     call_count = {"n": 0}
 

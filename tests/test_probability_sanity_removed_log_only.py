@@ -49,6 +49,7 @@ _CITY = City(
     settlement_unit="F",
     cluster="Dallas",
     wu_station="KDAL",
+    settlement_source_type="wu_icao",
 )
 
 # 3-bin Fahrenheit partition: open-low, 2°F interior, open-high.

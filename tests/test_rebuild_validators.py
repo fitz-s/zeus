@@ -45,6 +45,7 @@ def _make_city(name="NYC", settlement_unit="F", lat=40.6, lon=-73.8):
         settlement_unit=settlement_unit,
         cluster=name,
         wu_station="KJFK",
+        settlement_source_type="wu_icao",
     )
 
 

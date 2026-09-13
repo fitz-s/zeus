@@ -38,6 +38,7 @@ def _city(name: str, timezone_name: str = "America/New_York") -> City:
         settlement_unit="F",
         cluster=name,
         wu_station="KXXX",
+        settlement_source_type="wu_icao",
     )
 
 

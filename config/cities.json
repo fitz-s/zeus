@@ -112,7 +112,8 @@
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 6.5,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "settlement_source_type": "wu_icao"
     },
     {
       "name": "Austin",
@@ -606,7 +607,8 @@
       "unit": "C",
       "historical_peak_hour": 13.5,
       "diurnal_amplitude_c": 5.0,
-      "weighted_low_calibration_eligible": false
+      "weighted_low_calibration_eligible": false,
+      "settlement_source_type": "wu_icao"
     },
     {
       "name": "Jeddah",
@@ -713,7 +715,8 @@
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 5.5,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "settlement_source_type": "wu_icao"
     },
     {
       "name": "London",
@@ -1685,6 +1688,7 @@
     "2026-06-17: lat/lon corrected to precise WU settlement-station coords (4dp, station_precise_coords.json/OurAirports). Config previously held approximate coords off by up to 3.4km, violating _coord_note; live forecast fetch (replacement_forecast_production.py) requests at these coords so the wrong cell was sampled.",
     "2026-06-17: Auckland NZAA re-pinned to OurAirports (-37.008099,174.792007); station_precise_coords value was ~1.5km off (caught by independent Polymarket/OurAirports verify, polymarket_station_verify.md).",
     "2026-09-12: settlement_page_view added and set to 'hourly' on the 11 US degF NOAA cities (Atlanta, Austin, Chicago, Dallas, Denver, Houston, Los Angeles, Miami, NYC, San Francisco, Seattle); every other city stays 'all'. Reason: those markets' descriptions carry the clause 'This market will resolve off of the Hourly Data provided using the \"Show Hourly Data\" button.', which restricts the resolution surface to routine METAR plus station-prefixed SPECI rows. discovered_via: gamma-api description census of 270 active events (66 carried the clause, all 11 of these cities and no others). Replay against chain-winning bins 2026-08-23..2026-09-11: hourly view 434/434 settled degF cells, all-data view 302/434.",
-    "2026-09-12: Jinan settlement_source_type set explicitly to 'wu_icao' (the key was absent, so the runtime default carried the contract). Active Jinan events name the Weather Underground ZSJN history page. discovered_via: same gamma-api description census."
+    "2026-09-12: Jinan settlement_source_type set explicitly to 'wu_icao' (the key was absent, so the runtime default carried the contract). Active Jinan events name the Weather Underground ZSJN history page. discovered_via: same gamma-api description census.",
+    "2026-09-12: settlement_source_type set explicitly to 'wu_icao' on Auckland, Jakarta, and Lagos (the key was absent on all three, so the runtime default carried the contract, same class of gap as the Jinan fix above). All three markets name Weather Underground history pages (NZAA, WIHH, DNMM). settlement_source_type is now a required field on City (src/config.py) with no default, so a future absence fails loudly at config load instead of silently inheriting 'wu_icao'."
   ]
 }

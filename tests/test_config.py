@@ -181,6 +181,27 @@ def test_city_without_explicit_cluster_is_rejected(tmp_path):
         load_cities(path=path)
 
 
+def test_city_without_explicit_settlement_source_type_is_rejected(tmp_path):
+    path = tmp_path / "cities.json"
+    path.write_text(json.dumps({
+        "cities": [
+            {
+                "name": "Unknown City",
+                "lat": 1,
+                "lon": 2,
+                "timezone": "UTC",
+                "unit": "F",
+                "cluster": "test",
+                "wu_station": "KUNK",
+                "country_code": "US",
+                "weighted_low_calibration_eligible": True,
+            }
+        ]
+    }))
+    with pytest.raises(KeyError, match="Unknown City.*settlement_source_type"):
+        load_cities(path=path)
+
+
 def test_calibration_manager_cluster_taxonomy_matches_config():
     manager_source = (PROJECT_ROOT / "src/calibration/manager.py").read_text()
     refit_source = (PROJECT_ROOT / "scripts/refit_platt.py").read_text()

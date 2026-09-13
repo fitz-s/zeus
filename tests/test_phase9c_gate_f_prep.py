@@ -109,6 +109,7 @@ class TestRBZGetCalibratorMetricAware:
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
             cluster="NYC", wu_station="KNYC",
+            settlement_source_type="wu_icao",
         )
 
         # LOW path — must return the row with param_A=4.56, NOT 1.23
@@ -141,6 +142,7 @@ class TestRBZGetCalibratorMetricAware:
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
             cluster="NYC", wu_station="KNYC",
+            settlement_source_type="wu_icao",
         )
 
         cal_high, _ = get_calibrator(
@@ -165,6 +167,7 @@ class TestRBZGetCalibratorMetricAware:
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
             cluster="NYC", wu_station="KNYC",
+            settlement_source_type="wu_icao",
         )
 
         # No kwarg — should behave as 'high'

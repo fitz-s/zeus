@@ -157,6 +157,7 @@ class City:
     settlement_unit: str  # "F" or "C"
     cluster: str
     wu_station: str
+    settlement_source_type: str  # "wu_icao" | "hko" | "noaa" | "cwa_station" — required, no default: see validate_cities_config
     aliases: tuple[str, ...] = ()
     slug_names: tuple[str, ...] = ()
     wu_pws: Optional[str] = None
@@ -164,7 +165,6 @@ class City:
     airport_name: str = ""
     settlement_source: str = ""
     country_code: str = ""
-    settlement_source_type: str = "wu_icao"  # "wu_icao" | "hko" | "noaa" | "cwa_station"
     previous_settlement_source_type: Optional[str] = None
     settlement_source_type_effective_date: Optional[str] = None
     # Which view of weather.gov/wrh/timeseries the market's own description
@@ -354,6 +354,13 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 raise KeyError(
                     f"City {name!r} missing required field {required_field!r}"
                 )
+        if not c.get("settlement_source_type"):
+            raise KeyError(
+                f"City {name!r} missing required field 'settlement_source_type'. "
+                "The resolver family (wu_icao/hko/noaa/cwa_station) must be "
+                "explicit — the runtime default silently carries the wrong "
+                "family the day a city is cut over to a new source."
+            )
         if "weighted_low_calibration_eligible" not in c:
             raise KeyError(
                 f"City {name!r} missing required field "
@@ -383,6 +390,7 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 settlement_unit=unit,
                 cluster=cluster,
                 wu_station=c["wu_station"],
+                settlement_source_type=c["settlement_source_type"],
                 aliases=tuple(c.get("aliases", [])),
                 slug_names=tuple(c.get("slug_names", [])),
                 wu_pws=c.get("wu_pws"),
@@ -390,7 +398,6 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 airport_name=c.get("airport_name", ""),
                 settlement_source=c.get("settlement_source", ""),
                 country_code=c["country_code"],
-                settlement_source_type=c.get("settlement_source_type") or "wu_icao",
                 previous_settlement_source_type=c.get(
                     "previous_settlement_source_type"
                 ),

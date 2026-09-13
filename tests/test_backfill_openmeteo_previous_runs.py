@@ -23,6 +23,7 @@ def _city() -> City:
         aliases=["Auckland"],
         slug_names=["auckland"],
         wu_station="NZAA",
+        settlement_source_type="wu_icao",
     )
 
 

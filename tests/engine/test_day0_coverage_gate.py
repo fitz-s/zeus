@@ -46,6 +46,7 @@ _NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="US-Northeast",
     settlement_unit="F", wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 
 _DECISION_TIME = datetime(2026, 5, 24, 15, 0, 0, tzinfo=timezone.utc)

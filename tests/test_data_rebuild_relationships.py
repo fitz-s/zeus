@@ -456,6 +456,7 @@ def test_r3_store_add_pair_raises_without_decision_group_id():
             name="NYC", lat=40.7772, lon=-73.8726,
             timezone="America/New_York", cluster="NYC",
             settlement_unit="F", wu_station="KLGA",
+            settlement_source_type="wu_icao",
         )
         with pytest.raises((TypeError, ValueError, sqlite3.IntegrityError)):
             store_module.add_calibration_pair(

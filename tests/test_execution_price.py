@@ -278,6 +278,7 @@ class TestEvaluatorWiring:
             settlement_unit="F",
             cluster="Dallas",
             wu_station="KDAL",
+            settlement_source_type="wu_icao",
         )
 
         class FakeEns:

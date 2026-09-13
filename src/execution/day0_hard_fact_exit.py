@@ -302,9 +302,7 @@ def _final_complete_hourly_observation_extreme(
     revision state of the settlement product.
     """
 
-    source_type = str(
-        getattr(city, "settlement_source_type", "") or "wu_icao"
-    ).strip().lower()
+    source_type = str(city.settlement_source_type).strip().lower()
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     if source_type == "noaa" and station:
         hourly_source = f"ogimet_metar_{station.lower()}"

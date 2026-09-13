@@ -67,6 +67,7 @@ class TestCalibrationPairRequiresMetricIdentity:
             name="NYC", lat=40.7772, lon=-73.8726,
             timezone="America/New_York", cluster="NYC",
             settlement_unit="F", wu_station="KLGA",
+            settlement_source_type="wu_icao",
         )
 
         # Must not raise TypeError (may raise IntegrityError or similar for data reasons)

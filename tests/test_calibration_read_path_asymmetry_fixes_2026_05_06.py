@@ -66,6 +66,7 @@ def _city(cluster: str = "US-Northeast") -> City:
         settlement_unit="F",
         cluster=cluster,
         wu_station="KTST",
+        settlement_source_type="wu_icao",
     )
 
 

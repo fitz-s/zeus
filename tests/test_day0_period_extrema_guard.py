@@ -47,6 +47,7 @@ _CITY = City(
     settlement_unit="C",
     cluster="Amsterdam",
     wu_station="EHAM",
+    settlement_source_type="wu_icao",
 )
 
 # Celsius bins: 1°C wide interior, open shoulders on both ends, contiguous partition.

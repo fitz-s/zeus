@@ -35,6 +35,7 @@ NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="US-Northeast",
     settlement_unit="F", wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 
 # Standard 11-bin structure for NYC winter

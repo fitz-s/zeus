@@ -73,6 +73,7 @@ CITY_F = City(
     settlement_unit="F",
     cluster="US",
     wu_station="KTESTF",
+    settlement_source_type="wu_icao",
 )
 TARGET_PRODUCT = "test_mx2t3"
 

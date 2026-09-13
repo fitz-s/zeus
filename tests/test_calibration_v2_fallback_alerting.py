@@ -52,6 +52,7 @@ def _city() -> City:
         settlement_unit="F",
         cluster="US-Northeast",
         wu_station="KNYC",
+        settlement_source_type="wu_icao",
     )
 
 

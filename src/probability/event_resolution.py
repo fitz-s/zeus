@@ -109,7 +109,7 @@ def _station_id_for_city(city: Any, sem: SettlementSemantics) -> str:
     non-WU sources (HKO, CWA, NOAA) ``SettlementSemantics.resolution_source``
     carries the authoritative station identity (e.g. ``"HKO_HQ"``).
     """
-    if getattr(city, "settlement_source_type", "wu_icao") == "wu_icao":
+    if city.settlement_source_type == "wu_icao":
         return getattr(city, "wu_station", "") or ""
     return sem.resolution_source or ""
 
@@ -140,7 +140,7 @@ def event_resolution_for_city(
     return EventResolution(
         city=getattr(city, "name", str(city)),
         station_id=station_id,
-        settlement_source_type=getattr(city, "settlement_source_type", "wu_icao"),
+        settlement_source_type=city.settlement_source_type,
         resolution_source=sem.resolution_source,
         target_local_date=target_date,
         settlement_timezone=getattr(city, "timezone", ""),

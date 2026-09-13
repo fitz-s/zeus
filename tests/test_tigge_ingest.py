@@ -36,6 +36,7 @@ NYC = City(
     cluster="US-Northeast",
     settlement_unit="F",
     wu_station="KLGA",
+    settlement_source_type="wu_icao",
 )
 TARGET_DATE = date(2026, 1, 15)
 NYC_SEMANTICS = SettlementSemantics.default_wu_fahrenheit("KLGA")
