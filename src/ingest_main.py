@@ -4337,6 +4337,215 @@ def _day0_diurnal_residual_refit_tick():
 
 
 # ---------------------------------------------------------------------------
+# Daily settlement sigma-floor refit
+# ---------------------------------------------------------------------------
+
+# Promotion-gate sanity rail (T-refitter design §b item 3): a refit cell more than this many
+# times wider or narrower than the incumbent's sigma_floor_c is a candidate for a corrupted
+# settlement row given MIN_COHORT_N_DEFAULT=20 is not a large sample -- carry the incumbent
+# forward for that cell instead of promoting. This is a data-corruption sanity rail on the RAW
+# estimate, not a performance ratchet on the estimator (S_sigma_floor2 already measured that a
+# never-below-fresh ratchet on the estimator itself costs real center sharpness).
+_SETTLEMENT_SIGMA_FLOOR_MAGNITUDE_RATIO = 3.0
+
+
+def _settlement_sigma_floor_merge_gate(
+    incumbent_cells: dict, candidate_cells: dict, *, ratio: float = _SETTLEMENT_SIGMA_FLOOR_MAGNITUDE_RATIO,
+) -> tuple[dict, dict]:
+    """Merge a fresh candidate's cells over the incumbent artifact's cells under the daily
+    promotion gate (T-refitter design §b items 2-3 / §e item 3).
+
+    Two carry-forward rules, independent of the fitter's own min_global_n refusal (which is
+    enforced by the caller BEFORE this function is ever reached -- a refused fit never produces
+    a candidate to merge):
+      (ii) CONTINUITY: a (city|season|metric) key present in the incumbent and absent from the
+           candidate (e.g. a city with zero settled residuals in the trailing window) is carried
+           forward from the incumbent rather than silently dropping that cell's floor to "no
+           floor at all" -- degrading BELOW absent, not TO absent.
+      (iii) MAGNITUDE: a candidate cell whose sigma_floor_c moved more than `ratio`x (up or
+           down) from the incumbent's value for that key is carried forward from the incumbent
+           instead of promoted -- a sanity rail against a single corrupted settlement row, not a
+           second-guess of the estimator.
+    A key present only in the candidate (a newly-observed city/metric pair) is kept as-is.
+
+    Returns (merged_cells, gate_meta); gate_meta's counts are stamped into the written
+    artifact's ``_meta.refit_gate`` so a reader can see the gate outcome without re-deriving it.
+    """
+    merged: dict = {}
+    carried_missing: list[str] = []
+    carried_magnitude: list[str] = []
+    kept_new = 0
+    kept_updated = 0
+    for key, cand_cell in candidate_cells.items():
+        inc_cell = incumbent_cells.get(key)
+        if inc_cell is None:
+            merged[key] = cand_cell
+            kept_new += 1
+            continue
+        try:
+            inc_floor = float(inc_cell.get("sigma_floor_c"))
+            cand_floor = float(cand_cell.get("sigma_floor_c"))
+        except (TypeError, ValueError):
+            # Malformed incumbent cell -- prefer the candidate's (presumably well-formed,
+            # since it came straight from the fitter) value rather than carry forward junk.
+            merged[key] = cand_cell
+            kept_updated += 1
+            continue
+        if inc_floor > 0.0 and (cand_floor > inc_floor * ratio or cand_floor < inc_floor / ratio):
+            merged[key] = inc_cell
+            carried_magnitude.append(key)
+            continue
+        merged[key] = cand_cell
+        kept_updated += 1
+    for key, inc_cell in incumbent_cells.items():
+        if key not in candidate_cells:
+            merged[key] = inc_cell
+            carried_missing.append(key)
+    gate_meta = {
+        "carried_forward_missing_count": len(carried_missing),
+        "carried_forward_missing_keys": sorted(carried_missing),
+        "carried_forward_magnitude_count": len(carried_magnitude),
+        "carried_forward_magnitude_keys": sorted(carried_magnitude),
+        "kept_new": kept_new,
+        "kept_updated": kept_updated,
+        "magnitude_ratio": ratio,
+    }
+    return merged, gate_meta
+
+
+@_scheduler_job("ingest_settlement_sigma_floor_refit")
+def _settlement_sigma_floor_refit_tick():
+    """Daily refit of state/settlement_sigma_floor.json (EMPIRICAL settlement sigma-floor).
+
+    The artifact had NO scheduled producer at all (manual-only, per
+    architecture/script_manifest.yaml's fit_settlement_sigma_floor.py entry) despite being an
+    actively re-promoted, live-serving calibration input -- exactly the
+    evidence-artifacts-with-ttl-need-a-refitter trap the day0 diurnal-residual job above already
+    defuses for its own artifact. This job removes the "someone remembers to rerun the fitter"
+    dependency for the sigma floor too, on the fitter's own recommended cadence ("recommend
+    daily", scripts/fit_settlement_sigma_floor.py module docstring) and the cadence the
+    trailing-60-day walk-forward validation was actually run at (T-refitter design memo §b).
+
+    Scheduled 5 minutes after ``ingest_day0_diurnal_residual_refit`` (06:35 UTC vs 06:30), in the
+    same post-hole-scanner settlement-grading window as that job and
+    ingest_etl_recalibrate/ingest_drift_detector (all hour=6) -- the fitter's canonical join
+    (forecast_posteriors JOIN settlement_outcomes(VERIFIED)) has the identical data-readiness
+    dependency. Also fires immediately at boot (next_run_time=now).
+
+    Unlike the diurnal job, this one cannot let the fitter promote directly: the fitter writes
+    ONLY the fresh fit, with no memory of the artifact it would replace, so this tick runs the
+    fitter against a throwaway candidate path, then applies the promotion gate
+    (``_settlement_sigma_floor_merge_gate``) against the CURRENT live artifact before the one
+    atomic replace of the real path -- the fitter's own ``min_global_n`` refusal (exit 2) already
+    stands upstream of that (a refused fit raises here before any candidate exists to merge, so
+    the incumbent is untouched), and the merge adds the two checks that refusal alone can't
+    cover: a dropped cell (city ran dry in the trailing window) and a cell that jumped an
+    implausible multiple in one day (see ``_settlement_sigma_floor_merge_gate``).
+
+    Runs the fitter in a bounded child process (measured 11.5s wall for the bare bounded join
+    over the live 89 GB zeus-forecasts.db, well inside this bound) with explicit
+    ``--fcst``/``--out``/``--asof`` paths resolved from ``src.config.STATE_DIR`` -- mirrors
+    ``_day0_diurnal_residual_refit_tick``'s reasoning for pinning explicit paths rather than the
+    script's own repo-relative defaults.
+
+    Fails LOUD (raises) on a non-zero exit, a timeout, or an unreadable candidate artifact, so
+    ``_scheduler_job`` records a FAILED entry in scheduler_jobs_health.json -- this is a single
+    fitter with its own hard refusal gate, not the four-artifact fail-soft batch
+    (``_artifact_refit_tick``). The live artifact is written only via tmp+``os.replace`` (atomic),
+    so a failed or killed run never corrupts the prior artifact.
+    """
+    import subprocess
+
+    from src.config import STATE_DIR
+
+    venv_python = _etl_subprocess_python()
+    script_path = Path(__file__).parent.parent / "scripts" / "fit_settlement_sigma_floor.py"
+    forecast_db = STATE_DIR / "zeus-forecasts.db"
+    out_path = STATE_DIR / "settlement_sigma_floor.json"
+    candidate_path = STATE_DIR / "settlement_sigma_floor.json.refit_candidate"
+    asof = datetime.now(timezone.utc).date().isoformat()
+    r = subprocess.run(
+        [
+            venv_python, str(script_path),
+            "--fcst", str(forecast_db),
+            "--out", str(candidate_path),
+            "--asof", asof,
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"fit_settlement_sigma_floor.py exit={r.returncode}: "
+            f"{(r.stderr or '').strip()[-1000:]}"
+        )
+    try:
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            f"fit_settlement_sigma_floor.py exited 0 but wrote an unreadable candidate: {exc}"
+        ) from exc
+    finally:
+        try:
+            candidate_path.unlink()
+        except FileNotFoundError:
+            pass
+    if not isinstance(candidate, dict):
+        raise RuntimeError("fit_settlement_sigma_floor.py candidate is not a JSON object")
+
+    incumbent: dict = {}
+    if out_path.exists():
+        try:
+            incumbent = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "[SETTLEMENT_SIGMA_FLOOR_REFIT] incumbent artifact unreadable (%s) -- "
+                "treating as empty for the continuity gate", exc,
+            )
+            incumbent = {}
+    incumbent_cells = incumbent.get("cells", {}) if isinstance(incumbent, dict) else {}
+    candidate_cells = candidate.get("cells", {}) if isinstance(candidate, dict) else {}
+    if not isinstance(incumbent_cells, dict):
+        incumbent_cells = {}
+    if not isinstance(candidate_cells, dict):
+        candidate_cells = {}
+
+    merged_cells, gate_meta = _settlement_sigma_floor_merge_gate(incumbent_cells, candidate_cells)
+    if gate_meta["carried_forward_missing_count"]:
+        logger.warning(
+            "[SETTLEMENT_SIGMA_FLOOR_REFIT] %d cell(s) absent from today's refit, carried "
+            "forward from the incumbent: %s",
+            gate_meta["carried_forward_missing_count"],
+            ", ".join(gate_meta["carried_forward_missing_keys"][:10]),
+        )
+    if gate_meta["carried_forward_magnitude_count"]:
+        logger.warning(
+            "[SETTLEMENT_SIGMA_FLOOR_REFIT] %d cell(s) moved more than %.1fx, carried forward "
+            "from the incumbent: %s",
+            gate_meta["carried_forward_magnitude_count"],
+            _SETTLEMENT_SIGMA_FLOOR_MAGNITUDE_RATIO,
+            ", ".join(gate_meta["carried_forward_magnitude_keys"][:10]),
+        )
+
+    merged = dict(candidate)
+    merged["cells"] = merged_cells
+    meta = dict(merged.get("_meta") or {})
+    meta["refit_gate"] = gate_meta
+    merged["_meta"] = meta
+
+    tmp_final = f"{out_path}.tmp"
+    with open(tmp_final, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, sort_keys=True)
+    os.replace(tmp_final, out_path)
+
+    logger.info(
+        "[SETTLEMENT_SIGMA_FLOOR_REFIT] promoted %d cells (asof=%s, %d new, %d updated, "
+        "%d carried-missing, %d carried-magnitude)",
+        len(merged_cells), asof, gate_meta["kept_new"], gate_meta["kept_updated"],
+        gate_meta["carried_forward_missing_count"], gate_meta["carried_forward_magnitude_count"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -4462,6 +4671,13 @@ def _ingest_main_job_specs() -> list[tuple]:
         # (src/ingest/post_trade_capital_daemon.py:_realized_fee_evidence_refit_cycle).
         (_day0_diurnal_residual_refit_tick, "cron", dict(hour=6, minute=30,
             id="ingest_day0_diurnal_residual_refit", max_instances=1, coalesce=True,
+            misfire_grace_time=3600, next_run_time=now)),
+        # Daily 06:35 UTC (5 min after the diurnal-residual refit above, same
+        # post-hole-scanner settlement-grading window) -- the sigma-floor artifact had NO
+        # scheduled producer at all (manual-only); see _settlement_sigma_floor_refit_tick
+        # docstring. Also fires immediately at boot (next_run_time=now).
+        (_settlement_sigma_floor_refit_tick, "cron", dict(hour=6, minute=35,
+            id="ingest_settlement_sigma_floor_refit", max_instances=1, coalesce=True,
             misfire_grace_time=3600, next_run_time=now)),
         (_ingest_status_rollup_tick, "interval", dict(minutes=5, id="ingest_status_rollup",
             max_instances=1, coalesce=True, executor="fast")),

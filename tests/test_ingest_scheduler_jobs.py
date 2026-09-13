@@ -900,3 +900,296 @@ class TestDay0DiurnalResidualRefitScheduled:
             im._day0_diurnal_residual_refit_tick()
 
         assert health_calls[-1][1]["failed"] is True
+
+
+class TestSettlementSigmaFloorMergeGate:
+    """Unit coverage for _settlement_sigma_floor_merge_gate — the promotion gate the daily
+    refit tick applies before ever touching the live artifact (T-refitter design §b items 2-3):
+    cell continuity (a cell absent from today's refit is carried forward, not dropped) and a
+    magnitude-jump sanity rail (a >3x/<1/3x jump is carried forward, not promoted)."""
+
+    def test_new_cell_is_kept(self) -> None:
+        import src.ingest_main as im
+
+        merged, meta = im._settlement_sigma_floor_merge_gate(
+            {}, {"NewCity|JJA|high": {"sigma_floor_c": 1.5, "n": 30}}
+        )
+        assert merged == {"NewCity|JJA|high": {"sigma_floor_c": 1.5, "n": 30}}
+        assert meta["kept_new"] == 1
+        assert meta["kept_updated"] == 0
+        assert meta["carried_forward_missing_count"] == 0
+        assert meta["carried_forward_magnitude_count"] == 0
+
+    def test_ordinary_update_within_bound_is_kept(self) -> None:
+        import src.ingest_main as im
+
+        incumbent = {"C|JJA|high": {"sigma_floor_c": 2.0, "n": 40}}
+        candidate = {"C|JJA|high": {"sigma_floor_c": 2.4, "n": 42}}
+        merged, meta = im._settlement_sigma_floor_merge_gate(incumbent, candidate)
+        assert merged["C|JJA|high"]["sigma_floor_c"] == 2.4
+        assert meta["kept_updated"] == 1
+        assert meta["carried_forward_magnitude_count"] == 0
+
+    def test_cell_missing_from_candidate_is_carried_forward(self) -> None:
+        import src.ingest_main as im
+
+        incumbent = {
+            "C|JJA|high": {"sigma_floor_c": 2.0, "n": 40},
+            "D|JJA|high": {"sigma_floor_c": 1.0, "n": 20},
+        }
+        candidate = {"C|JJA|high": {"sigma_floor_c": 2.1, "n": 41}}
+        merged, meta = im._settlement_sigma_floor_merge_gate(incumbent, candidate)
+        assert merged["D|JJA|high"] == incumbent["D|JJA|high"], "dropped cell must carry forward"
+        assert meta["carried_forward_missing_count"] == 1
+        assert meta["carried_forward_missing_keys"] == ["D|JJA|high"]
+
+    def test_cell_beyond_magnitude_ratio_is_carried_forward_both_directions(self) -> None:
+        import src.ingest_main as im
+
+        incumbent = {
+            "Up|JJA|high": {"sigma_floor_c": 1.0, "n": 40},
+            "Down|JJA|high": {"sigma_floor_c": 9.0, "n": 40},
+        }
+        candidate = {
+            # 4x jump up -- beyond the 3x rail.
+            "Up|JJA|high": {"sigma_floor_c": 4.0, "n": 41},
+            # 4x jump down -- beyond the 1/3x rail.
+            "Down|JJA|high": {"sigma_floor_c": 2.0, "n": 41},
+        }
+        merged, meta = im._settlement_sigma_floor_merge_gate(incumbent, candidate)
+        assert merged["Up|JJA|high"] == incumbent["Up|JJA|high"]
+        assert merged["Down|JJA|high"] == incumbent["Down|JJA|high"]
+        assert meta["carried_forward_magnitude_count"] == 2
+        assert set(meta["carried_forward_magnitude_keys"]) == {"Up|JJA|high", "Down|JJA|high"}
+
+    def test_cell_exactly_at_the_ratio_boundary_is_kept(self) -> None:
+        import src.ingest_main as im
+
+        incumbent = {"C|JJA|high": {"sigma_floor_c": 1.0, "n": 40}}
+        candidate = {"C|JJA|high": {"sigma_floor_c": 3.0, "n": 41}}  # exactly 3.0x, not > 3.0x
+        merged, meta = im._settlement_sigma_floor_merge_gate(incumbent, candidate)
+        assert merged["C|JJA|high"]["sigma_floor_c"] == 3.0
+        assert meta["carried_forward_magnitude_count"] == 0
+
+
+class TestSettlementSigmaFloorRefitScheduled:
+    """Antibody for the settlement-sigma-floor staleness gap (X-AU-floor-refitter): the
+    artifact had NO scheduled producer at all, unlike its diurnal-residual sibling. These pin
+    the daily job's registration, its explicit-path invocation, its promotion gate, and its
+    failure-recording contract."""
+
+    def test_job_registered_daily_five_minutes_after_the_diurnal_refit(self) -> None:
+        import src.ingest_main as im
+
+        specs = [
+            (trigger, kwargs)
+            for func, trigger, kwargs in im._ingest_main_job_specs()
+            if func is im._settlement_sigma_floor_refit_tick
+        ]
+        assert len(specs) == 1
+        trigger, kwargs = specs[0]
+        assert trigger == "cron"
+        assert kwargs["hour"] == 6
+        assert kwargs["minute"] == 35
+        assert kwargs["id"] == "ingest_settlement_sigma_floor_refit"
+        assert kwargs["max_instances"] == 1
+        assert "next_run_time" in kwargs  # immediate at boot, mirrors the diurnal sibling
+
+    def test_registered_in_the_build_registry(self) -> None:
+        import src.ingest_main as im
+
+        job_ids = {str(kwargs["id"]) for _fn, _trigger, kwargs in im._ingest_main_job_specs()}
+        assert "ingest_settlement_sigma_floor_refit" in job_ids
+
+    def test_invokes_fitter_with_explicit_paths_and_asof(self, tmp_path) -> None:
+        """The child process must receive explicit --fcst/--out/--asof pinned to
+        src.config.STATE_DIR, not the fitter script's own repo-relative defaults."""
+        import json as _json
+
+        import src.ingest_main as im
+
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["timeout"] = kwargs.get("timeout")
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.write_text(_json.dumps({"_meta": {}, "cells": {}}), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        cmd = captured["cmd"]
+        assert cmd[1].endswith("fit_settlement_sigma_floor.py")
+        assert cmd[cmd.index("--fcst") + 1] == str(tmp_path / "zeus-forecasts.db")
+        assert cmd[cmd.index("--out") + 1] == str(
+            tmp_path / "settlement_sigma_floor.json.refit_candidate"
+        )
+        assert cmd[cmd.index("--asof") + 1] == str(date.today())
+        assert captured["timeout"] == 600
+        # the throwaway candidate path must not survive the tick.
+        assert not (tmp_path / "settlement_sigma_floor.json.refit_candidate").exists()
+
+    def test_gate_carries_forward_missing_and_magnitude_cells_and_stamps_meta(
+        self, tmp_path
+    ) -> None:
+        """End-to-end: an incumbent artifact with a dropped cell and a >3x-jump cell survives
+        a refit with both carried forward, and the gate outcome is stamped into _meta."""
+        import json as _json
+
+        import src.ingest_main as im
+
+        incumbent = {
+            "_meta": {"asof": "2026-09-01"},
+            "cells": {
+                "Steady|JJA|high": {"sigma_floor_c": 2.0, "n": 40},
+                "Dropped|JJA|high": {"sigma_floor_c": 1.0, "n": 20},
+                "Spiked|JJA|high": {"sigma_floor_c": 1.0, "n": 20},
+            },
+        }
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        out_path.write_text(_json.dumps(incumbent), encoding="utf-8")
+
+        candidate = {
+            "_meta": {"asof": "2026-09-13"},
+            "cells": {
+                "Steady|JJA|high": {"sigma_floor_c": 2.1, "n": 41},
+                "Spiked|JJA|high": {"sigma_floor_c": 9.0, "n": 21},  # 9x jump -- gated
+                "NewCity|JJA|high": {"sigma_floor_c": 1.3, "n": 25},
+            },
+        }
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text(_json.dumps(candidate), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        written = _json.loads(out_path.read_text(encoding="utf-8"))
+        cells = written["cells"]
+        assert cells["Steady|JJA|high"]["sigma_floor_c"] == 2.1, "ordinary update promoted"
+        assert cells["Dropped|JJA|high"] == incumbent["cells"]["Dropped|JJA|high"], (
+            "cell missing from the refit must carry forward from the incumbent"
+        )
+        assert cells["Spiked|JJA|high"] == incumbent["cells"]["Spiked|JJA|high"], (
+            "cell beyond the magnitude ratio must carry forward from the incumbent"
+        )
+        assert cells["NewCity|JJA|high"]["sigma_floor_c"] == 1.3, "new cell kept"
+        gate = written["_meta"]["refit_gate"]
+        assert gate["carried_forward_missing_keys"] == ["Dropped|JJA|high"]
+        assert gate["carried_forward_magnitude_keys"] == ["Spiked|JJA|high"]
+        assert gate["kept_new"] == 1
+        assert gate["kept_updated"] == 1
+
+    def test_first_refit_with_no_incumbent_promotes_candidate_as_is(self, tmp_path) -> None:
+        """No prior artifact (first-ever run in a fresh state dir) must not raise or require
+        a special case -- every candidate cell is simply new."""
+        import json as _json
+
+        import src.ingest_main as im
+
+        candidate = {"_meta": {}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.0, "n": 30}}}
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text(_json.dumps(candidate), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        written = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert written["cells"]["C|JJA|high"]["sigma_floor_c"] == 2.0
+        assert written["_meta"]["refit_gate"]["kept_new"] == 1
+
+    def test_fitter_min_global_n_refusal_leaves_incumbent_untouched(self, tmp_path) -> None:
+        """The fitter's own refusal (exit 2, no write) must propagate as a raise and must
+        never reach the merge/write step -- the incumbent artifact is untouched, byte for byte."""
+        import json as _json
+
+        import src.ingest_main as im
+
+        incumbent = {"_meta": {"asof": "2026-09-01"}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.0}}}
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        before_text = _json.dumps(incumbent)
+        out_path.write_text(before_text, encoding="utf-8")
+
+        def _fake_run(cmd, **kwargs):
+            return type(
+                "R", (), {"returncode": 2, "stdout": "", "stderr": "only 3 residual pairs"}
+            )()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            pytest.raises(RuntimeError, match="exit=2"),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        assert out_path.read_text(encoding="utf-8") == before_text
+
+    def test_fitter_failure_raises_and_is_recorded_as_failed(self, tmp_path) -> None:
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        def _fake_run(cmd, **kwargs):
+            return type(
+                "R", (), {"returncode": 1, "stdout": "", "stderr": "boom: bad ledger"}
+            )()
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._settlement_sigma_floor_refit_tick()
+
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_settlement_sigma_floor_refit"
+        assert kwargs["failed"] is True
+        assert "boom: bad ledger" in kwargs["reason"]
+
+    def test_fitter_timeout_is_also_recorded_as_failed(self, tmp_path) -> None:
+        import subprocess as sp
+
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        def _fake_run(cmd, **kwargs):
+            raise sp.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._settlement_sigma_floor_refit_tick()
+
+        assert health_calls[-1][1]["failed"] is True

@@ -250,6 +250,16 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "writes only that one artifact (atomic tmp+replace); defuses the "
                         "loader's MAX_ARTIFACT_AGE_DAYS=14 staleness gate that otherwise goes "
                         "silently inert with no scheduled producer"),
+    SourceJobSpec("ingest_settlement_sigma_floor_refit", "ingest_main", "derived", "default", False,
+                  callable_ref="_settlement_sigma_floor_refit_tick", file_only=True,
+                  notes="daily 06:35 UTC (+ immediate at boot) refit of "
+                        "state/settlement_sigma_floor.json; the fitter subprocess is read-only "
+                        "over zeus-forecasts.db (explicit STATE_DIR paths) and writes a "
+                        "throwaway candidate, which the tick merges over the live artifact under "
+                        "a promotion gate (cell continuity + magnitude-jump sanity, on top of "
+                        "the fitter's own min_global_n refusal) before one atomic tmp+replace of "
+                        "the live artifact; the artifact previously had NO scheduled producer at "
+                        "all (manual-only)"),
 )
 
 _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
