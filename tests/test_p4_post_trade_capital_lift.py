@@ -1141,7 +1141,7 @@ def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):
         raise RuntimeError("venue unavailable")
 
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fail_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
 
@@ -1267,7 +1267,7 @@ def test_chain_sync_read_reconcile_dml_runs_inside_trade_coordinator_lease(monke
         return {"synced": 1}, True
 
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
     monkeypatch.setattr(
@@ -1342,7 +1342,7 @@ def test_chain_sync_read_write_lease_timeout_reaches_child_exit_status(monkeypat
             raise AssertionError("must never reach the DML when the lease itself fails")
 
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
     monkeypatch.setattr(
@@ -1434,7 +1434,7 @@ def test_chain_sync_read_dml_busy_is_classified_via_bounded_sqlite_write(monkeyp
             raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
     monkeypatch.setattr(
@@ -1451,6 +1451,58 @@ def test_chain_sync_read_dml_busy_is_classified_via_bounded_sqlite_write(monkeyp
     # the DML raised -- unchanged by this fast-follow.
     assert conn.commits >= 1
     assert conn.closed is True
+
+
+def test_chain_sync_read_cycle_reuses_its_own_connection_for_load_portfolio(monkeypatch):
+    """T-chainsync (2026-09-13): chain_sync_read_cycle must pass its own
+    trade+world-ATTACHed connection (the one already opened via get_connection() two
+    lines above) into load_portfolio(), instead of letting load_portfolio open a
+    second, independent write-class connection. The redundant second connection's
+    connect()/PRAGMA journal_mode=WAL step was measured stalling up to 2.6s under this
+    daemon's own commit cadence, compounding into the 77s chain-sync child kills. This
+    test fails on the pre-fix parent, which called load_portfolio() bare.
+    """
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+
+    class _Connection:
+        def __init__(self):
+            self.commits = 0
+            self.closed = False
+
+        def commit(self):
+            self.commits += 1
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    conn = _Connection()
+    captured_kwargs: dict = {}
+
+    def _fake_load_portfolio(**kwargs):
+        captured_kwargs.update(kwargs)
+        return object()
+
+    def _fake_run_chain_sync(portfolio, clob, passed_conn, *, write_scope=None):
+        assert passed_conn is conn
+        return {}, False
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", _fake_load_portfolio)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+
+    post_trade_capital.chain_sync_read_cycle()
+
+    assert captured_kwargs.get("connection") is conn
 
 
 def test_payout_observer_runs_in_killable_child(monkeypatch):

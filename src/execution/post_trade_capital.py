@@ -778,7 +778,19 @@ def chain_sync_read_cycle() -> None:
     summary: dict = {}
     failure: Exception | None = None
     try:
-        portfolio = load_portfolio()
+        # T-chainsync (2026-09-13): reuse this cycle's already-ATTACHed trade+world
+        # connection (conn, opened above via get_connection()) instead of letting
+        # load_portfolio() open a second, independent write-class connection. The
+        # second connection's bare sqlite3.connect()/PRAGMA journal_mode step (not
+        # its query cost, already fixed by 0d749d879) was measured stalling up to
+        # 2.6s under this daemon's own machine-gun commit cadence -- enough stalls
+        # compound into the observed 15-77s chain-sync child kills (2,353 today).
+        # A live A/B (15 min, 5s samples) showed a genuine mode=ro connection never
+        # stalled while the write-capable shape did; passing connection=conn here
+        # skips load_portfolio's redundant connect+ATTACH entirely (it detects
+        # 'world' already attached via _attached_schema_names and skips its own
+        # ATTACH), so no second connection is opened at all for this path.
+        portfolio = load_portfolio(connection=conn)
         with PolymarketClient() as clob:
             # chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
             # Degrades gracefully if Keychain funder_address is absent (REST call fails -> caught).
