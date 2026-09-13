@@ -2557,9 +2557,6 @@ _BLOCKED_INPUT_RECEIPT_REASON = (
 _DAY0_CARRIER_VECTOR_MISSING_REASON = (
     "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"
 )
-_DAY0_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING_REASON = (
-    "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING"
-)
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
@@ -2963,42 +2960,6 @@ def _blocked_attempt_fingerprint(
                 # an inert fingerprint component; unreadable primary evidence
                 # is still handled by the outer retry-safe path.
                 day0_hourly_frontier = None
-            # A Day0-preliminary decline (DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_
-            # TEMPERATURE_STATE_MISSING) is resolved by a METAR/HKO/ogimet print
-            # landing in observation_prints -- a source none of the fingerprint
-            # components above reads. Without this, that decline never re-arms:
-            # a later wake for the same scope hashes identically and is
-            # short-circuited to SKIPPED_UNCHANGED_BLOCKED_INPUT even after the
-            # precondition the child would check has been satisfied.
-            day0_current_temperature_state_identity: dict[str, object] | None = None
-            try:
-                from src.config import runtime_cities_by_name  # noqa: PLC0415
-                from src.data.day0_hourly_vectors import (  # noqa: PLC0415
-                    read_day0_current_temperature_state,
-                )
-
-                city_cfg = runtime_cities_by_name().get(scope[0])
-                current_state = (
-                    None
-                    if city_cfg is None
-                    else read_day0_current_temperature_state(
-                        conn=conn,
-                        city=city_cfg,
-                        target_date=scope[1],
-                        decision_time=computed_at,
-                    )
-                )
-                day0_current_temperature_state_identity = (
-                    None
-                    if current_state is None
-                    else {
-                        "observed_at": current_state.observed_at.isoformat(),
-                        "value_native": current_state.value_native,
-                        "source": current_state.source,
-                    }
-                )
-            except sqlite3.Error:
-                day0_current_temperature_state_identity = None
         finally:
             conn.close()
     except _ClaimReadDeadlineExceeded:
@@ -3044,9 +3005,6 @@ def _blocked_attempt_fingerprint(
                 "source_clock_frontier": source_clock_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
                 "day0_hourly_frontier": day0_hourly_frontier,
-                "day0_current_temperature_state_identity": (
-                    day0_current_temperature_state_identity
-                ),
             },
             "logic": logic_revisions,
         },
@@ -3103,14 +3061,10 @@ def _day0_carrier_vector_preflight_reason(
     """Prove an immutable Day0 request lacks its required future-path bundle.
 
     This is the queue-side twin of
-    ``replacement_forecast_materializer._day0_noaa_future_vector_members``: it
-    evaluates that same child's two preconditions (current-temperature-state
-    presence, then complete future-vector bundle) against the same read-only
-    forecasts connection, in the same order, so a request known to fail the
-    child is declined here instead of paying a subprocess spawn.
+    ``replacement_forecast_materializer._day0_noaa_future_vector_members``.
     Unknown schema, identity, or DB state falls through to the authoritative
-    materializer; only the same strict predicates may suppress a child
-    process.
+    materializer; only the same strict complete-bundle predicate may suppress a
+    child process.
     """
 
     source = str(payload.get("day0_observed_extreme_source") or "").strip().lower()
@@ -3142,7 +3096,6 @@ def _day0_carrier_vector_preflight_reason(
     from src.data.day0_hourly_vectors import (  # noqa: PLC0415
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         day0_hourly_models_for_city,
-        read_day0_current_temperature_state,
         read_freshest_day0_hourly_vectors,
         remaining_day_extremes_c,
     )
@@ -3169,14 +3122,6 @@ def _day0_carrier_vector_preflight_reason(
     conn: sqlite3.Connection | None = None
     try:
         conn = _queue_read_only_connection(Path(forecast_db))
-        current_state = read_day0_current_temperature_state(
-            conn=conn,
-            city=city,
-            target_date=target_date,
-            decision_time=computed_at,
-        )
-        if current_state is None:
-            return _DAY0_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING_REASON
         vectors = read_freshest_day0_hourly_vectors(
             city=city_name,
             target_date=target_date,
@@ -6108,7 +6053,6 @@ def _process_claimed_materialization_batch(
     failed: list[str] = []
     unchanged_blocked: list[str] = []
     preflight_blocked: list[str] = []
-    preflight_block_reasons: set[str] = set()
     unchanged_success: list[str] = []
     stale_day0_superseded: list[str] = []
     source_cycle_regressions: list[str] = []
@@ -6325,7 +6269,6 @@ def _process_claimed_materialization_batch(
             )
             processed.append(str(receipt))
             preflight_blocked.append(str(receipt))
-            preflight_block_reasons.add(preflight_reason)
             continue
         # SCOPE: one exact city/date/metric request whose successful posterior
         # commit and current input fingerprint are both proven. DRAIN: the fixed
@@ -6539,8 +6482,9 @@ def _process_claimed_materialization_batch(
     if unchanged_blocked:
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
     if preflight_blocked:
-        reasons.append(_BLOCKED_INPUT_RECEIPT_REASON)
-        reasons.extend(sorted(preflight_block_reasons))
+        reasons.extend(
+            (_BLOCKED_INPUT_RECEIPT_REASON, _DAY0_CARRIER_VECTOR_MISSING_REASON)
+        )
     if unchanged_success:
         reasons.append(_UNCHANGED_SUCCESS_SKIP_REASON)
     if stale_day0_superseded:
