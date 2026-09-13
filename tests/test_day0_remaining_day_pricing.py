@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-11
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-11; last_reused=2026-09-11
+# Last reused or audited: 2026-09-13
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-13; last_reused=2026-09-13
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1258,7 +1258,7 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
 def test_shared_remaining_carrier_normalizes_fahrenheit_round_trip_grid():
     """Celsius storage residue must not invalidate adjacent Fahrenheit bins."""
 
-    assert DAY0_PROBABILITY_SEMANTICS_REVISION.endswith("_v14")
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION.endswith("_v15")
 
     bounds_c = [
         (None, 26.11111111111111),
@@ -10407,3 +10407,33 @@ def test_global_day0_fast_fact_is_statistical_and_causal(
     assert "_edli_day0_physical_frontier_observation_time" not in stronger
     assert era._day0_observation_age_minutes(stronger, stronger_decision) == 15.0
     assert stronger["observation_context_id"] != rebound["observation_context_id"]
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("slope", [-1.0, 1.0])
+@pytest.mark.parametrize("unit", ["C", "F"])
+def test_current_state_same_instant_reaches_remaining_extrema(metric, slope, unit, monkeypatch):
+    """A perfect diurnal path must stay perfect through the live vector consumer."""
+    monkeypatch.setattr("src.config.day0_current_state_innovation_e_fold_hours", lambda: 4.2)
+    start = datetime(2026, 9, 13, tzinfo=UTC)
+    temperatures = tuple(20.0 + slope * (hour - 12) for hour in range(24))
+    vector = Day0HourlyVector(
+        model="ecmwf_ifs", city="Paris", target_date="2026-09-13",
+        timezone_name="UTC", captured_at="2026-09-13T11:00:00+00:00",
+        times=tuple((start + timedelta(hours=hour)).isoformat() for hour in range(24)),
+        temps_c=temperatures,
+    )
+    observation_time = start + timedelta(hours=12, minutes=30)
+    observed_c = 20.0 + 0.5 * slope
+    state = Day0CurrentTemperatureState(
+        value_native=observed_c if unit == "C" else observed_c * 1.8 + 32.0,
+        observed_at=observation_time, source="wu_icao_history",
+    )
+    extrema, innovations = remaining_day_extremes_c_with_current_state(
+        [vector], target_date="2026-09-13", decision_time=observation_time + timedelta(minutes=5),
+        metric=metric, current_state=state, settlement_unit=unit,
+        fallback_window_start=observation_time,
+    )
+    expected = max(temperatures[13:]) if metric == "high" else min(temperatures[13:])
+    assert extrema == pytest.approx([expected])
+    assert innovations == pytest.approx({"ecmwf_ifs": 0.0}, abs=1e-12)

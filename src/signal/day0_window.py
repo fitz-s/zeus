@@ -29,10 +29,10 @@ def condition_day0_hourly_members_on_current_state(
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Condition future hourly paths on the latest observed model residual.
 
-    The correction is causal and transient: each model's residual at the
-    latest elapsed hourly anchor decays exponentially through unseen hours.
-    The elapsed anchor itself is replaced by the observation so the final
-    sub-hour fallback cannot resurrect the model value.
+    Compare the observation to each issued forecast at the same instant,
+    interpolating its hourly grid before decaying the residual into future
+    hours. The elapsed anchor is replaced by the observation for the final
+    sub-hour fallback. No future observations enter this calculation.
     """
 
     values = np.asarray(members_hourly, dtype=float)
@@ -59,8 +59,17 @@ def condition_day0_hourly_members_on_current_state(
     if not timedelta(0) <= anchor_lag <= timedelta(hours=1):
         return None
 
+    forecast_at_observation = values[:, anchor_idx]
+    future = [index for index, instant in enumerate(instants) if instant > observed_utc]
+    if anchor_lag > timedelta(0) and future:
+        next_idx = min(future, key=lambda index: instants[index])
+        interval = (instants[next_idx] - instants[anchor_idx]).total_seconds()
+        fraction = anchor_lag.total_seconds() / interval
+        forecast_at_observation = (
+            (1.0 - fraction) * forecast_at_observation + fraction * values[:, next_idx]
+        )
     conditioned = values.copy()
-    innovations = float(current_temp) - conditioned[:, anchor_idx]
+    innovations = float(current_temp) - forecast_at_observation
     conditioned[:, anchor_idx] = float(current_temp)
     for index, instant in enumerate(instants):
         if instant <= observed_utc:
