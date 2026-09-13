@@ -5481,6 +5481,17 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # competes in the next complete current q/book/wealth auction.
     "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE",
     "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE",
+    # SCOPE: a winner carrier whose in-batch bounded wealth reauction
+    # (global_batch_runtime.py:9576, _WEALTH_REAUCTION_MAX_ATTEMPTS=2)
+    # exhausted its attempt cap without converging on a stable current cut —
+    # the exact sibling shape of GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE /
+    # GLOBAL_REAUCTION_PROBABILITY_UNSTABLE above (same bounded-attempt-
+    # exhaustion pattern, one dimension of supersession truth apiece).
+    # DRAIN: terminalize this carrier; the reauction loop already tried the
+    # bounded number of times. RESET: a fresh producer/redecision carrier has
+    # a new event_id and competes in the next complete current q/book/wealth
+    # auction.
+    "GLOBAL_REAUCTION_WEALTH_UNSTABLE",
     # The venue call for a global SELL exit STARTED but returned a definite
     # non-ack, non-unknown rejection (event_reactor_adapter.py:15034; guarded
     # by exit_evidence.venue_call_started=True, submitted=False). A completed

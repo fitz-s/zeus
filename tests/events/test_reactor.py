@@ -3053,17 +3053,26 @@ def test_global_reauction_epoch_expiry_is_explicitly_transient(caplog):
             "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:stale",
             True,
         ),
+        (
+            "GLOBAL_REAUCTION_WEALTH_UNSTABLE:WEALTH_SUPERSEDED",
+            False,
+        ),
     ),
 )
 def test_newly_registered_money_path_reason_bases_never_fail_open(
     caplog, reason, expected_transient
 ):
-    """Ten money-path reason bases (GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED through
-    GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED) reached the fail-open UNKNOWN
-    branch in production over 2026-09-09..2026-09-13. Nine are pre-venue races
-    or infra faults (requeue); GLOBAL_SELL_EXIT_REJECTED is a completed
-    venue-side rejection (terminal). Each must now classify explicitly, never
-    hit the fail-open ERROR log, and land on its intended side.
+    """Eleven money-path reason bases (GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED
+    through GLOBAL_REAUCTION_WEALTH_UNSTABLE) reached the fail-open UNKNOWN
+    branch in production over 2026-09-09..2026-09-13 (the first ten), or sit
+    in the identical unregistered gap as an adjacent sibling of an already-
+    registered base (GLOBAL_REAUCTION_WEALTH_UNSTABLE, sibling of
+    GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE / _PROBABILITY_UNSTABLE). Nine
+    are pre-venue races or infra faults (requeue); GLOBAL_SELL_EXIT_REJECTED
+    is a completed venue-side rejection and GLOBAL_REAUCTION_WEALTH_UNSTABLE
+    is a bounded-reauction exhaustion (both terminal). Each must now classify
+    explicitly, never hit the fail-open ERROR log, and land on its intended
+    side.
     """
     reason_base = reason.partition(":")[0]
 
