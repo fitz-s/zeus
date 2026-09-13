@@ -5283,6 +5283,66 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # persistent fault keeps failing and surfaces through monitoring/alerts,
     # not through consuming the opportunity.
     "GLOBAL_BATCH_FAILED",
+    # Capital truth (wealth economic identity) changed after selection but
+    # before any venue call (event_reactor_adapter.py:18155 producer,
+    # consumed pre-actuation at event_reactor_adapter.py:9582). No side
+    # effect has occurred; the sibling in-batch reauction bucket at
+    # event_reactor_adapter.py:18140 rebuilds the complete cut on the
+    # current endowment. Requeue with fresh wealth truth, mirroring
+    # GLOBAL_REAUCTION_EPOCH_EXPIRED above.
+    "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED",
+    # A required HELD family's book was missing from this cut's CLOB capture
+    # (global_batch_runtime.py:8384). Sibling of GLOBAL_BOOK_RESPONSE_INCOMPLETE
+    # above: re-capture the full epoch next cycle instead of terminal-burning a
+    # held family that simply has not been fetched yet.
+    "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE",
+    # Revalidating the current global-actuation probability immediately before
+    # actuation raised (event_reactor_adapter.py:18619); proof_accepted=False,
+    # no venue call made. A pre-venue "must fail closed" authority check, the
+    # BUY-side counterpart of GLOBAL_SELL_CURRENT_AUTHORITY_FAILED below —
+    # requeue and re-decide on current probability truth.
+    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED",
+    # No admissible prepared candidate emerged for this family this cycle
+    # (event_reactor_adapter.py:19424, wrapping _global_prepare_reason —
+    # a SELECTION_SCOPE_EMPTY telemetry value, a spine no-trade reason, or the
+    # 'prepared_family_missing' fallback). Sibling of GLOBAL_FAMILY_INELIGIBLE
+    # and GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED above: reconsider once the
+    # missing/changed substrate advances, never terminal-burn the event.
+    "GLOBAL_ACTUATION_PREPARE_FAILED",
+    # A generic (non-JIT-authority) exception during global SELL exit execution
+    # BEFORE any venue call started (event_reactor_adapter.py:15017; guarded by
+    # `not (exit_evidence is not None and exit_evidence.venue_call_started)`).
+    # A code-fault/infra-fault class with proof_accepted=False and no side
+    # effect, mirroring GLOBAL_BATCH_FAILED above — requeue, don't burn.
+    "GLOBAL_SELL_EXECUTION_FAILED",
+    # Any exception revalidating a global SELL's current authority (Day0
+    # statistical authority, sell-action-authority identity, wealth, entry
+    # calibration, or an unexpected fault) before the exit is attempted
+    # (event_reactor_adapter.py:14423); proof_accepted=False, no venue call.
+    # Its named sibling sub-cases (wealth/calibration superseded) are already
+    # absorbed by the in-batch reauction buckets — this flat entry covers every
+    # other current-authority-loss wrapper with the same pre-venue-race shape.
+    "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED",
+    # The refreshed wealth witness (mid wealth-reauction retry) revealed held
+    # obligations outside this cut's captured probability/book fence
+    # (global_batch_runtime.py:9630). Sibling of GLOBAL_REAUCTION_EPOCH_EXPIRED:
+    # this bounded cut's captured scope cannot serve the new truth, but a fresh
+    # cut recaptures the full current book/probability universe.
+    "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED",
+    # A specific candidate (not its whole family) was pre-excluded from this
+    # cut's ranking by an in-cut policy decision recorded in
+    # excluded_candidates (global_batch_runtime.py:8670 and :8695, and the
+    # terminal disposition wrapper at :10117). Structurally identical to, and
+    # emitted from the same stamp_receipt chain as, GLOBAL_FAMILY_INELIGIBLE
+    # above — reconsider this exact candidate once the excluding policy fact
+    # advances.
+    "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE",
+    # A JIT book/maker-witness/mode authority went stale between candidate
+    # selection and actuation for a global SELL (event_reactor_adapter.py:14548
+    # and :15008), proof_accepted=False, no venue call made. A pre-venue
+    # book/price race, the same shape as LIVE_DEPTH_AUTHORITY_MISSING and
+    # SUBMIT_ABORTED_MODE_FLIPPED above — a fresh JIT capture cures it.
+    "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -5421,6 +5481,15 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # competes in the next complete current q/book/wealth auction.
     "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE",
     "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE",
+    # The venue call for a global SELL exit STARTED but returned a definite
+    # non-ack, non-unknown rejection (event_reactor_adapter.py:15034; guarded
+    # by exit_evidence.venue_call_started=True, submitted=False). A completed
+    # venue-side disposition for THIS exit attempt — a rejected sell exit has
+    # its own recovery lifecycle, so requeueing this event would only repeat
+    # an already-adjudicated venue rejection. Mirrors venue_auth_invalid_
+    # signature_400 and idempotency_collision above (venue call started,
+    # replaying it is the risk, not the cure).
+    "GLOBAL_SELL_EXIT_REJECTED",
 })
 
 

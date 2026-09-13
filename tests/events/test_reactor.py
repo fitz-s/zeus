@@ -3017,6 +3017,68 @@ def test_global_reauction_epoch_expiry_is_explicitly_transient(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+@pytest.mark.parametrize(
+    "reason,expected_transient",
+    (
+        ("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:expected=a:current=b", True),
+        (
+            "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE:family-1",
+            True,
+        ),
+        (
+            "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:stale",
+            True,
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:prepared_family_missing",
+            True,
+        ),
+        ("GLOBAL_SELL_EXIT_REJECTED:INSUFFICIENT_BALANCE", False),
+        ("GLOBAL_SELL_EXECUTION_FAILED:KeyError:'token_id'", True),
+        (
+            "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:missing",
+            True,
+        ),
+        (
+            "GLOBAL_REAUCTION_WEALTH_SCOPE_CHANGED:families=1:tokens=0",
+            True,
+        ),
+        (
+            "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:GLOBAL_BUY_CANDIDATES_DISABLED",
+            True,
+        ),
+        (
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:stale",
+            True,
+        ),
+    ),
+)
+def test_newly_registered_money_path_reason_bases_never_fail_open(
+    caplog, reason, expected_transient
+):
+    """Ten money-path reason bases (GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED through
+    GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED) reached the fail-open UNKNOWN
+    branch in production over 2026-09-09..2026-09-13. Nine are pre-venue races
+    or infra faults (requeue); GLOBAL_SELL_EXIT_REJECTED is a completed
+    venue-side rejection (terminal). Each must now classify explicitly, never
+    hit the fail-open ERROR log, and land on its intended side.
+    """
+    reason_base = reason.partition(":")[0]
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert _is_transient_money_path_reason(reason) is expected_transient
+        if expected_transient:
+            assert reason_base in TRANSIENT_MONEY_PATH_REASONS
+            assert _is_explicitly_transient_money_path_reason(reason) is True
+        else:
+            assert reason_base in TERMINAL_MONEY_PATH_REASONS
+            assert _is_explicitly_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_duplicate_same_token_pre_submit_rejection_is_terminal(caplog):
     reason = "duplicate_entry_same_token:open_or_filled_entry_command_same_token"
 
