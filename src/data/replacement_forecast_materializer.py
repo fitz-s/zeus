@@ -2744,19 +2744,19 @@ def _validate_sigma_tau_artifact(raw_bytes: bytes) -> dict | None:
 # lookup (FIX 6 -- "generation skew" guard). A fresh generation is picked up on the NEXT lookup;
 # every lookup already served from an older generation is unaffected.
 #
-# CYCLE-PINNING NOTE (B4, deep-review 2026-07-28): the reviewer asked for the artifact to be
-# snapshotted ONCE per materialization CYCLE (an explicit cycle boundary), not merely once per
-# observed file generation. Investigated the live batch entry point
-# (src/data/replacement_forecast_live_materialization_queue.py::_run_materialization_batch): each
-# queued item is materialized in its OWN SUBPROCESS (_materialization_command invokes
-# scripts/materialize_replacement_forecast_live.py per item via subprocess.run), so in the ACTUAL
-# live batch architecture this module-level cache is already naturally scoped to exactly one
-# materialization -- there is no in-process multi-item loop in that path for the artifact to skew
-# across. The residual risk is a hypothetical FUTURE in-process caller that materializes many
-# requests in one long-lived process; threading an explicit cycle-id snapshot through would require
-# touching the queue/batch caller, which is outside this module's scope. mtime+size is the
-# practical hardening available at this file's boundary; a true cycle-id-keyed snapshot is a
-# follow-up if an in-process batch caller is ever introduced.
+# CYCLE-PINNING NOTE (B4, deep-review 2026-07-28; updated 2026-09-13): the reviewer asked for the
+# artifact to be snapshotted ONCE per materialization CYCLE (an explicit cycle boundary), not
+# merely once per observed file generation. The live batch entry point
+# (src/data/replacement_forecast_live_materialization_queue.py::_run_materialization_batch) now
+# spawns ONE process per claimed batch (--batch-input-json), which loops over every family's
+# _run_one in-process instead of one subprocess per family -- the "hypothetical FUTURE in-process
+# caller" this note once deferred is the current architecture. mtime+size still refreshes on the
+# NEXT lookup if the artifact changes mid-batch, so no family reads a torn write, but a batch of
+# several seconds can now legitimately span two file generations if the artifact is rewritten
+# mid-batch, serving the newer artifact to families materialized after the refresh and the older
+# one to families before it. A true cycle-id-keyed snapshot (one artifact read for the whole
+# batch, not just the whole process lifetime) remains a follow-up if that split-generation case is
+# ever shown to matter; mtime+size is the practical hardening available at this file's boundary.
 _sigma_tau_artifact_cache: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "validated": None, "hash": None}
 
 

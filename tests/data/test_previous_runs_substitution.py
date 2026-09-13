@@ -3062,10 +3062,13 @@ def test_materialization_queue_coalesces_duplicate_seeds_before_limit(
     )
 
 
-def test_materialization_queue_runs_default_requests_in_bounded_parallel(
+def test_materialization_queue_materializes_one_claimed_batch_in_one_process(
     tmp_path, monkeypatch
 ) -> None:
-    import threading
+    """A claimed batch of N families produces exactly ONE child invocation carrying
+    all N via --batch-input-json (not one spawn per family). DEFAULT_MATERIALIZATION_
+    MAX_WORKERS stays 1: there is still exactly one subprocess in flight, it just
+    now does N families' work instead of one."""
 
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
@@ -3090,34 +3093,30 @@ def test_materialization_queue_runs_default_requests_in_bounded_parallel(
         path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
         paths.append(path)
     calls: list[list[str]] = []
-    calls_lock = threading.Lock()
-    worker_limit_reached = threading.Event()
-    active = 0
-    max_active = 0
 
-    def _parallel_runner(argv):
-        nonlocal active, max_active
+    def _batch_runner(argv):
         command = list(argv)
-        with calls_lock:
-            calls.append(command)
-            active += 1
-            max_active = max(max_active, active)
-            if active == queue_mod.DEFAULT_MATERIALIZATION_MAX_WORKERS:
-                worker_limit_reached.set()
-        assert worker_limit_reached.wait(timeout=1.0)
-        with calls_lock:
-            active -= 1
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=(
-                '{"status":"READY","reason_codes":[],"committed":true,'
-                '"posterior_id":42,"reactor_wake_published":true}\n'
-            ),
-            stderr="",
+        calls.append(command)
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--deadline-utc")
+        input_paths = command[start:end]
+        stdout = "\n".join(
+            json.dumps(
+                {
+                    "input_json": input_path,
+                    "returncode": 0,
+                    "stdout": (
+                        '{"status":"READY","reason_codes":[],"committed":true,'
+                        '"posterior_id":42,"reactor_wake_published":true}\n'
+                    ),
+                    "stderr": "",
+                }
+            )
+            for input_path in input_paths
         )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout + "\n", stderr="")
 
-    monkeypatch.setattr(queue_mod, "_run_command", _parallel_runner)
+    monkeypatch.setattr(queue_mod, "_run_command", _batch_runner)
     report = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir,
         processed_dir=processed_dir,
@@ -3132,13 +3131,15 @@ def test_materialization_queue_runs_default_requests_in_bounded_parallel(
     assert report.failed_count == 0
     assert report.committed_posterior_count == len(paths)
     assert report.reactor_wake_published_count == len(paths)
-    assert len(calls) == len(paths)
-    assert max_active == queue_mod.DEFAULT_MATERIALIZATION_MAX_WORKERS
-    assert all("--input-json" in command for command in calls)
-    assert all("--batch-input-json" not in command for command in calls)
-    assert all("--init-schema" not in command for command in calls)
+    assert len(calls) == 1
+    assert "--batch-input-json" in calls[0]
+    assert "--input-json" not in calls[0]
+    assert "--init-schema" not in calls[0]
     claimed_inputs = {
-        Path(command[command.index("--input-json") + 1]) for command in calls
+        Path(path)
+        for path in calls[0][
+            calls[0].index("--batch-input-json") + 1 : calls[0].index("--deadline-utc")
+        ]
     }
     assert {path.name for path in claimed_inputs} == {path.name for path in paths}
     assert {path.parent.parent.name for path in claimed_inputs} == {
@@ -3156,6 +3157,203 @@ def test_materialization_queue_runs_default_requests_in_bounded_parallel(
         }
         for path in receipts
     )
+
+
+def test_materialization_queue_batch_routes_each_envelope_independently(
+    tmp_path, monkeypatch
+) -> None:
+    """Three families in one claimed batch, one process, three envelopes: two
+    succeed and are recorded independently; the DEFERRED one is restored to the
+    request directory without disturbing the other two."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    paths = []
+    for city in ("Shanghai", "Paris", "Tokyo"):
+        path = request_dir / f"{city}.2026-07-02.high.json"
+        path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
+        paths.append(path)
+
+    def _batch_runner(argv):
+        command = list(argv)
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--deadline-utc")
+        input_paths = command[start:end]
+        lines = []
+        for input_path in input_paths:
+            if "Tokyo" in input_path:
+                returncode, stdout, stderr = (
+                    75,
+                    "",
+                    json.dumps(
+                        {
+                            "status": "DEFERRED",
+                            "reason_codes": [
+                                "REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_OPEN_READ_SNAPSHOT"
+                            ],
+                            "stage": "open_read_snapshot",
+                            "committed": False,
+                            "reactor_wake_published": False,
+                        }
+                    )
+                    + "\n",
+                )
+            else:
+                returncode, stdout, stderr = (
+                    0,
+                    json.dumps(
+                        {
+                            "status": "READY",
+                            "reason_codes": [],
+                            "committed": True,
+                            "posterior_id": 42,
+                            "reactor_wake_published": True,
+                        }
+                    )
+                    + "\n",
+                    "",
+                )
+            lines.append(
+                json.dumps(
+                    {
+                        "input_json": input_path,
+                        "returncode": returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }
+                )
+            )
+        return subprocess.CompletedProcess(
+            command, 0, stdout="\n".join(lines) + "\n", stderr=""
+        )
+
+    monkeypatch.setattr(queue_mod, "_run_command", _batch_runner)
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=len(paths),
+    )
+
+    assert report.failed_count == 0
+    assert report.processed_count == 2
+    assert report.committed_posterior_count == 2
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == 2
+    assert {json.loads(p.read_text(encoding="utf-8"))["city"] for p in receipts} == {
+        "Shanghai",
+        "Paris",
+    }
+    restored = tuple(request_dir.glob("*.json"))
+    assert len(restored) == 1
+    assert "Tokyo" in restored[0].name
+    assert not tuple(failed_dir.glob("*.json"))
+
+
+def test_materialization_queue_batch_restores_requests_missing_an_envelope(
+    tmp_path, monkeypatch
+) -> None:
+    """The batch process exits non-zero after emitting an envelope for only the
+    first family (a crash mid-loop). The enveloped family is recorded per its
+    envelope; every family without an envelope is restored, not failed -- its
+    true outcome is unknown."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    paths = []
+    for city in ("Shanghai", "Paris", "Tokyo"):
+        path = request_dir / f"{city}.2026-07-02.high.json"
+        path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
+        paths.append(path)
+
+    envelope_sent_for: dict[str, str] = {}
+
+    def _crashing_batch_runner(argv):
+        command = list(argv)
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--deadline-utc")
+        input_paths = command[start:end]
+        # The claim/priority order is not under this test's control -- only that
+        # exactly one family gets an envelope before the process dies.
+        envelope_sent_for["path"] = input_paths[0]
+        first_envelope = json.dumps(
+            {
+                "input_json": input_paths[0],
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "status": "READY",
+                        "reason_codes": [],
+                        "committed": True,
+                        "posterior_id": 1,
+                        "reactor_wake_published": True,
+                    }
+                )
+                + "\n",
+                "stderr": "",
+            }
+        )
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=first_envelope + "\n",
+            stderr="Fatal Python error: Segmentation fault\n",
+        )
+
+    monkeypatch.setattr(queue_mod, "_run_command", _crashing_batch_runner)
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=len(paths),
+    )
+
+    assert report.failed_count == 0
+    assert report.processed_count == 1
+    assert report.committed_posterior_count == 1
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == 1
+    enveloped_city = Path(envelope_sent_for["path"]).name.split(".", 1)[0]
+    assert json.loads(receipts[0].read_text(encoding="utf-8"))["city"] == enveloped_city
+    other_cities = {"Shanghai", "Paris", "Tokyo"} - {enveloped_city}
+    restored = {p.name for p in request_dir.glob("*.json")}
+    assert len(restored) == 2
+    assert all(any(city in name for name in restored) for city in other_cities)
+    assert not tuple(failed_dir.glob("*.json"))
 
 
 def test_materialization_queue_bounds_success_receipts_per_family(tmp_path) -> None:
@@ -5555,27 +5753,35 @@ def test_materialization_timeout_isolated_to_its_own_request(
             encoding="utf-8",
         )
 
-    def _timeout_one_request(argv):
+    def _timeout_mid_batch(argv):
+        # The whole claimed batch runs in ONE subprocess. A's envelope is already
+        # flushed (_print_batch_envelope writes and flushes per family as it
+        # finishes) by the time B's family stalls and the hard subprocess.run
+        # timeout kills the process -- so only B's request is left un-enveloped.
         command = list(argv)
-        input_path = command[command.index("--input-json") + 1]
-        if Path(input_path).name == "B.json":
-            raise subprocess.TimeoutExpired(
-                cmd=command,
-                timeout=1.5,
-                output="",
-                stderr="",
-            )
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=(
-                '{"status":"READY","reason_codes":[],"committed":true,'
-                '"posterior_id":42,"reactor_wake_published":true}\n'
-            ),
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--deadline-utc")
+        input_paths = command[start:end]
+        a_path = next(path for path in input_paths if Path(path).name == "A.json")
+        a_envelope = json.dumps(
+            {
+                "input_json": a_path,
+                "returncode": 0,
+                "stdout": (
+                    '{"status":"READY","reason_codes":[],"committed":true,'
+                    '"posterior_id":42,"reactor_wake_published":true}\n'
+                ),
+                "stderr": "",
+            }
+        )
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=1.5,
+            output=a_envelope + "\n",
             stderr="",
         )
 
-    monkeypatch.setattr(queue_mod, "_run_command", _timeout_one_request)
+    monkeypatch.setattr(queue_mod, "_run_command", _timeout_mid_batch)
     report = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir,
         processed_dir=processed_dir,

@@ -12,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -68,6 +67,9 @@ _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS = 3
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS = 75.0
 _MATERIALIZATION_STAGE_RECEIPT_SUFFIX = ".stage"
 _MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS = 1.0
+_MATERIALIZATION_BATCH_MISSING_ENVELOPE_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_BATCH_PROCESS_EXITED_WITHOUT_ENVELOPE"
+)
 _GLOBAL_AUCTION_SCOPE_CACHE: tuple[str, int, frozenset[str]] | None = None
 _AWAITING_ENSEMBLE_HWM_REASON = (
     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
@@ -534,6 +536,27 @@ def _materialization_command(
     )
 
 
+def _materialization_batch_command(
+    pending: Sequence[_PendingMaterialization],
+    *,
+    deadline_at: datetime,
+) -> tuple[str, ...]:
+    """One process for a whole claimed batch: one interpreter start, one DB
+    connection, one schema/manifest preflight, one absolute deadline shared
+    across every family's own transaction (scripts/materialize_replacement_
+    forecast_live.py's --batch-input-json loop)."""
+
+    return (
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
+        "--batch-input-json",
+        *(str(item.input_json) for item in pending),
+        "--deadline-utc",
+        deadline_at.astimezone(timezone.utc).isoformat(),
+        "--commit",
+    )
+
+
 def _child_deadline_at() -> datetime:
     """Reserve a small handoff window before the queue's hard subprocess kill."""
 
@@ -577,10 +600,42 @@ def _timeout_result(
     )
 
 
-def _materialization_error_result(
+def _parse_batch_envelopes(
+    stdout: str | bytes | None,
+) -> tuple[dict[Path, subprocess.CompletedProcess[str]], list[str]]:
+    """Decode one _print_batch_envelope JSON line per request into a synthetic
+    per-request CompletedProcess, so the existing per-item outcome routing
+    below (succeeded/blocked/deferred/failed) needs no change."""
+
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
+    parsed: dict[Path, subprocess.CompletedProcess[str]] = {}
+    protocol_errors: list[str] = []
+    for line in (stdout or "").splitlines():
+        try:
+            payload = json.loads(line)
+            input_json = Path(str(payload["input_json"]))
+            parsed[input_json] = subprocess.CompletedProcess(
+                args=(),
+                returncode=int(payload["returncode"]),
+                stdout=str(payload.get("stdout") or ""),
+                stderr=str(payload.get("stderr") or ""),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            protocol_errors.append(f"{exc.__class__.__name__}: {exc}")
+    return parsed, protocol_errors
+
+
+def _batch_missing_envelope_result(
     command: Sequence[str],
-    exc: Exception,
+    batch_returncode: int,
+    batch_stderr: str,
+    protocol_errors: Sequence[str],
 ) -> subprocess.CompletedProcess[str]:
+    """A request the batch process never emitted an envelope for (it exited,
+    crashed, or was killed before reaching that request). The true per-request
+    outcome is unknown, so this is retryable, not a terminal failure."""
+
     return subprocess.CompletedProcess(
         args=list(command),
         returncode=2,
@@ -588,8 +643,12 @@ def _materialization_error_result(
         stderr=json.dumps(
             {
                 "status": "ERROR",
-                "error_type": exc.__class__.__name__,
-                "error": str(exc),
+                "error_type": "MaterializationBatchMissingEnvelope",
+                "error": "batch process exited without an envelope for this request",
+                "reason_codes": [_MATERIALIZATION_BATCH_MISSING_ENVELOPE_REASON],
+                "batch_returncode": batch_returncode,
+                "batch_stderr": batch_stderr,
+                "protocol_errors": list(protocol_errors),
             },
             sort_keys=True,
         )
@@ -597,36 +656,35 @@ def _materialization_error_result(
     )
 
 
-def _run_materialization_item(
-    item: _PendingMaterialization,
-) -> subprocess.CompletedProcess[str]:
-    try:
-        return _run_command(item.command)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_result(item.command, exc)
-    except Exception as exc:
-        return _materialization_error_result(item.command, exc)
-
-
 def _run_materialization_batch(
     pending: Sequence[_PendingMaterialization],
 ) -> dict[Path, subprocess.CompletedProcess[str]]:
+    """Materialize a whole claimed batch in ONE child process via
+    --batch-input-json instead of one spawn per family. Preserves the
+    single-writer invariant exactly: one process, one connection, one
+    sequential per-request transaction loop (DEFAULT_MATERIALIZATION_MAX_WORKERS
+    stays 1 -- there is still exactly one subprocess in flight)."""
+
     if not pending:
         return {}
-    completed: dict[Path, subprocess.CompletedProcess[str]] = {}
-    workers = min(DEFAULT_MATERIALIZATION_MAX_WORKERS, len(pending))
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        thread_name_prefix="replacement-materialize",
-    ) as executor:
-        futures = {
-            executor.submit(_run_materialization_item, item): item
-            for item in pending
-        }
-        for future in as_completed(futures):
-            item = futures[future]
-            completed[item.input_json] = future.result()
-    return completed
+    command = _materialization_batch_command(pending, deadline_at=_child_deadline_at())
+    try:
+        batch = _run_command(command)
+    except subprocess.TimeoutExpired as exc:
+        parsed, _ = _parse_batch_envelopes(exc.stdout)
+        for item in pending:
+            parsed.setdefault(item.input_json, _timeout_result(item.command, exc))
+        return parsed
+    parsed, protocol_errors = _parse_batch_envelopes(batch.stdout)
+    for item in pending:
+        if item.input_json not in parsed:
+            parsed[item.input_json] = _batch_missing_envelope_result(
+                item.command,
+                batch.returncode,
+                batch.stderr,
+                protocol_errors,
+            )
+    return parsed
 
 
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
@@ -2514,7 +2572,10 @@ _TRANSIENT_READ_RETRY_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_TRANSIENT_READ_RETRY_DEFERRED"
 )
 _TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
-    {"REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED"}
+    {
+        "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
+        _MATERIALIZATION_BATCH_MISSING_ENVELOPE_REASON,
+    }
 )
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (

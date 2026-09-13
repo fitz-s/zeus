@@ -275,28 +275,42 @@ def _multiprocess_forecast_materialization_owner(
     exact_retry_started,
     release,
 ) -> None:
-    """Drain only inside the forecast-live owner under its single-writer cap."""
+    """Drain only inside the forecast-live owner under its single-writer cap.
+
+    _run_materialization_batch now spawns ONE child process per claimed batch
+    (--batch-input-json) instead of one subprocess per family, so the injection
+    seam moves from the removed per-item _run_materialization_item to
+    _run_command: the fake below plays the child's own in-process --batch-
+    input-json loop, processing the batch's paths one at a time in order, which
+    is exactly the sequencing this test proves (a family cannot skip the single
+    in-flight batch process even when it is Day0-exact-priority).
+    """
 
     exact_path = Path(seed_file)
 
-    def _run_owned_item(item):
-        with running.get_lock():
-            running.value += 1
-            peak_running.value = max(peak_running.value, running.value)
-            if running.value == materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS:
-                four_started.set()
-        try:
-            if item.input_json == exact_path:
-                exact_retry_started.set()
-                item.input_json.unlink()
-            else:
-                assert release.wait(5.0)
-            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        finally:
+    def _fake_run_command(argv):
+        command = list(argv)
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--deadline-utc")
+        input_paths = [Path(path) for path in command[start:end]]
+        for input_path in input_paths:
             with running.get_lock():
-                running.value -= 1
+                running.value += 1
+                peak_running.value = max(peak_running.value, running.value)
+                if running.value == materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS:
+                    four_started.set()
+            try:
+                if input_path == exact_path:
+                    exact_retry_started.set()
+                    input_path.unlink()
+                else:
+                    assert release.wait(5.0)
+            finally:
+                with running.get_lock():
+                    running.value -= 1
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    materialization_queue._run_materialization_item = _run_owned_item
+    materialization_queue._run_command = _fake_run_command
     pending = [
         materialization_queue._PendingMaterialization(
             input_json=Path(path),
