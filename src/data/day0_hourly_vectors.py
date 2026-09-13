@@ -510,14 +510,32 @@ def _day0_parse_aware_clock(value: object, *, field_name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _day0_normalize_vector_request_semantics(key: str, value: object) -> object:
-    """Canonicalize request semantics without coercing unknown metadata strings."""
+def _day0_normalize_vector_request_semantics(
+    key: str, value: object, *, model: str
+) -> object:
+    """Canonicalize request semantics without coercing unknown metadata strings.
+
+    ``request_params_json`` is stamped from the bundle-wide capture request, so
+    its ``runs``/``endpoint_modes`` maps carry an entry per sibling model in the
+    bundle, not just this row's own model. A sibling model's run advancing must
+    not change this row's own semantic identity, so both maps are projected
+    down to this row's own model before the equivalence comparison.
+    """
 
     if key == "request_params_json" and isinstance(value, str):
         try:
             value = json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
             return value
+    if key == "request_params_json" and isinstance(value, Mapping):
+        projected = dict(value)
+        for map_key in ("runs", "endpoint_modes"):
+            sub = projected.get(map_key)
+            if isinstance(sub, Mapping):
+                projected[map_key] = (
+                    {model: sub[model]} if model in sub else {}
+                )
+        value = projected
     return _day0_canonical_json(value)
 
 
@@ -694,7 +712,7 @@ def _day0_canonical_vector_row_snapshot(
         raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_REQUEST_BINDING_INVALID")
 
     semantic_meta = {
-        str(key): _day0_normalize_vector_request_semantics(str(key), value)
+        str(key): _day0_normalize_vector_request_semantics(str(key), value, model=model)
         for key, value in meta.items()
         if str(key) not in _DAY0_CAPTURE_EQUIVALENCE_ONLY_META
     }

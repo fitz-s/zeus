@@ -402,6 +402,106 @@ def test_day0_v1_capture_equivalence_rejects_payload_or_issue_change(
     }
 
 
+def _bundle_wide_request_params_json(*, own_run: str, sibling_run: str) -> str:
+    return json.dumps(
+        {
+            "city": "Paris",
+            "models": ["icon_d2", "ukmo_global_deterministic_10km"],
+            "runs": {
+                "icon_d2": own_run,
+                "ukmo_global_deterministic_10km": sibling_run,
+            },
+            "endpoint_modes": {
+                "icon_d2": "single_runs",
+                "ukmo_global_deterministic_10km": "single_runs",
+            },
+            "model": "icon_d2",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def test_day0_normalize_vector_request_semantics_ignores_sibling_model_run_advance():
+    # A sibling model's run advancing inside the bundle-wide `runs` map must
+    # not change this row's own semantic identity (T_day0inelig.md H5 / D2).
+    import src.data.day0_hourly_vectors as hourly
+
+    before = _bundle_wide_request_params_json(
+        own_run="2026-06-10T00:00:00+00:00",
+        sibling_run="2026-06-10T06:00:00+00:00",
+    )
+    after = _bundle_wide_request_params_json(
+        own_run="2026-06-10T00:00:00+00:00",
+        sibling_run="2026-06-10T12:00:00+00:00",
+    )
+    normalized_before = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", before, model="icon_d2"
+    )
+    normalized_after = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", after, model="icon_d2"
+    )
+    assert normalized_before == normalized_after
+
+
+def test_day0_normalize_vector_request_semantics_detects_own_model_run_advance():
+    # The row's own model advancing must still be detected as a real change.
+    import src.data.day0_hourly_vectors as hourly
+
+    before = _bundle_wide_request_params_json(
+        own_run="2026-06-10T00:00:00+00:00",
+        sibling_run="2026-06-10T06:00:00+00:00",
+    )
+    after = _bundle_wide_request_params_json(
+        own_run="2026-06-10T06:00:00+00:00",
+        sibling_run="2026-06-10T06:00:00+00:00",
+    )
+    normalized_before = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", before, model="icon_d2"
+    )
+    normalized_after = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", after, model="icon_d2"
+    )
+    assert normalized_before != normalized_after
+
+
+def test_day0_normalize_vector_request_semantics_legacy_own_model_only_row_unchanged():
+    # A legacy row whose `runs`/`endpoint_modes` maps already carry only its
+    # own model (pre-8acb71a4f capture shape) must normalize identically to
+    # itself and to the projected form of an equivalent bundle-wide row.
+    import src.data.day0_hourly_vectors as hourly
+
+    legacy = json.dumps(
+        {
+            "city": "Paris",
+            "models": ["icon_d2"],
+            "runs": {"icon_d2": "2026-06-10T00:00:00+00:00"},
+            "endpoint_modes": {"icon_d2": "single_runs"},
+            "model": "icon_d2",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    bundle_wide = _bundle_wide_request_params_json(
+        own_run="2026-06-10T00:00:00+00:00",
+        sibling_run="2026-06-10T18:00:00+00:00",
+    )
+    normalized_legacy = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", legacy, model="icon_d2"
+    )
+    normalized_legacy_again = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", legacy, model="icon_d2"
+    )
+    normalized_bundle_wide = hourly._day0_normalize_vector_request_semantics(
+        "request_params_json", bundle_wide, model="icon_d2"
+    )
+    assert normalized_legacy == normalized_legacy_again
+    assert normalized_legacy["runs"] == {"icon_d2": "2026-06-10T00:00:00+00:00"}
+    assert normalized_legacy["endpoint_modes"] == {"icon_d2": "single_runs"}
+    assert normalized_legacy["runs"] == normalized_bundle_wide["runs"]
+    assert normalized_legacy["endpoint_modes"] == normalized_bundle_wide["endpoint_modes"]
+
+
 def test_day0_v1_capture_equivalence_preserves_ordinary_entry_bundle(
     monkeypatch,
 ):
