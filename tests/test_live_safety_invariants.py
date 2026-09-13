@@ -11963,6 +11963,113 @@ def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
     ]
 
 
+def _gamma_market_for_dead_token_tests() -> dict:
+    return {
+        "conditionId": "condition-weather",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-token-weather", "no-token-weather"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeType": "weather_fees",
+        "feeSchedule": {
+            "exponent": 1,
+            "rate": 0.05,
+            "takerOnly": True,
+            "rebateRate": 0.25,
+        },
+        "takerBaseFee": 1000,
+    }
+
+
+def _call_current_global_market_authority_with_conn(monkeypatch, trade_conn):
+    from src.contracts import fee_authority
+    from src.engine import event_reactor_adapter as adapter
+
+    monkeypatch.setattr(
+        fee_authority,
+        "resolve_taker_fee_fraction",
+        lambda schedule: (schedule, "current_schedule"),
+    )
+
+    def gamma_get(path, *, params, timeout):
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: [_gamma_market_for_dead_token_tests()],
+        )
+
+    return adapter._current_global_market_authority(
+        condition_id="condition-weather",
+        token_id="no-token-weather",
+        side="NO",
+        gamma_get=gamma_get,
+        clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+            "condition-weather", "yes-token-weather", "no-token-weather"
+        ),
+        raw_book=_global_jit_book("no-token-weather"),
+        captured_at_utc=datetime.now(timezone.utc),
+        timeout=3.0,
+        trade_conn=trade_conn,
+    )
+
+
+def test_global_market_authority_inherits_market_end_at_from_prior_snapshot(
+    monkeypatch,
+):
+    """Dead-token universe leak fix: a substrate-observer capture has no Gamma-scan
+    end-boundary fact of its own. Without a lookback it persists market_end_at=NULL
+    forever, so a resolved market whose latest snapshot came from this builder never
+    leaves the executable universe. It must inherit the boundary from the most
+    recent prior snapshot of the same condition_id that recorded one."""
+    from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
+    from tests.test_k1_stage1_presubmit_snapshot_persist import _elected_snapshot
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_snapshot_schema(conn)
+        prior_end_at = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+        prior_close_at = datetime(2026, 8, 1, 12, 5, tzinfo=timezone.utc)
+        prior_captured_at = datetime(2026, 8, 1, 11, 0, tzinfo=timezone.utc)
+        prior = replace(
+            _elected_snapshot(snapshot_id="snap-prior-scanner"),
+            condition_id="condition-weather",
+            market_end_at=prior_end_at,
+            market_close_at=prior_close_at,
+            captured_at=prior_captured_at,
+            freshness_deadline=prior_captured_at + timedelta(seconds=30),
+        )
+        insert_snapshot(conn, prior, capture_trigger="PRIORITY_MARKER")
+
+        authority = _call_current_global_market_authority_with_conn(monkeypatch, conn)
+
+        assert authority.snapshot.market_end_at == prior_end_at
+        assert authority.snapshot.market_close_at == prior_close_at
+    finally:
+        conn.close()
+
+
+def test_global_market_authority_keeps_market_end_at_none_with_no_prior_row(
+    monkeypatch,
+):
+    """No prior snapshot of this condition_id ever recorded an end boundary: the
+    lookback finds nothing and behaviour is unchanged (market_end_at stays None)."""
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_snapshot_schema(conn)
+
+        authority = _call_current_global_market_authority_with_conn(monkeypatch, conn)
+
+        assert authority.snapshot.market_end_at is None
+        assert authority.snapshot.market_close_at is None
+    finally:
+        conn.close()
+
+
 def test_global_jit_snapshot_id_changes_for_each_raw_authority_payload():
     from src.engine import event_reactor_adapter as adapter
 

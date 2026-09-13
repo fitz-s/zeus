@@ -20,6 +20,7 @@ Relationship invariants (the row IS the witness book it was built from):
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -182,6 +183,46 @@ def test_presubmit_snapshot_provenance_jit() -> None:
     assert JIT_PRESUBMIT_PROVENANCE_SOURCE == "JIT_PRESUBMIT"
     # The fresh JIT book is a live CLOB read — authority_tier honestly says CLOB.
     assert row.authority_tier == "CLOB"
+
+
+def test_presubmit_snapshot_row_inherits_elected_market_end_at() -> None:
+    """Dead-token universe leak fix: build_presubmit_snapshot_row is pure/no-I/O
+    and mirrors family identity via dataclass replace — it must never reset
+    market_end_at/market_close_at, only carry forward whatever the elected row
+    already carries. A non-NULL elected boundary survives into the JIT row."""
+
+    elected = replace(
+        _elected_snapshot(),
+        market_end_at=_NOW + timedelta(days=1),
+        market_close_at=_NOW + timedelta(days=1, minutes=5),
+    )
+    witness = _witness()
+
+    row = build_presubmit_snapshot_row(
+        elected,
+        witness=witness,
+        decision_time=_FETCH_INSTANT,
+    )
+
+    assert row.market_end_at == elected.market_end_at
+    assert row.market_close_at == elected.market_close_at
+
+
+def test_presubmit_snapshot_row_keeps_none_when_elected_has_no_market_end_at() -> None:
+    """No prior boundary fact was ever carried onto the elected row: the JIT row
+    stays None too (unchanged behaviour) rather than inventing one."""
+
+    elected = _elected_snapshot()  # market_end_at=None, market_close_at=None
+    witness = _witness()
+
+    row = build_presubmit_snapshot_row(
+        elected,
+        witness=witness,
+        decision_time=_FETCH_INSTANT,
+    )
+
+    assert row.market_end_at is None
+    assert row.market_close_at is None
 
 
 def test_presubmit_snapshot_row_is_insertable() -> None:

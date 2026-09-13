@@ -947,6 +947,37 @@ def latest_snapshot_for_market(
     return None
 
 
+def latest_known_market_bounds(
+    conn: sqlite3.Connection,
+    condition_id: str,
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Return ``(market_end_at, market_close_at)`` from the most recent snapshot
+    of ``condition_id`` that recorded a non-NULL ``market_end_at``, or
+    ``(None, None)`` when no such row exists.
+
+    Builders outside the Gamma-authoritative scan path (substrate-observer
+    captures, JIT pre-submit rows) do not themselves learn a market's end
+    boundary and persist NULL. Without this lookback, once a market's latest
+    snapshot comes from one of those builders it never regains an end boundary
+    and the resolved-market universe filter can never exclude it. Ignores
+    freshness/expiry: an old boundary fact is still the correct fact.
+    """
+    row = conn.execute(
+        """
+        SELECT market_end_at, market_close_at
+        FROM executable_market_snapshots
+        WHERE condition_id = ?
+          AND market_end_at IS NOT NULL
+        ORDER BY captured_at DESC
+        LIMIT 1
+        """,
+        (condition_id,),
+    ).fetchone()
+    if row is None:
+        return None, None
+    return _dt_parse(row[0]), _dt_parse(row[1])
+
+
 def executable_snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshot:
     """Public wrapper so callers outside this module can hydrate a snapshot row
     without importing the private ``_snapshot_from_row`` symbol."""

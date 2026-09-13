@@ -775,6 +775,7 @@ def _current_global_market_authority(
     raw_book_provider: (
         Callable[[], tuple[Mapping[str, object], datetime]] | None
     ) = None,
+    trade_conn: sqlite3.Connection | None = None,
 ) -> _CurrentGlobalMarketAuthority:
     """Capture exact current Gamma/CLOB/book submit authority.
 
@@ -1008,6 +1009,22 @@ def _current_global_market_authority(
         raw_gamma_hash = _sha256_json(dict(market))
         raw_clob_hash = _sha256_json(raw_clob_market)
         raw_book_hash = _sha256_json(dict(raw_book))
+        # This substrate-observer capture has no Gamma-scan end-boundary fact of
+        # its own. Left as None, a resolved market whose latest snapshot came
+        # from this builder never leaves the executable universe. Carry the
+        # boundary forward from the most recent prior snapshot that recorded
+        # one; fail-soft to None (unchanged behaviour) on any lookup failure.
+        known_market_end_at: datetime | None = None
+        known_market_close_at: datetime | None = None
+        if trade_conn is not None:
+            try:
+                from src.state.snapshot_repo import latest_known_market_bounds
+
+                known_market_end_at, known_market_close_at = (
+                    latest_known_market_bounds(trade_conn, condition_id)
+                )
+            except Exception:  # noqa: BLE001 - fail-soft: never block authority on a read
+                known_market_end_at, known_market_close_at = None, None
         snapshot = ExecutableMarketSnapshot(
             snapshot_id=_sha256_json(
                 (
@@ -1034,8 +1051,8 @@ def _current_global_market_authority(
             closed=bool(market_closed),
             accepting_orders=True,
             market_start_at=None,
-            market_end_at=None,
-            market_close_at=None,
+            market_end_at=known_market_end_at,
+            market_close_at=known_market_close_at,
             sports_start_at=None,
             min_tick_size=min_tick,
             min_order_size=min_order_size,
@@ -14130,6 +14147,7 @@ def _submit_current_global_sell(
                         captured_at_utc=None,
                         timeout=timeout,
                         raw_book_provider=_capture_final_sell_book,
+                        trade_conn=trade_conn,
                     )
                 except ValueError as rest_exc:
                     if not _is_global_jit_authority_failure(str(rest_exc)):
@@ -15474,6 +15492,7 @@ def _global_preflight_entry_jit_receipt(
                     raw_book=raw_book,
                     captured_at_utc=jit[3],
                     timeout=timeout,
+                    trade_conn=trade_conn,
                 )
             current_candidate = _global_buy_candidate_from_raw_book(
                 candidate,
