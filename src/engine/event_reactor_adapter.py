@@ -34379,6 +34379,27 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 )
             if exposure_by_bin:
                 return exposure_by_bin
+        except sqlite3.OperationalError as exc:
+            # The held-position monitor reclaims this connection's write path by
+            # calling Connection.interrupt() on it (see
+            # _global_preflight_sqlite_fence, which fences exactly this
+            # held_position_conn alongside world/forecast/trade during winner
+            # preflight). That call raises this OperationalError with no other
+            # shape available to distinguish it, so propagate it UNCHANGED: the
+            # fence's own preflight_fence.interrupt_reason authority then
+            # classifies it as the existing "cancelled" cut-preemption
+            # (GLOBAL_SELECTION_CANCELLED / DEFERRED_PREEMPTED) instead of a
+            # fabricated exposure failure. Every other OperationalError (locked,
+            # disk I/O, malformed) still fails closed below.
+            if (
+                getattr(exc, "sqlite_errorcode", None)
+                == getattr(sqlite3, "SQLITE_INTERRUPT", 9)
+                or "interrupted" in str(exc).lower()
+            ):
+                raise
+            raise RuntimeError(
+                f"EDLI_SELECTION_EXPOSURE_UNAVAILABLE:{type(exc).__name__}:{exc}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - exposure ambiguity must not flatten live risk.
             raise RuntimeError(
                 f"EDLI_SELECTION_EXPOSURE_UNAVAILABLE:{type(exc).__name__}:{exc}"

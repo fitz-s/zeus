@@ -1950,6 +1950,122 @@ def test_selection_exposure_fails_closed_when_trade_db_truth_unreadable():
         )
 
 
+def _readable_position_current_conn():
+    """A real in-memory conn with the full exposure-query column set, no rows."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                direction TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_cost_basis_usd REAL
+            )
+        """
+    )
+    return conn
+
+
+class _FailOnExposureSelectConn:
+    """Forwards schema PRAGMAs to a real conn; injects one error on the exposure SELECT.
+
+    Mirrors production: the held-position monitor's Connection.interrupt() lands
+    on the in-flight statement (the row-scanning exposure SELECT), not on the
+    near-instant PRAGMA table_info schema probe _position_current_columns runs
+    first. A blanket-failing stub conn would raise during that probe instead
+    and get misclassified as OPEN_POSITION_TRUTH_UNAVAILABLE before this test's
+    target exception handler ever runs.
+    """
+
+    def __init__(self, real_conn, error):
+        self._real = real_conn
+        self._error = error
+
+    def execute(self, sql, params=()):
+        if "FROM position_current" in sql:
+            raise self._error
+        return self._real.execute(sql, params)
+
+
+def test_selection_exposure_propagates_held_monitor_interrupt_unwrapped():
+    """A held-position-monitor interrupt() on this read must not become a failure.
+
+    _global_preflight_sqlite_fence fences held_position_conn (alongside world/
+    forecast/trade) during winner preflight and calls Connection.interrupt() on
+    it to reclaim the write path for an exact held-SELL monitor cut. Python's
+    sqlite3 module raises this exact OperationalError with no other typed shape
+    available here; wrapping it as EDLI_SELECTION_EXPOSURE_UNAVAILABLE would
+    hide the fence's own ``interrupt_reason`` authority, which classifies the
+    same signal as GLOBAL_SELECTION_CANCELLED / DEFERRED_PREEMPTED one frame up
+    — reporting a benign by-design preemption as a broken cut.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    conn = _FailOnExposureSelectConn(
+        _readable_position_current_conn(),
+        sqlite3.OperationalError("interrupted"),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
+def test_selection_exposure_still_fails_closed_when_locked_not_interrupted():
+    """A genuine 'database is locked' OperationalError must still fail closed.
+
+    Only the held-position-monitor's Connection.interrupt() signal is a
+    designed preemption. Every other OperationalError (locked, disk I/O,
+    malformed) must keep raising EDLI_SELECTION_EXPOSURE_UNAVAILABLE so live
+    risk never flattens to an empty baseline.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    conn = _FailOnExposureSelectConn(
+        _readable_position_current_conn(),
+        sqlite3.OperationalError("database is locked"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="EDLI_SELECTION_EXPOSURE_UNAVAILABLE:OperationalError:database is locked",
+    ):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
 # ===========================================================================
 # BLOCKER 5 — the spine->legacy overlay must write one coherent qkernel-selected
 # probability authority into the proof fields consumed by receipts, submit, monitor, and
