@@ -2825,6 +2825,8 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
 
     conn = _Connection()
     sentinel_vector = object()
+    sentinel_current_state = object()
+    current_state_calls: dict[str, object] = {}
     monkeypatch.setattr(
         config_mod,
         "runtime_cities_by_name",
@@ -2832,6 +2834,14 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
     )
     monkeypatch.setattr(
         vectors_mod, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
+    )
+
+    def _read_current_state(**kwargs):
+        current_state_calls.update(kwargs)
+        return sentinel_current_state
+
+    monkeypatch.setattr(
+        vectors_mod, "read_day0_current_temperature_state", _read_current_state
     )
 
     def _read_vectors(**kwargs):
@@ -2860,6 +2870,11 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
     )
 
     assert reason == queue_mod._DAY0_CARRIER_VECTOR_MISSING_REASON
+    assert current_state_calls["conn"] is conn
+    assert current_state_calls["target_date"] == "2099-09-03"
+    assert current_state_calls["decision_time"] == datetime(
+        2099, 9, 3, 17, 16, tzinfo=timezone.utc
+    )
     assert calls["city"] == "Austin"
     assert calls["target_date"] == "2099-09-03"
     assert calls["expected_models"] == ("ecmwf_ifs",)
@@ -2890,6 +2905,127 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
         )
         is None
     )
+
+
+# Shared scalar inputs for the preflight/child parity tests below: one real
+# forecasts-DB city (NYC), so the same day0_hourly_models_for_city and
+# target-local-day-window checks the production preflight runs are exercised
+# for real rather than mocked out, isolating just the current-temperature-
+# state gate under test.
+_DAY0_CURRENT_TEMPERATURE_STATE_GATE_INPUTS = {
+    "city": "NYC",
+    "target_date": "2026-06-10",
+    "temperature_metric": "high",
+    "computed_at": "2026-06-10T19:45:00+00:00",
+    "day0_observed_extreme_source": "aviationweather_metar",
+    "day0_observed_extreme_observation_time": "2026-06-10T19:00:00+00:00",
+    "day0_observed_extreme_c": 25.0,
+}
+
+
+def _create_observation_prints_table(forecast_db: Path) -> None:
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.execute(
+            """CREATE TABLE observation_prints (
+                id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+                source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+                unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+            )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("subject", ["preflight", "child"])
+def test_day0_carrier_current_temperature_state_missing_declines_identically(
+    tmp_path, subject
+) -> None:
+    """The queue-side preflight is documented as the child's twin. On a missing
+    current-temperature-state, both must decline with the exact SAME reason
+    string, from the SAME scalar inputs, against the SAME forecasts DB — a
+    future edit to only one side must fail this test. Must FAIL on the parent
+    (pre-fix) preflight, which never calls this precondition."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_forecast_materializer as materializer
+
+    forecast_db = tmp_path / "forecasts.db"
+    _create_observation_prints_table(forecast_db)  # empty: no current state
+
+    inputs = _DAY0_CURRENT_TEMPERATURE_STATE_GATE_INPUTS
+    expected_reason = (
+        "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING"
+    )
+
+    if subject == "preflight":
+        reason = queue_mod._day0_carrier_vector_preflight_reason(
+            forecast_db=forecast_db, payload=dict(inputs)
+        )
+        assert reason == expected_reason
+        assert (
+            reason
+            == queue_mod._DAY0_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING_REASON
+        )
+    else:
+        request = types.SimpleNamespace(
+            city=inputs["city"],
+            target_date=inputs["target_date"],
+            computed_at=inputs["computed_at"],
+            day0_observed_extreme_observation_time=inputs[
+                "day0_observed_extreme_observation_time"
+            ],
+        )
+        conn = sqlite3.connect(forecast_db)
+        try:
+            with pytest.raises(ValueError, match=expected_reason):
+                materializer._day0_noaa_future_vector_members(
+                    conn, request, metric="high"
+                )
+        finally:
+            conn.close()
+
+
+def test_day0_carrier_vector_preflight_passes_through_when_current_temperature_state_present(
+    tmp_path, monkeypatch
+) -> None:
+    """When the current-temperature-state precondition IS satisfied, the
+    preflight must fall through unchanged to its existing vector-bundle check
+    (not decline on the new gate)."""
+    import src.data.day0_hourly_vectors as vectors_mod
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    _create_observation_prints_table(forecast_db)
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.execute(
+            "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                1, "NYC", "KLGA", "aviationweather_metar",
+                "2026-06-10T19:30:00+00:00", 26.0, "C",
+                "2026-06-10T19:35:00+00:00",
+                "METAR KLGA 101930Z 18008KT 10SM CLR 26/16 A2998 T02560161",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        vectors_mod,
+        "read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: [object()],
+    )
+    monkeypatch.setattr(
+        vectors_mod, "remaining_day_extremes_c", lambda _vectors, **_kwargs: [26.5]
+    )
+
+    reason = queue_mod._day0_carrier_vector_preflight_reason(
+        forecast_db=forecast_db,
+        payload=dict(_DAY0_CURRENT_TEMPERATURE_STATE_GATE_INPUTS),
+    )
+    assert reason is None
 
 
 def test_materialization_queue_can_defer_seed_preparation_for_requests(
@@ -6363,6 +6499,190 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
     assert third.status == "PROCESSED"
     assert third.failed_count == 0
     assert len(spawned) == 2
+
+
+def test_blocked_current_temperature_state_decline_reevaluates_when_a_print_lands(
+    tmp_path, monkeypatch
+) -> None:
+    """A DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING decline
+    must re-arm once the METAR/HKO print that resolves it lands -- the blocked-
+    attempt fingerprint must not stay parked on unrelated DB-state proxies while
+    the actual precondition source (observation_prints) moves underneath it.
+    Must FAIL before day0_current_temperature_state_identity is added as a
+    fingerprint component: without it, wake 3 stays SKIPPED_UNCHANGED_BLOCKED_INPUT
+    forever, even after the print lands."""
+    import src.data.day0_hourly_vectors as vectors_mod
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    # Hold every OTHER blocked-attempt-fingerprint raw fact constant across all
+    # three wakes, so only the current-temperature-state component (real DB
+    # reads, no mock) can move the hash -- isolating the exact mechanism the
+    # review flagged.
+    monkeypatch.setattr(
+        queue_mod, "_source_clock_missing_configured_sources", lambda *_a, **_k: ()
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "read_current_instrument_frontier_identity",
+        lambda *_a, **_k: {"revision": "constant"},
+    )
+    monkeypatch.setattr(
+        queue_mod, "current_value_serving_schema", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(weights, "scheme_for_city", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        input_hwm, "_latest_eligible_ensemble_input_mark", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        queue_mod, "_seed_source_cycle_boundary", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+
+    base_request = {
+        "city": "NYC",
+        "target_date": "2026-06-10",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-10T06:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "80F"}],
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-06-10T19:00:00+00:00",
+        "day0_observed_extreme_c": 25.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    input_json = request_dir / "NYC.2026-06-10.high.json"
+
+    def _must_not_spawn(_argv):
+        raise AssertionError(
+            "must not spawn while current-temperature-state is unresolved"
+        )
+
+    # Wake 1: no print yet -- preflight declines for the new reason, marker written.
+    input_json.write_text(
+        json.dumps({**base_request, "computed_at": "2026-06-10T19:45:00+00:00"}),
+        encoding="utf-8",
+    )
+    first = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=forecast_db,
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_must_not_spawn,
+    )
+    assert first.status == "PROCESSED"
+    assert first.failed_count == 0
+    # Check the per-request receipt (always carries the exact preflight_reason)
+    # rather than the batch-level summary, so this assertion is independent of
+    # how the batch summary happens to aggregate distinct reasons.
+    first_receipt = json.loads(
+        next((tmp_path / "blocked_latest").glob("*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING"
+        in first_receipt["reason_codes"]
+    )
+
+    # Wake 2: re-enqueued with a later computed_at, still NO print -- an
+    # unrelated re-enqueue must stay suppressed (SKIPPED_UNCHANGED_BLOCKED_INPUT),
+    # not re-decline, not spawn.
+    input_json.write_text(
+        json.dumps({**base_request, "computed_at": "2026-06-10T19:50:00+00:00"}),
+        encoding="utf-8",
+    )
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=forecast_db,
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_must_not_spawn,
+    )
+    assert second.status == "PROCESSED"
+    assert queue_mod._UNCHANGED_BLOCKED_SKIP_REASON in second.reason_codes
+    skipped_receipt = next((tmp_path / "blocked_latest").glob("*.json"))
+    assert (
+        json.loads(skipped_receipt.read_text(encoding="utf-8"))["status"]
+        == "SKIPPED_UNCHANGED_BLOCKED_INPUT"
+    )
+
+    # The METAR print that satisfies the precondition lands.
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1, "NYC", "KLGA", "aviationweather_metar",
+            "2026-06-10T19:52:00+00:00", 26.0, "C",
+            "2026-06-10T19:53:00+00:00",
+            "METAR KLGA 101952Z 18008KT 10SM CLR 26/16 A2998 T02560161",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    # Isolate JUST the current-temperature-state gate: mock the (unrelated,
+    # untouched) vector-bundle check so the preflight passes through cleanly
+    # once the state is present.
+    monkeypatch.setattr(
+        vectors_mod, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [object()]
+    )
+    monkeypatch.setattr(
+        vectors_mod, "remaining_day_extremes_c", lambda _vectors, **_kwargs: [26.5]
+    )
+    spawned: list[str] = []
+
+    def _record_spawn(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="{}\n", stderr="")
+
+    # Wake 3: same scope, later computed_at, print now present -- must NOT be
+    # short-circuited by the stale fingerprint; must reach the materializer.
+    input_json.write_text(
+        json.dumps({**base_request, "computed_at": "2026-06-10T19:55:00+00:00"}),
+        encoding="utf-8",
+    )
+    third = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=forecast_db,
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_record_spawn,
+    )
+    assert third.status == "PROCESSED"
+    assert len(spawned) == 1
+    assert queue_mod._UNCHANGED_BLOCKED_SKIP_REASON not in third.reason_codes
+    assert (
+        "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING"
+        not in third.reason_codes
+    )
 
 
 def test_blocked_source_clock_request_retries_only_on_new_provider_family(
