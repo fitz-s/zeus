@@ -49,6 +49,7 @@ INV-37: the producer WRITE is single-DB (trades.db only) via ``get_trade_connect
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -106,21 +107,36 @@ def _market_substrate_broad_turnstile():
 
 
 def _substrate_snapshot_trade_write_context_factory(owner: str):
-    def _factory():
+    def _factory(conn: sqlite3.Connection):
         from src.state.write_coordinator import (
             DBIdentity,
             WritePriority,
+            bounded_sqlite_write,
             default_runtime_write_coordinator,
         )
 
-        return default_runtime_write_coordinator().lease(
-            (DBIdentity.TRADE,),
-            owner=owner,
-            write_class="live",
-            priority=WritePriority.RECOVERY_CRITICAL,
-            deadline_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-        )
+        @contextlib.contextmanager
+        def _bounded_lease():
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.TRADE,),
+                owner=owner,
+                write_class="live",
+                priority=WritePriority.RECOVERY_CRITICAL,
+                deadline_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+            ) as lease:
+                # R-AD precedent (2a1e15c1d): .lease() alone only RECORDS
+                # max_hold_ms in telemetry -- bounded_sqlite_write is the
+                # primitive that actually enforces it (busy_timeout=0 fence +
+                # WriteLeaseTimeout on a remaining-budget breach).
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+                ):
+                    yield lease
+
+        return _bounded_lease()
 
     return _factory
 
@@ -128,21 +144,32 @@ def _substrate_snapshot_trade_write_context_factory(owner: str):
 def _substrate_background_snapshot_trade_write_context_factory(owner: str):
     """Return the explicit fast-yield context for broad substrate capture only."""
 
-    def _factory():
+    def _factory(conn: sqlite3.Connection):
         from src.state.write_coordinator import (
             DBIdentity,
             WritePriority,
+            bounded_sqlite_write,
             default_runtime_write_coordinator,
         )
 
-        return default_runtime_write_coordinator().lease(
-            (DBIdentity.TRADE,),
-            owner=owner,
-            write_class="live",
-            priority=WritePriority.BACKGROUND_RECOVERY,
-            deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-        )
+        @contextlib.contextmanager
+        def _bounded_lease():
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.TRADE,),
+                owner=owner,
+                write_class="live",
+                priority=WritePriority.BACKGROUND_RECOVERY,
+                deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+            ) as lease:
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+                ):
+                    yield lease
+
+        return _bounded_lease()
 
     return _factory
 

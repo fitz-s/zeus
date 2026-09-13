@@ -280,6 +280,13 @@ def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
             commit_records.append(kwargs)
 
     class _PersistContext:
+        def __init__(self, _conn) -> None:
+            # X-AO 2026-09-13: persist_context_factory is now called with the
+            # snapshot connection (bounded_sqlite_write needs it); this fake
+            # accepts and ignores it, same as production factories that do
+            # their own bounded_sqlite_write wrapping around this shape.
+            pass
+
         def __enter__(self):
             events.append("enter")
             return _FakeLease()
@@ -525,11 +532,21 @@ def test_background_substrate_factory_uses_monitor_aware_priority(monkeypatch):
 
     observed: list[object] = []
 
+    class _FakeLease:
+        def __init__(self) -> None:
+            self.acquired_at = time.monotonic()
+
+        def record_stage(self, _stage) -> None:
+            pass
+
+        def record_sqlite_error(self, _exc, *, stage) -> None:
+            pass
+
     class _Coordinator:
         @contextlib.contextmanager
         def lease(self, _dbs, **kwargs):
             observed.append(kwargs["priority"])
-            yield
+            yield _FakeLease()
 
     monkeypatch.setattr(
         write_coordinator,
@@ -539,7 +556,7 @@ def test_background_substrate_factory_uses_monitor_aware_priority(monkeypatch):
 
     with substrate_observer._substrate_background_snapshot_trade_write_context_factory(
         "substrate_pending_family_background_capture"
-    )():
+    )(sqlite3.connect(":memory:")):
         pass
 
     assert observed == [WritePriority.BACKGROUND_RECOVERY]
@@ -776,3 +793,180 @@ def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatc
     monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "2.25")
 
     assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(2.25)
+
+
+# ---------------------------------------------------------------------------
+# X-AO 2026-09-13: the coordinator-level hold-time budget is now actually
+# enforced (R-AD precedent 2a1e15c1d) instead of only recorded in telemetry.
+# Live evidence: F_GETLK sample showed substrate_observer_daemon holding the
+# real SQLite write lock 24.8s/300s including one continuous 5.0s hold; the
+# root cause (an unindexed anchor-exclusion scan running inside insert_snapshot's
+# already-open write transaction) is fixed separately in snapshot_repo.py.
+# These tests cover the independent, complementary fix: a genuine SQLite BUSY
+# collision under either factory must now fail fast as WriteLeaseTimeout,
+# never hang behind the connection's ordinary 30s busy_timeout, and must
+# leave no partial row -- the deferred work simply retries next cycle.
+# ---------------------------------------------------------------------------
+
+
+def _hold_real_write_lock(db_path, *, lock_held, release_lock) -> threading.Thread:
+    """Start a background thread holding the real SQLite WAL write lock."""
+
+    def _run() -> None:
+        other = sqlite3.connect(str(db_path), timeout=30)
+        other.execute("PRAGMA journal_mode=WAL")
+        other.execute("PRAGMA busy_timeout = 30000")
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("INSERT INTO _lock_probe (v) VALUES (1)")
+        lock_held.set()
+        assert release_lock.wait(timeout=2.0)
+        other.commit()
+        other.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_substrate_snapshot_factory_enforces_bounded_sqlite_write_on_busy(tmp_path):
+    """A real BUSY collision under the (foreground) factory fails fast as
+    WriteLeaseTimeout, not a raw sqlite3.OperationalError, and not after
+    waiting out the connection's ordinary 30s busy_timeout."""
+    from src.data import substrate_observer
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                write_coordinator,
+                "default_runtime_write_coordinator",
+                lambda: coordinator,
+            )
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            started = time.monotonic()
+            with pytest.raises(WriteLeaseTimeout):
+                with substrate_observer._substrate_snapshot_trade_write_context_factory(
+                    "substrate_pending_family_snapshot_refresh"
+                )(conn):
+                    conn.execute("INSERT INTO _lock_probe (v) VALUES (2)")
+            elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+    assert elapsed < 1.0, f"BUSY collision should fail fast, took {elapsed:.3f}s"
+    # No partial row: the failed INSERT never committed.
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 2").fetchone()[0]
+    verify_conn.close()
+    assert count == 0, "a BUSY-interrupted write must leave no partial row"
+    conn.close()
+
+
+def test_substrate_background_snapshot_factory_enforces_bounded_sqlite_write_on_busy(tmp_path):
+    """Same BUSY-fail-fast contract for the BACKGROUND_RECOVERY factory."""
+    from src.data import substrate_observer
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                write_coordinator,
+                "default_runtime_write_coordinator",
+                lambda: coordinator,
+            )
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            started = time.monotonic()
+            with pytest.raises(WriteLeaseTimeout):
+                with substrate_observer._substrate_background_snapshot_trade_write_context_factory(
+                    "substrate_pending_family_background_capture"
+                )(conn):
+                    conn.execute("INSERT INTO _lock_probe (v) VALUES (3)")
+            elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+    assert elapsed < 1.0, f"BUSY collision should fail fast, took {elapsed:.3f}s"
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 3").fetchone()[0]
+    verify_conn.close()
+    assert count == 0, "a BUSY-interrupted write must leave no partial row"
+    conn.close()
+
+
+def test_substrate_snapshot_factory_recovers_next_cycle_after_lock_release(tmp_path):
+    """After the deferred cycle's WriteLeaseTimeout, the NEXT attempt (once the
+    real lock is released) succeeds normally -- 'not captured this cycle,
+    retried next', the same outcome the snapshot lane already uses for any
+    other BUSY-classified failure (see
+    test_background_warm_capture_fast_yields_then_retries_after_lock_release)."""
+    from src.data import substrate_observer
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            write_coordinator,
+            "default_runtime_write_coordinator",
+            lambda: coordinator,
+        )
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+
+        with pytest.raises(WriteLeaseTimeout):
+            with substrate_observer._substrate_snapshot_trade_write_context_factory(
+                "substrate_pending_family_snapshot_refresh"
+            )(conn):
+                conn.execute("INSERT INTO _lock_probe (v) VALUES (4)")
+
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+        # The connection's busy_timeout is restored (bounded_sqlite_write's own
+        # contract) and the lease is free again -- the retry succeeds cleanly.
+        with substrate_observer._substrate_snapshot_trade_write_context_factory(
+            "substrate_pending_family_snapshot_refresh"
+        )(conn):
+            conn.execute("INSERT INTO _lock_probe (v) VALUES (4)")
+            conn.commit()
+
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 4").fetchone()[0]
+    verify_conn.close()
+    assert count == 1, "the retried cycle must persist exactly once"
+    conn.close()

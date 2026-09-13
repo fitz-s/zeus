@@ -85,45 +85,56 @@ _SNAPSHOT_ANCHOR_EXCEPT_CLAUSE = """
 """
 
 
-def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None:
-    """Cadence-gated inline retention for executable_market_snapshots.
+class _InlineExpirePlan:
+    """Pre-computed inline-retention candidates: read-only outcome, no DB writes."""
 
-    Never raises -- a bug here must not block a legitimate snapshot write;
-    failures roll back only this helper's SAVEPOINT and are logged, leaving
-    the caller's own transaction and the append-only trigger untouched.
+    __slots__ = ("ids", "trigger_sql")
+
+    def __init__(self, ids: tuple[str, ...], trigger_sql: str) -> None:
+        self.ids = ids
+        self.trigger_sql = trigger_sql
+
+
+def _inline_expire_plan(
+    conn: sqlite3.Connection,
+    *,
+    predicted_rowid: int,
+    just_inserted_id: str | None,
+) -> "_InlineExpirePlan | None":
+    """Read-only: decide whether inline retention is due, and if so, exactly
+    which snapshot_ids to delete.
+
+    T-mirrorlease / X-AO (2026-09-13): this candidate scan (the
+    venue_commands/position_events anchor-exclusion query in particular) must
+    run BEFORE the caller's INSERT opens its implicit write transaction --
+    once a connection has taken the real SQLite write lock, every later
+    statement on that SAME connection, including a plain SELECT, continues to
+    hold that lock until COMMIT/ROLLBACK (memory: a read inside an
+    already-open write transaction still holds the lock for its own
+    duration). Never raises -- a bug here must degrade to "no expiry this
+    call", not block a legitimate snapshot write.
     """
     try:
-        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        if rowid is None or int(rowid) % _SNAPSHOT_INLINE_EXPIRE_THROTTLE != 0:
-            return
+        if predicted_rowid <= 0 or predicted_rowid % _SNAPSHOT_INLINE_EXPIRE_THROTTLE != 0:
+            return None
 
-        # Candidate discovery must remain index-bounded while the caller owns
-        # the live snapshot write lease.  The one-time retention migration
-        # creates this index before deleting backlog; a live DB that has not
-        # completed that prerequisite must skip inline expiry instead of
-        # scanning the append table under SQLite's single-writer transaction.
-        # On a large canonical DB that scan can retain the writer for minutes,
-        # starving held-position decisions and collateral refreshes.
+        # Candidate discovery must remain index-bounded. The one-time retention
+        # migration creates this index before deleting backlog; a live DB that
+        # has not completed that prerequisite must skip inline expiry instead
+        # of scanning the append table.  On a large canonical DB that scan can
+        # take seconds, starving held-position decisions and collateral
+        # refreshes if it ran while a write lock were held -- it no longer
+        # does, but the index bound is kept as defense in depth regardless.
         cutoff_index_columns = conn.execute(
             f"PRAGMA index_info({_SNAPSHOT_CUTOFF_INDEX_NAME!r})"
         ).fetchall()
         if not cutoff_index_columns or str(cutoff_index_columns[0][2]) != "captured_at":
             logger.warning(
-                "_inline_expire_executable_market_snapshots: required cutoff "
-                "index %s is unavailable; skipping unbounded live-writer scan",
+                "_inline_expire_plan: required cutoff index %s is unavailable; "
+                "skipping unbounded scan",
                 _SNAPSHOT_CUTOFF_INDEX_NAME,
             )
-            return
-
-        # The row just inserted by this same call (rowid = last_insert_rowid())
-        # is excluded below so a legitimately old-timestamped write (e.g. a
-        # backfill/catch-up insert) is never deleted by the very insert that
-        # created it.
-        just_inserted = conn.execute(
-            "SELECT snapshot_id FROM executable_market_snapshots WHERE rowid = ?",
-            (rowid,),
-        ).fetchone()
-        just_inserted_id = just_inserted[0] if just_inserted is not None else None
+            return None
 
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_KEEP_DAYS)
@@ -142,7 +153,7 @@ def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None
         if just_inserted_id is not None:
             params += (just_inserted_id,)
         params += (_SNAPSHOT_INLINE_EXPIRE_LIMIT,)
-        ids = [
+        ids = tuple(
             row[0]
             for row in conn.execute(
                 f"""
@@ -155,9 +166,9 @@ def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None
                 """,
                 params,
             ).fetchall()
-        ]
+        )
         if not ids:
-            return
+            return None
 
         trigger_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?",
@@ -165,27 +176,45 @@ def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None
         ).fetchone()
         if trigger_row is None or not trigger_row[0]:
             logger.warning(
-                "_inline_expire_executable_market_snapshots: append-only delete "
-                "trigger %s is missing; skipping this firing",
+                "_inline_expire_plan: append-only delete trigger %s is missing; "
+                "skipping this firing",
                 _SNAPSHOT_DELETE_TRIGGER_NAME,
             )
-            return
-        trigger_sql = trigger_row[0]
+            return None
+        return _InlineExpirePlan(ids=ids, trigger_sql=trigger_row[0])
+    except Exception:  # noqa: BLE001 - a planning bug must never block a real write
+        logger.exception("_inline_expire_plan failed (no expiry this call)")
+        return None
 
+
+def _apply_inline_expire_plan(
+    conn: sqlite3.Connection, plan: "_InlineExpirePlan | None"
+) -> None:
+    """Write-only: apply an already-computed plan inside the caller's open
+    write transaction. Bounded to len(plan.ids) <= _SNAPSHOT_INLINE_EXPIRE_LIMIT
+    deletes by primary key -- no scan, safe to run while the write lock is held.
+
+    Never raises -- a bug here must not block a legitimate snapshot write;
+    failures roll back only this helper's SAVEPOINT and are logged, leaving
+    the caller's own transaction and the append-only trigger untouched.
+    """
+    if plan is None:
+        return
+    try:
         conn.execute("SAVEPOINT inline_snapshot_expire")
         try:
             conn.execute(f"DROP TRIGGER {_SNAPSHOT_DELETE_TRIGGER_NAME}")
-            placeholders = ",".join("?" for _ in ids)
+            placeholders = ",".join("?" for _ in plan.ids)
             conn.execute(
                 f"DELETE FROM executable_market_snapshots WHERE snapshot_id IN ({placeholders})",
-                ids,
+                plan.ids,
             )
             changed = conn.execute("SELECT changes()").fetchone()[0]
-            if int(changed) != len(ids):
+            if int(changed) != len(plan.ids):
                 raise RuntimeError(
-                    f"inline snapshot expire changes() mismatch: expected {len(ids)}, got {changed}"
+                    f"inline snapshot expire changes() mismatch: expected {len(plan.ids)}, got {changed}"
                 )
-            conn.execute(trigger_sql)
+            conn.execute(plan.trigger_sql)
             conn.execute("RELEASE inline_snapshot_expire")
         except BaseException:
             conn.execute("ROLLBACK TO inline_snapshot_expire")
@@ -198,7 +227,36 @@ def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None
         # database-wide, not specific to the trigger-guarded delete above.
         conn.execute("PRAGMA incremental_vacuum(1000)")
     except Exception:  # noqa: BLE001 - inline expiry must never block a real write
+        logger.exception("_apply_inline_expire_plan failed (write unaffected)")
+
+
+def _inline_expire_executable_market_snapshots(conn: sqlite3.Connection) -> None:
+    """Cadence-gated inline retention for executable_market_snapshots.
+
+    Standalone entry point: reads ``last_insert_rowid()`` for callers that run
+    this AFTER a row already exists on ``conn`` (e.g. this module's own test
+    suite, or any future caller that has not adopted the hold-bounded split
+    below). ``insert_snapshot`` itself does NOT call this -- it calls
+    ``_inline_expire_plan`` before its INSERT and ``_apply_inline_expire_plan``
+    after, so the candidate scan never runs while it holds the real SQLite
+    write lock. Never raises.
+    """
+    try:
+        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        if rowid is None:
+            return
+        just_inserted = conn.execute(
+            "SELECT snapshot_id FROM executable_market_snapshots WHERE rowid = ?",
+            (rowid,),
+        ).fetchone()
+        just_inserted_id = just_inserted[0] if just_inserted is not None else None
+    except Exception:  # noqa: BLE001 - inline expiry must never block a real write
         logger.exception("_inline_expire_executable_market_snapshots failed (write unaffected)")
+        return
+    plan = _inline_expire_plan(
+        conn, predicted_rowid=int(rowid), just_inserted_id=just_inserted_id
+    )
+    _apply_inline_expire_plan(conn, plan)
 
 # capture_policy_spec.md §2 full-capture trigger taxonomy. The DB column is
 # deliberately UNCONSTRAINED (a CHECK on ADD COLUMN full-scans the ~43GB live
@@ -455,6 +513,32 @@ def insert_snapshot(
             "value tier is enforced here at the write boundary."
         )
     row["capture_trigger"] = capture_trigger
+
+    # Plan inline retention BEFORE the INSERT below opens its implicit write
+    # transaction (T-mirrorlease / X-AO 2026-09-13): SQLite assigns a rowid
+    # tables's next rowid as max(rowid)+1 deterministically, so this predicts
+    # exactly the rowid the pending INSERT will receive -- safe because the
+    # caller already holds the exclusive per-DB write lease serializing every
+    # writer of this table.  When retention is due, the (occasionally
+    # multi-second) venue_commands/position_events anchor-exclusion scan runs
+    # HERE, as a plain autocommit read, never while the real SQLite write lock
+    # is held.  A failure here degrades to "no expiry this call" and never
+    # blocks the snapshot write itself.
+    try:
+        predicted_rowid = (
+            int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM executable_market_snapshots"
+                ).fetchone()[0]
+            )
+            + 1
+        )
+    except Exception:  # noqa: BLE001 - the INSERT below raises the real error if this table is broken
+        predicted_rowid = 0
+    expire_plan = _inline_expire_plan(
+        conn, predicted_rowid=predicted_rowid, just_inserted_id=snapshot.snapshot_id
+    )
+
     conn.execute(
         """
         INSERT INTO executable_market_snapshots (
@@ -487,7 +571,7 @@ def insert_snapshot(
     )
     if advance_latest:
         _upsert_latest_snapshot(conn, row)
-    _inline_expire_executable_market_snapshots(conn)
+    _apply_inline_expire_plan(conn, expire_plan)
 
 
 def compact_snapshot_id(snapshot: ExecutableMarketSnapshot) -> str:

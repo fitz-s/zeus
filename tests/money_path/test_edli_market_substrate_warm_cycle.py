@@ -876,11 +876,21 @@ def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypa
 
     observed: list[dict] = []
 
+    class _FakeLease:
+        def __init__(self) -> None:
+            self.acquired_at = time_module.monotonic()
+
+        def record_stage(self, _stage) -> None:
+            pass
+
+        def record_sqlite_error(self, _exc, *, stage) -> None:
+            pass
+
     class _Coordinator:
         @contextlib.contextmanager
         def lease(self, _dbs, **kwargs):
             observed.append(kwargs)
-            yield
+            yield _FakeLease()
 
     monkeypatch.setattr(
         write_coordinator,
@@ -890,7 +900,7 @@ def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypa
 
     with substrate_observer._substrate_snapshot_trade_write_context_factory(
         "substrate_pending_family_snapshot_refresh"
-    )():
+    )(sqlite3.connect(":memory:")):
         pass
 
     assert observed == [
@@ -923,9 +933,11 @@ def test_substrate_priority_snapshot_writer_waits_past_background_probe(
 
     def priority_writer() -> None:
         try:
+            # Opened in this thread: sqlite3 connections cannot cross threads.
+            priority_conn = sqlite3.connect(":memory:")
             with substrate_observer._substrate_snapshot_trade_write_context_factory(
                 "substrate_pending_family_snapshot_refresh"
-            )():
+            )(priority_conn):
                 acquired.set()
         except BaseException as exc:  # noqa: BLE001 - asserted below.
             errors.append(exc)

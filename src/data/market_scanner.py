@@ -3130,7 +3130,7 @@ def capture_executable_market_snapshot(
     clob_market_info_cache: dict[str, dict] | None = None,
     fee_details_cache: dict[str, dict[str, Any]] | None = None,
     tolerate_missing_book: bool = False,
-    persist_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    persist_context_factory: Callable[[sqlite3.Connection], contextlib.AbstractContextManager[object]] | None = None,
     commit_after_persist: bool = False,
     capture_trigger: str | None = None,
 ) -> dict[str, str | bool]:
@@ -3441,7 +3441,7 @@ def capture_executable_market_snapshot(
         depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )
     persist_context = (
-        persist_context_factory()
+        persist_context_factory(conn)
         if persist_context_factory is not None
         else contextlib.nullcontext()
     )
@@ -5002,8 +5002,8 @@ def refresh_executable_market_substrate_snapshots(
     force_refresh_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     priority_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
-    snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
-    background_snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    snapshot_write_context_factory: Callable[[sqlite3.Connection], contextlib.AbstractContextManager[object]] | None = None,
+    background_snapshot_write_context_factory: Callable[[sqlite3.Connection], contextlib.AbstractContextManager[object]] | None = None,
     background_fast_yield: bool = False,
     cooperative_write_busy_timeout_ms: int | None = None,
     capture_trigger_override: str | None = None,
