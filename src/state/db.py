@@ -142,6 +142,27 @@ _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
         "EXIT_ORDER_ID_MISSING",
     }
 )
+# The set of event types whose writers ever set phase_before != phase_after
+# into 'pending_exit' (a real transition, not a self-fold no-op). Derived
+# from every writer of position_events rows with phase_after='pending_exit':
+# src.state.canonical_write.transition_phase (the single writer for
+# pending_exit phase mutations; its only event_type values, across every
+# call site of its src.execution.exit_lifecycle shim, are EXIT_INTENT and
+# EXIT_ORDER_REJECTED) plus the two direct-INSERT peers in
+# src.execution.command_recovery and src.execution.exchange_reconcile that
+# also stamp EXIT_ORDER_POSTED / EXIT_INTENT. Every other writer that can
+# touch phase_after='pending_exit' folds phase_before to the same value by
+# construction (MONITOR_REFRESHED, CHAIN_SIZE_CORRECTED, the self-fold
+# REVIEW_REQUIRED / MANUAL_OVERRIDE_APPLIED call sites) or only releases OUT
+# of pending_exit (EXIT_RETRY_RELEASED's phase_after is always the
+# released-to phase, never pending_exit, by an explicit early-return guard).
+_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES = frozenset(
+    {
+        "EXIT_INTENT",
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_REJECTED",
+    }
+)
 _EXIT_STATE_HINT_VALUES = frozenset(state.value for state in ExitState if state.value)
 _TRANSITIONAL_HINT_EVENT_TYPES = frozenset(
     {
@@ -14355,29 +14376,47 @@ def _hydrate_pending_exit_pre_state_hints(
     spine records it as ``phase_before`` for exit-intent/reject events. Loader
     recovery must not be polluted by later no-op ``pending_exit -> pending_exit``
     events such as chain corrections.
+
+    Restricted to ``_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES`` (the only
+    event types whose writers ever carry a real, non-self phase transition
+    into pending_exit) so this walks the position's few real exit attempts
+    newest-first instead of every ``pending_exit -> pending_exit`` no-op
+    (MONITOR_REFRESHED refresh churn, chain-size corrections, retry
+    releases) that can vastly outnumber them for a long-lived position.
     """
 
     missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("pre_exit_state")]
     if not missing:
         return
+    transition_index = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ("idx_position_events_position_type_sequence",),
+    ).fetchone()
+    index_clause = (
+        " INDEXED BY idx_position_events_position_type_sequence"
+        if transition_index is not None
+        else ""
+    )
+    event_placeholders = ", ".join("?" for _ in _PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES)
     rows = []
     try:
         for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in missing):
             if not trade_id:
                 continue
             row = conn.execute(
-                """
+                f"""
                 SELECT position_id,
                        phase_before
-                  FROM position_events
+                  FROM position_events{index_clause}
                  WHERE position_id = ?
+                   AND event_type IN ({event_placeholders})
                    AND phase_after = 'pending_exit'
                    AND COALESCE(phase_before, '') != ''
                    AND phase_before != phase_after
                  ORDER BY sequence_no DESC
                  LIMIT 1
                 """,
-                (trade_id,),
+                (trade_id, *_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES),
             ).fetchone()
             if row is not None:
                 rows.append(row)

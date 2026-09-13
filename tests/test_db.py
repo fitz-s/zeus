@@ -2692,6 +2692,89 @@ def test_portfolio_loader_normalizes_active_pre_exit_state_for_runtime_position(
     assert position.pre_exit_state == "entered"
 
 
+def test_portfolio_loader_pre_exit_state_ignores_monitor_refreshed_noop_churn(tmp_path):
+    """A real EXIT_ORDER_POSTED transition must resolve even behind a wall of
+    later MONITOR_REFRESHED pending_exit -> pending_exit no-ops (the shape
+    that made the newest-first phase_after scan walk thousands of rows per
+    position on the live DB)."""
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "pending-exit-monitor-noise-loader.db")
+    init_schema(conn)
+    position_id = "pending-exit-monitor-noise-pos"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+        order_status="sell_pending_confirmation",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="EXIT_ORDER_POSTED",
+        status="sell_pending_confirmation",
+        occurred_at="2026-07-02T02:17:35+00:00",
+        sequence_no=1,
+        phase_before="active",
+        phase_after="pending_exit",
+    )
+    for offset in range(50):
+        _insert_status_position_event_for_view_test(
+            conn,
+            position_id=position_id,
+            event_type="MONITOR_REFRESHED",
+            status="monitor_refreshed",
+            occurred_at=f"2026-07-02T03:{offset:02d}:00+00:00",
+            sequence_no=2 + offset,
+            phase_before="pending_exit",
+            phase_after="pending_exit",
+        )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loaded = loader_view["positions"][0]
+    assert loaded["state"] == "pending_exit"
+    assert loaded["pre_exit_state"] == "entered"
+
+
+def test_portfolio_loader_pre_exit_state_empty_when_only_noop_rows_exist(tmp_path):
+    """No real transition into pending_exit exists (only self-fold no-ops),
+    so pre_exit_state must stay empty rather than resolving from a no-op
+    row's phase_before."""
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "pending-exit-only-noops-loader.db")
+    init_schema(conn)
+    position_id = "pending-exit-only-noops-pos"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+        order_status="sell_pending_confirmation",
+    )
+    for offset in range(5):
+        _insert_status_position_event_for_view_test(
+            conn,
+            position_id=position_id,
+            event_type="MONITOR_REFRESHED",
+            status="monitor_refreshed",
+            occurred_at=f"2026-07-02T03:{offset:02d}:00+00:00",
+            sequence_no=1 + offset,
+            phase_before="pending_exit",
+            phase_after="pending_exit",
+        )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loaded = loader_view["positions"][0]
+    assert loaded["state"] == "pending_exit"
+    assert loaded["pre_exit_state"] == ""
+
+
 def test_position_current_views_do_not_cap_full_open_fill_cost_to_projection(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,
