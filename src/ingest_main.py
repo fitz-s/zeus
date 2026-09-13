@@ -4448,9 +4448,12 @@ def _settlement_sigma_floor_refit_tick():
     ``_day0_diurnal_residual_refit_tick``'s reasoning for pinning explicit paths rather than the
     script's own repo-relative defaults.
 
-    Fails LOUD (raises) on a non-zero exit, a timeout, or an unreadable candidate artifact, so
-    ``_scheduler_job`` records a FAILED entry in scheduler_jobs_health.json -- this is a single
-    fitter with its own hard refusal gate, not the four-artifact fail-soft batch
+    Fails LOUD (raises) on a non-zero exit, a timeout, an unreadable candidate artifact, OR a
+    promotion gate that accepted ZERO cells (every overlapping cell carried forward, no new cell
+    added -- the written table would be byte-for-byte the incumbent, which a healthy refit never
+    produces since the MAD-sigma estimator moves with every residual) -- so ``_scheduler_job``
+    records a FAILED entry in scheduler_jobs_health.json in every one of those cases. This is a
+    single fitter with its own hard refusal gate, not the four-artifact fail-soft batch
     (``_artifact_refit_tick``). The live artifact is written only via tmp+``os.replace`` (atomic),
     so a failed or killed run never corrupts the prior artifact.
     """
@@ -4524,6 +4527,28 @@ def _settlement_sigma_floor_refit_tick():
             gate_meta["carried_forward_magnitude_count"],
             _SETTLEMENT_SIGMA_FLOOR_MAGNITUDE_RATIO,
             ", ".join(gate_meta["carried_forward_magnitude_keys"][:10]),
+        )
+
+    # FAIL LOUD when the gate accepted NOTHING (gate_meta["kept_new"] + ["kept_updated"] == 0):
+    # every overlapping candidate cell was carried forward and no new cell was added, so the
+    # written table would be byte-for-byte the incumbent. A healthy refit through new
+    # settlements never reproduces the incumbent exactly -- the MAD-sigma estimator moves with
+    # every residual added to the trailing window -- so a fully-carried-forward outcome means
+    # the fitter itself is broken (wrong DB path, schema drift, a unit/scale bug) rather than a
+    # quiet no-op. Without this check the tick would report SUCCESS to
+    # scheduler_jobs_health.json every day while freshness stayed silently defeated forever,
+    # with only a WARNING nobody alerts on as the trace. This is a parameter-free derivation
+    # (zero accepted == broken), not a fraction/ratio threshold that would need its own tuning.
+    accepted = gate_meta["kept_new"] + gate_meta["kept_updated"]
+    if accepted == 0:
+        raise RuntimeError(
+            f"settlement sigma-floor refit gate accepted 0 of {len(candidate_cells)} candidate "
+            f"cell(s) -- every overlapping cell was carried forward from the incumbent and no "
+            f"new cell was added (carried_forward_missing="
+            f"{gate_meta['carried_forward_missing_count']}, carried_forward_magnitude="
+            f"{gate_meta['carried_forward_magnitude_count']}). A refit through new settlements "
+            f"never reproduces the incumbent bit-for-bit; treating this as a broken fitter, not "
+            f"a healthy no-op."
         )
 
     merged = dict(candidate)

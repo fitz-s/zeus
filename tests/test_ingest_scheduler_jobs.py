@@ -1014,7 +1014,13 @@ class TestSettlementSigmaFloorRefitScheduled:
             captured["cmd"] = cmd
             captured["timeout"] = kwargs.get("timeout")
             out_path = Path(cmd[cmd.index("--out") + 1])
-            out_path.write_text(_json.dumps({"_meta": {}, "cells": {}}), encoding="utf-8")
+            # A non-empty candidate: an empty-cells candidate would trip the "gate accepted
+            # nothing" fail-loud check below (0 candidate cells -> 0 accepted), which is not
+            # what this test is exercising (path/argv wiring only).
+            out_path.write_text(
+                _json.dumps({"_meta": {}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.0, "n": 30}}}),
+                encoding="utf-8",
+            )
             return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
 
         with (
@@ -1138,6 +1144,102 @@ class TestSettlementSigmaFloorRefitScheduled:
             im._settlement_sigma_floor_refit_tick.__wrapped__()
 
         assert out_path.read_text(encoding="utf-8") == before_text
+
+    def test_gate_accepts_nothing_raises_and_is_recorded_as_failed(self, tmp_path) -> None:
+        """A broken fitter (wrong DB path, schema drift, an estimator bug) that still exits 0
+        but produces a candidate whose every overlapping cell is carried forward -- and no new
+        cell is added -- must FAIL LOUD, not report SUCCESS while quietly freezing the artifact
+        forever. Zero accepted == broken, not a healthy no-op (a real refit's MAD-sigma moves
+        with every residual, so it never reproduces the incumbent bit-for-bit)."""
+        import json as _json
+
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        incumbent = {
+            "_meta": {"asof": "2026-09-01"},
+            "cells": {"Steady|JJA|high": {"sigma_floor_c": 2.0, "n": 40}},
+        }
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        before_text = _json.dumps(incumbent)
+        out_path.write_text(before_text, encoding="utf-8")
+
+        # candidate's one overlapping cell is a 9x jump -- gated (carried forward), and it adds
+        # no new cell, so the accepted count is 0.
+        candidate = {
+            "_meta": {"asof": "2026-09-13"},
+            "cells": {"Steady|JJA|high": {"sigma_floor_c": 18.0, "n": 41}},
+        }
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text(_json.dumps(candidate), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._settlement_sigma_floor_refit_tick()
+
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_settlement_sigma_floor_refit"
+        assert kwargs["failed"] is True
+        assert "accepted 0" in kwargs["reason"]
+        # the incumbent artifact must be untouched -- the gate-rejects-everything raise happens
+        # before the write step, exactly like the min_global_n refusal.
+        assert out_path.read_text(encoding="utf-8") == before_text
+
+    def test_gate_accepts_one_cell_still_succeeds_with_warning_counts(self, tmp_path) -> None:
+        """A partially-gated refit (some cells carried forward, at least one accepted) is a
+        healthy day, not a failure -- the zero-accepted check must not over-fire on ordinary
+        gate activity."""
+        import json as _json
+
+        import src.ingest_main as im
+
+        incumbent = {
+            "_meta": {"asof": "2026-09-01"},
+            "cells": {
+                "Steady|JJA|high": {"sigma_floor_c": 2.0, "n": 40},
+                "Spiked|JJA|high": {"sigma_floor_c": 1.0, "n": 20},
+            },
+        }
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        out_path.write_text(_json.dumps(incumbent), encoding="utf-8")
+
+        candidate = {
+            "_meta": {"asof": "2026-09-13"},
+            "cells": {
+                "Steady|JJA|high": {"sigma_floor_c": 2.1, "n": 41},  # ordinary update -- accepted
+                "Spiked|JJA|high": {"sigma_floor_c": 9.0, "n": 21},  # 9x jump -- gated
+            },
+        }
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text(_json.dumps(candidate), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()  # must not raise
+
+        written = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert written["cells"]["Steady|JJA|high"]["sigma_floor_c"] == 2.1
+        assert written["cells"]["Spiked|JJA|high"] == incumbent["cells"]["Spiked|JJA|high"]
+        gate = written["_meta"]["refit_gate"]
+        assert gate["kept_updated"] == 1
+        assert gate["carried_forward_magnitude_count"] == 1
 
     def test_fitter_failure_raises_and_is_recorded_as_failed(self, tmp_path) -> None:
         import src.ingest_main as im
