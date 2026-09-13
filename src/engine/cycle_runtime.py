@@ -9992,6 +9992,9 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            protective_fak_redecision = should_exit and local_exit_trigger in {
+                "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD", "FLASH_CRASH_PANIC",
+            }
             if should_exit:
                 # Global redecision may choose an immediate FAK below the
                 # resting lot. Keep the share quantum here; the selected mode
@@ -10040,7 +10043,7 @@ def execute_monitoring_phase(
                     )
                 below_share_precision = held_shares > 0 and sellable_shares <= 0
                 below_min_order = (
-                    not statistical_sell_requires_global
+                    not (statistical_sell_requires_global or protective_fak_redecision)
                     and fresh_min_order is not None
                     and held_shares > 0
                     and held_shares < fresh_min_order
@@ -10078,6 +10081,26 @@ def execute_monitoring_phase(
                     )
                     summary["monitor_statistical_sell_dust_holds"] = (
                         summary.get("monitor_statistical_sell_dust_holds", 0) + 1
+                    )
+                elif (
+                    monitoring_non_executable_dust
+                    and protective_fak_redecision
+                    and sellable_shares > 0
+                    and not is_exit_cooldown_active(pos)
+                    and release_backoff_exhausted_pending_exit_for_redecision(
+                        pos, conn=conn, current_min_order_size=Decimal("0.01"),
+                        deadline_monotonic=position_deadline,
+                    )
+                ):
+                    # This is the effective lot for the newly proposed FAK,
+                    # not a change to snapshot.min_order_size. The release
+                    # verifies terminal/no EXIT commands; execute_exit still
+                    # has to build exact protective authority before submit.
+                    monitoring_non_executable_dust = False
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_dust_for_protective_fak"] = (
+                        summary.get("monitor_released_dust_for_protective_fak", 0) + 1
                     )
                 elif monitoring_non_executable_dust and fresh_min_order is None:
                     should_exit = False

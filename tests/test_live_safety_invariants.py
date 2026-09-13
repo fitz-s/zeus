@@ -7121,6 +7121,12 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     (
         ("EDGE_REVERSAL", True, True, "delegated", False, False),
         ("FLASH_CRASH_PANIC", True, True, "direct", False, False),
+        ("FLASH_CRASH_PANIC", True, True, "direct_small", False, False),
+        ("FLASH_CRASH_PANIC", True, True, "direct_dust", False, False),
+        ("FLASH_CRASH_PANIC", True, True, "direct_dust_open", False, False),
+        ("FLASH_CRASH_PANIC", True, True, "direct_dust_cooldown", False, False),
+        ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct_small", False, False),
+        ("RED_FORCE_EXIT", True, True, "direct_small", False, False),
         ("EDGE_REVERSAL", True, True, "lineage_upgrade", False, False),
         (
             "EDGE_REVERSAL",
@@ -7165,6 +7171,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     posterior_support_zero,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
+    from decimal import Decimal
+    from src.execution import exit_lifecycle
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime, monitor_refresh
     from src.engine.lifecycle_events import build_entry_canonical_write
@@ -7174,6 +7182,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     conn = get_connection(tmp_path / "global-auction-owns-monitor-sell.db")
     init_schema(conn)
+    small_protective = outcome.startswith("direct_")
     pos = _make_position(
         trade_id="global-auction-owned-sell",
         state="holding",
@@ -7186,14 +7195,14 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         order_posted_at="2026-07-14T16:59:00+00:00",
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
         shares=(
-            3.0
+            2.0 if small_protective else 3.0
             if outcome == "dust"
             else 0.002221
             if outcome == "sub_precision"
             else 500.0
         ),
         shares_filled=(
-            3.0
+            2.0 if small_protective else 3.0
             if outcome == "dust"
             else 0.002221
             if outcome == "sub_precision"
@@ -7201,7 +7210,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         ),
         chain_state="synced",
         chain_shares=(
-            3.0 if outcome == "dust" else 0.002221 if outcome == "sub_precision" else 500.0
+            2.0 if small_protective else 3.0 if outcome == "dust" else 0.002221 if outcome == "sub_precision" else 500.0
         ),
         token_id="paris-yes",
         no_token_id="paris-no",
@@ -7214,6 +7223,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         source_module="tests/test_current_global_monitor_sell_is_non_authoritative",
     )
     append_many_and_project(conn, events, projection)
+    if outcome.startswith("direct_dust"):
+        exit_lifecycle._mark_exit_dust_hold(
+            pos, reason="FLASH_CRASH_PANIC [DUST]",
+            error="executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
+            conn=conn,
+        )
+        monkeypatch.setattr(exit_lifecycle, "_latest_fresh_snapshot_min_order_for_token", lambda *_, **__: Decimal("5"))
+        if outcome == "direct_dust_open":
+            monkeypatch.setattr(exit_lifecycle, "_latest_exit_command_release_witness", lambda *_, **__: (False, "SUBMIT_REQUESTED"))
+        if outcome == "direct_dust_cooldown":
+            monkeypatch.setattr(exit_lifecycle, "is_exit_cooldown_active", lambda *_: True)
     portfolio = _make_portfolio(pos)
     if outcome == "lineage_upgrade":
         pos._held_sell_reauction_obligation = {
@@ -7259,7 +7279,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
-            5.0 if outcome == "dust" else None,
+            5.0 if outcome == "dust" or small_protective else None,
         )
         setattr(
             position,
@@ -7344,7 +7364,6 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
     )
     from src.engine import global_batch_runtime
-    from src.execution import exit_lifecycle
 
     if outcome == "lineage_upgrade":
         monkeypatch.setattr(
@@ -7358,7 +7377,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_fresh_snapshot_min_order",
-        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: Decimal("5") if outcome.startswith("direct_dust") else None,
     )
 
     coverage_checks = []
@@ -7520,7 +7539,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     monitor_now = (
         (lambda: datetime.now(timezone.utc))
-        if outcome == "sub_precision"
+        if outcome == "sub_precision" or outcome.startswith("direct_dust")
         else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
     )
 
@@ -7591,6 +7610,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert reserved_requests == []
         assert execute_calls == []
         assert event_order == ["canonical_monitor_refreshed"]
+    elif outcome in {"direct_dust_open", "direct_dust_cooldown"}:
+        assert execute_calls == []
+        assert summary["exits"] == 0
+        assert pos.exit_state == "backoff_exhausted"
+        assert summary.get("monitor_released_dust_for_protective_fak", 0) == 0
     elif outcome == "dust":
         assert summary.get("monitor_statistical_sell_dust_holds", 0) == 0
         assert summary["exits"] == 0
@@ -7707,6 +7731,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         else:
             assert execute_authorities == [None]
         assert execute_calls == [pos]
+        if outcome == "direct_dust":
+            assert summary["monitor_released_dust_for_protective_fak"] == 1
+            assert pos.exit_state != "backoff_exhausted"
+        if small_protective:
+            assert getattr(pos, monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR) == 5.0
+            assert float(pos.effective_shares) == 2.0
         # FIX 1 (DAY0_HARD_FACT_BIN_DEAD retry-starvation): this branch is
         # reached only for the "direct" outcome (RED_FORCE_EXIT,
         # DAY0_HARD_FACT_BIN_DEAD, FLASH_CRASH_PANIC, and the branchwise
@@ -7730,7 +7760,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     # non-direct outcomes never called execute_exit in this test to begin
     # with, so the drain was never attempted for them either.
     assert same_turn_reauction_drain_attempts == []
-    assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
+    assert invalidations == (["venue_side_effect"] if outcome in {"direct", "direct_small", "direct_dust"} else [])
     conn.close()
 
 
@@ -26722,3 +26752,143 @@ def test_red_file_backed_real_coordinator_contention_leaves_zero_partial_writes(
     ).fetchone()[0] == 0
     conn1.close()
     conn2.close()
+
+@pytest.mark.parametrize(
+    ("certificate_to_b2_age_ns", "expect_b2_expired"),
+    ((1_001_000_000, True), (0, False)),
+)
+def test_real_red_executor_rechecks_b2_after_exit_certificate_persist(
+    monkeypatch, certificate_to_b2_age_ns, expect_b2_expired
+):
+    """B2 freshness is evaluated after the durable exit certificate write."""
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+    from src.execution import exit_lifecycle, executor
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    conn, position = _red_real_schema_fixture(
+        f"red-b2-after-certificate-{expect_b2_expired}"
+    )
+    intent = exit_lifecycle.build_exit_intent(
+        position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            fresh_prob=0.2,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.4,
+            current_market_price_is_fresh=True,
+            best_bid=0.39,
+            best_ask=0.40,
+            hours_to_settlement=10.0,
+            position_state="active",
+        ),
+    )
+    handoff = exit_lifecycle.persist_red_exit_handoff(
+        conn,
+        position,
+        exit_intent=intent,
+        attestation=RiskAttestation(
+            RiskLevel.RED,
+            "certificate-A",
+            "2026-08-24T00:00:00+00:00",
+            31,
+        ),
+        attempt_id=f"certificate-attempt-{expect_b2_expired}",
+    )
+    assert handoff is not None
+    position._red_exit_handoff = handoff
+
+    b2_clock = 10_000_000_000
+    b2 = RiskAttestation(
+        RiskLevel.RED,
+        f"certificate-B2-{expect_b2_expired}",
+        "2026-08-24T00:00:00+00:00",
+        b2_clock,
+    )
+    clock = [b2_clock]
+    monkeypatch.setattr(executor.time, "monotonic_ns", lambda: clock[0])
+
+    class SharedTestConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        @property
+        def row_factory(self):
+            return self._connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self._connection.row_factory = value
+
+        def close(self):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    # The certificate ledger is WORLD-owned in production. Keep this test
+    # isolated while preserving the real ledger call and its commit boundary.
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection",
+        lambda: SharedTestConnection(conn),
+    )
+    persisted_certificates = []
+    real_persist_all = DecisionCertificateLedger.persist_all
+
+    def persist_certificate_then_advance(self, certificates):
+        result = real_persist_all(self, certificates)
+        persisted_certificates.extend(certificates)
+        clock[0] = b2_clock + certificate_to_b2_age_ns
+        return result
+
+    monkeypatch.setattr(
+        DecisionCertificateLedger,
+        "persist_all",
+        persist_certificate_then_advance,
+    )
+    sdk_calls = _configure_real_red_executor_call_chain(
+        monkeypatch,
+        conn,
+        b2=b2,
+    )
+
+    result = exit_lifecycle.execute_exit(
+        _make_portfolio(position),
+        position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            fresh_prob=0.2,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.4,
+            current_market_price_is_fresh=True,
+            best_bid=0.39,
+            best_ask=0.40,
+            hours_to_settlement=10.0,
+            position_state="active",
+        ),
+        conn=conn,
+        clob=SimpleNamespace(
+            get_order_status=lambda _order_id: {"status": "LIVE"}
+        ),
+        exit_intent=replace(intent, red_handoff=handoff.as_payload()),
+    )
+
+    assert len(persisted_certificates) == 1
+    if expect_b2_expired:
+        assert sdk_calls == []
+        rejected = conn.execute(
+            "SELECT event_type, payload_json FROM venue_command_events "
+            "WHERE event_type = 'SUBMIT_REJECTED'"
+        ).fetchone()
+        assert rejected is not None
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "RED_B2_EXPIRED"
+        assert payload["sdk_submit_attempted"] is False
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 1
+    else:
+        assert len(sdk_calls) == 1, result
+        assert sdk_calls[0]["submit_requested_rows"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 1

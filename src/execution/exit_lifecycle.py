@@ -8214,7 +8214,10 @@ def _execute_live_exit(
 
     dust_error = (
         ""
-        if global_taker_fak_min_order_floor_bypass
+        if global_taker_fak_min_order_floor_bypass or (
+            isinstance(protective_sell_authority, ProtectiveSellExecutionAuthority)
+            and exit_intent.submit_order_type == "FAK"
+        )
         else _below_snapshot_min_order_error(
             position,
             snapshot_context,

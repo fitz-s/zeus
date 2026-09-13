@@ -7866,38 +7866,6 @@ def execute_exit_order(
                 conn,
                 command_id=command_id,
             )
-        if isinstance(intent.red_handoff, Mapping):
-            try:
-                b2_clock = int(intent.red_handoff.get("submit_monotonic_ns") or 0)
-                b2_age_ms = (time.monotonic_ns() - b2_clock) / 1_000_000
-            except (TypeError, ValueError):
-                b2_age_ms = float("inf")
-            if b2_clock <= 0 or b2_age_ms < 0 or b2_age_ms > 1000:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=datetime.now(timezone.utc).isoformat(),
-                    payload={
-                        "reason": "RED_B2_EXPIRED",
-                        "b2_age_ms": b2_age_ms,
-                        "sdk_submit_attempted": False,
-                        "red_handoff": dict(intent.red_handoff),
-                    },
-                )
-                conn.commit()
-                return OrderResult(
-                    trade_id=intent.trade_id,
-                    status="rejected",
-                    reason="RED_B2_EXPIRED",
-                    submitted_price=limit_price,
-                    shares=shares,
-                    order_role="exit",
-                    intent_id=intent.intent_id,
-                    idempotency_key=idem.value,
-                    command_id=command_id,
-                    command_state="REJECTED",
-                )
         # AUDIT SPINE PARITY (wave 5, 2026-09-13): every SELL Zeus places was
         # invisible to decision_certificates — the entry path persists a
         # durable certificate before its venue call (see
@@ -7976,6 +7944,39 @@ def execute_exit_order(
                 exc_info=True,
             )
 
+        if isinstance(intent.red_handoff, Mapping):
+            b2_clock = 0
+            try:
+                b2_clock = int(intent.red_handoff.get("submit_monotonic_ns") or 0)
+                b2_age_ms = (time.monotonic_ns() - b2_clock) / 1_000_000
+            except (TypeError, ValueError):
+                b2_age_ms = float("inf")
+            if b2_clock <= 0 or b2_age_ms < 0 or b2_age_ms > 1000:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                    payload={
+                        "reason": "RED_B2_EXPIRED",
+                        "b2_age_ms": b2_age_ms,
+                        "sdk_submit_attempted": False,
+                        "red_handoff": dict(intent.red_handoff),
+                    },
+                )
+                conn.commit()
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason="RED_B2_EXPIRED",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
         # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
         _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:

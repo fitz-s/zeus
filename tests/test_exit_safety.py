@@ -9530,8 +9530,15 @@ def test_hard_fact_exit_uses_fresh_bid_protective_fak(
     assert authority.best_bid == "0.18"
 
 
+@pytest.mark.parametrize(
+    ("case_id", "requested_shares", "snapshot_min_order_size"),
+    (
+        ("original", 12.94, "0.01"),
+        ("subminimum_protective_fak", 2.0, "5"),
+    ),
+)
 def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
-    conn, monkeypatch
+    conn, monkeypatch, case_id, requested_shares, snapshot_min_order_size
 ):
     from src.execution import exit_lifecycle
     from src.state.portfolio import (
@@ -9544,7 +9551,7 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
 
     now = datetime(2026, 9, 3, 10, 24, 45, tzinfo=timezone.utc)
     position = Position(
-        trade_id="pos-protective-fak-no-fill",
+        trade_id=f"pos-protective-fak-no-fill-{case_id}",
         market_id="condition-protective-fak-no-fill",
         condition_id="condition-protective-fak-no-fill",
         city="Tel Aviv",
@@ -9555,10 +9562,10 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         entry_price=0.33,
-        size_usd=4.28,
-        shares=12.94,
-        chain_shares=12.94,
-        cost_basis_usd=4.28,
+        size_usd=requested_shares * 0.33,
+        shares=requested_shares,
+        chain_shares=requested_shares,
+        cost_basis_usd=requested_shares * 0.33,
         state="day0_window",
         chain_state="synced",
         strategy_key="forecast_qkernel_entry",
@@ -9569,12 +9576,14 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
                position_id, phase, direction, token_id, no_token_id,
                shares, chain_shares, chain_state, updated_at,
                temperature_metric, condition_id
-           ) VALUES (?, 'day0_window', 'buy_no', ?, ?, 12.94, 12.94,
+           ) VALUES (?, 'day0_window', 'buy_no', ?, ?, ?, ?,
                      'synced', ?, 'high', ?)""",
         (
             position.trade_id,
             position.token_id,
             position.no_token_id,
+            requested_shares,
+            requested_shares,
             now.isoformat(),
             position.condition_id,
         ),
@@ -9587,7 +9596,7 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'day0_window',
                      'day0_window', 'src.engine.cycle_runtime', 'live', ?)""",
         (
-            "event-protective-fak-no-fill-monitor",
+            f"event-protective-fak-no-fill-monitor-{case_id}",
             position.trade_id,
             (now - timedelta(seconds=7)).isoformat(),
             json.dumps(
@@ -9620,7 +9629,7 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
             "executable_snapshot_id": "snapshot-protective-fak-no-fill",
             "executable_snapshot_hash": "hash-protective-fak-no-fill",
             "executable_snapshot_orderbook_top_bid": 0.10,
-            "executable_snapshot_min_order_size": 0.01,
+            "executable_snapshot_min_order_size": snapshot_min_order_size,
         },
     )
     monkeypatch.setattr(
@@ -9628,17 +9637,19 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
         "check_sell_collateral",
         lambda *_args, **_kwargs: (True, ""),
     )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "place_sell_order",
-        lambda **_kwargs: exit_lifecycle.OrderResult(
+    submitted = {}
+
+    def reject_no_fill(**kwargs):
+        submitted.update(kwargs)
+        return exit_lifecycle.OrderResult(
             trade_id=position.trade_id,
             status="rejected",
             reason="venue_fak_no_match_400",
-            command_id="cmd-protective-fak-no-fill",
+            command_id=f"cmd-protective-fak-no-fill-{case_id}",
             command_state="REJECTED",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", reject_no_fill)
     monkeypatch.setattr(
         exit_lifecycle,
         "_global_sell_fak_no_fill_reauction_error",
@@ -9670,6 +9681,14 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
     )
 
     assert outcome == "sell_error: venue_fak_no_match_400"
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["shares"] == pytest.approx(requested_shares)
+    assert submitted["executable_snapshot_min_order_size"] == snapshot_min_order_size
+    authority = submitted["protective_sell_execution_authority"]
+    assert isinstance(authority, exit_lifecycle.ProtectiveSellExecutionAuthority)
+    assert Decimal(authority.shares) == Decimal(str(requested_shares))
+    assert authority.snapshot_id == "snapshot-protective-fak-no-fill"
+    assert authority.snapshot_hash == "hash-protective-fak-no-fill"
     assert position.state == "day0_window"
     assert position.exit_state == ""
     events = conn.execute(
@@ -9687,6 +9706,366 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
     assert json.loads(events[1]["payload_json"])["release_reason"] == (
         "EXIT_RETRY_COOLDOWN_EXPIRED"
     )
+
+
+def test_protective_subquantum_inventory_has_no_venue_call(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    now = datetime(2026, 9, 3, 10, 24, 45, tzinfo=timezone.utc)
+    position = Position(
+        trade_id="pos-protective-fak-subquantum",
+        market_id="condition-protective-fak-subquantum",
+        condition_id="condition-protective-fak-subquantum",
+        city="Tel Aviv",
+        cluster="asia",
+        target_date="2026-09-03",
+        bin_label="32C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.33,
+        size_usd=0.003,
+        shares=0.009,
+        chain_shares=0.009,
+        cost_basis_usd=0.003,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    conn.execute(
+        """INSERT INTO position_current(
+               position_id, phase, direction, token_id, no_token_id,
+               shares, chain_shares, chain_state, updated_at,
+               temperature_metric, condition_id
+           ) VALUES (?, 'day0_window', 'buy_no', ?, ?, ?, ?,
+                     'synced', ?, 'high', ?)""",
+        (
+            position.trade_id,
+            position.token_id,
+            position.no_token_id,
+            0.009,
+            0.009,
+            now.isoformat(),
+            position.condition_id,
+        ),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_hard_fact_sell_authority_valid",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snapshot-protective-fak-subquantum",
+            "executable_snapshot_hash": "hash-protective-fak-subquantum",
+            "executable_snapshot_orderbook_top_bid": 0.10,
+            "executable_snapshot_min_order_size": "5",
+        },
+    )
+    venue_calls = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **kwargs: venue_calls.append(kwargs),
+    )
+
+    outcome = exit_lifecycle._execute_live_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+            current_market_price=0.10,
+            current_market_price_is_fresh=True,
+            best_bid=0.10,
+            day0_active=True,
+        ),
+        exit_lifecycle.ExitIntent(
+            trade_id=position.trade_id,
+            reason="DAY0_HARD_FACT_BIN_DEAD",
+            token_id=NO_TOKEN,
+            shares=0.009,
+            current_market_price=0.10,
+            best_bid=0.10,
+            exact_limit_price=0.10,
+            submit_order_type="FAK",
+        ),
+        object(),
+        conn=conn,
+        execution_evidence=exit_lifecycle.ExitExecutionEvidence(),
+        is_red_force_exit=False,
+        is_hard_fact_force_exit=True,
+        hard_fact_authority=object(),
+        exit_intent_already_recorded=True,
+    )
+
+    assert outcome == "exit_blocked: protective_authority_unavailable"
+    assert venue_calls == []
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error.startswith(
+        "protective_sell_execution_authority_unavailable:ValueError:"
+    )
+
+
+def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
+    conn, monkeypatch
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import (
+        ExitContext,
+        PortfolioState,
+        Position,
+        flash_crash_catastrophe_velocity,
+        flash_crash_confirmations,
+    )
+
+    now = datetime(2026, 9, 3, 10, 24, 45, tzinfo=timezone.utc)
+    trade_id = "pos-protective-fak-gateway"
+    snapshot_id = "snap-protective-fak-gateway"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Tel Aviv",
+        cluster="asia",
+        target_date="2026-09-03",
+        bin_label="32C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.33,
+        size_usd=0.66,
+        shares=2.0,
+        chain_shares=2.0,
+        cost_basis_usd=0.66,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    conn.execute(
+        """INSERT INTO position_current(
+               position_id, phase, direction, token_id, no_token_id,
+               shares, chain_shares, chain_state, updated_at,
+               temperature_metric, condition_id
+           ) VALUES (?, 'day0_window', 'buy_yes', ?, ?, 2.0, 2.0,
+                     'synced', ?, 'high', ?)""",
+        (
+            trade_id,
+            YES_TOKEN,
+            NO_TOKEN,
+            now.isoformat(),
+            position.condition_id,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO position_events(
+               event_id, position_id, event_version, sequence_no,
+               event_type, occurred_at, phase_before, phase_after,
+               source_module, env, payload_json
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'day0_window',
+                     'day0_window', 'src.engine.cycle_runtime', 'live', ?)""",
+        (
+            f"event-{trade_id}-monitor",
+            trade_id,
+            (now - timedelta(seconds=7)).isoformat(),
+            json.dumps(
+                {
+                    "exit_decision_should_exit": True,
+                    "exit_decision_trigger": "FLASH_CRASH_PANIC",
+                    "held_sell_full_depth_action_authority": True,
+                    "last_monitor_market_price_is_fresh": True,
+                    "last_monitor_best_bid": 0.10,
+                    "market_velocity_1h": flash_crash_catastrophe_velocity() - 0.01,
+                    "flash_crash_count": flash_crash_confirmations(),
+                    "applied_validations": [
+                        "flash_crash_persistent_market_evidence",
+                        "flash_crash_trigger",
+                    ],
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    _ensure_snapshot(
+        conn,
+        snapshot_id=snapshot_id,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        min_order_size="5",
+        orderbook_top_bid="0.10",
+        orderbook_top_ask="0.16",
+        captured_at=_NOW,
+        freshness_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    _enable_exit_submit_prereqs(conn, monkeypatch, ctf_shares=2.0)
+    # Borrow the fixture DB through the real executor connection factory.
+    class SharedTestConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        @property
+        def row_factory(self):
+            return self._connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self._connection.row_factory = value
+
+        def close(self):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    submit_conn = SharedTestConnection(conn)
+    world_conn = SharedTestConnection(conn)
+    monkeypatch.setattr(
+        "src.execution.executor.get_trade_connection_with_world_required",
+        lambda **_kwargs: submit_conn,
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection",
+        lambda: world_conn,
+    )
+    built_authorities = []
+    real_build_authority = exit_lifecycle._build_protective_sell_execution_authority
+
+    def capture_authority(**kwargs):
+        authority = real_build_authority(**kwargs)
+        built_authorities.append(authority)
+        return authority
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_build_protective_sell_execution_authority",
+        capture_authority,
+    )
+    client_calls = []
+    persisted_at_client = []
+    bound_envelopes = []
+
+    # Real command/envelope path ends at this client seam; test_v2_adapter
+    # independently covers the final SDK boundary for subminimum SELL FAK.
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            return _fresh_exit_collateral_payload(token_id=YES_TOKEN, shares=2.0)
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+            bound_envelopes.append(envelope)
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def place_limit_order(self, **kwargs):
+            client_calls.append(kwargs)
+            persisted_at_client.extend(
+                conn.execute(
+                    "SELECT command_id, state, size, snapshot_id "
+                    "FROM venue_commands WHERE position_id = ? "
+                    "AND intent_kind = 'EXIT'",
+                    (trade_id,),
+                ).fetchall()
+            )
+            return _fake_submit_result(
+                self.bound_envelope,
+                order_id="ord-protective-fak-gateway",
+            )
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+    try:
+        outcome = exit_lifecycle.execute_exit(
+            PortfolioState(positions=[position]),
+            position,
+            ExitContext(
+                exit_reason=(
+                    "FLASH_CRASH_PANIC "
+                    f"(velocity={flash_crash_catastrophe_velocity() - 0.01:.3f}, "
+                    f"causal_quotes={flash_crash_confirmations()})"
+                ),
+                fresh_prob=None,
+                fresh_prob_is_fresh=False,
+                current_market_price=0.10,
+                current_market_price_is_fresh=True,
+                best_bid=0.10,
+                best_ask=0.16,
+                hours_to_settlement=12.0,
+                day0_active=True,
+            ),
+            clob=SimpleNamespace(get_order_status=lambda _order_id: {"status": "OPEN"}),
+            conn=conn,
+        )
+
+        assert outcome == "sell_pending: order=ord-protective-fak-gateway, status=OPEN"
+        assert len(client_calls) == 1
+        assert client_calls[0]["token_id"] == YES_TOKEN
+        assert client_calls[0]["side"] == "SELL"
+        assert client_calls[0]["order_type"] == "FAK"
+        assert client_calls[0]["size"] == pytest.approx(2.0)
+        assert len(built_authorities) == 1
+        authority = built_authorities[0]
+        assert isinstance(authority, exit_lifecycle.ProtectiveSellExecutionAuthority)
+        assert authority.position_id == trade_id
+        assert authority.token_id == YES_TOKEN
+        assert Decimal(authority.shares) == Decimal("2")
+        assert authority.snapshot_id == snapshot_id
+        assert len(persisted_at_client) == 1
+        assert persisted_at_client[0]["state"] == "SUBMITTING"
+        assert persisted_at_client[0]["size"] == pytest.approx(2.0)
+        assert persisted_at_client[0]["snapshot_id"] == snapshot_id
+        assert len(bound_envelopes) == 1
+        envelope = bound_envelopes[0]
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+        assert isinstance(envelope, VenueSubmissionEnvelope)
+        assert envelope.size == Decimal("2.0")
+        assert envelope.min_order_size == Decimal("5")
+        assert envelope.order_type == "FAK"
+        assert envelope.post_only is False
+        command = conn.execute(
+            """SELECT vc.state, vc.size, vc.price, vc.snapshot_id,
+                      vc.envelope_id, vse.size AS envelope_size,
+                      vse.min_order_size, vse.order_type, vse.post_only
+                 FROM venue_commands AS vc
+                 JOIN venue_submission_envelopes AS vse
+                   ON vse.envelope_id = vc.envelope_id
+                WHERE vc.position_id = ? AND vc.intent_kind = 'EXIT'""",
+            (trade_id,),
+        ).fetchone()
+        assert command is not None
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands "
+            "WHERE position_id = ? AND intent_kind = 'EXIT'",
+            (trade_id,),
+        ).fetchone()[0] == 1
+        assert command["state"] == "ACKED"
+        assert command["size"] == pytest.approx(2.0)
+        assert command["price"] == pytest.approx(0.10)
+        assert command["snapshot_id"] == snapshot_id
+        assert Decimal(command["envelope_size"]) == Decimal("2")
+        assert Decimal(command["min_order_size"]) == Decimal("5")
+        assert command["order_type"] == "FAK"
+        assert command["post_only"] == 0
+        assert position.exit_state == "sell_pending"
+    finally:
+        _clear_exit_submit_prereqs()
 
 
 def test_protective_semantic_receipt_gap_records_retry_without_submit(
