@@ -1,11 +1,27 @@
 # Created: 2026-09-12
-# Money-path fix: decision_certificates whole-day gaps (2026-09-08, 2026-09-11).
-# See docs trace: an epoch that raises AFTER actuate_winner()/consume() already
-# returned a receipt for the winner must carry that receipt's
-# decision_proof_bundle forward into the POST_SUBMIT_UNKNOWN fallback receipt
-# instead of dropping it to None -- the venue call already started, so the
-# certificate must not depend on unrelated post-submit bookkeeping (which runs
-# AFTER the actuator call, inside the same try block) also succeeding.
+# Money-path fix, narrow scope (per R-R review of 07c3dc07c): an epoch that
+# raises AFTER actuate_winner()/consume() already returned a receipt for the
+# winner must carry that receipt's decision_proof_bundle forward into the
+# POST_SUBMIT_UNKNOWN fallback receipt instead of dropping it to None -- the
+# venue call already started, so the certificate must not depend on unrelated
+# post-submit bookkeeping (which runs AFTER the actuator call, inside the same
+# try block) also succeeding.
+#
+# This closes ONLY that one population: an event whose actuator call already
+# returned before a later, unrelated exception in the same epoch. It does NOT
+# by itself close the reported 2026-09-08 / 2026-09-11 whole-day
+# decision_certificates gaps -- per T_certs.md's own trace, 09-08's zero-cert
+# behavior went entirely through the pre-actuation reject() path (winner_receipt
+# never assigned, untouched by this diff), and 09-11 had zero POST_SUBMIT_UNKNOWN
+# log lines in the rotation checked, meaning this exact branch may not have
+# fired that day at all. Whether/how much of either day's gap this branch
+# explains needs an event-level trace, not asserted here. Separately, and also
+# not touched by this diff: 09-11 apparently lacked even the pre-submit
+# EXECUTION_COMMAND certificates that
+# _persist_live_command_certificates_before_executor_submit
+# (event_reactor_adapter.py) should write before any venue call -- if true,
+# that population's root cause is upstream of everything this fix changes and
+# needs its own separate investigation.
 #
 # Harness mirrors
 # tests/integration/test_w3_solve_seam_g3.py::
@@ -334,9 +350,14 @@ def test_actuation_started_exception_carries_forward_the_receipt_proof_bundle(mo
     assert _execution_receipt_certificate_bundle(receipt) == marker_bundle
 
 
-def test_pre_actuation_exception_still_persists_no_certificate(monkeypatch):
-    """(b) epoch raises before actuate_winner() is ever called (or returns)
-    -> no certificate, compile failure recorded as today (unchanged)."""
+def test_exception_before_actuation_starts_still_persists_no_certificate(monkeypatch):
+    """(b) epoch raises in early-cut setup, BEFORE actuation_started is ever set
+    to True (the `before_calls = venue_submit_count()` call at
+    global_batch_runtime.py:9977, strictly before :10011) -> actuate_winner is
+    never called, the except handler takes the plain reject() branch, no
+    certificate, compile failure recorded as today (unchanged). This is the
+    already-correct "actuation never began" case -- distinct from (c) below,
+    where actuation_started IS True but actuate_winner() itself is what raises."""
     # source_run_id must match _build_selected()'s hard-coded witness
     # posterior_identity_hash ("run-cert") so _forecast_carrier_matches()
     # passes and the code reaches the venue_submit_count() call this test
@@ -367,3 +388,47 @@ def test_pre_actuation_exception_still_persists_no_certificate(monkeypatch):
     assert receipt.side_effect_status == "NO_SUBMIT"
     assert receipt.reason.startswith("GLOBAL_AUCTION_FAILED:")
     assert receipt.decision_proof_bundle is None
+
+
+def test_actuator_call_itself_raises_still_persists_no_certificate(monkeypatch):
+    """(c) actuation_started=True (set at global_batch_runtime.py:10011,
+    immediately before the actuator call) but actuate_winner()/consume() ITSELF
+    raises before returning -> winner_receipt (initialized to None at :10012)
+    is never assigned, so there is no receipt and no bundle to carry forward.
+    This pins the exact edge the fix's inline comment (:10132-10145) rests on:
+    "when actuate_winner/consume() itself is what raised, winner_receipt stays
+    None and no bundle exists to carry". The except handler still routes this
+    through the actuation_started=True branch (POST_SUBMIT_UNKNOWN, not the
+    plain reject()), but with no persistable EXECUTION_RECEIPT certificate --
+    matching the pre-fix, unchanged "no certificate, compile/persist failure
+    recorded" outcome for this sub-case."""
+    from src.events.reactor import _execution_receipt_certificate_bundle
+
+    event = _winner_event(city="CertCityActuatorRaises", source_run_id="run-cert")
+    selected = _build_selected(
+        _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        event,
+        family_key=_family_key_for(event),
+    )
+
+    def _actuate(*_args, **_kwargs):
+        raise RuntimeError("SIMULATED_VENUE_CALL_ITSELF_RAISED")
+
+    def _venue_submit_count():
+        # Returns normally on the pre-actuation before_calls capture; the
+        # actuator call raises before any second call would happen.
+        return 0
+
+    result = _run(
+        monkeypatch,
+        event=event,
+        selected=selected,
+        actuate_winner=_actuate,
+        venue_submit_count=_venue_submit_count,
+    )
+
+    receipt = result.receipts[event.event_id]
+    assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+    assert "GLOBAL_ACTUATION_EXCEPTION" in receipt.reason
+    assert receipt.decision_proof_bundle is None
+    assert _execution_receipt_certificate_bundle(receipt) == ()
