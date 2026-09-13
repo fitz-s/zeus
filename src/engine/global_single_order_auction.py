@@ -967,6 +967,55 @@ def select_prepared_global_auction(
                 ),
             )
 
+        def unbound_excluded_holding_coverage_row(
+            holding: Any,
+            *,
+            reason: str,
+        ) -> GlobalHoldingAuctionCoverage:
+            """Build an EXCLUDED row without calling holding_binding.
+
+            A materialization-excluded family is never bound again: the
+            exclusion may itself be caused by this exact holding's binding
+            lookup raising, and a sibling holding in the same malformed bin
+            would re-raise the same way. Every field that would normally
+            come from the resolved binding or probability witness instead
+            comes from the holding's own raw fields (or is left unset), so
+            this is the one and only way an EXCLUDED coverage row gets
+            built once a family is known unbindable.
+            """
+            prepared = prepared_by_family[holding.family_key]
+            return GlobalHoldingAuctionCoverage(
+                position_id=str(holding.position_id),
+                family_key=str(holding.family_key),
+                bin_id=str(holding.bin_id),
+                condition_id=f"UNRESOLVED_BINDING:{holding.bin_id}",
+                side=str(holding.side),
+                token_id=str(holding.token_id),
+                held_shares=Decimal(holding.shares),
+                ledger_snapshot_id=str(
+                    holdings_by_family[holding.family_key].ledger_snapshot_id
+                ),
+                probability_witness_identity=None,
+                probability_content_identity=None,
+                wealth_economic_identity=wealth_witness.economic_identity,
+                selection_epoch_identity=selection_epoch_identity,
+                book_epoch_identity=book_epoch.witness_identity,
+                selection_cut_at_utc=selection_cut_at_utc,
+                decision_at_utc=decision_at_utc,
+                book_deadline_at_utc=book_deadline_at_utc,
+                status="EXCLUDED",
+                reason=reason,
+                sell_exit_authority_status=str(
+                    prepared.day0_exit_authority_status
+                ),
+                sell_exit_authority_reason=str(
+                    prepared.day0_exit_authority_reason
+                ),
+                sell_action_authority_identity=str(
+                    prepared.sell_action_authority_identity
+                ),
+            )
+
         candidates = []
         materialization_excluded_by_family: dict[str, str] = {}
 
@@ -1075,21 +1124,32 @@ def select_prepared_global_auction(
             prepared = prepared_by_family[family_key]
             for holding in holdings.holdings:
                 if family_key in excluded:
-                    holding_coverage.append(
-                        coverage_row(
-                            holding,
-                            probability,
-                            status="EXCLUDED",
-                            reason=(
-                                excluded_by_family[family_key]
-                                if family_key in materialization_excluded_by_family
-                                else (
+                    # A materialization-excluded family is never bound again
+                    # (see unbound_excluded_holding_coverage_row): the same
+                    # binding lookup that already raised for one holding
+                    # would raise again for a sibling holding in the same
+                    # malformed bin, escaping uncaught. A genuine
+                    # preflight-excluded family has no such defect, so its
+                    # coverage row still resolves the real binding.
+                    if family_key in materialization_excluded_by_family:
+                        holding_coverage.append(
+                            unbound_excluded_holding_coverage_row(
+                                holding,
+                                reason=excluded_by_family[family_key],
+                            )
+                        )
+                    else:
+                        holding_coverage.append(
+                            coverage_row(
+                                holding,
+                                probability,
+                                status="EXCLUDED",
+                                reason=(
                                     "FAMILY_PREFLIGHT_EXCLUDED:"
                                     f"{excluded_by_family[family_key]}"
-                                )
-                            ),
+                                ),
+                            )
                         )
-                    )
                     continue
                 if isinstance(probability, DeterministicBinPayoffWitness):
                     sell_functional = "DETERMINISTIC_PAYOFF"
@@ -1306,8 +1366,11 @@ def select_prepared_global_auction(
                     # only to this family, not to globality.  The exception
                     # itself may be the family's own binding lookup failing
                     # (holding_binding, used above to resolve condition_id),
-                    # so this coverage row is built from the holding's own
-                    # raw fields rather than by re-deriving that binding.
+                    # so this coverage row -- and every later coverage row
+                    # for this now-excluded family, built by the
+                    # "family_key in excluded" branch above -- comes from
+                    # unbound_excluded_holding_coverage_row rather than by
+                    # re-deriving that binding.
                     materialization_excluded_by_family[family_key] = reason
                     excluded_by_family[family_key] = reason
                     excluded.add(family_key)
@@ -1317,36 +1380,9 @@ def select_prepared_global_auction(
                         if candidate.family_key != family_key
                     ]
                     holding_coverage.append(
-                        GlobalHoldingAuctionCoverage(
-                            position_id=str(holding.position_id),
-                            family_key=str(holding.family_key),
-                            bin_id=str(holding.bin_id),
-                            condition_id=f"UNRESOLVED_BINDING:{holding.bin_id}",
-                            side=str(holding.side),
-                            token_id=str(holding.token_id),
-                            held_shares=Decimal(holding.shares),
-                            ledger_snapshot_id=str(holdings.ledger_snapshot_id),
-                            probability_witness_identity=None,
-                            probability_content_identity=None,
-                            wealth_economic_identity=(
-                                wealth_witness.economic_identity
-                            ),
-                            selection_epoch_identity=selection_epoch_identity,
-                            book_epoch_identity=book_epoch.witness_identity,
-                            selection_cut_at_utc=selection_cut_at_utc,
-                            decision_at_utc=decision_at_utc,
-                            book_deadline_at_utc=book_deadline_at_utc,
-                            status="EXCLUDED",
+                        unbound_excluded_holding_coverage_row(
+                            holding,
                             reason=reason,
-                            sell_exit_authority_status=str(
-                                prepared.day0_exit_authority_status
-                            ),
-                            sell_exit_authority_reason=str(
-                                prepared.day0_exit_authority_reason
-                            ),
-                            sell_action_authority_identity=str(
-                                prepared.sell_action_authority_identity
-                            ),
                         )
                     )
                     continue
