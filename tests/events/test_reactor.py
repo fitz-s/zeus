@@ -3033,7 +3033,45 @@ def test_global_reauction_epoch_expiry_is_explicitly_transient(caplog):
             "GLOBAL_ACTUATION_PREPARE_FAILED:prepared_family_missing",
             True,
         ),
-        ("GLOBAL_SELL_EXIT_REJECTED:INSUFFICIENT_BALANCE", False),
+        (
+            # Site A shape (event_reactor_adapter.py:14976-14994): the venue
+            # call started and the exception handler wraps the definite
+            # rejection. Also covered end-to-end by
+            # test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit
+            # (tests/integration/test_w3_solve_seam_g3.py)'s deterministic_reject case.
+            "GLOBAL_SELL_EXIT_REJECTED:RuntimeError:venue rejected",
+            False,
+        ),
+        (
+            # Site B shape (event_reactor_adapter.py:15056-15069): a
+            # not-submitted outcome outside
+            # _EXIT_LIFECYCLE_ADJUDICATED_REJECTION_PREFIXES must requeue
+            # regardless of venue_call_started or when it was returned. This
+            # exact string is also the base produced by exit_lifecycle.py:
+            # 8663's POST-observe duplicate of this pre-venue early-out
+            # (venue_call_started True there, False here) -- the classifier
+            # cannot and need not tell the two apart, since both collapse to
+            # the identical reason base. The producer-level discriminant
+            # (_global_sell_exit_not_submitted_reason_prefix) is exhaustively
+            # pinned against every execute_exit/_execute_live_exit early-out
+            # string by tests/engine/
+            # test_global_sell_exit_not_submitted_classification.py, and the
+            # real call graph by
+            # test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit's
+            # pre_venue_block / post_observe_duplicate_block /
+            # post_observe_real_rejection / post_observe_active_order_adoption
+            # cases (tests/integration/test_w3_solve_seam_g3.py).
+            "GLOBAL_SELL_EXIT_BLOCKED:exit_blocked: incomplete_context",
+            True,
+        ),
+        (
+            # A genuine post-observe rejection outside execute_exit's
+            # retryable vocabulary stays TERMINAL -- the fix narrows the
+            # BLOCKED carve-out to the named prefixes, it does not remove
+            # venue_call_started as the fallback discriminant.
+            "GLOBAL_SELL_EXIT_REJECTED:sell_error: invalid order size",
+            False,
+        ),
         ("GLOBAL_SELL_EXECUTION_FAILED:KeyError:'token_id'", True),
         (
             "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
@@ -3062,17 +3100,21 @@ def test_global_reauction_epoch_expiry_is_explicitly_transient(caplog):
 def test_newly_registered_money_path_reason_bases_never_fail_open(
     caplog, reason, expected_transient
 ):
-    """Eleven money-path reason bases (GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED
-    through GLOBAL_REAUCTION_WEALTH_UNSTABLE) reached the fail-open UNKNOWN
-    branch in production over 2026-09-09..2026-09-13 (the first ten), or sit
-    in the identical unregistered gap as an adjacent sibling of an already-
-    registered base (GLOBAL_REAUCTION_WEALTH_UNSTABLE, sibling of
-    GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE / _PROBABILITY_UNSTABLE). Nine
-    are pre-venue races or infra faults (requeue); GLOBAL_SELL_EXIT_REJECTED
-    is a completed venue-side rejection and GLOBAL_REAUCTION_WEALTH_UNSTABLE
-    is a bounded-reauction exhaustion (both terminal). Each must now classify
-    explicitly, never hit the fail-open ERROR log, and land on its intended
-    side.
+    """Twelve money-path reason bases reached the fail-open UNKNOWN branch in
+    production over 2026-09-09..2026-09-13 (the original ten), or sit in an
+    identical unregistered gap found auditing those ten's producers
+    (GLOBAL_REAUCTION_WEALTH_UNSTABLE, sibling of
+    GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE/_PROBABILITY_UNSTABLE; and
+    GLOBAL_SELL_EXIT_BLOCKED, split out of GLOBAL_SELL_EXIT_REJECTED's second
+    producer site -- see event_reactor_adapter.py:15022-15045 -- which used
+    to emit the SAME base for both a real venue rejection and a pre-venue
+    exit_blocked/exit_deferred early-out from exit_lifecycle.py's execute_exit,
+    silently dead-lettering the latter under a blanket TERMINAL registration).
+    Ten are pre-venue races or infra faults (requeue); GLOBAL_SELL_EXIT_REJECTED
+    (now guarded to only the venue-call-started arm) and
+    GLOBAL_REAUCTION_WEALTH_UNSTABLE (a bounded-reauction exhaustion) are
+    terminal. Each must now classify explicitly, never hit the fail-open
+    ERROR log, and land on its intended side.
     """
     reason_base = reason.partition(":")[0]
 

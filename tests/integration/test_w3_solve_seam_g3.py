@@ -39162,6 +39162,186 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert fenced_connections == [global_claim_conn] * 4
     assert global_claim_conn.in_transaction is False
 
+    def return_pre_venue_block(*_args, **_kwargs):
+        # exit_lifecycle.py's own `exit_blocked:` early-outs (missing/stale
+        # quote, token-aggregate pending resolution, ...) return a string
+        # WITHOUT ever calling execution_evidence.observe() -- venue_call_started
+        # stays False. This must classify as a requeue-able block, never as the
+        # deterministic venue rejection asserted above.
+        return "exit_blocked: incomplete_context"
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        return_pre_venue_block,
+    )
+    pre_venue_block = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert pre_venue_block.submitted is False
+    assert pre_venue_block.proof_accepted is False
+    assert pre_venue_block.venue_call_started is False
+    assert pre_venue_block.reason == (
+        "GLOBAL_SELL_EXIT_BLOCKED:exit_blocked: incomplete_context"
+    )
+    assert not pre_venue_block.reason.startswith("GLOBAL_SELL_EXIT_REJECTED:")
+
+    def return_post_observe_duplicate_block(*_args, **kwargs):
+        # exit_lifecycle.py:8663 returns this SAME string as
+        # return_pre_venue_block above, but reached AFTER
+        # execution_evidence.observe() ran against a real (merely
+        # concurrency-locked, not content-rejected) venue rejection --
+        # venue_call_started is True here. Both call sites mean "another
+        # active exit already owns this token's cancel, wait for it" and
+        # must classify identically.
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = False
+        evidence.command_id = "command-locked"
+        evidence.command_state = "REJECTED"
+        evidence.order_type = expected_order_type
+        evidence.result_status = "rejected"
+        evidence.result_reason = "sum of active orders exceeds balance"
+        return "exit_blocked: unsafe_open_exit_cancel_pending"
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        return_post_observe_duplicate_block,
+    )
+    post_observe_duplicate_block = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert post_observe_duplicate_block.submitted is False
+    assert post_observe_duplicate_block.proof_accepted is False
+    assert post_observe_duplicate_block.venue_call_started is True
+    assert post_observe_duplicate_block.reason == (
+        "GLOBAL_SELL_EXIT_BLOCKED:exit_blocked: unsafe_open_exit_cancel_pending"
+    )
+    assert not post_observe_duplicate_block.reason.startswith(
+        "GLOBAL_SELL_EXIT_REJECTED:"
+    )
+
+    def return_post_observe_real_rejection(*_args, **kwargs):
+        # A genuine post-observe rejection that is NOT one of execute_exit's
+        # own retryable-vocabulary strings must still classify TERMINAL --
+        # the fix narrows the BLOCKED carve-out to the named vocabulary, it
+        # does not remove the venue_call_started discriminant entirely.
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = False
+        evidence.command_id = "command-content-rejected"
+        evidence.command_state = "REJECTED"
+        evidence.order_type = expected_order_type
+        evidence.result_status = "rejected"
+        evidence.result_reason = "invalid order size"
+        return "sell_error: invalid order size"
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        return_post_observe_real_rejection,
+    )
+    post_observe_real_rejection = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert post_observe_real_rejection.submitted is False
+    assert post_observe_real_rejection.venue_call_started is True
+    assert post_observe_real_rejection.reason == (
+        "GLOBAL_SELL_EXIT_REJECTED:sell_error: invalid order size"
+    )
+
+    def return_post_observe_active_order_adoption(*_args, **kwargs):
+        # exit_lifecycle.py:8664-8669's _adopt_active_exit_sell, reached from
+        # the SAME _is_exit_transient_lock_error guard as
+        # post_observe_duplicate_block above, six lines below it. It binds
+        # the position to an already-active venue order -- forward progress,
+        # not a failure -- after execution_evidence.observe() has already run
+        # against a real (merely concurrency-locked) venue rejection.
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = False
+        evidence.command_id = "command-adopted"
+        evidence.command_state = "LIVE"
+        evidence.order_type = expected_order_type
+        evidence.result_status = "rejected"
+        evidence.result_reason = "sum of active orders exceeds balance"
+        return (
+            "sell_pending: active_prior_exit_sell "
+            "command_id=command-adopted order=venue-order-9 state=LIVE"
+        )
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        return_post_observe_active_order_adoption,
+    )
+    post_observe_active_order_adoption = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert post_observe_active_order_adoption.submitted is False
+    assert post_observe_active_order_adoption.proof_accepted is False
+    assert post_observe_active_order_adoption.venue_call_started is True
+    assert post_observe_active_order_adoption.reason == (
+        "GLOBAL_SELL_EXIT_BLOCKED:sell_pending: active_prior_exit_sell "
+        "command_id=command-adopted order=venue-order-9 state=LIVE"
+    )
+    assert not post_observe_active_order_adoption.reason.startswith(
+        "GLOBAL_SELL_EXIT_REJECTED:"
+    )
+
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
     assert source.index("if _global_sell_candidate(global_actuation) is not None") < source.index(
         "if entry_submit_block_reason is not None"

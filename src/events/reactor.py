@@ -5343,6 +5343,17 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # book/price race, the same shape as LIVE_DEPTH_AUTHORITY_MISSING and
     # SUBMIT_ABORTED_MODE_FLIPPED above — a fresh JIT capture cures it.
     "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED",
+    # execute_exit (src/execution/exit_lifecycle.py) returned WITHOUT ever
+    # calling exit_evidence.observe() — no venue call started
+    # (event_reactor_adapter.py:15022-15045, the venue_call_started=False arm
+    # of the normal-return path). Every producer of this shape is one of
+    # exit_lifecycle.py's `exit_blocked:` / `exit_deferred:` pre-venue
+    # early-outs (stale/missing quote, token-aggregate pending resolution,
+    # protective-authority unavailable, cancel unavailable, ...), each of
+    # which already arms its own retry (_mark_exit_retry,
+    # mark_market_closed_hold_to_settlement) — a live SELL exit attempt that
+    # never reached the venue must requeue, not dead-letter as a rejection.
+    "GLOBAL_SELL_EXIT_BLOCKED",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -5493,13 +5504,16 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # auction.
     "GLOBAL_REAUCTION_WEALTH_UNSTABLE",
     # The venue call for a global SELL exit STARTED but returned a definite
-    # non-ack, non-unknown rejection (event_reactor_adapter.py:15034; guarded
-    # by exit_evidence.venue_call_started=True, submitted=False). A completed
-    # venue-side disposition for THIS exit attempt — a rejected sell exit has
-    # its own recovery lifecycle, so requeueing this event would only repeat
-    # an already-adjudicated venue rejection. Mirrors venue_auth_invalid_
-    # signature_400 and idempotency_collision above (venue call started,
-    # replaying it is the risk, not the cure).
+    # non-ack, non-unknown rejection: the exception-path producer
+    # (event_reactor_adapter.py:14986) is unconditionally venue_call_started,
+    # and the normal-return producer (:15034-ish, the exit_evidence.
+    # venue_call_started=True arm added alongside GLOBAL_SELL_EXIT_BLOCKED
+    # above) only chooses this prefix once the venue call actually started.
+    # A completed venue-side disposition for THIS exit attempt — a rejected
+    # sell exit has its own recovery lifecycle, so requeueing this event
+    # would only repeat an already-adjudicated venue rejection. Mirrors
+    # venue_auth_invalid_signature_400 and idempotency_collision above
+    # (venue call started, replaying it is the risk, not the cure).
     "GLOBAL_SELL_EXIT_REJECTED",
 })
 

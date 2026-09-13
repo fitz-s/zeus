@@ -14356,6 +14356,58 @@ def _durable_global_sell_market_authority(
     )
 
 
+# TERMINAL is a WHITELIST, not a fallback: three rounds of narrowing a
+# TRANSIENT vocabulary each left a sibling early-out behind
+# (exit_lifecycle.py:8663's post-observe "unsafe_open_exit_cancel_pending"
+# duplicate, then :8664-8669's post-observe _adopt_active_exit_sell
+# "sell_pending: active_prior_exit_sell ..." — forward progress onto an
+# already-active venue order, not a rejection). Only these two producer
+# prefixes represent the venue genuinely adjudicating THIS exit attempt as
+# non-retryable — confirmed the only two occurrences reachable AFTER
+# execution_evidence.observe() ran with a real, definite non-ack:
+#   exit_lifecycle.py:8687 "sell_blocked_dust: {sell_error}" — venue rejected
+#     as below the minimum order size; _mark_exit_dust_hold,
+#     EXIT_ORDER_REJECTED.
+#   exit_lifecycle.py:8725 "sell_error: {sell_error}" — a generic venue
+#     rejection; _mark_exit_retry runs its own separate, position-level
+#     retry independent of this event's own disposition.
+# Every OTHER not-submitted outcome — execute_exit's own
+# exit_blocked:/exit_deferred:/exit_redecision_required: retry/redecision
+# vocabulary, a pre-venue duplicate of one of the two prefixes above that was
+# never actually observed (a position already in dust-hold,
+# venue_call_started stays False), an active-order adoption, or any UNKNOWN
+# future string — is not a venue adjudication of this attempt and must
+# requeue: replaying a block is cheap, dead-lettering forward progress or a
+# retryable block loses the exit. venue_call_started alone is NOT the
+# discriminant (both whitelisted and non-whitelisted post-observe outcomes
+# can carry it) — the outcome vocabulary is, with venue_call_started as an
+# additional required gate so a pre-venue occurrence of the SAME prefix
+# (e.g. the pre-observe "sell_blocked_dust: existing_canonical_dust_hold:..."
+# duplicate) can never spuriously classify TERMINAL.
+_EXIT_LIFECYCLE_ADJUDICATED_REJECTION_PREFIXES = (
+    "sell_error:",
+    "sell_blocked_dust:",
+)
+
+
+def _global_sell_exit_not_submitted_reason_prefix(
+    outcome_text: str, *, venue_call_started: bool
+) -> str:
+    """Classify a not-submitted execute_exit outcome as blocked or rejected.
+
+    Extracted as its own pure function (pinned by an exhaustive parametrized
+    unit test covering every execute_exit/_execute_live_exit early-out
+    string) after three rounds of review each found a sibling early-out this
+    logic mis-classified while it lived inline and untestable in isolation.
+    """
+
+    if venue_call_started and outcome_text.startswith(
+        _EXIT_LIFECYCLE_ADJUDICATED_REJECTION_PREFIXES
+    ):
+        return "GLOBAL_SELL_EXIT_REJECTED"
+    return "GLOBAL_SELL_EXIT_BLOCKED"
+
+
 def _submit_current_global_sell(
     event: OpportunityEvent,
     *,
@@ -15101,7 +15153,9 @@ def _submit_current_global_sell(
     if unknown_side_effect:
         reason_prefix = "GLOBAL_SELL_EXIT_UNKNOWN"
     elif not submitted:
-        reason_prefix = "GLOBAL_SELL_EXIT_REJECTED"
+        reason_prefix = _global_sell_exit_not_submitted_reason_prefix(
+            outcome_text, venue_call_started=exit_evidence.venue_call_started
+        )
     return _global_sell_receipt(
         event,
         global_actuation=global_actuation,
