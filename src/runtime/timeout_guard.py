@@ -1,5 +1,5 @@
 # Created: 2026-05-13
-# Last reused or audited: 2026-05-14
+# Last reused or audited: 2026-09-13
 # Authority basis:
 #   - 2026-05-13: ECMWF hang antibody bundle — /tmp/zeus_module_audit.md row "rglob on stale mount"
 #   - 2026-05-14: ECMWF wedge telemetry — latent deadlock fix. The original
@@ -10,11 +10,29 @@
 #     a deadlock. This is the original wedge mode `run_with_timeout` was meant
 #     to PREVENT. Fix: manage the executor explicitly, shutdown(wait=False,
 #     cancel_futures=True) on timeout, ensuring the raise leaves the function.
+#   - 2026-09-13 (T-collateral2): ThreadPoolExecutor itself defeats a one-shot
+#     child's ability to exit at all. `concurrent.futures.thread` registers
+#     every worker thread it ever creates in the module-global
+#     `_threads_queues` dict and its `atexit`-registered `_python_exit()`
+#     unconditionally `t.join()`s each one with no timeout — a call this
+#     module already made unreachable at the `with`-statement level in 2026-05-14
+#     survives one level up, at interpreter shutdown. A wedged worker (e.g. a
+#     socket read stuck past its own configured timeout) then blocks process
+#     exit indefinitely: `_COLLATERAL_CHILD_EXIT_GRACE_SECONDS` and every other
+#     child's exit grace can only ever be satisfied by the parent's SIGKILL,
+#     never by the child exiting on its own. Fix: stop using
+#     ThreadPoolExecutor. Run `fn` on a bare `threading.Thread(daemon=True)` —
+#     daemon threads are never registered with `_python_exit` and are never
+#     joined by the interpreter's own shutdown sequence either, so a wedged
+#     worker leaks (as documented) without blocking this process, or any
+#     process that imports this module, from exiting.
 #   Daemon-thread-safe timeout for blocking I/O calls. APScheduler runs jobs in
 #   ThreadPoolExecutor workers (see src/ingest_main.py:1141 "fast"/"default"
 #   executor pools), so signal.alarm cannot be used (it raises ValueError in
-#   non-main threads). This helper uses a single-shot ThreadPoolExecutor + .result(timeout=)
-#   so callers fail loud on stalls (e.g. stale NFS / 51 source data mount).
+#   non-main threads). This helper runs `fn` on a single daemon thread and
+#   bounds it with `Thread.join(timeout=...)` so callers fail loud on stalls
+#   (e.g. stale NFS / 51 source data mount) without that thread ever blocking
+#   this process's own exit.
 """Thread-safe timeout guard for blocking operations.
 
 Why
@@ -32,7 +50,10 @@ We cannot actually interrupt the blocked thread — Python has no portable
 What we DO get is:
   * the caller observes a ``TimeoutError`` and can record/log/recover;
   * the daemon's other scheduler jobs continue to run;
-  * the next hang has an explicit log line with the operation label.
+  * the next hang has an explicit log line with the operation label;
+  * (2026-09-13) the leaked thread is a daemon thread, so it can never keep
+    THIS process (or a one-shot subprocess wrapping this call) from exiting
+    — the thread leaks, the process does not.
 
 For ``rglob`` against a stale mount or any other I/O call where a 12h
 hang would otherwise hold the BULK writer-lock indefinitely (witnessed
@@ -43,7 +64,7 @@ the right antibody: convert silent forever-block into a loud
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeoutError
+import threading
 from contextlib import contextmanager
 from typing import Callable, Iterator, TypeVar
 
@@ -82,54 +103,47 @@ def run_with_timeout(
     """
     if seconds <= 0:
         raise ValueError(f"timeout_guard seconds must be > 0, got {seconds}")
-    # Each call gets its own single-worker pool — we never want to share
-    # a wedged worker between unrelated callers.
-    #
-    # NOTE 2026-05-14: do NOT use `with ThreadPoolExecutor(...) as ex:` here.
-    # The context-manager __exit__ calls `shutdown(wait=True)`, which blocks
-    # FOREVER on a wedged worker thread. The TimeoutError we raise from the
-    # except branch triggers __exit__ before propagation, so the caller never
-    # sees the timeout — the wedge silently transfers from `fn` to the
-    # `with` statement. That defeats the entire point of this helper.
-    # We manage the executor manually and call shutdown(wait=False,
-    # cancel_futures=True) on the timeout path, ensuring the raise leaves
-    # this function. The wedged worker thread leaks (Python has no portable
-    # Thread.kill) — by design; the win is converting a silent forever-hold
-    # into a loud TimeoutError at a known boundary.
-    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"timeout_guard_{label}")
-    try:
-        fut = ex.submit(fn)
+    # NOTE 2026-09-13 (T-collateral2): do NOT use ThreadPoolExecutor here.
+    # Every worker thread it creates is registered in the module-global
+    # `concurrent.futures.thread._threads_queues` and unconditionally
+    # `.join()`ed with no timeout by that module's own `atexit` handler
+    # (`_python_exit`) — so a wedged worker blocks not just this function's
+    # `with`-statement (the 2026-05-14 fix below) but the *process's own
+    # exit*, indefinitely. A one-shot subprocess whose whole purpose is to be
+    # killable on a bounded deadline (e.g. the collateral-refresh child) can
+    # then only ever be reaped by an external SIGKILL, never by exiting on
+    # its own once its internal TimeoutError has already fired and been
+    # logged. A bare `threading.Thread(daemon=True)` is never registered with
+    # `_python_exit` and is never joined by the interpreter's own shutdown
+    # sequence either: the wedged thread still leaks (Python has no portable
+    # `Thread.kill`) — by design, matching the trade-off documented above —
+    # but the process itself remains free to exit the moment this function
+    # returns or raises.
+    outcome: dict[str, object] = {}
+
+    def _runner() -> None:
         try:
-            result = fut.result(timeout=seconds)
-        except _FutTimeoutError as exc:
-            logger.warning(
-                "timeout_guard: %s exceeded %.1fs — thread leaked, daemon should restart",
-                label,
-                seconds,
-            )
-            # Best-effort: cancel queued futures and DO NOT wait for the
-            # wedged worker. Bare shutdown(wait=True) would deadlock here.
-            ex.shutdown(wait=False, cancel_futures=True)
-            raise TimeoutError(
-                f"timeout_guard: {label} exceeded {seconds:.1f}s"
-            ) from exc
-        except BaseException:
-            # Any other exception from fn: do not wait on the worker either
-            # (the worker has already finished — wait=False is cheap).
-            ex.shutdown(wait=False, cancel_futures=True)
-            raise
-        # Normal success path: worker finished; safe to shutdown(wait=True).
-        ex.shutdown(wait=True)
-        return result
-    except BaseException:
-        # Defensive: ensure executor is shut down if anything above raised
-        # before the inner try (e.g. submit() failure). wait=False so we
-        # never deadlock here.
-        try:
-            ex.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        raise
+            outcome["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            outcome["exc"] = exc
+
+    worker = threading.Thread(
+        target=_runner,
+        name=f"timeout_guard_{label}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=seconds)
+    if worker.is_alive():
+        logger.warning(
+            "timeout_guard: %s exceeded %.1fs — thread leaked, daemon should restart",
+            label,
+            seconds,
+        )
+        raise TimeoutError(f"timeout_guard: {label} exceeded {seconds:.1f}s")
+    if "exc" in outcome:
+        raise outcome["exc"]  # type: ignore[misc]
+    return outcome["result"]  # type: ignore[return-value]
 
 
 @contextmanager
