@@ -2264,11 +2264,12 @@ def enqueue_cycle_advance_reseeds(
                 if not published:
                     _discard_unpublished_cycle_advance_stage(staged_seed_file)
             else:
+                # inserted=False means _record_enqueue's UNIQUE-index INSERT OR
+                # IGNORE found a concurrent/prior enqueue already recorded for
+                # this (scope, target_cycle) -- a dedup, not a failure. The
+                # already_enqueued counter below records it; do not also count
+                # it as causal_baseline_scope_failed.
                 _discard_unpublished_cycle_advance_stage(staged_seed_file)
-                if causal_baseline_source_run_id:
-                    report["causal_baseline_scope_failed"] = int(
-                        report["causal_baseline_scope_failed"]
-                    ) + 1
             if inserted and published:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1

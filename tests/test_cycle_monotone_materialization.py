@@ -1016,6 +1016,131 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
         assert marker["seed_file"] == str(old_seed)
 
 
+def test_committed_ens_wake_record_enqueue_dedup_counts_as_already_enqueued(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_record_enqueue`` returning False means a concurrent/prior enqueue
+    already recorded the row (per its own docstring, via the UNIQUE index
+    INSERT OR IGNORE) -- a dedup, not a failure. A committed-ENS-wake call
+    (``causal_baseline_source_run_id`` set) must count this as
+    ``already_enqueued``, never ``causal_baseline_scope_failed``."""
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle_advance._ensure_day0_conditioning_identity_column(conn)
+    target_cycle = datetime(2026, 8, 23, 0, tzinfo=UTC)
+    committed_run = "ecmwf_open_data:mx2t6_high:2026-08-23T00Z"
+    conn.execute(
+        "CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            source_run_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_id TEXT, model_version TEXT,
+            authority TEXT, causality_status TEXT, boundary_ambiguous INTEGER,
+            forecast_window_attribution_status TEXT,
+            contributes_to_target_extrema INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run (source_run_id, source_cycle_time) VALUES (?, ?)
+        """,
+        (committed_run, target_cycle.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (
+            ?, 'Cape Town', '2026-08-23', 'high', 'ecmwf_open_data',
+            'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1
+        )
+        """,
+        (committed_run,),
+    )
+    conn.commit()
+    conn.close()
+
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    day0_payload = {
+        "day0_observed_extreme_c": 14.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-23T07:29:21+00:00",
+        "day0_observed_extreme_sample_count": 18,
+        "day0_observed_extreme_unit": "C",
+    }
+    monkeypatch.setattr(
+        cycle_advance, "freshest_materializable_cycle", lambda _conn: target_cycle
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "scope_needs_cycle_advance",
+        lambda *args, **kwargs: {
+            "needs_advance": True,
+            "consumed_cycle": "2026-08-22T18:00:00+00:00",
+            "target_cycle": target_cycle.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
+        lambda **kwargs: day0_payload,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_day0_enqueue_owner_request_check",
+        lambda **kwargs: cycle_advance._Day0EnqueueOwnerRequestCheck(
+            cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE, "ABSENT"
+        ),
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        seed_file = Path(kwargs["output_path"])
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text(
+            json.dumps({"baseline_source_run_id": committed_run}),
+            encoding="utf-8",
+        )
+        return seed_file
+
+    monkeypatch.setattr(
+        cycle_advance, "_build_and_write_advance_seed", _fake_build_seed
+    )
+    # Simulate a concurrent/prior enqueue winning the UNIQUE-index INSERT for
+    # this exact (scope, target_cycle): _record_enqueue's own docstring says
+    # this False return means "already recorded", not a failure.
+    monkeypatch.setattr(
+        cycle_advance, "_record_enqueue", lambda *args, **kwargs: False
+    )
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 8, 23, 7, 53, tzinfo=UTC),
+        limit=1,
+        scopes=(("Cape Town", "2026-08-23", "high"),),
+        manifests=(),
+        causal_baseline_source_run_id=committed_run,
+    )
+
+    assert report["already_enqueued"] == 1
+    assert report["causal_baseline_scope_failed"] == 0
+    assert report["seeds_enqueued"] == 0
+    assert report["status"] == "CYCLE_ADVANCE_TRIGGER"
+
+
 def test_cycle_advance_does_not_enqueue_anchor_behind_eligible_ensemble(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
