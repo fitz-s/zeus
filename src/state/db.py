@@ -268,6 +268,7 @@ def _connect(
     write_class: WriteClass | str | None = None,
     busy_timeout_ms: int | None = None,
     deadline_monotonic: float | None = None,
+    disable_wal_autocheckpoint: bool = False,
 ) -> sqlite3.Connection:
     """Low-level connection with standard pragmas.
 
@@ -277,6 +278,13 @@ def _connect(
     class is recorded via counter; flock acquisition is reserved for
     Phase 1+ retrofits where callers wrap the connection lifetime in
     ``db_writer_lock(...)`` themselves.
+
+    ``disable_wal_autocheckpoint`` (T-collateral, 2026-09-12, opt-in, default
+    False so every existing caller is unchanged): a caller whose own dedicated
+    periodic PASSIVE checkpoint job owns the WAL drain (e.g. the post-trade-
+    capital daemon's ``trades_wal_checkpoint``) sets this so its frequent
+    commits never pay for draining a large un-checkpointed backlog left by a
+    pinned reader releasing.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # Callers doing optional derived publication may choose a shorter budget so
@@ -315,6 +323,8 @@ def _connect(
             f"PRAGMA journal_size_limit = {WAL_RETAINED_BYTES}"
         )
         execute_with_deadline("PRAGMA foreign_keys=ON")
+        if disable_wal_autocheckpoint:
+            execute_with_deadline("PRAGMA wal_autocheckpoint=0")
         # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
         # so the hot working set of large forecast tables stays resident across
         # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
@@ -521,6 +531,7 @@ def get_trade_connection(
     write_class: WriteClass | str | None = None,
     busy_timeout_ms: int | None = None,
     deadline_monotonic: float | None = None,
+    disable_wal_autocheckpoint: bool = False,
 ) -> sqlite3.Connection:
     """Trade DB connection (zeus_trades.db).
 
@@ -533,12 +544,16 @@ def get_trade_connection(
     ``deadline_monotonic`` bounds the total wait (connection open + busy
     retries) against an absolute ``time.monotonic()`` deadline, independent
     of ``busy_timeout_ms``'s per-connection budget; see ``_connect``.
+
+    ``disable_wal_autocheckpoint`` -- see ``_connect``; default False leaves
+    every existing caller unchanged.
     """
     return _connect(
         _zeus_trade_db_path(),
         write_class=write_class,
         busy_timeout_ms=busy_timeout_ms,
         deadline_monotonic=deadline_monotonic,
+        disable_wal_autocheckpoint=disable_wal_autocheckpoint,
     )
 
 

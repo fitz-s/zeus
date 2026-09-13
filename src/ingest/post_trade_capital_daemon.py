@@ -605,6 +605,66 @@ def _write_post_trade_capital_heartbeat() -> None:
             os._exit(1)
 
 
+# WAL checkpoint-starvation backstop, dedicated to this process (T-collateral, 2026-09-12).
+# src/main.py already runs a PASSIVE trades-DB checkpoint on the same physical file every 90s
+# (src.main._trades_wal_checkpoint_cycle / src.state.db.checkpoint_wal), but that job runs in
+# the ORDER daemon's process. It cannot stop THIS daemon's own connections from carrying
+# SQLite's default per-connection autocheckpoint: when an external reader (e.g. a Codex
+# session) pins the WAL floor for long enough, the backlog can grow into the multiple-GB
+# range, and whichever connection commits first once the pin releases pays for draining the
+# ENTIRE backlog synchronously. This daemon's collateral cycle commits every 30s -- far more
+# often than the order daemon's 90s backstop -- so it was statistically the connection most
+# likely to be "it" (confirmed live: a 9.9GB WAL drained to 133MB in one drain on this
+# daemon's pid, freezing chain_sync_read/capital_evidence/payout_observer/collateral for
+# minutes). The collateral write path now also disables its own autocheckpoint
+# (disable_wal_autocheckpoint=True in post_trade_capital.py); this job is the backstop that
+# actually reclaims the freed frames -- on a short interval owned by this process, so a
+# release is picked up within seconds instead of waiting on the order daemon's cadence.
+_TRADES_WAL_CHECKPOINT_BACKLOG_ALERT_BYTES = 512 * 1024 * 1024  # mirrors src/main.py
+
+
+def _trades_wal_checkpoint_cycle() -> None:
+    """PASSIVE-checkpoint the trades DB from this process, on a short interval.
+
+    Reuses ``src.state.db.checkpoint_wal`` (the sole canonical checkpoint helper -- do not
+    reimplement). PASSIVE never waits behind a reader/writer and never truncates (see that
+    function's docstring), so this cannot itself become a new stall source.
+    """
+    from src.state import db as _db
+
+    db_path = _db._zeus_trade_db_path()
+    busy, log_frames, ckpt_frames, page_size = _db.checkpoint_wal(db_path)
+    if busy != 0:
+        logger.info(
+            "post-trade-capital trades WAL checkpoint(PASSIVE): CONTENDED busy=%d "
+            "log_frames=%d checkpointed=%d page_size=%d -- concurrent checkpointer holds "
+            "the lock; backlog unknown this sample",
+            busy, log_frames, ckpt_frames, page_size,
+        )
+        return
+    if log_frames < 0 or ckpt_frames < 0 or page_size <= 0:
+        logger.warning(
+            "post-trade-capital trades WAL checkpoint(PASSIVE): checkpoint_wal reported an "
+            "invalid sample busy=%d log_frames=%d checkpointed=%d page_size=%d",
+            busy, log_frames, ckpt_frames, page_size,
+        )
+        return
+    outstanding_bytes = max(0, log_frames - ckpt_frames) * page_size
+    if outstanding_bytes >= _TRADES_WAL_CHECKPOINT_BACKLOG_ALERT_BYTES:
+        logger.warning(
+            "post-trade-capital trades WAL checkpoint(PASSIVE): BACKLOG log_frames=%d "
+            "checkpointed=%d outstanding=%.0fMiB page_size=%d -- a reader is pinning the "
+            "WAL floor",
+            log_frames, ckpt_frames, outstanding_bytes / (1024 * 1024), page_size,
+        )
+    else:
+        logger.info(
+            "post-trade-capital trades WAL checkpoint(PASSIVE): OK log_frames=%d "
+            "checkpointed=%d page_size=%d",
+            log_frames, ckpt_frames, page_size,
+        )
+
+
 def main() -> None:
     global _scheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -711,6 +771,16 @@ def main() -> None:
             _collateral_snapshot_refresh_isolated
         ),
         "interval", seconds=30, id="collateral_snapshot_refresh",
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
+    # Trades-DB WAL checkpoint backstop, dedicated to this process (T-collateral,
+    # 2026-09-12). 20s: shorter than the collateral job's 30s cadence and matched to its
+    # (now 20s) deadline, so a pinned-reader release is drained by this job within seconds
+    # rather than being left for whichever business connection commits next.
+    _scheduler.add_job(
+        _scheduler_job("trades_wal_checkpoint")(_trades_wal_checkpoint_cycle),
+        "interval", seconds=20, id="trades_wal_checkpoint",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),
     )

@@ -440,15 +440,23 @@ def _post_trade_collateral_timeout_seconds() -> float:
 def _post_trade_collateral_deadline_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS")
     if raw in (None, ""):
-        return 25.0
+        # T-collateral (2026-09-12): the 25.0s default left only a 3s margin
+        # inside the 30s scheduler cadence before the next tick was due; when
+        # sibling children (chain_sync_read 77s, capital_evidence 77s) saturate
+        # the BlockingScheduler's executor, that margin is consumed by
+        # scheduling latency alone and max_instances=1 then suppresses every
+        # subsequent attempt for minutes. 20.0s matches the venue-call read
+        # floor (_post_trade_collateral_timeout_seconds) already bounding the
+        # only network I/O in this cycle, widening the margin to 8s.
+        return 20.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 25.0", raw)
-        return 25.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 20.0", raw)
+        return 20.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 25.0", raw)
-        return 25.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 20.0", raw)
+        return 20.0
     return value
 
 
@@ -469,7 +477,15 @@ def _upsert_pusd_wallet_balance_head(snapshot, wallet_address: str) -> None:
 
     # get_trade_connection is the canonical connection shim (src/state/db.py) —
     # NOT a new raw sqlite3.connect() site (Track A.3 writer-lock antibody).
-    conn = get_trade_connection(write_class="bulk")
+    # disable_wal_autocheckpoint=True (T-collateral, 2026-09-12): this write
+    # commits every 30s from a killable one-shot child; leaving SQLite's
+    # default per-connection autocheckpoint enabled meant an unlucky commit
+    # right after a pinned external reader released could pay for draining
+    # the entire un-checkpointed WAL backlog synchronously (9.9GB observed
+    # live), freezing every sibling child on the same DB. The daemon's own
+    # dedicated trades_wal_checkpoint job (post_trade_capital_daemon.py) now
+    # owns that drain on a short, predictable interval instead.
+    conn = get_trade_connection(write_class="bulk", disable_wal_autocheckpoint=True)
     try:
         ensure_table(conn)
         upsert_wallet_balance_head(
@@ -518,6 +534,10 @@ def collateral_snapshot_refresh_cycle() -> None:
     ledger = CollateralLedger(
         db_path=_zeus_trade_db_path(),
         initialize_schema=False,
+        # T-collateral (2026-09-12): see the matching comment on the
+        # wallet_balance_head connection below -- this cycle's own
+        # ledger.refresh() write is the other half of the same write path.
+        disable_wal_autocheckpoint=True,
     )
     deadline_seconds = _post_trade_collateral_deadline_seconds()
 

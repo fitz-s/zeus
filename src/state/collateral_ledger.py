@@ -176,7 +176,9 @@ def _apply_busy_timeout(conn: sqlite3.Connection, busy_ms: int | None) -> None:
     conn.execute("PRAGMA busy_timeout = %d" % int(busy_ms))
 
 
-def _connect_owned_collateral_db(db_path: str | Path) -> sqlite3.Connection:
+def _connect_owned_collateral_db(
+    db_path: str | Path, *, disable_wal_autocheckpoint: bool = False
+) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     busy_ms = _collateral_busy_timeout_ms()
@@ -191,6 +193,13 @@ def _connect_owned_collateral_db(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    if disable_wal_autocheckpoint:
+        # T-collateral (2026-09-12): opt-in only -- callers outside the
+        # post-trade-capital daemon (main.py, riskguard.py) keep SQLite's
+        # default autocheckpoint; that daemon owns a dedicated periodic
+        # PASSIVE checkpoint job (trades_wal_checkpoint) so its own frequent
+        # commits never pay for draining a large un-checkpointed backlog.
+        conn.execute("PRAGMA wal_autocheckpoint=0")
     _apply_busy_timeout(conn, busy_ms)
     return conn
 
@@ -252,6 +261,7 @@ class CollateralLedger:
         *,
         db_path: str | Path | None = None,
         initialize_schema: bool = True,
+        disable_wal_autocheckpoint: bool = False,
     ) -> None:
         """Initialize a ledger backed by a sqlite3 connection.
 
@@ -267,6 +277,11 @@ class CollateralLedger:
         - ``initialize_schema=False``: require an already-migrated schema through
           a read-only validation. Use in recurring daemon cycles after pre-flight
           so construction does not compete for the SQLite writer merely to run DDL.
+        - ``disable_wal_autocheckpoint=True`` (path-backed only): every connection
+          this ledger opens gets ``PRAGMA wal_autocheckpoint=0``. For a caller whose
+          own dedicated periodic PASSIVE checkpoint job owns the WAL drain instead
+          (T-collateral, 2026-09-12) -- otherwise a frequent-commit caller can have
+          an unlucky commit pay for draining the whole un-checkpointed backlog.
 
         Authority basis: 2026-06-17 live redecision repair. The 2026-05-13
         singleton fix correctly stopped transient caller-conn poisoning, but did
@@ -284,6 +299,7 @@ class CollateralLedger:
         self._memory_reservations: dict[str, dict[str, Any]] = {}
         self._owns_conn = False
         self._db_path: Path | None = None
+        self._disable_wal_autocheckpoint = disable_wal_autocheckpoint
         if db_path is not None:
             # Path-backed singleton: no persistent sqlite connection survives
             # between calls. Bootstrap callers may initialize schema once; hot
@@ -356,13 +372,16 @@ class CollateralLedger:
                     deadline_ms=_COLLATERAL_WRITE_LEASE_DEADLINE_MS,
                     max_hold_ms=_COLLATERAL_WRITE_LEASE_MAX_HOLD_MS,
                     connection_factory=lambda _path: _connect_owned_collateral_db(
-                        self._db_path
+                        self._db_path,
+                        disable_wal_autocheckpoint=self._disable_wal_autocheckpoint,
                     ),
                 ) as tx:
                     yield tx.connection
                 return
 
-        conn = _connect_owned_collateral_db(self._db_path)
+        conn = _connect_owned_collateral_db(
+            self._db_path, disable_wal_autocheckpoint=self._disable_wal_autocheckpoint
+        )
         try:
             yield conn
             conn.commit()

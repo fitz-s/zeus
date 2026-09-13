@@ -1464,3 +1464,175 @@ def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):
 
     monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", "invalid")
     assert post_trade_capital._post_trade_collateral_timeout_seconds() == 20.0
+
+
+# ===========================================================================
+# T-collateral (2026-09-12): bounded WAL checkpoint + refresh margin.
+#
+# CURRENT_WEALTH_COLLATERAL_EXPIRED blocked every entry cut for ~9 minutes because the
+# collateral child kept missing its 30s cadence. Root cause: this daemon's own connections
+# carried SQLite's default per-connection autocheckpoint, so an unlucky commit right after a
+# pinned external reader released paid for draining the ENTIRE un-checkpointed WAL backlog
+# (9.9GB observed live) synchronously, freezing every sibling child. Fix: (1) the collateral
+# write path disables its own autocheckpoint and a dedicated short-interval PASSIVE
+# checkpoint job in THIS process reclaims the freed frames instead; (2) the child deadline
+# drops from 25.0s to 20.0s (matching the venue-call read floor) to widen the margin inside
+# the 30s cadence from 3s to 8s.
+# ===========================================================================
+
+
+def test_collateral_child_deadline_matches_venue_read_floor(monkeypatch):
+    """The default collateral deadline must equal the venue-call timeout floor (20.0s).
+
+    T-collateral: the prior 25.0s default left only a 3s margin before the next 30s tick
+    was due; when sibling children saturate the scheduler's executor, that margin is
+    consumed by scheduling latency alone, not by collateral's own work.
+    """
+    from src.execution import post_trade_capital
+
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
+    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 20.0
+    assert (
+        post_trade_capital._post_trade_collateral_deadline_seconds()
+        == post_trade_capital._post_trade_collateral_timeout_seconds()
+    )
+
+    monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", "invalid")
+    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 20.0
+
+
+def test_collateral_child_isolated_timeout_uses_the_20s_deadline(monkeypatch):
+    """The killable-child wrapper's subprocess timeout must track the (now 20s) deadline.
+
+    Total kill timeout = deadline + the unchanged 2.0s exit grace = 22.0s, leaving an 8s
+    margin inside the 30s cadence (was 3s at the old 25.0s deadline).
+    """
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
+    captured: dict[str, float] = {}
+
+    def _run(*args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    daemon._collateral_snapshot_refresh_isolated()
+    assert captured["timeout"] == pytest.approx(22.0)
+
+
+def test_collateral_ledger_and_wallet_head_writes_disable_wal_autocheckpoint(monkeypatch):
+    """The two writes on collateral_snapshot_refresh_cycle's path must both request
+    disable_wal_autocheckpoint=True -- this daemon's own trades_wal_checkpoint job (not
+    SQLite's implicit per-commit autocheckpoint) must own the WAL drain."""
+    from src.execution import post_trade_capital
+
+    captured_ledger_kwargs: dict = {}
+    captured_conn_kwargs: dict = {}
+
+    class _FakeLedger:
+        def __init__(self, **kwargs):
+            captured_ledger_kwargs.update(kwargs)
+
+        def refresh(self, adapter):
+            raise post_trade_capital.CollateralSnapshotDegraded("stop before network/db work")
+
+    # collateral_snapshot_refresh_cycle imports both names LOCALLY (fresh each call), so
+    # the source modules must be patched, not post_trade_capital's own namespace.
+    import src.state.collateral_ledger as _collateral_ledger_mod
+    import src.runtime.timeout_guard as _timeout_guard_mod
+
+    monkeypatch.setattr(_collateral_ledger_mod, "CollateralLedger", _FakeLedger)
+    monkeypatch.setattr(
+        _timeout_guard_mod,
+        "run_with_timeout",
+        lambda fn, seconds, label: (None, None, ""),
+    )
+
+    def _fake_get_trade_connection(**kwargs):
+        captured_conn_kwargs.update(kwargs)
+        raise AssertionError("wallet_balance_head upsert should not run in this test")
+
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection", _fake_get_trade_connection
+    )
+
+    with pytest.raises(post_trade_capital.CollateralSnapshotDegraded):
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+
+    assert captured_ledger_kwargs.get("disable_wal_autocheckpoint") is True
+
+    # Exercise the wallet_balance_head connection site directly (its own call is
+    # unreachable once the ledger raises above).
+    from src.state.collateral_ledger import CollateralSnapshot
+    from datetime import datetime, timezone
+
+    snapshot = CollateralSnapshot(
+        pusd_balance_micro=0,
+        pusd_allowance_micro=0,
+        usdc_e_legacy_balance_micro=0,
+        ctf_token_balances={},
+        ctf_token_allowances={},
+        reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={},
+        captured_at=datetime.now(timezone.utc),
+        authority_tier="CHAIN",
+    )
+    with pytest.raises(AssertionError, match="should not run"):
+        post_trade_capital._upsert_pusd_wallet_balance_head(snapshot, "0xWALLET")
+    assert captured_conn_kwargs.get("disable_wal_autocheckpoint") is True
+
+
+def test_daemon_registers_trades_wal_checkpoint_job():
+    """post_trade_capital_daemon must register its own short-interval PASSIVE checkpoint
+    job, wrapped in the same fail-soft _scheduler_job() decorator as every sibling job."""
+    call = _add_job_call(_P4_DAEMON, "trades_wal_checkpoint")
+    assert call is not None, (
+        "post_trade_capital_daemon must register a 'trades_wal_checkpoint' job"
+    )
+    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+    assert isinstance(keywords.get("seconds"), ast.Constant)
+    assert keywords["seconds"].value == 20
+    assert isinstance(keywords.get("max_instances"), ast.Constant)
+    assert keywords["max_instances"].value == 1
+    assert isinstance(keywords.get("coalesce"), ast.Constant)
+    assert keywords["coalesce"].value is True
+
+    assert isinstance(call.func, ast.Attribute) and call.func.attr == "add_job"
+    job_arg = call.args[0]
+    assert isinstance(job_arg, ast.Call)
+    assert isinstance(job_arg.func, ast.Call)
+    assert isinstance(job_arg.func.func, ast.Name) and job_arg.func.func.id == "_scheduler_job"
+
+
+def test_trades_wal_checkpoint_cycle_calls_the_canonical_passive_checkpoint(monkeypatch):
+    """The cycle must reuse src.state.db.checkpoint_wal (PASSIVE, never reimplemented) --
+    not run a raw PRAGMA wal_checkpoint itself."""
+    from src.ingest import post_trade_capital_daemon as daemon
+    from src.state import db as _db
+
+    captured: dict = {}
+
+    def _fake_checkpoint_wal(db_path):
+        captured["db_path"] = db_path
+        return (0, 100, 100, 4096)
+
+    monkeypatch.setattr(_db, "checkpoint_wal", _fake_checkpoint_wal)
+    daemon._trades_wal_checkpoint_cycle()
+    assert captured["db_path"] == _db._zeus_trade_db_path()
+
+
+def test_trades_wal_checkpoint_cycle_never_raises_on_contention_or_backlog(monkeypatch):
+    """A CONTENDED or BACKLOG sample must be logged, never raised -- the checkpoint job
+    must not be able to crash the scheduler."""
+    from src.ingest import post_trade_capital_daemon as daemon
+    from src.state import db as _db
+
+    # busy=1 (CONTENDED): a concurrent checkpointer holds the exclusive lock this sample.
+    monkeypatch.setattr(_db, "checkpoint_wal", lambda db_path: (1, -1, -1, 4096))
+    daemon._trades_wal_checkpoint_cycle()
+
+    # A backlog past the 512 MiB alert threshold must warn, not raise.
+    huge_log_frames = daemon._TRADES_WAL_CHECKPOINT_BACKLOG_ALERT_BYTES // 4096 + 10
+    monkeypatch.setattr(_db, "checkpoint_wal", lambda db_path: (0, huge_log_frames, 0, 4096))
+    daemon._trades_wal_checkpoint_cycle()
