@@ -679,11 +679,30 @@ def chain_sync_read_cycle() -> None:
     is no longer invisible to ``collateral_snapshot_persist``'s zero-retry coordinator
     BEGIN (write_coordinator.py:~816-822). ``lease()`` (not ``transaction()``) is used
     so the connection above — carrying the sanctioned trade+world ATTACH — stays open
-    for the whole cycle instead of being replaced by a fresh factory connection; the
-    lease scope wraps the DML AND the commit (mirrors harvester_pnl_resolver.py's
-    ``_settlement_writer_transaction``) so the real SQLite write lock is never held
-    after the coordinator's advisory gate is released. No HTTP runs inside the lease —
-    it wraps only ``reconcile_with_chain``'s DML, never ``run_chain_sync``'s API call.
+    for the whole cycle instead of being replaced by a fresh factory connection;
+    ``bounded_sqlite_write`` wraps the DML AND the commit inside that lease (mirrors
+    every other bare-``lease()`` caller in this repo, e.g. cycle_runtime.py's own
+    ``_canonical_trade_write_lease`` use) so a BUSY collision is fail-fast and
+    classified as ``WriteLeaseTimeout`` with proper coordinator telemetry, and the
+    real SQLite write lock is never held after the coordinator's advisory gate is
+    released. No HTTP runs inside the lease — it wraps only ``reconcile_with_chain``'s
+    DML, never ``run_chain_sync``'s API call.
+
+    Known, disclosed residual (R-AD review, 2026-09-13): ``reconcile_with_chain``
+    (``src/state/chain_reconciliation.py``'s rescue-audit path, ~line 1435) contains
+    its own internal ``conn.commit()`` on this SAME connection, wrapped in a local
+    ``except Exception: logger.error(...)`` — pre-existing, undisturbed by this
+    change, and explicitly documented there as deliberate ("rescue_events is an
+    authoritative audit record ... durability is allowed here"). Under this lease
+    that internal commit now also runs with busy_timeout=0, so a BUSY there is
+    classified only by that module's own logger, not coordinator telemetry. No data
+    is lost when it fires: SQLite does not discard a failed commit's pending rows,
+    so they ride forward uncommitted to the next successful commit on the same
+    connection — ultimately this cycle's own unconditional final commit below.
+    Routing that specific internal commit through coordinator telemetry would require
+    threading this lease into ``chain_reconciliation.reconcile()``'s signature, which
+    is shared with the still-uncoordinated order-daemon chain-sync call site
+    (cycle_runner.py:874) and is out of scope for this fix.
     """
     # Lazy imports (mirror src/main.py:_chain_sync_and_exit_monitor_cycle). The chain-sync
     # READ helpers live in the order-runtime cycle_runner; we import ONLY the read-phase
@@ -702,6 +721,7 @@ def chain_sync_read_cycle() -> None:
     from src.state.write_coordinator import (
         DBIdentity,
         WritePriority,
+        bounded_sqlite_write,
         default_runtime_write_coordinator,
     )
 
@@ -713,34 +733,47 @@ def chain_sync_read_cycle() -> None:
     # non-MONITOR TRADE sidecar convention in
     # src/engine/event_reactor_adapter.py::_persist_global_jit_authority_snapshot_isolated
     # (owner differs; parameters are the cited sibling's, not invented here).
+    #
+    # R-AD fast-follow (2026-09-13): bounded_sqlite_write, not a hand-rolled
+    # busy_timeout dance -- .lease() alone only RECORDS max_hold_ms in telemetry, it
+    # never enforces it (write-lease-bounds-acquisition-not-hold). bounded_sqlite_write
+    # is the same enforcement primitive write_coordinator.transaction() calls
+    # internally (write_coordinator.py:805-814) and the convention every other
+    # bare-.lease() caller in this repo uses (cycle_runtime.py:3505-3516,
+    # exit_lifecycle.py:14456-14469, executor.py, chain_mirror_reconciler.py,
+    # riskguard.py, global_batch_runtime.py) -- it forces busy_timeout=0 for the body,
+    # classifies a BUSY collision as WriteLeaseTimeout with proper stage/error
+    # telemetry (lease.record_stage/record_sqlite_error), and restores busy_timeout on
+    # exit. .transaction() itself is not used here because it always opens its OWN
+    # connection via connection_factory and unconditionally closes it in its own
+    # finally: that would sever the INV-37 world+trade ATTACH this cycle's connection
+    # carries, and would hit a closed connection at chain_sync_read_cycle's own
+    # pre-existing outer safety-net conn.commit() below (which
+    # test_chain_sync_read_failure_reaches_child_exit_status pins as firing
+    # unconditionally), turning every ordinary successful cycle into a spurious
+    # "chain_sync_read cycle failed".
     @contextmanager
     def _coordinated_reconcile_commit():
-        old_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
-        with default_runtime_write_coordinator().lease(
+        coordinator = default_runtime_write_coordinator()
+        with coordinator.lease(
             (DBIdentity.TRADE,),
             owner="chain_sync_read",
             write_class="live",
             priority=WritePriority.STANDARD,
             deadline_ms=1_500,
             max_hold_ms=500,
-        ):
-            # Force fail-fast BUSY at the reconcile's implicit BEGIN (mirrors
-            # write_coordinator.transaction()'s own busy_timeout=0-before-BEGIN):
-            # a raw/legacy writer's ordinary commit must not block this admitted
-            # slot for up to the connection's live default busy_timeout.
-            conn.execute("PRAGMA busy_timeout = 0")
-            try:
-                yield
-            finally:
+        ) as lease:
+            with bounded_sqlite_write(conn, lease, max_hold_ms=500):
                 # Unconditional commit preserves the pre-existing behavior of this
-                # cycle (see below): the reconcile writes are committed whether or
-                # not reconcile raised, while still holding the coordinator lease
-                # so the real SQLite write lock is released before the advisory
-                # gate is.
+                # cycle: the reconcile writes are committed whether or not reconcile
+                # raised, while still inside bounded_sqlite_write's busy_timeout=0
+                # fence and the coordinator lease, so the real SQLite write lock is
+                # released before the advisory gate is, and a commit-time BUSY is
+                # classified the same way a DML-time BUSY is (WriteLeaseTimeout).
                 try:
-                    conn.commit()
+                    yield
                 finally:
-                    conn.execute(f"PRAGMA busy_timeout = {old_busy_timeout}")
+                    conn.commit()
 
     summary: dict = {}
     failure: Exception | None = None

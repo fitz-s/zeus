@@ -1161,14 +1161,28 @@ def test_chain_sync_read_reconcile_dml_runs_inside_trade_coordinator_lease(monke
     src/engine/event_reactor_adapter.py::_persist_global_jit_authority_snapshot_isolated
     sibling convention) around _run_chain_sync's write phase, and the write phase's own
     commit must happen while that lease is still held (never after it is released).
+
+    R-AD fast-follow (2026-09-13): the lease yields a REAL WriteLease/_LeaseMetrics (not
+    a bare SimpleNamespace) so this also exercises the real bounded_sqlite_write path the
+    production code now wraps the DML in -- proving the busy_timeout=0-then-restore
+    dance runs through that shared primitive rather than a hand-rolled one that only
+    .lease() would have left unenforced (write-lease-bounds-acquisition-not-hold).
     """
     import contextlib
+    import time as time_mod
+    from pathlib import Path
 
     from src.data import polymarket_client
     from src.engine import cycle_runner
     from src.execution import post_trade_capital
     from src.state import write_coordinator as coordinator_mod
-    from src.state.write_coordinator import DBIdentity, WritePriority
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLease,
+        WritePriority,
+        _LeaseMetrics,
+    )
 
     class _Cursor:
         def __init__(self, row):
@@ -1195,8 +1209,17 @@ def test_chain_sync_read_reconcile_dml_runs_inside_trade_coordinator_lease(monke
                 }
             )
             self.active_leases += 1
+            real_lease = WriteLease(
+                owner=owner,
+                db_set=tuple(dbs),
+                db_paths=(Path("/tmp/fake-chain-sync-lease-test.db"),),
+                write_class=WriteClass(write_class),
+                priority=priority,
+                acquired_at=time_mod.monotonic(),
+                _metrics=_LeaseMetrics(),
+            )
             try:
-                yield SimpleNamespace()
+                yield real_lease
             finally:
                 self.active_leases -= 1
 
@@ -1329,6 +1352,104 @@ def test_chain_sync_read_write_lease_timeout_reaches_child_exit_status(monkeypat
     with pytest.raises(RuntimeError, match="chain_sync_read cycle failed"):
         post_trade_capital.chain_sync_read_cycle()
 
+    assert conn.closed is True
+
+
+def test_chain_sync_read_dml_busy_is_classified_via_bounded_sqlite_write(monkeypatch):
+    """R-AD fast-follow (2026-09-13): a BUSY collision DURING the reconcile DML itself
+    (not just at lease acquisition, covered by the test above) must surface as a
+    WriteLeaseTimeout through the SAME bounded_sqlite_write classification every other
+    bare-.lease() caller in this repo uses -- not a raw, uncoordinated
+    sqlite3.OperationalError. This is the concrete proof that _coordinated_reconcile_
+    commit really does route the write phase's hold through bounded_sqlite_write
+    (write_coordinator.py:223-274) rather than only recording max_hold_ms in .lease()'s
+    telemetry, which never enforces or classifies anything on its own (see
+    write-lease-bounds-acquisition-not-hold).
+    """
+    import contextlib
+    import sqlite3
+    import time as time_mod
+    from pathlib import Path
+
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.state import write_coordinator as coordinator_mod
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import WriteLease, _LeaseMetrics
+
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Connection:
+        def __init__(self):
+            self.commits = 0
+            self.closed = False
+
+        def execute(self, sql, *args):
+            normalized = " ".join(sql.split()).upper()
+            if normalized == "PRAGMA BUSY_TIMEOUT":
+                return _Cursor((30_000,))
+            if normalized.startswith("PRAGMA BUSY_TIMEOUT"):
+                return _Cursor(None)
+            raise AssertionError(f"unexpected conn.execute: {sql!r}")
+
+        def commit(self):
+            self.commits += 1
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _RealishCoordinator:
+        @contextlib.contextmanager
+        def lease(self, dbs, *, owner, write_class, priority, deadline_ms, max_hold_ms):
+            real_lease = WriteLease(
+                owner=owner,
+                db_set=tuple(dbs),
+                db_paths=(Path("/tmp/fake-chain-sync-busy-test.db"),),
+                write_class=WriteClass(write_class),
+                priority=priority,
+                acquired_at=time_mod.monotonic(),
+                _metrics=_LeaseMetrics(),
+            )
+            yield real_lease
+
+    conn = _Connection()
+
+    def _fake_run_chain_sync(portfolio, clob, passed_conn, *, write_scope=None):
+        with write_scope():
+            # Simulates reconcile_with_chain's DML hitting a raw/legacy writer's
+            # ordinary commit -- exactly the collision this whole fix targets.
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+    monkeypatch.setattr(
+        coordinator_mod, "default_runtime_write_coordinator", lambda: _RealishCoordinator()
+    )
+
+    with pytest.raises(RuntimeError, match="chain_sync_read cycle failed") as excinfo:
+        post_trade_capital.chain_sync_read_cycle()
+
+    # The classification is the point of this test: bounded_sqlite_write, not a raw
+    # OperationalError, must be what chain_sync_read_cycle's failure wraps.
+    assert isinstance(excinfo.value.__cause__, coordinator_mod.WriteLeaseTimeout)
+    # The unconditional commit convention (see the test above) still fires even though
+    # the DML raised -- unchanged by this fast-follow.
+    assert conn.commits >= 1
     assert conn.closed is True
 
 
