@@ -2055,12 +2055,30 @@ class TestExecutor:
             "order_type": "GTC",
         }
 
-    def test_reduce_only_exit_persists_certificate_before_venue_call(self, monkeypatch):
+    def test_reduce_only_exit_persists_certificate_before_venue_call(
+        self, monkeypatch, tmp_path
+    ):
         """Audit spine parity: execute_exit_order must persist exactly one
         ReduceOnlyExitCertificate, carrying the position identity, BEFORE the
         venue call — mirroring the entry path's
-        _persist_live_command_certificates_before_executor_submit discipline."""
+        _persist_live_command_certificates_before_executor_submit discipline.
+
+        decision_certificates is WORLD-owned, so the certificate ledger is
+        routed through a dedicated world-file connection here (not
+        _TEST_CONN), matching what execute_exit_order actually opens
+        (get_world_connection()) rather than the trade connection it is
+        called with.
+        """
         from src.decision_kernel import claims
+
+        world_db_path = tmp_path / "world.db"
+
+        def _world_factory(**_kwargs):
+            conn = sqlite3.connect(str(world_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr("src.state.db.get_world_connection", _world_factory)
 
         captured = {}
 
@@ -2075,9 +2093,17 @@ class TestExecutor:
                 self.persist_signed_identity = persister
 
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
-                rows = _TEST_CONN.execute(
-                    "SELECT certificate_type, payload_json FROM decision_certificates"
-                ).fetchall()
+                # The certificate connection is opened-and-closed before this
+                # call (never held across the venue HTTP call), so ordering is
+                # checked against the durable file state, not a live handle.
+                read_conn = sqlite3.connect(str(world_db_path))
+                read_conn.row_factory = sqlite3.Row
+                try:
+                    rows = read_conn.execute(
+                        "SELECT certificate_type, payload_json FROM decision_certificates"
+                    ).fetchall()
+                finally:
+                    read_conn.close()
                 captured["rows_before_venue_call"] = [
                     (row["certificate_type"], json.loads(row["payload_json"]))
                     for row in rows
@@ -2120,19 +2146,39 @@ class TestExecutor:
         assert payload["side"] == "SELL"
 
         # And it is still exactly one row after the venue call completes —
-        # no duplicate persisted on the ack path.
-        after_rows = _TEST_CONN.execute(
+        # no duplicate persisted on the ack path. Also confirm it never
+        # touched the trade connection's own (main) schema.
+        world_conn = sqlite3.connect(str(world_db_path))
+        after_rows = world_conn.execute(
             "SELECT COUNT(*) FROM decision_certificates WHERE certificate_type = ?",
             (claims.REDUCE_ONLY_EXIT,),
         ).fetchone()[0]
+        world_conn.close()
         assert after_rows == 1
+        # _TEST_CONN's own decision_certificates table is a frozen decoy left
+        # by generic init_schema() bootstrap (every connection gets the table
+        # DDL run on it) — its presence is expected and NOT itself a symptom
+        # of the routing bug; the row must never land there, though.
+        trade_main_rows = _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM decision_certificates"
+        ).fetchone()[0]
+        assert trade_main_rows == 0
 
     def test_reduce_only_exit_certificate_persist_failure_does_not_block_submit(
-        self, monkeypatch, caplog
+        self, monkeypatch, caplog, tmp_path
     ):
         """A broken audit-spine write must never block a reduce-only exit: the
         submit still proceeds and reaches the venue, with an ERROR logged."""
         import logging
+
+        world_db_path = tmp_path / "world.db"
+
+        def _world_factory(**_kwargs):
+            conn = sqlite3.connect(str(world_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr("src.state.db.get_world_connection", _world_factory)
 
         captured = {}
 
@@ -2190,12 +2236,171 @@ class TestExecutor:
             for record in caplog.records
             if record.levelno == logging.ERROR
         )
-        # No certificate row exists — the failed write never landed — but the
-        # exit itself was not blocked by it (asserted above).
-        after_rows = _TEST_CONN.execute(
+        # No certificate row exists anywhere — the failed write never landed
+        # in either DB — but the exit itself was not blocked (asserted above).
+        assert not world_db_path.exists() or sqlite3.connect(
+            str(world_db_path)
+        ).execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_certificates'"
+        ).fetchone()[0] == 0
+        # _TEST_CONN's own decision_certificates table is a frozen decoy left
+        # by generic init_schema() bootstrap; the row must never land there.
+        trade_main_rows = _TEST_CONN.execute(
             "SELECT COUNT(*) FROM decision_certificates"
         ).fetchone()[0]
-        assert after_rows == 0
+        assert trade_main_rows == 0
+
+    def test_reduce_only_exit_certificate_lands_in_world_not_trade_main(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression for the world/trade domain-routing bug: build the REAL
+        multi-schema topology execute_exit_order actually runs under in
+        production (a trade-main connection with world merely ATTACHed) and
+        confirm the certificate lands in the world file, never in the trade
+        connection's own main schema — a single-schema fixture cannot catch
+        this, since there would be nowhere else for the row to go wrong."""
+        from src.decision_kernel import claims
+        from src.state.db import init_schema, init_schema_trade_only
+
+        trade_db_path = tmp_path / "trade.db"
+        world_db_path = tmp_path / "world.db"
+
+        trade_conn = sqlite3.connect(str(trade_db_path))
+        trade_conn.row_factory = sqlite3.Row
+        trade_conn.execute("PRAGMA foreign_keys=ON")
+        init_schema(trade_conn)
+        init_schema_trade_only(trade_conn)
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_db_path),))
+        trade_conn.commit()
+
+        def _world_factory(**_kwargs):
+            conn = sqlite3.connect(str(world_db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr("src.state.db.get_world_connection", _world_factory)
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.persist_signed_identity = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                return _final_submit_result(self.bound_envelope, order_id="sell-world-route-1")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
+
+        snapshot_id = _ensure_snapshot(
+            trade_conn,
+            token_id="yes-token-world-route",
+            direction="sell_yes",
+            min_tick_size=Decimal("0.01"),
+            final_limit_price=Decimal("0.50"),
+            snapshot_top_ask=Decimal("0.51"),
+            snapshot_top_bid=Decimal("0.49"),
+        )
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-world-route",
+                token_id="yes-token-world-route",
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=trade_conn,
+        )
+
+        assert result.status == "pending"
+
+        # init_schema() bootstraps a decision_certificates table on every
+        # connection it runs on, including this trade-only one — that decoy
+        # table's mere existence is expected, not itself the bug. What
+        # matters is that no ROW ever lands in it.
+        main_rows = trade_conn.execute(
+            "SELECT count(*) FROM main.decision_certificates"
+        ).fetchone()[0]
+        assert main_rows == 0, (
+            "the certificate row must never land in the trade DB's own main "
+            "schema copy of decision_certificates"
+        )
+
+        world_conn = sqlite3.connect(str(world_db_path))
+        world_conn.row_factory = sqlite3.Row
+        row = world_conn.execute(
+            "SELECT certificate_type, payload_json FROM decision_certificates "
+            "WHERE certificate_type = ?",
+            (claims.REDUCE_ONLY_EXIT,),
+        ).fetchone()
+        world_conn.close()
+        trade_conn.close()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert payload["position_id"] == "trade-world-route"
+        assert payload["token_id"] == "yes-token-world-route"
+
+    @pytest.mark.parametrize(
+        "intent_kwargs,expected_reason",
+        [
+            (
+                {
+                    "protective_sell_execution_authority": SimpleNamespace(kind="RED_FORCE_EXIT"),
+                    "global_sell_execution_authority": None,
+                    "marketable_sell_certificate": None,
+                },
+                "RED_FORCE_EXIT",
+            ),
+            (
+                {
+                    "protective_sell_execution_authority": None,
+                    "global_sell_execution_authority": SimpleNamespace(),
+                    "marketable_sell_certificate": None,
+                },
+                "GLOBAL_SELL_AUCTION",
+            ),
+            (
+                {
+                    "protective_sell_execution_authority": None,
+                    "global_sell_execution_authority": None,
+                    "marketable_sell_certificate": {"some": "certificate"},
+                },
+                "MARKETABLE_SELL",
+            ),
+            (
+                {
+                    "protective_sell_execution_authority": None,
+                    "global_sell_execution_authority": None,
+                    "marketable_sell_certificate": None,
+                },
+                "REDUCE_ONLY_EXIT",
+            ),
+        ],
+    )
+    def test_exit_reason_for_certificate_branches(self, intent_kwargs, expected_reason):
+        from src.execution.executor import _exit_reason_for_certificate
+
+        fake_intent = SimpleNamespace(**intent_kwargs)
+        assert _exit_reason_for_certificate(fake_intent) == expected_reason
 
     def test_reduce_only_exit_certificate_validates_through_shared_verifier(self):
         """The exit certificate must pass through the same ledger/verifier

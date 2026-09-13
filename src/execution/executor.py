@@ -7915,6 +7915,7 @@ def execute_exit_order(
                 build_reduce_only_exit_certificate,
             )
             from src.decision_kernel.ledger import DecisionCertificateLedger
+            from src.state.db import get_world_connection
 
             exit_certificate_decision_time = datetime.now(timezone.utc)
             exit_certificate = build_reduce_only_exit_certificate(
@@ -7939,8 +7940,32 @@ def execute_exit_order(
                 },
                 decision_time=exit_certificate_decision_time,
             )
-            DecisionCertificateLedger(conn).persist_all((exit_certificate,))
-            conn.commit()
+            # decision_certificates is WORLD-owned (src/state/domains.py:
+            # Domain.WORLD). `conn` here is a trade-main connection with
+            # world merely ATTACHed (get_trade_connection_with_world_required);
+            # DecisionCertificateLedger uses the bare unqualified table name,
+            # which would create/use a SEPARATE, orphaned decision_certificates
+            # table inside zeus_trades.db's own main schema instead of the
+            # canonical zeus-world.db table every evaluator reads. Mirror the
+            # entry path (events/reactor.py's live_cap_conn = get_world_connection())
+            # with a connection whose main genuinely is zeus-world.db, opened
+            # and closed locally for this write only — never held across the
+            # venue HTTP call below.
+            world_conn = get_world_connection()
+            try:
+                DecisionCertificateLedger(world_conn).persist_all((exit_certificate,))
+                world_conn.commit()
+            except Exception:
+                try:
+                    world_conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    world_conn.close()
+                except Exception:
+                    pass
         except Exception:
             logger.error(
                 "execute_exit_order: reduce-only exit certificate persist "
