@@ -882,6 +882,80 @@ def test_default_client_factory_isolates_concurrent_adapters_with_different_time
     assert helpers._http_client.timeout == original_timeout
 
 
+def test_get_balance_allowance_routes_timestamp_sync_through_dedicated_transport(
+    monkeypatch,
+):
+    """R-AS2 (2026-09-13): ClobClient._get_timestamp() (py_clob_client_v2/client.py)
+    calls the bare module-level get() directly, NOT self._get(...). Since
+    _l1_headers/_l2_headers call self._get_timestamp() on every signed call
+    (use_server_time=True is unconditional on this adapter), and
+    get_balance_allowance() -- the exact T-collateral2 target -- starts with
+    _l2_headers, a dedicated transport that overrides only _get/_post/_delete
+    leaves this ONE prerequisite round trip bound by neither the configured
+    timeout nor anything this fix touches.
+
+    Proves the full call is bounded end to end using the REAL ClobClient (not
+    the lightweight test fake, which doesn't model this method): stub the
+    SDK's shared free-function transport (http_helpers.helpers.request) to
+    raise -- anything that still reaches it (the /time call, pre-fix) blows
+    up the whole get_balance_allowance() call. Stub the dedicated transport's
+    own httpx.Client.request to succeed. Before the _get_timestamp fix this
+    test FAILS (the /time call hits the raising stub); after, it passes (both
+    round trips go through the dedicated transport and never touch the
+    stub).
+    """
+    import base64
+
+    import httpx
+    from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
+    from py_clob_client_v2.http_helpers import helpers as clob_http_helpers
+    from src.venue.polymarket_v2_adapter import _install_dedicated_clob_transport
+
+    def _shared_transport_used(*args, **kwargs):
+        raise AssertionError(
+            "shared module-global transport was used -- a call bypassed the "
+            "dedicated transport (this is exactly what R-AS2 flagged for "
+            "_get_timestamp)"
+        )
+
+    monkeypatch.setattr(clob_http_helpers, "request", _shared_transport_used)
+
+    def _fake_dedicated_response(self, *, method, url, headers=None, params=None, **kwargs):
+        if url.endswith("/time"):
+            payload = {"timestamp": 1_757_000_000}
+        else:
+            payload = {"balance": "1000000", "allowance": "1000000"}
+        return httpx.Response(
+            200, json=payload, request=httpx.Request(method, url)
+        )
+
+    monkeypatch.setattr(httpx.Client, "request", _fake_dedicated_response)
+
+    signer_key = "0x" + "11" * 32
+    creds = ApiCreds(
+        api_key="test-api-key",
+        api_secret=base64.urlsafe_b64encode(b"s" * 32).decode(),
+        api_passphrase="test-passphrase",
+    )
+    client = ClobClient(
+        "https://clob.polymarket.com",
+        137,
+        key=signer_key,
+        creds=creds,
+        signature_type=2,
+        funder="0xfunder",
+        use_server_time=True,
+    )
+    _install_dedicated_clob_transport(client, timeout_seconds=5.0)
+
+    result = client.get_balance_allowance(
+        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+    )
+
+    assert result["balance"] == "1000000"
+
+
 def test_adapter_close_releases_its_own_dedicated_transport_only(monkeypatch):
     """PolymarketV2Adapter.close() must close ONLY its own dedicated
     transport (installed when network_timeout_seconds was configured) and

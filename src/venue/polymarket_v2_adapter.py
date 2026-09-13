@@ -219,8 +219,21 @@ def _install_dedicated_clob_transport(client: Any, *, timeout_seconds: float) ->
     no cross-caller race. The shared global transport is never touched by
     this function and keeps serving every other ``ClobClient`` instance at
     its own (SDK-default) timeout, exactly as before this fix existed.
+
+    R-AS2 review (2026-09-13): ``ClobClient._get_timestamp`` (used by
+    ``_l1_headers``/``_l2_headers``, i.e. every signed call -- including
+    ``get_balance_allowance``, the T-collateral2 target -- whenever
+    ``use_server_time=True``, which this adapter always passes) calls the
+    bare module-level ``get()`` function directly rather than
+    ``self._get(...)``. Overriding ``_get`` alone therefore left this one
+    prerequisite network call routed through the shared global transport,
+    at whatever timeout it happens to carry, on every authenticated call --
+    exactly the class of hazard this fix exists to close. Override
+    ``_get_timestamp`` too, so the ``/time`` round trip goes through the
+    same dedicated transport as the request it precedes.
     """
     import httpx
+    from py_clob_client_v2.endpoints import TIME
     from py_clob_client_v2.http_helpers import helpers as _clob_http_helpers
 
     dedicated_transport = httpx.Client(
@@ -292,9 +305,21 @@ def _install_dedicated_clob_transport(client: Any, *, timeout_seconds: float) ->
             "DELETE", endpoint, headers=headers, data=data, params=params
         )
 
+    def _dedicated_get_timestamp() -> "int | None":
+        # Mirrors ClobClient._get_timestamp()'s exact logic
+        # (py_clob_client_v2/client.py), just routed through _dedicated_get
+        # instead of the bare module-level get().
+        if not client.use_server_time:
+            return None
+        result = _dedicated_get(f"{client.host}{TIME}")
+        if isinstance(result, dict):
+            return result.get("time") or result.get("timestamp")
+        return int(result)
+
     client._get = _dedicated_get
     client._post = _dedicated_post
     client._delete = _dedicated_delete
+    client._get_timestamp = _dedicated_get_timestamp
     # Owned per-instance (unlike the shared module-global, which the SDK
     # never closes either): the caller that constructed this client is
     # responsible for its lifetime. Stashed as a plain attribute so
