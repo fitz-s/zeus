@@ -1081,8 +1081,12 @@ def select_prepared_global_auction(
                             probability,
                             status="EXCLUDED",
                             reason=(
-                                "FAMILY_PREFLIGHT_EXCLUDED:"
-                                f"{excluded_by_family[family_key]}"
+                                excluded_by_family[family_key]
+                                if family_key in materialization_excluded_by_family
+                                else (
+                                    "FAMILY_PREFLIGHT_EXCLUDED:"
+                                    f"{excluded_by_family[family_key]}"
+                                )
                             ),
                         )
                     )
@@ -1281,11 +1285,71 @@ def select_prepared_global_auction(
                                 sell_book_witness_identity=exclusion_book_witness,
                             )
                         )
-                except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality
-                    return _no_trade(
+                except Exception as exc:  # noqa: BLE001 - excludes only this family, not the batch
+                    reason = (
                         "GLOBAL_SELL_CANDIDATE_MATERIALIZATION_FAILED:"
                         f"{type(exc).__name__}:{exc}"
                     )
+                    _LOG.warning(
+                        "global sell candidate materialization failed, "
+                        "excluding family for this cut: family=%s "
+                        "token_id=%s bin_id=%s side=%s position_id=%s "
+                        "error=%s",
+                        family_key,
+                        holding.token_id,
+                        holding.bin_id,
+                        holding.side,
+                        holding.position_id,
+                        reason,
+                    )
+                    # Same rule as the BUY-side book-asset loop above: fatal
+                    # only to this family, not to globality.  The exception
+                    # itself may be the family's own binding lookup failing
+                    # (holding_binding, used above to resolve condition_id),
+                    # so this coverage row is built from the holding's own
+                    # raw fields rather than by re-deriving that binding.
+                    materialization_excluded_by_family[family_key] = reason
+                    excluded_by_family[family_key] = reason
+                    excluded.add(family_key)
+                    candidates = [
+                        candidate
+                        for candidate in candidates
+                        if candidate.family_key != family_key
+                    ]
+                    holding_coverage.append(
+                        GlobalHoldingAuctionCoverage(
+                            position_id=str(holding.position_id),
+                            family_key=str(holding.family_key),
+                            bin_id=str(holding.bin_id),
+                            condition_id=f"UNRESOLVED_BINDING:{holding.bin_id}",
+                            side=str(holding.side),
+                            token_id=str(holding.token_id),
+                            held_shares=Decimal(holding.shares),
+                            ledger_snapshot_id=str(holdings.ledger_snapshot_id),
+                            probability_witness_identity=None,
+                            probability_content_identity=None,
+                            wealth_economic_identity=(
+                                wealth_witness.economic_identity
+                            ),
+                            selection_epoch_identity=selection_epoch_identity,
+                            book_epoch_identity=book_epoch.witness_identity,
+                            selection_cut_at_utc=selection_cut_at_utc,
+                            decision_at_utc=decision_at_utc,
+                            book_deadline_at_utc=book_deadline_at_utc,
+                            status="EXCLUDED",
+                            reason=reason,
+                            sell_exit_authority_status=str(
+                                prepared.day0_exit_authority_status
+                            ),
+                            sell_exit_authority_reason=str(
+                                prepared.day0_exit_authority_reason
+                            ),
+                            sell_action_authority_identity=str(
+                                prepared.sell_action_authority_identity
+                            ),
+                        )
+                    )
+                    continue
 
     try:
         universe_witness = global_universe_witness_from_scope(
