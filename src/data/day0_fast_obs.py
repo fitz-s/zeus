@@ -2262,7 +2262,7 @@ class Day0FastObsEmitter:
                 day0_changed = world_conn.execute(
                     """
                     SELECT 1
-                      FROM opportunity_events
+                      FROM opportunity_events NOT INDEXED
                      WHERE rowid > ?
                        AND event_type = 'DAY0_EXTREME_UPDATED'
                      LIMIT 1

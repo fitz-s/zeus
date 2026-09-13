@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-09-05
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-05; last_reused=2026-09-05
+# Last reused/audited: 2026-09-13
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-13; last_reused=2026-09-13
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -3198,7 +3198,8 @@ class TestMutexNoHttpSplit:
             persist_ledger=False,
         ) == 0
 
-    def test_event_memo_watermark_ignores_non_day0_appends(self):
+    @pytest.mark.parametrize("older_day0_rows", [0, 10000])
+    def test_event_memo_watermark_ignores_non_day0_appends(self, older_day0_rows):
         import src.data.day0_fast_obs as fast_obs
 
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
@@ -3221,6 +3222,24 @@ class TestMutexNoHttpSplit:
         ) == 2
         conn.commit()
 
+        conn.executemany(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source,
+                observed_at, available_at, received_at,
+                causal_snapshot_id, payload_hash, idempotency_key,
+                priority, expires_at, payload_json, schema_version, created_at
+            )
+            SELECT ?, event_type, entity_key, source,
+                   observed_at, available_at, received_at,
+                   causal_snapshot_id, ?, ?, priority, expires_at,
+                   payload_json, schema_version, created_at
+              FROM opportunity_events WHERE rowid = 1
+            """,
+            ((f"old-{i}", f"old-hash-{i}", f"old-key-{i}")
+             for i in range(older_day0_rows)),
+        )
+        conn.commit()
         fresh = fast_obs.Day0FastObsEmitter()
         assert fresh.hydrate_event_memos_from_events(conn, eligible) == 2
         conn.execute(
@@ -3243,10 +3262,16 @@ class TestMutexNoHttpSplit:
         conn.commit()
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
-
-        assert fresh.hydrate_event_memos_from_events(conn, eligible) == 0
-
+        vm_blocks = []
+        conn.set_progress_handler(lambda: (vm_blocks.append(1) or 0), 100)
+        try:
+            assert fresh.hydrate_event_memos_from_events(conn, eligible) == 0
+        finally:
+            conn.set_progress_handler(None, 0)
         assert not any("GROUP BY json_extract" in sql for sql in statements)
+        # The one-row suffix must not scan the already-consumed DAY0 archive.
+        assert len(vm_blocks) < 100
+
 
     def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
         from src.data import day0_oracle_anomaly as oa
