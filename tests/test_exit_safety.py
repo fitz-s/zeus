@@ -9813,8 +9813,17 @@ def test_protective_subquantum_inventory_has_no_venue_call(conn, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("case_id", "runtime_state", "canonical_dust", "semantic_receipt"),
+    (
+        ("day0", "day0_window", False, True),
+        ("canonical_active", "active", True, True),
+        ("canonical_stale", "holding", True, True),
+        ("missing_semantic_receipt", "day0_window", False, False),
+    ),
+)
 def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
-    conn, monkeypatch
+    conn, monkeypatch, case_id, runtime_state, canonical_dust, semantic_receipt
 ):
     from src.execution import exit_lifecycle
     from src.state.portfolio import (
@@ -9826,8 +9835,16 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
     )
 
     now = datetime(2026, 9, 3, 10, 24, 45, tzinfo=timezone.utc)
-    trade_id = "pos-protective-fak-gateway"
-    snapshot_id = "snap-protective-fak-gateway"
+    trade_id = (
+        "pos-protective-fak-gateway"
+        if case_id == "day0"
+        else f"pos-protective-fak-gateway-{case_id}"
+    )
+    snapshot_id = (
+        "snap-protective-fak-gateway"
+        if case_id == "day0"
+        else f"snap-protective-fak-gateway-{case_id}"
+    )
     position = Position(
         trade_id=trade_id,
         market_id="condition-test",
@@ -9844,7 +9861,7 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
         shares=2.0,
         chain_shares=2.0,
         cost_basis_usd=0.66,
-        state="day0_window",
+        state=runtime_state,
         chain_state="synced",
         strategy_key="forecast_qkernel_entry",
         env="live",
@@ -9879,7 +9896,7 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
                 {
                     "exit_decision_should_exit": True,
                     "exit_decision_trigger": "FLASH_CRASH_PANIC",
-                    "held_sell_full_depth_action_authority": True,
+                    "held_sell_full_depth_action_authority": semantic_receipt,
                     "last_monitor_market_price_is_fresh": True,
                     "last_monitor_best_bid": 0.10,
                     "market_velocity_1h": flash_crash_catastrophe_velocity() - 0.01,
@@ -9904,7 +9921,30 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
         captured_at=_NOW,
         freshness_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc),
     )
+    if canonical_dust:
+        conn.execute(
+            "UPDATE position_current SET phase = 'pending_exit', "
+            "order_status = 'backoff_exhausted', exit_reason = ? "
+            "WHERE position_id = ?",
+            (
+                "FLASH_CRASH_PANIC [DUST: executable_snapshot_gate: "
+                "size 2.0 is below snapshot min_order_size 5]",
+                trade_id,
+            ),
+        )
     conn.commit()
+
+    canonical = conn.execute(
+        "SELECT phase, order_status, shares, chain_shares, exit_reason "
+        "FROM position_current WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()
+    if canonical_dust:
+        assert canonical["phase"] == "pending_exit"
+        assert canonical["order_status"] == "backoff_exhausted"
+        assert canonical["shares"] == pytest.approx(2.0)
+        assert canonical["chain_shares"] == pytest.approx(2.0)
+        assert "DUST" in canonical["exit_reason"]
 
     monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
     _enable_exit_submit_prereqs(conn, monkeypatch, ctf_shares=2.0)
@@ -10013,57 +10053,69 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
             conn=conn,
         )
 
-        assert outcome == "sell_pending: order=ord-protective-fak-gateway, status=OPEN"
-        assert len(client_calls) == 1
-        assert client_calls[0]["token_id"] == YES_TOKEN
-        assert client_calls[0]["side"] == "SELL"
-        assert client_calls[0]["order_type"] == "FAK"
-        assert client_calls[0]["size"] == pytest.approx(2.0)
-        assert len(built_authorities) == 1
-        authority = built_authorities[0]
-        assert isinstance(authority, exit_lifecycle.ProtectiveSellExecutionAuthority)
-        assert authority.position_id == trade_id
-        assert authority.token_id == YES_TOKEN
-        assert Decimal(authority.shares) == Decimal("2")
-        assert authority.snapshot_id == snapshot_id
-        assert len(persisted_at_client) == 1
-        assert persisted_at_client[0]["state"] == "SUBMITTING"
-        assert persisted_at_client[0]["size"] == pytest.approx(2.0)
-        assert persisted_at_client[0]["snapshot_id"] == snapshot_id
-        assert len(bound_envelopes) == 1
-        envelope = bound_envelopes[0]
-        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+        if not semantic_receipt:
+            assert outcome == "exit_blocked: flash_crash_sell_authority_required"
+            assert client_calls == []
+            assert built_authorities == []
+            assert persisted_at_client == []
+            assert bound_envelopes == []
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_commands "
+                "WHERE position_id = ? AND intent_kind = 'EXIT'",
+                (trade_id,),
+            ).fetchone()[0] == 0
+        else:
+            assert outcome == "sell_pending: order=ord-protective-fak-gateway, status=OPEN"
+            assert len(client_calls) == 1
+            assert client_calls[0]["token_id"] == YES_TOKEN
+            assert client_calls[0]["side"] == "SELL"
+            assert client_calls[0]["order_type"] == "FAK"
+            assert client_calls[0]["size"] == pytest.approx(2.0)
+            assert len(built_authorities) == 1
+            authority = built_authorities[0]
+            assert isinstance(authority, exit_lifecycle.ProtectiveSellExecutionAuthority)
+            assert authority.position_id == trade_id
+            assert authority.token_id == YES_TOKEN
+            assert Decimal(authority.shares) == Decimal("2")
+            assert authority.snapshot_id == snapshot_id
+            assert len(persisted_at_client) == 1
+            assert persisted_at_client[0]["state"] == "SUBMITTING"
+            assert persisted_at_client[0]["size"] == pytest.approx(2.0)
+            assert persisted_at_client[0]["snapshot_id"] == snapshot_id
+            assert len(bound_envelopes) == 1
+            envelope = bound_envelopes[0]
+            from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
-        assert isinstance(envelope, VenueSubmissionEnvelope)
-        assert envelope.size == Decimal("2.0")
-        assert envelope.min_order_size == Decimal("5")
-        assert envelope.order_type == "FAK"
-        assert envelope.post_only is False
-        command = conn.execute(
-            """SELECT vc.state, vc.size, vc.price, vc.snapshot_id,
-                      vc.envelope_id, vse.size AS envelope_size,
-                      vse.min_order_size, vse.order_type, vse.post_only
-                 FROM venue_commands AS vc
-                 JOIN venue_submission_envelopes AS vse
-                   ON vse.envelope_id = vc.envelope_id
-                WHERE vc.position_id = ? AND vc.intent_kind = 'EXIT'""",
-            (trade_id,),
-        ).fetchone()
-        assert command is not None
-        assert conn.execute(
-            "SELECT COUNT(*) FROM venue_commands "
-            "WHERE position_id = ? AND intent_kind = 'EXIT'",
-            (trade_id,),
-        ).fetchone()[0] == 1
-        assert command["state"] == "ACKED"
-        assert command["size"] == pytest.approx(2.0)
-        assert command["price"] == pytest.approx(0.10)
-        assert command["snapshot_id"] == snapshot_id
-        assert Decimal(command["envelope_size"]) == Decimal("2")
-        assert Decimal(command["min_order_size"]) == Decimal("5")
-        assert command["order_type"] == "FAK"
-        assert command["post_only"] == 0
-        assert position.exit_state == "sell_pending"
+            assert isinstance(envelope, VenueSubmissionEnvelope)
+            assert envelope.size == Decimal("2.0")
+            assert envelope.min_order_size == Decimal("5")
+            assert envelope.order_type == "FAK"
+            assert envelope.post_only is False
+            command = conn.execute(
+                """SELECT vc.state, vc.size, vc.price, vc.snapshot_id,
+                          vc.envelope_id, vse.size AS envelope_size,
+                          vse.min_order_size, vse.order_type, vse.post_only
+                     FROM venue_commands AS vc
+                     JOIN venue_submission_envelopes AS vse
+                       ON vse.envelope_id = vc.envelope_id
+                    WHERE vc.position_id = ? AND vc.intent_kind = 'EXIT'""",
+                (trade_id,),
+            ).fetchone()
+            assert command is not None
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_commands "
+                "WHERE position_id = ? AND intent_kind = 'EXIT'",
+                (trade_id,),
+            ).fetchone()[0] == 1
+            assert command["state"] == "ACKED"
+            assert command["size"] == pytest.approx(2.0)
+            assert command["price"] == pytest.approx(0.10)
+            assert command["snapshot_id"] == snapshot_id
+            assert Decimal(command["envelope_size"]) == Decimal("2")
+            assert Decimal(command["min_order_size"]) == Decimal("5")
+            assert command["order_type"] == "FAK"
+            assert command["post_only"] == 0
+            assert position.exit_state == "sell_pending"
     finally:
         _clear_exit_submit_prereqs()
 
@@ -10674,6 +10726,20 @@ def test_existing_canonical_dust_hold_suppresses_duplicate_exit_intent(conn, mon
         min_order_size="5",
         snapshot_id="snap-dust-existing-canonical-fresh",
     )
+    assert exit_lifecycle._canonical_non_executable_dust_hold(
+        canonical, conn=conn, now=_NOW, current_min_order_size=Decimal("0.01"),
+    ) is None
+    conn.execute(
+        "UPDATE position_current SET shares=0.009,chain_shares=0.009 "
+        "WHERE position_id=?", (canonical.trade_id,),
+    )
+    assert exit_lifecycle._canonical_non_executable_dust_hold(
+        canonical, conn=conn, now=_NOW, current_min_order_size=Decimal("0.01"),
+    ) is not None
+    conn.execute(
+        "UPDATE position_current SET shares=1.0,chain_shares=1.0 "
+        "WHERE position_id=?", (canonical.trade_id,),
+    )
     before_events = conn.execute(
         "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
         (canonical.trade_id,),
@@ -11012,7 +11078,8 @@ def test_existing_dust_hold_chain_correction_is_idempotent(conn):
     assert payload["asset_id"] == NO_TOKEN
 
 
-def test_existing_canonical_dust_hold_requires_fresh_snapshot_evidence(conn):
+@pytest.mark.parametrize("effective_lot", [None, Decimal("0.01")])
+def test_existing_canonical_dust_hold_requires_fresh_snapshot_evidence(conn, effective_lot):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
 
@@ -11059,13 +11126,15 @@ def test_existing_canonical_dust_hold_requires_fresh_snapshot_evidence(conn):
         exit_lifecycle._canonical_non_executable_dust_hold(
             position,
             conn=conn,
+            current_min_order_size=effective_lot,
             now=datetime(2026, 7, 8, tzinfo=timezone.utc),
         )
         is None
     )
 
 
-def test_existing_canonical_dust_hold_rejects_invalidated_snapshot(conn):
+@pytest.mark.parametrize("effective_lot", [None, Decimal("0.01")])
+def test_existing_canonical_dust_hold_rejects_invalidated_snapshot(conn, effective_lot):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
     from src.state.snapshot_repo import record_snapshot_invalidation
@@ -11119,6 +11188,7 @@ def test_existing_canonical_dust_hold_rejects_invalidated_snapshot(conn):
         exit_lifecycle._canonical_non_executable_dust_hold(
             position,
             conn=conn,
+            current_min_order_size=effective_lot,
             now=_NOW + timedelta(seconds=2),
         )
         is None
@@ -15560,6 +15630,7 @@ def test_live_global_maker_rest_reaches_submit_when_bid_is_below_floor(
     ).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("canonical_dust", [False, True])
 @pytest.mark.parametrize(
     ("planned_shares", "close_position"),
     ((2.0, True), (1.0, False)),
@@ -15569,8 +15640,10 @@ def test_live_global_taker_fak_allows_subminimum_selected_and_residual(
     monkeypatch,
     planned_shares,
     close_position,
+    canonical_dust,
 ):
     from types import SimpleNamespace
+    from unittest.mock import Mock
 
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution import exit_lifecycle
@@ -15602,7 +15675,19 @@ def test_live_global_taker_fak_allows_subminimum_selected_and_residual(
         order_status="filled",
     )
     upsert_position_current(conn, build_position_current_projection(position))
-    authority = SimpleNamespace(
+    if canonical_dust:
+        conn.execute(
+            "UPDATE position_current SET phase='pending_exit', "
+            "order_status='backoff_exhausted', exit_reason='CANONICAL_DUST_HOLD' "
+            "WHERE position_id=?", (position.trade_id,),
+        )
+        _ensure_snapshot(
+            conn, min_order_size="5",
+            freshness_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        )
+        conn.commit()
+    authority = Mock(
+        spec=exit_lifecycle.GlobalSellExecutionAuthority,
         jit_candidate=SimpleNamespace(
             execution_mode="TAKER_LIMIT",
             held_shares=Decimal("2"),

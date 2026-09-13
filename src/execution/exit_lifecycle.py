@@ -4760,12 +4760,13 @@ def _canonical_non_executable_dust_hold(
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
+    current_min_order_size: object = None,
 ) -> tuple[str, str] | None:
     """Return current canonical dust-hold evidence even if the runtime object is stale.
 
     A historical ``[DUST: ...]`` reason is not enough to suppress a fresh exit:
-    min-order and chain balance are time-varying. Suppression requires a fresh
-    executable snapshot proving the canonical shares remain below min order.
+    min-order and chain balance are time-varying. A fresh snapshot remains
+    required; immediate redecision may supply its effective executable lot.
     """
 
     if conn is None:
@@ -4822,9 +4823,14 @@ def _canonical_non_executable_dust_hold(
         conn=conn,
         now=now,
     )
-    if min_order is None or shares >= min_order:
+    if min_order is None:
         return None
-    error = f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
+    effective_min = _positive_decimal(current_min_order_size)
+    min_order = effective_min or min_order
+    if shares >= min_order:
+        return None
+    lot_kind = "effective" if effective_min is not None else "snapshot"
+    error = f"executable_snapshot_gate: size {shares} is below {lot_kind} min_order_size {min_order}"
     return reason or f"CANONICAL_DUST_HOLD [DUST: {error}]", error
 
 
@@ -7832,7 +7838,23 @@ def _execute_live_exit(
         from src.state.db import log_exit_attempt_event, log_exit_fill_event, log_exit_retry_event
         from src.state.db import log_pending_exit_recovery_event
 
-    canonical_dust = _canonical_non_executable_dust_hold(position, conn=conn, now=_utcnow())
+    immediate_fak_redecision = bool(
+        is_red_force_exit
+        or is_hard_fact_force_exit
+        or str(exit_intent.reason or "").strip().split(" ", 1)[0] == "FLASH_CRASH_PANIC"
+        or (
+            isinstance(global_sell_authority, GlobalSellExecutionAuthority)
+            and _global_sell_taker_fak_min_order_floor_bypass_authorized(
+                exit_intent, global_sell_authority,
+            )
+        )
+    )
+    # Canonical dust uses the proposed mode's lot. This only admits redecision;
+    # current typed authority and the final submit checks still authorize FAK.
+    canonical_dust = _canonical_non_executable_dust_hold(
+        position, conn=conn, now=_utcnow(),
+        current_min_order_size=Decimal("0.01") if immediate_fak_redecision else None,
+    )
     if canonical_dust is not None:
         dust_reason, dust_error = canonical_dust
         _sync_runtime_to_canonical_dust_hold(
