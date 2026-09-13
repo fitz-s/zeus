@@ -925,11 +925,21 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
 
     observed: list[tuple[str, object]] = []
 
+    class _FakeLease:
+        def __init__(self) -> None:
+            self.acquired_at = time.monotonic()
+
+        def record_stage(self, _stage) -> None:
+            pass
+
+        def record_sqlite_error(self, _exc, *, stage) -> None:
+            pass
+
     class _Coordinator:
         @contextlib.contextmanager
         def lease(self, _dbs, **kwargs):
             observed.append((kwargs["owner"], kwargs["priority"]))
-            yield
+            yield _FakeLease()
 
     monkeypatch.setattr(
         write_coordinator,
@@ -959,7 +969,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
         pass
     with lane._edli_background_snapshot_trade_write_context_factory(
         owner="price_channel_snapshot_invalidate"
-    )():
+    )(sqlite3.connect(":memory:")):
         pass
 
     assert observed == [
@@ -2179,3 +2189,260 @@ def test_prepare_quote_messages_preserves_noncoalescer_dedupe_results():
         (False, True),
     ]
     assert len(prepared.quotes) == 1
+
+
+# ---------------------------------------------------------------------------
+# X-AO 2026-09-13: price-channel's coordinator-level hold-time budget is now
+# actually enforced (R-AD precedent 2a1e15c1d), mirroring the substrate fix.
+# Price-channel's own live F_GETLK sample showed no single-hold outlier
+# (33.8s/300s occupancy, max single hold 0.4s), so this is precedent-
+# consistency hardening: a genuine SQLite BUSY collision must now fail fast
+# as WriteLeaseTimeout, never hang behind the connection's ordinary 30s
+# busy_timeout, and must leave no partial row.
+# ---------------------------------------------------------------------------
+
+
+def _pc_create_trade_db(path) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS _lock_probe (id INTEGER PRIMARY KEY, v INTEGER);"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _pc_hold_real_write_lock(db_path, *, lock_held, release_lock) -> threading.Thread:
+    def _run() -> None:
+        other = sqlite3.connect(str(db_path), timeout=30)
+        other.execute("PRAGMA journal_mode=WAL")
+        other.execute("PRAGMA busy_timeout = 30000")
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("INSERT INTO _lock_probe (v) VALUES (1)")
+        lock_held.set()
+        assert release_lock.wait(timeout=2.0)
+        other.commit()
+        other.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_price_channel_trade_write_gate_enforces_bounded_sqlite_write_on_busy(tmp_path):
+    """_edli_price_channel_trade_write_context_factory: a real BUSY collision
+    fails fast as WriteLeaseTimeout, not a raw OperationalError, and leaves
+    no partial row."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _pc_create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _pc_hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                write_coordinator,
+                "default_runtime_write_coordinator",
+                lambda: coordinator,
+            )
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            started = time.monotonic()
+            with pytest.raises(WriteLeaseTimeout):
+                with lane._edli_price_channel_trade_write_context_factory(
+                    owner="price_channel_snapshot_refresh"
+                )(conn):
+                    conn.execute("INSERT INTO _lock_probe (v) VALUES (2)")
+            elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+    assert elapsed < 1.0, f"BUSY collision should fail fast, took {elapsed:.3f}s"
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 2").fetchone()[0]
+    verify_conn.close()
+    assert count == 0, "a BUSY-interrupted write must leave no partial row"
+    conn.close()
+
+
+def test_price_channel_background_snapshot_factory_enforces_bounded_sqlite_write_on_busy(
+    tmp_path,
+):
+    """Same BUSY-fail-fast contract for _edli_background_snapshot_trade_write_
+    context_factory (the price_channel_snapshot_invalidate lane)."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _pc_create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _pc_hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                write_coordinator,
+                "default_runtime_write_coordinator",
+                lambda: coordinator,
+            )
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            started = time.monotonic()
+            with pytest.raises(WriteLeaseTimeout):
+                with lane._edli_background_snapshot_trade_write_context_factory(
+                    owner="price_channel_snapshot_invalidate"
+                )(conn):
+                    conn.execute("INSERT INTO _lock_probe (v) VALUES (3)")
+            elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+    assert elapsed < 1.0, f"BUSY collision should fail fast, took {elapsed:.3f}s"
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 3").fetchone()[0]
+    verify_conn.close()
+    assert count == 0, "a BUSY-interrupted write must leave no partial row"
+    conn.close()
+
+
+def test_price_channel_write_gate_with_conn_enforces_bounded_sqlite_write_on_busy(tmp_path):
+    """_PriceChannelWriteGate(conn=...) (the shared gate behind
+    _edli_price_channel_trade_write_gate / _edli_price_channel_world_write_gate)
+    enforces the same BUSY-fail-fast contract once a caller passes its already-
+    open connection -- proving the gate's own bounded_sqlite_write wiring,
+    independent of the two standalone factories above."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _pc_create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _pc_hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                write_coordinator,
+                "default_runtime_write_coordinator",
+                lambda: coordinator,
+            )
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            started = time.monotonic()
+            with pytest.raises(WriteLeaseTimeout):
+                with lane._edli_price_channel_trade_write_gate(
+                    owner="price_channel_held_quote_refresh",
+                    priority="monitor",
+                    conn=conn,
+                ) as gate:
+                    assert gate.lease is not None
+                    conn.execute("INSERT INTO _lock_probe (v) VALUES (4)")
+            elapsed = time.monotonic() - started
+    finally:
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+    assert elapsed < 1.0, f"BUSY collision should fail fast, took {elapsed:.3f}s"
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 4").fetchone()[0]
+    verify_conn.close()
+    assert count == 0, "a BUSY-interrupted write must leave no partial row"
+    conn.close()
+
+
+def test_price_channel_write_gate_without_conn_still_works_unenforced(tmp_path):
+    """The one call site that opens its connection lazily inside the gate body
+    (price_channel_user_inbox) intentionally omits conn= -- this must remain a
+    valid, working shape (no bounded_sqlite_write applied, matching pre-fix
+    behavior for that one site only)."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    db_path = tmp_path / "trade.db"
+    _pc_create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            write_coordinator,
+            "default_runtime_write_coordinator",
+            lambda: coordinator,
+        )
+        with lane._edli_price_channel_trade_write_gate(
+            owner="price_channel_held_quote_refresh",
+            priority="monitor",
+        ) as gate:
+            assert gate.lease is not None
+
+
+def test_price_channel_snapshot_factories_recover_next_cycle_after_lock_release(tmp_path):
+    """After a deferred cycle's WriteLeaseTimeout, the NEXT attempt (once the
+    real lock is released) persists cleanly -- 'not captured this cycle,
+    retried next', matching the substrate lane's identical contract."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "trade.db"
+    _pc_create_trade_db(db_path)
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    holder = _pc_hold_real_write_lock(db_path, lock_held=lock_held, release_lock=release_lock)
+    assert lock_held.wait(timeout=2.0), "lock holder failed to acquire write lock"
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            write_coordinator,
+            "default_runtime_write_coordinator",
+            lambda: coordinator,
+        )
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+
+        with pytest.raises(WriteLeaseTimeout):
+            with lane._edli_price_channel_trade_write_context_factory(
+                owner="price_channel_snapshot_refresh"
+            )(conn):
+                conn.execute("INSERT INTO _lock_probe (v) VALUES (5)")
+
+        release_lock.set()
+        holder.join(timeout=3.0)
+        assert not holder.is_alive()
+
+        with lane._edli_price_channel_trade_write_context_factory(
+            owner="price_channel_snapshot_refresh"
+        )(conn):
+            conn.execute("INSERT INTO _lock_probe (v) VALUES (5)")
+            conn.commit()
+
+    verify_conn = sqlite3.connect(str(db_path))
+    count = verify_conn.execute("SELECT COUNT(*) FROM _lock_probe WHERE v = 5").fetchone()[0]
+    verify_conn.close()
+    assert count == 1, "the retried cycle must persist exactly once"
+    conn.close()

@@ -1313,6 +1313,7 @@ class _PriceChannelWriteGate:
         priority: str = "standard",
         deadline_monotonic: float | None = None,
         on_enter: Callable[[], None] | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> None:
         self._owner = owner
         self._scope = scope
@@ -1321,12 +1322,22 @@ class _PriceChannelWriteGate:
         self._priority = priority
         self._deadline_monotonic = deadline_monotonic
         self._on_enter = on_enter
+        # X-AO 2026-09-13: when the caller already has its write connection
+        # open at gate-construction time, passing it here enforces the
+        # declared max_hold_ms via bounded_sqlite_write (R-AD precedent
+        # 2a1e15c1d) instead of only recording it in telemetry. Omit when the
+        # gate itself opens the connection lazily inside its body (e.g.
+        # price_channel_user_inbox) -- there is nothing to bind yet at
+        # __enter__ time in that shape.
+        self._conn = conn
         self._stack: contextlib.ExitStack | None = None
+        self.lease = None
 
     def __enter__(self):
         from src.events.triggers.market_channel_ingestor import _world_write_mutex
         from src.state.write_coordinator import (
             DBIdentity,
+            bounded_sqlite_write,
             default_runtime_write_coordinator,
         )
 
@@ -1374,9 +1385,16 @@ class _PriceChannelWriteGate:
             }
             if self._priority != "standard":
                 lease_kwargs["priority"] = self._priority
-            stack.enter_context(
+            lease = stack.enter_context(
                 default_runtime_write_coordinator().lease(dbs, **lease_kwargs)
             )
+            self.lease = lease
+            if self._conn is not None:
+                stack.enter_context(
+                    bounded_sqlite_write(
+                        self._conn, lease, max_hold_ms=self._max_hold_ms
+                    )
+                )
             if self._on_enter is not None:
                 self._on_enter()
         except BaseException:
@@ -1398,6 +1416,7 @@ def _edli_price_channel_world_write_gate(
     *,
     owner: str,
     deadline_monotonic: float | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> _PriceChannelWriteGate:
     deadline_ms = (
         PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS
@@ -1414,6 +1433,7 @@ def _edli_price_channel_world_write_gate(
         deadline_ms=deadline_ms,
         max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
         deadline_monotonic=deadline_monotonic,
+        conn=conn,
     )
 
 
@@ -1499,6 +1519,7 @@ def _edli_price_channel_trade_write_gate(
     priority: str = "standard",
     deadline_monotonic: float | None = None,
     on_enter: Callable[[], None] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> _PriceChannelWriteGate:
     return _PriceChannelWriteGate(
         owner=owner,
@@ -1508,6 +1529,7 @@ def _edli_price_channel_trade_write_gate(
         priority=priority,
         deadline_monotonic=deadline_monotonic,
         on_enter=on_enter,
+        conn=conn,
     )
 
 
@@ -1658,16 +1680,31 @@ def _edli_price_channel_world_write_connection(*, owner: str):
 def _edli_price_channel_trade_write_context_factory(*, owner: str):
     """Return the foreground snapshot writer context for reactive refreshes."""
 
-    def _factory():
-        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
-
-        return default_runtime_write_coordinator().lease(
-            (DBIdentity.TRADE,),
-            owner=owner,
-            write_class="live",
-            deadline_ms=PRICE_CHANNEL_FOREGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+    def _factory(conn: sqlite3.Connection):
+        from src.state.write_coordinator import (
+            DBIdentity,
+            bounded_sqlite_write,
+            default_runtime_write_coordinator,
         )
+
+        @contextlib.contextmanager
+        def _bounded_lease():
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.TRADE,),
+                owner=owner,
+                write_class="live",
+                deadline_ms=PRICE_CHANNEL_FOREGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+            ) as lease:
+                # R-AD precedent (2a1e15c1d): .lease() alone only RECORDS
+                # max_hold_ms in telemetry -- bounded_sqlite_write is the
+                # primitive that actually enforces it.
+                with bounded_sqlite_write(
+                    conn, lease, max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS
+                ):
+                    yield lease
+
+        return _bounded_lease()
 
     return _factory
 
@@ -1675,21 +1712,30 @@ def _edli_price_channel_trade_write_context_factory(*, owner: str):
 def _edli_background_snapshot_trade_write_context_factory(*, owner: str):
     """Return the fast-yield context used only by background invalidation."""
 
-    def _factory():
+    def _factory(conn: sqlite3.Connection):
         from src.state.write_coordinator import (
             DBIdentity,
             WritePriority,
+            bounded_sqlite_write,
             default_runtime_write_coordinator,
         )
 
-        return default_runtime_write_coordinator().lease(
-            (DBIdentity.TRADE,),
-            owner=owner,
-            write_class="live",
-            priority=WritePriority.BACKGROUND_RECOVERY,
-            deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
-        )
+        @contextlib.contextmanager
+        def _bounded_lease():
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.TRADE,),
+                owner=owner,
+                write_class="live",
+                priority=WritePriority.BACKGROUND_RECOVERY,
+                deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+            ) as lease:
+                with bounded_sqlite_write(
+                    conn, lease, max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS
+                ):
+                    yield lease
+
+        return _bounded_lease()
 
     return _factory
 
@@ -3245,7 +3291,8 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
                         reconcile_facts.append((pending, fact))
 
         with _edli_price_channel_world_write_gate(
-            owner="price_channel_venue_reconcile"
+            owner="price_channel_venue_reconcile",
+            conn=conn,
         ):
             try:
                 for pending, fact in reconcile_facts:
@@ -3401,6 +3448,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                     with _edli_price_channel_world_write_gate(
                         owner="price_channel_fill_bridge_reconcile",
                         deadline_monotonic=deadline_monotonic,
+                        conn=conn,
                     ):
                         # One immutable, prevalidated candidate per lease.
                         conn.execute("BEGIN")
@@ -3441,6 +3489,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                     with _edli_price_channel_world_write_gate(
                         owner="price_channel_fill_bridge_reconcile",
                         deadline_monotonic=deadline_monotonic,
+                        conn=conn,
                     ):
                         conn.execute("BEGIN")
                         reconciled_trade_facts += append_confirmed_trade_facts_to_edli(
@@ -3505,6 +3554,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                     deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
                     max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
                     deadline_monotonic=deadline_monotonic,
+                    conn=bridge_conn,
                 ):
                     # One exact aggregate per transaction guarantees a lease
                     # release point before any later repair tranche.
@@ -5009,6 +5059,7 @@ def _edli_refresh_held_position_quote_evidence(
                                     conn,
                                     deadline_monotonic=deadline,
                                 ),
+                                conn=conn,
                             ),
                             commit=_commit_quote_evidence,
                             logger=logger,
@@ -5073,6 +5124,7 @@ def _edli_refresh_held_position_quote_evidence(
                                     conn,
                                     deadline_monotonic=deadline,
                                 ),
+                                conn=conn,
                             ),
                             commit=_commit_quote_evidence,
                             logger=logger,
@@ -5105,6 +5157,7 @@ def _edli_refresh_held_position_quote_evidence(
                             conn,
                             deadline_monotonic=deadline,
                         ),
+                        conn=conn,
                     ):
                         audit_rows = _edli_append_global_exit_audit_quote_evidence(
                             conn,
@@ -5374,6 +5427,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     deadline_ms=(
                         PRICE_CHANNEL_CANDIDATE_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
                     ),
+                    conn=conn,
                 ),
                 commit=_commit_quote_evidence,
                 logger=logger,
@@ -6157,9 +6211,10 @@ def _edli_market_channel_ingestor_cycle(
                 # wait on an incumbent SQLite writer.  It is prerequisite work,
                 # not part of the invalidation write unit, so it must complete
                 # before this replayable background lane acquires the canonical
-                # TRADE lease.  Once admitted, bind SQLite's own busy handler to
-                # the same short hold budget; max_hold_ms is telemetry, not a
-                # preemptive timer.
+                # TRADE lease.  Once admitted, the factory's own bounded_sqlite_
+                # write enforces the same short hold budget (X-AO 2026-09-13):
+                # a BUSY collision inside the lease now fails fast as
+                # WriteLeaseTimeout instead of only being recorded after the fact.
                 trade_conn = get_trade_connection(
                     write_class="live",
                     deadline_monotonic=(
@@ -6172,7 +6227,7 @@ def _edli_market_channel_ingestor_cycle(
                 try:
                     with _edli_background_snapshot_trade_write_context_factory(
                         owner="price_channel_snapshot_invalidate"
-                    )() as write_lease:
+                    )(trade_conn) as write_lease:
                         before_changes = int(trade_conn.total_changes)
                         invalidated = invalidate_executable_snapshots_for_market_channel_action(
                             trade_conn,
@@ -6438,9 +6493,11 @@ def _edli_market_channel_ingestor_cycle(
                         quote_write_gate=_edli_price_channel_trade_write_gate(
                             owner="price_channel_market_quote",
                             priority="background_recovery",
+                            conn=feasibility_conn,
                         ),
                         world_event_write_gate=_edli_price_channel_world_write_gate(
-                            owner="price_channel_market_event"
+                            owner="price_channel_market_event",
+                            conn=world_conn,
                         ),
                         world_event_commit=_commit_world_event,
                         world_event_rollback=_rollback_world_event,
