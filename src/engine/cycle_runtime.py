@@ -142,8 +142,6 @@ _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS = 1.0
-_HELD_POSITION_MONITOR_RESERVATION_MIN = 2
-_HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 250
 _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
 # A foreground quote writer may already own the unified TRADE gate when the
@@ -151,18 +149,6 @@ _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
 # but the monitor must wait long enough for that one incumbent transaction to
 # commit; a one-second retry repeatedly dropped otherwise-complete decisions.
 _MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 5_000
-
-
-def _held_position_monitor_reservation_count(position_count: int) -> int:
-    """Reserve one third of the book for deadline-degraded monitor cycles."""
-
-    return max(
-        _HELD_POSITION_MONITOR_RESERVATION_MIN,
-        math.ceil(
-            max(0, int(position_count))
-            / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES
-        ),
-    )
 
 
 def _held_position_monitor_primary_reservation(
@@ -177,19 +163,24 @@ def _held_position_monitor_primary_reservation(
     prerequisites/auxiliary work and reserve at least one complete read.
 
     Admission used to be additionally capped at roughly one third of the held
-    book (``position_count / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES``),
-    on the assumption that three of these passes would cover a full book. That
-    assumption was sized against a claim close to the 75s default; once the
-    periodic full-book claim was independently bounded well below that (see
+    book (via the now-removed ``_held_position_monitor_reservation_count``,
+    ``ceil(position_count / 3)``), on the assumption that three of these
+    passes would cover a full book. That assumption was sized against a claim
+    close to the 75s default; once the periodic full-book claim was
+    independently bounded well below that (see
     ``_held_position_monitor_claim_budget_seconds`` in ``src/main.py``), the
     one-third target stopped being reachable for any realistically sized book
     and was never the binding constraint again -- ``capacity`` (this claim's
     actual read budget) already was, every time. Carrying the stale target
     forward did nothing but let a small book request more reads than exist
-    (``desired`` has a floor of 2 regardless of ``position_count``), so this
-    pass now floors admission at the book size instead of a coverage-cycle
-    guess. What this claim can fund is derived fresh from its own budget every
-    call; there is nothing else to re-derive.
+    (the old target had a floor of 2 regardless of ``position_count``), so
+    this pass floors admission at the book size instead of a coverage-cycle
+    guess. This is the single source of truth for how many positions this
+    claim admits into a guaranteed-complete read: the position-selection gate
+    in ``execute_monitoring_phase`` uses this return value directly as its
+    selection limit, with no independent re-derivation.  What this claim can
+    fund is derived fresh from its own budget every call; there is nothing
+    else to re-derive.
     """
 
     from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
@@ -8039,9 +8030,16 @@ def execute_monitoring_phase(
         now_utc=monitor_now_utc,
         current_riskguard_red=current_riskguard_red,
     )
+    # The position-selection gate must admit exactly what the primary-belief
+    # time reservation above funded -- not re-derive its own count from the
+    # book size.  Preflight can only shrink the book (close/release
+    # positions), never grow it past what the reservation already saw, so
+    # bounding by the post-preflight count here only ever narrows admission
+    # to match a book that got smaller, never re-imposes the removed
+    # coverage-cycle target.
     monitor_reservation_count = min(
         primary_reserved_position_count,
-        _held_position_monitor_reservation_count(len(monitor_positions)),
+        len(monitor_positions),
     )
     summary["held_monitor_candidates"] = len(monitor_positions)
     summary["held_monitor_candidate_position_ids"] = [

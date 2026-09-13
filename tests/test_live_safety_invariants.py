@@ -603,7 +603,10 @@ def test_monitor_probability_reads_use_remaining_claim_after_fair_admitted_slice
             list(summary["held_monitor_primary_belief_admitted_position_ids"])
         )
         assert set(current_started) == {position.trade_id for position in positions}
-        assert current_started[:5] == admitted_by_pass[-1]
+        # capacity = floor(max(5, 75/2) / 5) = 7 for a 75s budget; a 15
+        # position book has enough positions to use all of it, so the fair
+        # admitted slice is 7, not the old one-third-of-book target of 5.
+        assert current_started[:7] == admitted_by_pass[-1]
         assert summary["held_monitor_primary_belief_read_started"] == 15
         assert summary["held_monitor_primary_belief_read_completed"] == 0
         assert summary["held_monitor_primary_belief_read_deferred"] == 15
@@ -923,14 +926,14 @@ def test_monitor_probability_reads_share_the_cycle_deadline(
     )
 
 
-def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():
-    """Deadline-degraded cycles still reserve rotating slices of a large book."""
-    from src.engine import cycle_runtime
-
-    assert cycle_runtime._held_position_monitor_reservation_count(0) == 2
-    assert cycle_runtime._held_position_monitor_reservation_count(3) == 2
-    assert cycle_runtime._held_position_monitor_reservation_count(9) == 3
-    assert cycle_runtime._held_position_monitor_reservation_count(23) == 8
+# test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles
+# tested the standalone one-third-of-book helper
+# (_held_position_monitor_reservation_count) directly. That helper is now
+# deleted -- its only production caller (the bounded_coverage selection gate
+# in execute_monitoring_phase) was re-pointed at
+# _held_position_monitor_primary_reservation's own return value so admission
+# has one source of truth. See test_monitor_primary_reserve_* below for the
+# coverage this test provided.
 
 
 def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monkeypatch):
@@ -2428,10 +2431,6 @@ def test_monitor_primary_reserve_covers_every_admitted_degraded_tranche():
     """Auxiliary work cannot spend the time promised to admitted positions."""
     from src.engine import cycle_runtime
 
-    # _held_position_monitor_reservation_count is a *different* caller's
-    # one-third-of-the-book degraded-coverage target (used only for the
-    # separate "bounded_coverage" tranche selection below) -- unchanged.
-    assert cycle_runtime._held_position_monitor_reservation_count(13) == 5
     # Admission is now bounded by what this claim can fund (capacity) and by
     # the book itself, not by the stale one-third-of-the-book target: a 13
     # position book at a 75s budget can fund 7 complete reads (floor(37.5/5)),
@@ -2542,6 +2541,162 @@ def test_monitor_primary_reserve_never_exceeds_the_book_across_budgets():
                 )
             )
             assert admitted <= max(0, position_count)
+
+
+def _run_monitor_coverage_pipeline(monkeypatch, *, positions, budget_seconds, label):
+    """Drive execute_monitoring_phase against a fixed position list, with all
+    network/DB-bound prefetch work stubbed out, and return its summary.
+
+    Used to assert on the real production admission gate
+    (``held_monitor_budget_coverage_positions`` / ``held_monitor_budget_reservation_count``),
+    not just the isolated ``_held_position_monitor_primary_reservation`` helper.
+    """
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    for position in positions:
+        position._canonical_monitor_refreshed_at = ""
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: list(positions),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps(label),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=budget_seconds,
+        should_preempt_for_urgent_day0=lambda: False,
+    )
+    return summary
+
+
+def test_monitor_budget_coverage_positions_matches_reservation_for_a_large_book(
+    monkeypatch,
+):
+    """The real position-selection gate must admit exactly what the
+    primary-belief time reservation funded -- not re-derive its own,
+    independent count from the book size.
+
+    A prior round of this fix corrected the isolated
+    ``_held_position_monitor_primary_reservation`` helper (site 1: how much
+    *time* is reserved) but left the downstream position-selection gate
+    (site 2: ``monitor_reservation_count``, which actually limits
+    ``held_monitor_budget_coverage_positions``) re-deriving its own limit
+    from the deleted one-third-of-the-book helper. For a 13-position book at
+    a 75s budget, capacity is 7 (floor(37.5/5)); site 1 already reserved 35s
+    (7 reads) worth of time, but site 2 still only admitted 5 positions into
+    that reservation -- 10 seconds of primary-belief time were withheld from
+    auxiliary work for two reads that were never used. FAILS on parent
+    (34b9fe237, where both sites independently capped at 5) and on the prior
+    round's commit 73931a515 (where site 1 says 7 but site 2 still says 5);
+    passes once both sites share the same source of truth.
+    """
+    positions = [
+        _make_position(
+            trade_id=f"large-book-{index}",
+            token_id=f"large-book-token-{index}",
+        )
+        for index in range(13)
+    ]
+    summary = _run_monitor_coverage_pipeline(
+        monkeypatch,
+        positions=positions,
+        budget_seconds=75.0,
+        label="test_budget_coverage_matches_reservation_13_75",
+    )
+
+    # capacity = floor(max(5, 75/2) / 5) = 7; the book has 13 positions, so
+    # capacity (not the book) binds -- the reservation and the actual
+    # selection must agree on that same number.
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(35.0)
+    assert summary["held_monitor_budget_reservation_count"] == 7
+    assert len(summary["held_monitor_budget_coverage_positions"]) == 7
+
+
+def test_monitor_budget_coverage_positions_bounded_by_capacity_at_incident_scale(
+    monkeypatch,
+):
+    """At the live incident's scale (76-80 positions, ~29s periodic claim),
+    admission is bounded by capacity (a pure function of budget), not by the
+    book -- and the real selection gate must reflect exactly that bound, the
+    same number the reservation computed, on every read of the summary.
+    """
+    positions = [
+        _make_position(
+            trade_id=f"incident-book-{index}",
+            token_id=f"incident-book-token-{index}",
+        )
+        for index in range(80)
+    ]
+    summary = _run_monitor_coverage_pipeline(
+        monkeypatch,
+        positions=positions,
+        budget_seconds=29.0,
+        label="test_budget_coverage_incident_scale_80_29",
+    )
+
+    # capacity = floor(max(5, 29/2) / 5) = floor(14.5/5) = 2 -- this is what
+    # a 29s claim can actually fund at one complete 5s read per admitted
+    # position; it does not depend on the book being 80 vs. 13 vs. 500.
+    assert summary["held_monitor_budget_reservation_count"] == 2
+    assert len(summary["held_monitor_budget_coverage_positions"]) == 2
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(10.0)
+    # Safety property: reserved time never exceeds the claim.
+    assert summary["held_monitor_primary_belief_reserve_seconds"] <= 29.0
+
+
+def test_monitor_budget_coverage_positions_never_exceeds_a_tiny_book(monkeypatch):
+    """A book smaller than capacity is never asked to admit more positions
+    than it has -- reproduces, at the real pipeline level, the phantom-
+    reservation bug fixed at the unit level in
+    test_monitor_primary_reserve_never_exceeds_a_tiny_book.
+    """
+    positions = [
+        _make_position(trade_id="tiny-book-0", token_id="tiny-book-token-0"),
+    ]
+    summary = _run_monitor_coverage_pipeline(
+        monkeypatch,
+        positions=positions,
+        budget_seconds=29.0,
+        label="test_budget_coverage_tiny_book_1_29",
+    )
+
+    assert summary["held_monitor_budget_reservation_count"] == 1
+    assert len(summary["held_monitor_budget_coverage_positions"]) == 1
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(5.0)
 
 
 def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(
@@ -15178,11 +15333,6 @@ def test_monitoring_partial_batch_fallback_targets_only_missing_token(monkeypatc
         cycle_runtime,
         "_held_position_monitor_primary_reservation",
         lambda count, _budget: (count, 0.0),
-    )
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_held_position_monitor_reservation_count",
-        lambda count: count,
     )
 
     refreshed: list[str] = []
