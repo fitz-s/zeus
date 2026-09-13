@@ -138,3 +138,125 @@ def test_mad_sigma_about_zero_empty_is_zero():
 def _td(i: int):
     import datetime as dt
     return dt.date(2026, 6, 8) + dt.timedelta(days=0)  # season JJA; date value irrelevant to cohorting
+
+
+# ----------------------------------------------------------------------------
+# TRAILING WINDOW + PER-EVENT DEDUP (2026-09-13) — _load_residuals must bound the join by
+# (asof - trailing_days, asof] and collapse multiple forecast_posteriors rows per settled event
+# down to the single latest no-leak posterior, so the floor is weighted by evidence (settled
+# events), not by how often a family was re-materialized.
+# ----------------------------------------------------------------------------
+def _make_fcst_db(tmp_path, rows):
+    """Build a minimal zeus-forecasts.db fixture with the columns _load_residuals queries.
+
+    ``rows`` is a list of (city, metric, target_date, source_cycle_time, anchor_value_c,
+    settlement_value, settlement_unit, authority) tuples. One settlement_outcomes row is written
+    per distinct (city, metric, target_date); every matching forecast_posteriors row is written
+    verbatim (a test may pass several rows for the same event to exercise dedup).
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "zeus-forecasts.db"
+    con = _sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE forecast_posteriors (city TEXT, temperature_metric TEXT, target_date TEXT, "
+        "source_cycle_time TEXT, provenance_json TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE settlement_outcomes (city TEXT, temperature_metric TEXT, target_date TEXT, "
+        "settlement_value REAL, settlement_unit TEXT, authority TEXT)"
+    )
+    seen_settlements = set()
+    for city, metric, tdate, sct, anchor_c, sval, sunit, authority in rows:
+        con.execute(
+            "INSERT INTO forecast_posteriors (city, temperature_metric, target_date, "
+            "source_cycle_time, provenance_json) VALUES (?, ?, ?, ?, ?)",
+            (city, metric, tdate, sct, _json.dumps({"anchor_value_c": anchor_c})),
+        )
+        key = (city, metric, tdate)
+        if key not in seen_settlements:
+            seen_settlements.add(key)
+            con.execute(
+                "INSERT INTO settlement_outcomes (city, temperature_metric, target_date, "
+                "settlement_value, settlement_unit, authority) VALUES (?, ?, ?, ?, ?, ?)",
+                (city, metric, tdate, sval, sunit, authority),
+            )
+    con.commit()
+    con.close()
+    return str(db_path)
+
+
+def test_trailing_window_excludes_old_includes_recent(tmp_path):
+    """target_date in (asof - trailing_days, asof]: a residual older than the cutoff is dropped;
+    one inside the window is kept."""
+    import datetime as dt
+
+    asof = dt.date(2026, 9, 12)
+    trailing_days = 10
+    cutoff = asof - dt.timedelta(days=trailing_days)  # 2026-09-02
+    rows = [
+        # exactly at the open boundary -> excluded (target_date == cutoff, not > cutoff)
+        ("OldCity", "high", cutoff.isoformat(), "2026-08-31T00:00:00+00:00", 10.0, 12.0, "C", "VERIFIED"),
+        # inside the window -> included
+        ("NewCity", "high", "2026-09-10", "2026-09-08T00:00:00+00:00", 10.0, 12.0, "C", "VERIFIED"),
+    ]
+    db_path = _make_fcst_db(tmp_path, rows)
+    residuals = script._load_residuals(db_path, asof=asof, trailing_days=trailing_days)
+    cities = {c for c, *_ in residuals}
+    assert "NewCity" in cities, "a residual inside the trailing window must be kept"
+    assert "OldCity" not in cities, "a residual at/before the trailing-window cutoff must be excluded"
+
+
+def test_two_posterior_rows_for_one_event_count_once(tmp_path):
+    """Two forecast_posteriors rows for the same (city, target_date, metric) settled event must
+    collapse to ONE residual — the latest no-leak posterior — not two."""
+    import datetime as dt
+
+    asof = dt.date(2026, 9, 12)
+    rows = [
+        # earlier cycle for the SAME event, anchor far from settlement (would skew a raw pool)
+        ("DupCity", "high", "2026-09-10", "2026-09-05T00:00:00+00:00", 5.0, 12.0, "C", "VERIFIED"),
+        # later (closer-to-settlement) cycle for the SAME event -> this one must be kept
+        ("DupCity", "high", "2026-09-10", "2026-09-09T00:00:00+00:00", 11.0, 12.0, "C", "VERIFIED"),
+    ]
+    db_path = _make_fcst_db(tmp_path, rows)
+    residuals = script._load_residuals(db_path, asof=asof, trailing_days=60)
+    dup = [r for r in residuals if r[0] == "DupCity"]
+    assert len(dup) == 1, "two posterior rows for one settled event must count once"
+    # residual = settled(12.0) - anchor(11.0) = 1.0, from the LATER (2026-09-09) cycle, not the
+    # earlier (2026-09-05) cycle's residual of 12.0-5.0=7.0.
+    assert dup[0][3] == pytest.approx(1.0), "must keep the LATEST no-leak posterior's residual"
+
+
+def test_meta_carries_trailing_days_and_asof(tmp_path, monkeypatch):
+    """main() must stamp _meta.trailing_days and _meta.asof on the written table."""
+    import datetime as dt
+    import json as _json
+    import sys as _sys
+
+    asof = dt.date(2026, 9, 12)
+    rows = [
+        (f"City{i % 3}", "high", (asof - dt.timedelta(days=i % 5 + 1)).isoformat(),
+         (asof - dt.timedelta(days=i % 5 + 2)).isoformat() + "T00:00:00+00:00",
+         10.0, 10.0 + (i % 3) * 0.1, "C", "VERIFIED")
+        for i in range(30)
+    ]
+    db_path = _make_fcst_db(tmp_path, rows)
+    out_path = tmp_path / "settlement_sigma_floor.json"
+    argv = [
+        "fit_settlement_sigma_floor.py",
+        "--fcst", db_path,
+        "--out", str(out_path),
+        "--asof", asof.isoformat(),
+        "--trailing-days", "45",
+        "--min-cohort-n", "5",
+        "--min-global-n", "5",
+    ]
+    monkeypatch.setattr(_sys, "argv", argv)
+    rc = script.main()
+    assert rc == 0
+    table = _json.loads(out_path.read_text(encoding="utf-8"))
+    assert table["_meta"]["trailing_days"] == 45
+    assert table["_meta"]["asof"] == asof.isoformat()
+    assert "45" in table["_meta"]["window"]

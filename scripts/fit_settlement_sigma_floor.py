@@ -42,6 +42,15 @@
 # READ-ONLY over state/zeus-forecasts.db (forecast_posteriors + settlement_outcomes, authority=VERIFIED
 # only — Fitz #4: UNVERIFIED/DISPUTED do not enter the chain). Writes state/settlement_sigma_floor.json
 # via the script's sanctioned atomic-replace path. Run as new settlements arrive (recommend daily).
+#
+# WINDOW (2026-09-13 — trailing, not cumulative): residuals are drawn from target_date in
+# (asof - trailing_days, asof], --trailing-days default 60. A fixed-start cumulative window never
+# drops old data, so every refit becomes more dominated by stale residuals over time; verified this
+# flips the direction of a refit for at least one city (a fixed-start 2026-06-10..09-12 cumulative
+# refit LOWERED Denver's floor against a fresh 08-23..09-12 residual MAD that says it should rise).
+# ONE RESIDUAL PER EVENT: forecast_posteriors carries many rows per (city, target_date, metric) —
+# one per forecast cycle — so a raw join weights the floor by how often a family was materialized,
+# not by evidence. Only the LATEST no-leak posterior per event is kept.
 """Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS.
 
 Output: state/settlement_sigma_floor.json
@@ -74,6 +83,16 @@ ABSOLUTE_FLOOR_C = 1.0            # chain law: predictive σ floor never below 1
 K_DEFAULT = 1.0                   # residual MAD-σ IS the floor (no haircut); consumer formula unchanged
 MAD_TO_SIGMA = 1.4826            # MAD → σ scale for a Normal (1/Φ⁻¹(0.75))
 SEASONS = ("DJF", "MAM", "JJA", "SON")
+
+# TRAILING WINDOW (2026-09-13 — replaces the fixed-start cumulative window). The original window
+# (residual-2026-06-10..asof) never dropped old data, so every refit became increasingly dominated
+# by stale residuals (verified: a 2026-09-12 cumulative refit DECREASED Denver's floor 1.79->1.49
+# against a fresh 08-23..09-12 lead-1..2 residual MAD of 1.71, i.e. the correct direction is UP).
+# 60 days is the smallest trailing window that keeps TIER1 (n>=MIN_COHORT_N_DEFAULT) for cities at
+# roughly 1-3 forecast leads/day settling most days -- ~60-180 raw residual rows before per-event
+# dedup, comfortably above 20 for any city that settles at least ~1 day in 3. It is short enough
+# that a settlement-law or station change is felt within weeks, not baked in for a full season.
+TRAILING_DAYS_DEFAULT = 60
 
 
 def to_c(v, u):
@@ -134,7 +153,10 @@ def mad_sigma_about_zero(residuals: "np.ndarray") -> float:
 
 # Canonical no-leak residual-join SQL. Hashed into provenance so a future session can prove the
 # table's lineage. NO-LEAK: source_cycle_time strictly before target_date (the forecast could not
-# have seen the settlement). VERIFIED settlements only (Fitz #4).
+# have seen the settlement). VERIFIED settlements only (Fitz #4). The trailing-window bound is
+# pushed into the WHERE clause (not a python post-filter) so the query itself, not just the
+# python-side loop, is bounded — the fixed-start cumulative query this replaces scanned the full
+# multi-month history on every refit.
 _RESIDUAL_QUERY = (
     "SELECT fp.city, fp.temperature_metric, fp.target_date, "
     "       json_extract(fp.provenance_json,'$.anchor_value_c') AS center, "
@@ -144,25 +166,35 @@ _RESIDUAL_QUERY = (
     "  ON so.city=fp.city AND so.target_date=fp.target_date "
     " AND so.temperature_metric=fp.temperature_metric "
     "WHERE json_extract(fp.provenance_json,'$.anchor_value_c') IS NOT NULL "
-    "  AND so.authority='VERIFIED' AND so.settlement_value IS NOT NULL"
+    "  AND so.authority='VERIFIED' AND so.settlement_value IS NOT NULL "
+    "  AND fp.target_date > ? AND fp.target_date <= ?"
 )
 
 
-def _load_residuals(fcst_path: str, *, asof: _dt.date):
+def _load_residuals(fcst_path: str, *, asof: _dt.date, trailing_days: int):
     """Return [(city, metric, target_date, residual_c)] for no-leak VERIFIED residual pairs.
 
-    residual = settled_c − fused_center_c. NO-LEAK guard: keep only pairs whose source_cycle_time
-    DATE is strictly before the target_date (lead ≥ 1 day) AND whose target_date ≤ asof (no future
-    settlements). Settlement value converted to °C via settlement_unit (Fitz #4: VERIFIED only).
+    residual = settled_c − fused_center_c, ONE PER SETTLED EVENT: forecast_posteriors carries many
+    rows per (city, target_date, metric) — one per forecast cycle/lead — so joining and MAD-ing the
+    raw rows weights the floor by how often a family was materialized, not by evidence (a city
+    computed every hour dominates one computed daily). Kept: the LATEST no-leak posterior per event
+    (max source_cycle_time strictly before target_date), i.e. the last forecast before the target
+    day resolves — the closest-to-settlement, most-informed call for that event.
+
+    TRAILING WINDOW: target_date in (asof − trailing_days, asof] — replaces the old fixed-start
+    cumulative window so a refit is dominated by recent regime, not increasingly-stale history.
+    NO-LEAK guard: keep only pairs whose source_cycle_time DATE is strictly before the target_date
+    (lead ≥ 1 day). Settlement value converted to °C via settlement_unit (Fitz #4: VERIFIED only).
     """
+    window_start = asof - _dt.timedelta(days=trailing_days)
     con = sqlite3.connect(f"file:{fcst_path}?mode=ro", uri=True)
     try:
         cur = con.cursor()
-        cur.execute(_RESIDUAL_QUERY)
+        cur.execute(_RESIDUAL_QUERY, (window_start.isoformat(), asof.isoformat()))
         rows = cur.fetchall()
     finally:
         con.close()
-    out: list = []
+    latest: dict = {}  # (city, metric, target_date) -> (source_cycle_time_str, residual_c)
     for city, metric, tdate, center, sval, sunit, sct in rows:
         if not city or not tdate or not metric or center is None:
             continue
@@ -173,7 +205,7 @@ def _load_residuals(fcst_path: str, *, asof: _dt.date):
             continue
         if cyc >= td:            # NO-LEAK: forecast cycle must predate the target date
             continue
-        if td > asof:            # no future settlements relative to as-of
+        if td > asof or td <= window_start:   # belt-and-suspenders on top of the SQL bound
             continue
         # UNIT DISCIPLINE: the fused center is provenance.anchor_value_c — ALREADY °C by contract
         # (named *_c). ONLY the settlement_value carries settlement_unit and must be converted. A
@@ -183,8 +215,12 @@ def _load_residuals(fcst_path: str, *, asof: _dt.date):
         s = to_c(float(sval), sunit)
         if s is None or not (np.isfinite(c) and np.isfinite(s)):
             continue
-        out.append((str(city), str(metric).lower(), td, float(s) - float(c)))
-    return out
+        key = (str(city), str(metric).lower(), td)
+        sct_str = str(sct)
+        prev = latest.get(key)
+        if prev is None or sct_str > prev[0]:
+            latest[key] = (sct_str, float(s) - float(c))
+    return [(k[0], k[1], k[2], v[1]) for k, v in latest.items()]
 
 
 def fit_floors(
@@ -255,10 +291,15 @@ def main() -> int:
     ap.add_argument("--min-cohort-n", type=int, default=MIN_COHORT_N_DEFAULT)
     ap.add_argument("--min-global-n", type=int, default=MIN_GLOBAL_N_DEFAULT)
     ap.add_argument("--k", type=float, default=K_DEFAULT, help="k_default written to _meta (σ_eff = max(σ, k·sigma_floor_c)).")
+    ap.add_argument(
+        "--trailing-days", type=int, default=TRAILING_DAYS_DEFAULT,
+        help="residual window is (asof - trailing_days, asof] (default 60; replaces the old fixed-start cumulative window).",
+    )
     args = ap.parse_args()
 
     asof = _dt.date.fromisoformat(args.asof) if args.asof else _dt.date.today()
-    residuals = _load_residuals(args.fcst, asof=asof)
+    window_start = asof - _dt.timedelta(days=args.trailing_days)
+    residuals = _load_residuals(args.fcst, asof=asof, trailing_days=args.trailing_days)
     if len(residuals) < args.min_global_n:
         print(
             f"[sigma-floor] only {len(residuals)} no-leak VERIFIED residual pairs in {args.fcst} "
@@ -268,9 +309,10 @@ def main() -> int:
 
     cells = fit_floors(residuals, min_cohort_n=args.min_cohort_n)
 
-    # source_query_hash: lineage proof (canonical residual SQL + asof). Stamped on every cell.
+    # source_query_hash: lineage proof (canonical residual SQL + asof + trailing_days). Stamped on
+    # every cell.
     qhash = hashlib.sha256(
-        (_RESIDUAL_QUERY + f"|asof={asof.isoformat()}").encode("utf-8")
+        (_RESIDUAL_QUERY + f"|asof={asof.isoformat()}|trailing_days={args.trailing_days}").encode("utf-8")
     ).hexdigest()[:16]
     for cell in cells.values():
         cell["source_query_hash"] = qhash
@@ -285,8 +327,10 @@ def main() -> int:
             "min_cohort_n": int(args.min_cohort_n),
             "absolute_floor_c": float(ABSOLUTE_FLOOR_C),
             "asof": asof.isoformat(),
+            "trailing_days": int(args.trailing_days),
+            "window": f"trailing-{args.trailing_days}d:{window_start.isoformat()}..{asof.isoformat()}",
             "authority": "settlement_sigma_floor_v2_residual",
-            "source": "forecast_posteriors.anchor_value_c ⋈ settlement_outcomes(authority=VERIFIED), no-leak",
+            "source": "forecast_posteriors.anchor_value_c ⋈ settlement_outcomes(authority=VERIFIED), no-leak, one-per-event",
             "source_query_hash": qhash,
             "residual_pairs_total": int(global_arr.size),
             "residual_mean_c": round(float(np.mean(global_arr)), 4),
