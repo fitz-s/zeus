@@ -4114,6 +4114,13 @@ def mark_market_closed_hold_to_settlement(
     naming why it left pending_exit. Give it its own terminal marker instead
     and leave state/exit_state/order_status untouched so it stays exactly as
     settle-eligible as it was the cycle before.
+
+    Without a live ``conn`` neither the dust check above (it needs a fresh
+    venue snapshot) nor the canonical write below can prove anything, so this
+    call makes no decision at all: the position is left exactly as it was and
+    ``False`` is returned for every case, dust or not, matching how every
+    caller already treats a failed canonical write (defer to a later cycle
+    with a real connection).
     """
 
     if _runtime_state_value(position) == "pending_exit" and _is_non_executable_dust_hold(
@@ -4189,7 +4196,12 @@ def mark_market_closed_hold_to_settlement(
         error=error,
         preserve_exit_reason=preserve_exit_reason,
     )
-    succeeded = conn is None or canonical_written
+    # Without conn, _dual_write_market_closed_hold_if_available already
+    # returns False (it cannot persist anything) — do not paper over that
+    # with a forced True. A conn-less call must never claim success: it
+    # would report the position as held-to-settlement with zero audit trail,
+    # the same silent-release failure mode this function exists to prevent.
+    succeeded = canonical_written
     if not succeeded:
         vars(position).clear()
         vars(position).update(position_before)

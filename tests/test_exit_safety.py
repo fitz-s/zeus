@@ -11931,6 +11931,118 @@ def test_market_closed_hold_still_releases_non_dust_backoff_exhausted(conn):
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
 
 
+def test_market_closed_hold_without_conn_makes_no_decision_for_confirmed_dust_hold():
+    """Without a live conn, _is_non_executable_dust_hold cannot fetch a fresh
+    venue snapshot and always reads as False (C5: only fresh evidence proves
+    dust). The pre-existing state-mutating code below the new guard must not
+    then silently claim success on conn=None: it cannot prove ANY outcome
+    without a connection, so it must leave the position untouched and report
+    failure, exactly like a failed canonical write."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-market-closed-dust-no-conn",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Amsterdam",
+        cluster="Amsterdam",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=1.28,
+        shares=2.0,
+        chain_shares=2.0,
+        cost_basis_usd=1.28,
+        entered_at="2026-07-08T10:00:00+00:00",
+        state="pending_exit",
+        pre_exit_state="active",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REVERSAL [DUST: executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5]",
+        last_exit_error="executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
+        exit_retry_count=3,
+        env="live",
+    )
+    before = copy.deepcopy(vars(position))
+
+    result = exit_lifecycle.mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="market_closed_non_accepting_orders",
+        conn=None,
+    )
+
+    assert result is False
+    assert vars(position) == before
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+
+
+def test_market_closed_hold_without_conn_makes_no_decision_for_non_dust_backoff_exhausted():
+    """The same conn=None deferral applies to a non-dust backoff_exhausted
+    hold: without conn there is no canonical write to make, so the
+    pre-existing release path must not silently mutate the in-memory
+    position and report success either. This is a behavior change from
+    743d96f20 for the non-dust case too -- no caller inspects this return
+    value to gate anything other than its own summary counters/rollback
+    (see cycle_runtime.py:9515,9585,10947, all of which already treat False
+    as "canonical write failed, defer" and either roll back or leave the
+    position untouched; exit_lifecycle.py:4725,7893,7907 ignore the return
+    value entirely)."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-market-closed-non-dust-no-conn",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Amsterdam",
+        cluster="Amsterdam",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=6.4,
+        entered_at="2026-07-08T10:00:00+00:00",
+        state="pending_exit",
+        pre_exit_state="active",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REJECTED_REPEATED",
+        last_exit_error="venue_rejected",
+        exit_retry_count=3,
+        env="live",
+    )
+    before = copy.deepcopy(vars(position))
+
+    result = exit_lifecycle.mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="market_closed_non_accepting_orders",
+        conn=None,
+    )
+
+    assert result is False
+    assert vars(position) == before
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+
+
 def test_after_settlement_stale_market_price_marks_closed_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
