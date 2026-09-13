@@ -6437,12 +6437,19 @@ def _compute_posterior_payload(
             # The settlement σ-floor (city|season|metric) lookup is IMPURE (config + season) and is read
             # ONCE here, then threaded into the pure q builder for BOTH the global and the city carriers
             # (same physical dispersion). It sets the floor provenance fields exactly as before.
-            if _current_shape is not None:
-                _floor_c, _floor_reason = None, None
-            else:
-                _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
-                    request, metric=metric
-                )
+            #
+            # 2026-09-13: the current-evidence-shape bypass added by b6e587ab2 (2026-07-11) is REMOVED.
+            # That commit's rationale ("historical k/w/floors would change a decision-time-only shape
+            # into a second probability regime") is correct for k/uniform_w/floor_steps (see the
+            # _resolve_sigma_tau_calibration branch above, which stays neutral under current-shape) but
+            # does not extend to the settlement σ-floor: the floor is a `max()` widen-only operation on
+            # the SAME predictive σ, not a second regime, and measurement (S-sigmafloor2, walk-forward,
+            # cluster-robust, 14 days / 556 city×day clusters) shows the bypass under-disperses every
+            # served shape (cov80 0.787 vs 0.80 nominal) with 52.6% of post-cutover rows served a sigma
+            # below their own live floor. The lookup now runs unconditionally for every shape.
+            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
+                request, metric=metric
+            )
             if _floor_c is not None:
                 settlement_sigma_floor_c = float(_floor_c)
                 settlement_sigma_floor_applied = True
