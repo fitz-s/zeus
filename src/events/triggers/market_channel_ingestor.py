@@ -1301,31 +1301,56 @@ def _bounded_latest_snapshot_rows(
         )
         target.append(row)
 
-    market_end_expr = (
-        "market_end_at" if "market_end_at" in snapshot_columns else "NULL AS market_end_at"
+    market_end_available = "market_end_at" in snapshot_columns
+    end_now_iso = (
+        now.astimezone(timezone.utc).isoformat() if market_end_available else None
     )
-    end_predicate = ""
-    end_params: tuple[object, ...] = ()
-    if "market_end_at" in snapshot_columns:
-        end_predicate = "AND (market_end_at IS NULL OR market_end_at > ?)"
-        end_params = (now.astimezone(timezone.utc).isoformat(),)
 
+    # Dead-token universe leak (2026-09-13): a market's end date never changes,
+    # but a builder outside the Gamma-authoritative scan path (substrate-observer,
+    # JIT pre-submit) cannot observe it and writes NULL onto whatever becomes the
+    # condition's latest row. Filtering/reporting that single row's own
+    # market_end_at made such a condition immortal in the universe with no future
+    # write able to correct it. Aggregate MAX(market_end_at) across the batch's
+    # condition_ids (non-NULL wins; bounded by the same IN-list) instead, so an
+    # end date recorded by any past row for that condition is never lost.
     def hydrate(refs: list[sqlite3.Row | tuple]) -> list[sqlite3.Row | tuple]:
         hydrated: dict[str, sqlite3.Row | tuple] = {}
         for offset in range(0, len(refs), 400):
             batch = refs[offset : offset + 400]
             placeholders = ",".join("?" for _ in batch)
             snapshot_ids = [str(row[0]) for row in batch]
-            rows = conn.execute(
-                f"""
-                SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-                       min_tick_size, min_order_size, neg_risk, {market_end_expr}
-                  FROM executable_market_snapshots
-                 WHERE snapshot_id IN ({placeholders})
-                   {end_predicate}
-                """,
-                (*snapshot_ids, *end_params),
-            ).fetchall()
+            if market_end_available:
+                condition_ids = sorted({str(row[1]) for row in batch})
+                cond_placeholders = ",".join("?" for _ in condition_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT s.snapshot_id, s.condition_id, s.yes_token_id, s.no_token_id,
+                           s.min_tick_size, s.min_order_size, s.neg_risk,
+                           end_bound.market_end_at
+                      FROM executable_market_snapshots AS s
+                      LEFT JOIN (
+                          SELECT condition_id, MAX(market_end_at) AS market_end_at
+                            FROM executable_market_snapshots
+                           WHERE condition_id IN ({cond_placeholders})
+                             AND market_end_at IS NOT NULL
+                           GROUP BY condition_id
+                      ) AS end_bound ON end_bound.condition_id = s.condition_id
+                     WHERE s.snapshot_id IN ({placeholders})
+                       AND (end_bound.market_end_at IS NULL OR end_bound.market_end_at > ?)
+                    """,
+                    (*condition_ids, *snapshot_ids, end_now_iso),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+                           min_tick_size, min_order_size, neg_risk, NULL AS market_end_at
+                      FROM executable_market_snapshots
+                     WHERE snapshot_id IN ({placeholders})
+                    """,
+                    snapshot_ids,
+                ).fetchall()
             hydrated.update({str(row[0]): row for row in rows})
         return [hydrated[str(ref[0])] for ref in refs if str(ref[0]) in hydrated]
 
@@ -1409,7 +1434,11 @@ def active_weather_token_metadata_from_snapshots(
             priority_token_ids=priority,
             now=now or datetime.now(timezone.utc),
         )
-    prefix = "snapshot." if use_latest_projection else ""
+    # Always aliased "snapshot." (even in the no-projection fallback): the
+    # end_bound aggregate joined in below exposes its own condition_id, so an
+    # unqualified base-table reference would be ambiguous once that join is
+    # present regardless of which FROM shape is active.
+    prefix = "snapshot."
     predicates = []
     if "active" in columns:
         predicates.append(f"COALESCE({prefix}active, 0) = 1")
@@ -1440,13 +1469,31 @@ def active_weather_token_metadata_from_snapshots(
     # predicate so the universe filter and the phase axis cannot diverge. NOT the
     # forecast_only-admission predicate — the universe legitimately keeps
     # SETTLEMENT_DAY markets (day0/exit); only POST_TRADING is excluded.
+    #
+    # Dead-token universe leak (2026-09-13): a market's end date never changes,
+    # but a builder outside the Gamma-authoritative scan path (substrate-observer,
+    # JIT pre-submit) cannot observe it and writes NULL. Reading the CURRENTLY
+    # latest row's own market_end_at made a condition immortal in the universe
+    # once such a row became latest, with no future write ever able to correct
+    # it. end_bound aggregates MAX(market_end_at) across the condition's full
+    # snapshot history (non-NULL wins) so an end date recorded by any past row
+    # is never lost, regardless of which builder wrote the current latest row.
+    market_end_join = ""
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        market_end_join = """
+        LEFT JOIN (
+            SELECT condition_id, MAX(market_end_at) AS market_end_at
+              FROM executable_market_snapshots
+             WHERE market_end_at IS NOT NULL
+             GROUP BY condition_id
+        ) AS end_bound ON end_bound.condition_id = %scondition_id
+        """ % prefix
         predicates.append(
-            f"({prefix}market_end_at IS NULL OR {prefix}market_end_at > '{now_iso}')"
+            f"(end_bound.market_end_at IS NULL OR end_bound.market_end_at > '{now_iso}')"
         )
     market_end_expr = (
-        f"{prefix}market_end_at"
+        "end_bound.market_end_at AS market_end_at"
         if "market_end_at" in columns
         else "NULL AS market_end_at"
     )
@@ -1459,9 +1506,10 @@ def active_weather_token_metadata_from_snapshots(
         FROM {latest_table} AS latest
         JOIN executable_market_snapshots AS snapshot
           ON snapshot.snapshot_id = latest.snapshot_id
+        {market_end_join}
         """
         if use_latest_projection
-        else "FROM executable_market_snapshots"
+        else f"FROM executable_market_snapshots AS snapshot {market_end_join}"
     )
     order_expr = (
         f"{prefix}captured_at DESC, {prefix}rowid DESC"

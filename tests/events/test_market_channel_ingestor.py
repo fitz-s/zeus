@@ -5379,6 +5379,118 @@ def test_universe_includes_market_with_null_end_at():
     assert "yes-null" in md, "NULL market_end_at must be kept (cannot prove settled)"
 
 
+def test_universe_excludes_condition_whose_latest_row_lost_a_known_past_end_at():
+    """Dead-token universe leak (2026-09-13): a builder outside the Gamma-scan path
+    (substrate-observer, JIT pre-submit) cannot observe market_end_at and writes
+    NULL onto whatever becomes the condition's latest row. A market's end date
+    never changes, so an end date recorded by an OLDER row for the same
+    condition_id must still exclude it even though the CURRENTLY latest row is
+    NULL — the aggregate bound across the condition's history, not the single
+    latest row, decides."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    # Older row (scanner-authored): recorded the true, already-past end date.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-old','0xdeadlatest','austin-weather','yes-deadlatest','no-deadlatest',"
+        "'0.01','5',0,1,0,'2026-06-04T09:00:00+00:00','2026-06-04T11:30:00+00:00')"
+    )
+    # Newer row (substrate-observer/JIT-authored): lost the end date to NULL.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-new','0xdeadlatest','austin-weather','yes-deadlatest','no-deadlatest',"
+        "'0.01','5',0,1,0,'2026-06-04T11:45:00+00:00',NULL)"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-deadlatest" not in md, (
+        "a condition with a known past end_at must stay excluded even when its "
+        "currently-latest row lost that fact to NULL"
+    )
+    assert "no-deadlatest" not in md
+
+
+def test_bounded_projection_excludes_condition_whose_latest_row_lost_a_known_past_end_at():
+    """Same invariant as test_universe_excludes_condition_whose_latest_row_lost_a_known_
+    past_end_at, but through the bounded ``executable_market_snapshot_latest``
+    projection path (``_bounded_latest_snapshot_rows``) that live production
+    actually takes — R-F measured 439 stuck condition_ids / 868 latest rows on
+    the live trades DB through exactly this path."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            market_end_at TEXT
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        """
+    )
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    # Older row (scanner-authored): recorded the true, already-past end date.
+    # Never entered the latest projection — a later capture replaced it there.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "snap-old", "0xdeadlatest", "austin-weather",
+            "yes-deadlatest", "no-deadlatest", "0.01", "5", 0, 1, 0,
+            "2026-06-04T09:00:00+00:00", "2026-06-04T11:30:00+00:00",
+        ),
+    )
+    # Newer row (substrate-observer/JIT-authored): lost the end date to NULL,
+    # and IS the row the latest projection now points at for this condition.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "snap-new", "0xdeadlatest", "austin-weather",
+            "yes-deadlatest", "no-deadlatest", "0.01", "5", 0, 1, 0,
+            "2026-06-04T11:45:00+00:00", None,
+        ),
+    )
+    for token in ("yes-deadlatest", "no-deadlatest"):
+        conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "0xdeadlatest", token, "snap-new", "austin-weather",
+                "yes-deadlatest", "no-deadlatest", 1, 0,
+                "2026-06-04T11:45:00+00:00",
+            ),
+        )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-deadlatest" not in md, (
+        "a condition with a known past end_at must stay excluded even when the "
+        "row the latest projection points at lost that fact to NULL"
+    )
+    assert "no-deadlatest" not in md
+
+
 def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
     """A running market-channel thread must not keep yesterday's token universe forever."""
 
