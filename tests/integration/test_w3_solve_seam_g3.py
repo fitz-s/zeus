@@ -15224,13 +15224,114 @@ def test_global_book_cache_replaces_only_mutable_held_family_delta(monkeypatch):
         frozenset({"a", "b"}),
         allow_topology_change=True,
     )
-    assert {row[0] for row in merged.asset_states} == {"held", "b"}
+    # "a" is in family_keys but the delta (epoch_for("b")) supplies no rows
+    # for it; the union coverage check accepts "a" as base-covered, so its
+    # base rows must be retained, not dropped. "held" was never in
+    # family_keys and passes through untouched either way.
+    assert {row[0] for row in merged.asset_states} == {"held", "a", "b"}
     assert {
         row for row in merged.asset_states if row[0] == "held"
     } == {
         row for row in cached_epoch.asset_states if row[0] == "held"
     }
+    assert {
+        row for row in merged.asset_states if row[0] == "a"
+    } == {
+        row for row in cached_epoch.asset_states if row[0] == "a"
+    }
     conn.close()
+
+
+def _book_epoch_family_states(*families, marker):
+    at = _dt.datetime.now(_dt.timezone.utc)
+    states = tuple(
+        (
+            family,
+            f"bin-{family}",
+            f"condition-{family}",
+            "YES",
+            f"yes-{family}",
+            "EXECUTABLE",
+            f"hash-{marker}-{family}",
+            f"event-{family}",
+            f"market-{family}",
+        )
+        for family in families
+    )
+    return CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=at,
+        ),
+    )
+
+
+def test_global_book_epoch_delta_retains_base_only_family_under_topology_change():
+    base = _book_epoch_family_states("A", "B", "C", marker="base")
+    delta = _book_epoch_family_states("A", marker="delta")
+
+    merged = era._merge_global_book_epoch_delta(
+        base,
+        delta,
+        frozenset({"A", "B", "C"}),
+        allow_topology_change=True,
+    )
+
+    assert {row[0] for row in merged.asset_states} == {"A", "B", "C"}
+    assert {
+        row for row in merged.asset_states if row[0] == "A"
+    } == {row for row in delta.asset_states if row[0] == "A"}
+    assert {
+        row for row in merged.asset_states if row[0] in ("B", "C")
+    } == {row for row in base.asset_states if row[0] in ("B", "C")}
+
+
+def test_global_book_epoch_delta_includes_family_new_to_base_under_topology_change():
+    base = _book_epoch_family_states("A", marker="base")
+    delta = _book_epoch_family_states("A", "D", marker="delta")
+
+    merged = era._merge_global_book_epoch_delta(
+        base,
+        delta,
+        frozenset({"A", "D"}),
+        allow_topology_change=True,
+    )
+
+    assert {row[0] for row in merged.asset_states} == {"A", "D"}
+    assert {
+        row for row in merged.asset_states if row[0] == "D"
+    } == {row for row in delta.asset_states if row[0] == "D"}
+
+
+def test_global_book_epoch_delta_rejects_partial_coverage_without_topology_change():
+    base = _book_epoch_family_states("A", "B", marker="base")
+    delta = _book_epoch_family_states("A", marker="delta")
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_DELTA_TOPOLOGY_CHANGED"):
+        era._merge_global_book_epoch_delta(
+            base,
+            delta,
+            frozenset({"A", "B"}),
+            allow_topology_change=False,
+        )
+
+    # Full, exact coverage still merges normally with no base rows retained
+    # for the refreshed family -- the delta branch is untouched.
+    full_delta = _book_epoch_family_states("A", "B", marker="delta")
+    merged = era._merge_global_book_epoch_delta(
+        base,
+        full_delta,
+        frozenset({"A", "B"}),
+        allow_topology_change=False,
+    )
+    assert {row[0] for row in merged.asset_states} == {"A", "B"}
+    assert {
+        row for row in merged.asset_states
+    } == {row for row in full_delta.asset_states}
 
 
 def test_global_book_epoch_scope_projects_broad_cached_cut():

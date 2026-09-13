@@ -2591,18 +2591,27 @@ def _merge_global_book_epoch_delta(
     ):
         raise ValueError("GLOBAL_BOOK_DELTA_TOPOLOGY_CHANGED")
 
+    # Only drop base rows for families the delta actually supplies rows for.
+    # The coverage check above accepts a family as covered by base OR delta
+    # (union); dropping every base row in family_keys regardless of delta
+    # coverage would silently empty a base-only-covered family even though
+    # it passed the coverage check and still appears in probability_keys.
+    # A caller passing delta_epoch=None (pure family removal/projection, see
+    # _scope_global_book_epoch) has no delta to defer to, so family_keys
+    # itself is the drop set in that case.
+    drop_families = family_keys if delta_epoch is None else delta_families
     states = tuple(
-        row for row in base_states if str(row[0]) not in family_keys
+        row for row in base_states if str(row[0]) not in drop_families
     ) + delta_states
     assets = tuple(
         asset
         for asset in tuple(getattr(base_epoch, "assets", ()) or ())
-        if str(getattr(asset, "family_key", "") or "") not in family_keys
+        if str(getattr(asset, "family_key", "") or "") not in drop_families
     ) + tuple(getattr(delta_epoch, "assets", ()) or ())
     sell_assets = tuple(
         asset
         for asset in tuple(getattr(base_epoch, "sell_assets", ()) or ())
-        if str(getattr(asset, "family_key", "") or "") not in family_keys
+        if str(getattr(asset, "family_key", "") or "") not in drop_families
     ) + tuple(getattr(delta_epoch, "sell_assets", ()) or ())
     base_captured_at = getattr(base_epoch, "captured_at_utc", None)
     base_max_age = getattr(base_epoch, "max_age", None)
@@ -11187,13 +11196,24 @@ def event_bound_live_adapter_from_trade_conn(
                             "reason=%s",
                             cache_store_status,
                         )
+                    delta_covered_families = {
+                        str(row[0])
+                        for row in tuple(
+                            getattr(delta_epoch, "asset_states", ()) or ()
+                        )
+                    }
+                    retained_from_base = len(
+                        eligible_refresh_family_keys - delta_covered_families
+                    )
                     logging.getLogger(__name__).info(
                         "global book epoch delta merged: elapsed_s=%.3f "
-                        "refreshed_families=%d total_families=%d assets=%d",
+                        "refreshed_families=%d total_families=%d assets=%d "
+                        "retained_from_base=%d",
                         _time.monotonic() - _book_started,
                         len(eligible_refresh_family_keys),
                         len(merged_probabilities),
                         len(merged_epoch.assets),
+                        retained_from_base,
                     )
                     return _publish_book_epoch(
                         bound_probabilities,
