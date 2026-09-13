@@ -7338,6 +7338,7 @@ def select_global_single_order(
         str, GlobalSellPointCounterfactual
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
+    joint_buy_cost_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
     buy_corrections: dict[str, PayoffQCorrection | None] = {}
     joint_buy_candidates_by_family: dict[
@@ -7893,6 +7894,7 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
+        joint_cost_limit = candidate_capital_limit
         if not settlement_locked_exact_payoff:
             liquidation_capacity = current_precliff_liquidation_capacity(
                 candidate.native_bid_levels
@@ -7919,7 +7921,7 @@ def select_global_single_order(
                 continue
             if liquidation_capacity < executable_ask_depth:
                 try:
-                    candidate_capital_limit = min(
+                    joint_cost_limit = min(
                         candidate_capital_limit,
                         _single_order_cost(
                             candidate.economic_cost_curve,
@@ -7933,6 +7935,10 @@ def select_global_single_order(
                     )
                     continue
         buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
+        # The joint planner walks VWAP cost; the fixed-order solver reserves
+        # every share at its limit and separately caps liquidation shares.
+        # Passing a depth cost as cash to the latter would shrink size twice.
+        joint_buy_cost_limits[candidate.candidate_id] = joint_cost_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=utility_liquid_cash,
             win_wealth_floor_usd=utility_liquid_cash,
@@ -8222,7 +8228,7 @@ def select_global_single_order(
                     positive_family_candidates,
                     probability_witness=witness,
                     endowment=family_endowment,
-                    capital_limit_by_candidate=buy_capital_limits,
+                    capital_limit_by_candidate=joint_buy_cost_limits,
                     fractional_kelly_multiplier=multiplier,
                 )
             except Exception:  # noqa: BLE001 - missing joint authority blocks this family

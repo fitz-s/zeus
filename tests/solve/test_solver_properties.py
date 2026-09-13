@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-11
+# Last reused/audited: 2026-09-13
 # Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
@@ -8300,3 +8300,131 @@ def test_joint_single_family_keeps_thin_ask_cap_under_reference_kelly():
     assert joint.full_kelly_target_shares == pytest.approx(Decimal("120"))
     assert joint.fractional_kelly_target_shares == pytest.approx(Decimal("15"))
     assert joint.shares <= joint.fractional_kelly_target_shares
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("budget_kind", ("cash", "allocator", "family"))
+def test_global_buy_keeps_liquidation_shares_separate_from_cash(side, budget_kind):
+    candidate = _global_candidate(
+        candidate_id=f"liquidation-budget-{side}", family=f"liquidation-{side}",
+        side=side, q=0.95, fee="0.05",
+        levels=(("0.20", "5"), ("0.80", "20")),
+    )
+    candidate = _with_precliff_depth(candidate, size="10")
+    correction = _correction_for(candidate, raw_q=0.95, corrected_q=0.90, p0=0.20)
+    budget = Decimal("5.08" if budget_kind == "allocator" else
+                     "8" if budget_kind == "family" else "200")
+    kwargs = {}
+    if budget_kind == "allocator":
+        kwargs["candidate_capital_limit_resolver"] = lambda _: budget
+    if budget_kind == "family":
+        kwargs["family_portfolio_endowment_resolver"] = lambda _: replace(
+            _family_endowment(candidate, spendable_cash="200",
+                              portfolio_capital="200", committed_capital="17"),
+            wealth_floor_usd=Decimal("200"),
+        )
+    decision = _global_select(
+        (candidate,), floor="200", ceiling="200", cash="200", cap="200",
+        fractional_kelly_multiplier="0.125",
+        payoff_q_correction_resolver=lambda *_: correction, **kwargs,
+    )
+
+    # Independent exhaustive economics over every .01 amount: the 10-share
+    # liquidation limit is a quantity, while collateral uses the deepest ask.
+    feasible = []
+    q, wealth = Decimal("0.90"), Decimal("200")
+    for units in range(1, 2501):
+        shares = Decimal(units) / 100
+        if shares > 10:
+            continue
+        limit = Decimal("0.20") if shares <= 5 else Decimal("0.80")
+        cost = (min(shares, Decimal("5")) * Decimal("0.208")
+                + max(shares - 5, Decimal("0")) * Decimal("0.808"))
+        max_spend = shares * (limit + Decimal("0.05") * limit * (1 - limit))
+        risk_cost = limit + Decimal("0.10") * limit * (1 - limit)
+        target = Decimal("0.125") * (
+            q * wealth / risk_cost - (1 - q) * wealth / (1 - risk_cost)
+        )
+        if shares * limit < 1 or max_spend > budget or shares > target:
+            continue
+        if S.venue_submit_amount_precision_error(
+            direction="buy_yes" if side == "YES" else "buy_no",
+            final_limit_price=limit, submitted_shares=shares, order_type="FOK",
+            tick_size=candidate.economic_cost_curve.min_tick,
+        ) is not None:
+            continue
+        loss_after, win_after = wealth - shares * risk_cost, wealth + shares * (1 - risk_cost)
+        if min(loss_after, win_after) <= 0:
+            continue
+        prefix_du = (float(1 - q) * math.log(float(loss_after / wealth))
+                     + float(q) * math.log(float(win_after / wealth)))
+        if prefix_du <= 0 or shares * (q - risk_cost) <= 0:
+            continue
+        ev = q * shares - cost
+        du = (float(1 - q) * math.log(float((wealth - cost) / wealth))
+              + float(q) * math.log(float((wealth + shares - cost) / wealth)))
+        if ev > 0 and du > 0:
+            feasible.append((du, -cost, shares, ev, max_spend))
+    oracle = max(feasible)
+    assert decision.candidate is candidate
+    assert decision.shares == oracle[2]
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(oracle[0])
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(float(oracle[3]))
+    assert decision.max_spend_usd == oracle[4] <= budget
+    assert decision.shares <= 10
+    assert decision.payoff_q_correction is correction
+    if budget_kind == "cash":
+        assert decision.shares == Decimal("10")
+        assert decision.expected_growth.expected_ev_usd == pytest.approx(3.92)
+    elif budget_kind == "allocator":
+        assert decision.shares == Decimal("6.25")
+
+
+def test_raw_joint_liquidation_cost_bound_is_preserved(monkeypatch):
+    candidate = _with_precliff_depth(_global_candidate(
+        candidate_id="joint-depth-bound", family="joint-depth-bound", side="YES",
+        q=0.9, fee="0.05", levels=(("0.20", "5"), ("0.80", "20")),
+    ), size="10")
+    original = S.plan_family_joint_buy_targets
+    seen = []
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs["capital_limit_by_candidate"][candidate.candidate_id])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(S, "plan_family_joint_buy_targets", capture)
+    _global_select(
+        (candidate,), cap="100", fractional_kelly_multiplier="0.125",
+        family_portfolio_endowment_resolver=lambda _: _family_endowment(candidate),
+    )
+    assert seen == [Decimal("5.08")]
+
+
+@pytest.mark.parametrize("better_side", ("YES", "NO"))
+def test_global_ranking_compares_full_feasible_sizes_on_both_sides(better_side):
+    better = _with_precliff_depth(_global_candidate(
+        candidate_id="better-depth", family="better-depth", side=better_side,
+        q=0.95, fee="0.05", levels=(("0.20", "5"), ("0.80", "20")),
+    ), size="10")
+    other = _global_candidate(
+        candidate_id="other-side", family="other-side",
+        side="NO" if better_side == "YES" else "YES", q=0.95,
+        fee="0.05", levels=(("0.40", "10"),),
+    )
+    corrections = {
+        better.candidate_id: _correction_for(better, raw_q=0.95, corrected_q=0.90, p0=0.20),
+        other.candidate_id: _correction_for(other, raw_q=0.95, corrected_q=0.79, p0=0.40),
+    }
+    decision = _global_select(
+        (other, better), floor="200", ceiling="200", cash="200", cap="200",
+        fractional_kelly_multiplier="0.125",
+        payoff_q_correction_resolver=lambda c, *_: corrections[c.candidate_id],
+    )
+    assert decision.candidate is better
+    assert decision.shares == Decimal("10")
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        0.90 * math.log(204.92 / 200) + 0.10 * math.log(194.92 / 200)
+    )
+    assert decision.expected_growth.expected_delta_log_wealth > (
+        0.79 * math.log(205.88 / 200) + 0.21 * math.log(195.88 / 200)
+    )
