@@ -2549,6 +2549,7 @@ def _run_monitor_coverage_pipeline(
     positions,
     budget_seconds,
     label,
+    seed_read_cost_samples=None,
     primary_read_elapsed_seconds=None,
 ):
     """Drive execute_monitoring_phase against a fixed position list, with all
@@ -2558,15 +2559,28 @@ def _run_monitor_coverage_pipeline(
     (``held_monitor_budget_coverage_positions`` / ``held_monitor_budget_reservation_count``),
     not just the isolated ``_held_position_monitor_primary_reservation`` helper.
 
-    ``primary_read_elapsed_seconds``, when given, makes the mocked
-    ``refresh_position`` stamp that value onto each position the way the
-    real function stamps a measured elapsed read.
+    ``seed_read_cost_samples``, when given, replaces the process-lifetime
+    primary-belief-read-cost rolling sample with these values before the
+    cycle runs, so admission can be asserted against a measured cost basis
+    instead of the ceiling fallback. Always resets that sample buffer (to
+    empty when omitted) so tests never leak samples into each other via
+    shared module state. ``primary_read_elapsed_seconds``, when given, makes
+    the mocked ``refresh_position`` stamp that value onto each position the
+    way the real function stamps a measured elapsed read.
     """
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_monitor_primary_belief_read_elapsed_samples",
+        cycle_runtime.deque(
+            seed_read_cost_samples or (),
+            maxlen=cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP,
+        ),
+    )
     for position in positions:
         position._canonical_monitor_refreshed_at = ""
     monkeypatch.setattr(
@@ -2781,6 +2795,96 @@ def test_monitor_primary_belief_read_elapsed_samples_bounded():
         )
 
 
+def test_monitor_primary_belief_read_cost_basis_falls_back_to_ceiling_before_enough_observations():
+    """Before ``_HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES`` reads have
+    been observed in this process -- including at boot, with zero -- capacity
+    must equal today's ceiling-based value exactly: 2 at the 29s incident-scale
+    claim, regardless of book size.
+    """
+    from src.engine import cycle_runtime
+
+    empty = cycle_runtime.deque(
+        maxlen=cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
+    )
+    with patch.object(
+        cycle_runtime, "_held_monitor_primary_belief_read_elapsed_samples", empty
+    ):
+        assert cycle_runtime._held_monitor_primary_belief_read_cost_basis_seconds() == (
+            pytest.approx(5.0)
+        )
+        admitted, reserved = cycle_runtime._held_position_monitor_primary_reservation(
+            80,
+            29.0,
+            single_read_seconds=(
+                cycle_runtime._held_monitor_primary_belief_read_cost_basis_seconds()
+            ),
+        )
+        assert admitted == 2
+        assert reserved == pytest.approx(10.0)
+
+        # Below the minimum sample count: still the ceiling.
+        for _ in range(cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES - 1):
+            cycle_runtime._record_held_monitor_primary_belief_read_elapsed_seconds(0.2)
+        assert cycle_runtime._held_monitor_primary_belief_read_cost_basis_seconds() == (
+            pytest.approx(5.0)
+        )
+
+
+def test_monitor_primary_belief_read_cost_basis_uses_max_not_mean():
+    """The cost basis is a conservative tail (max of retained samples), not a
+    mean -- a single slow read must pull it back up, not be averaged away.
+    """
+    from src.engine import cycle_runtime
+
+    samples = cycle_runtime.deque(
+        [0.2] * (cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES - 1)
+        + [4.9],
+        maxlen=cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP,
+    )
+    with patch.object(
+        cycle_runtime, "_held_monitor_primary_belief_read_elapsed_samples", samples
+    ):
+        basis = cycle_runtime._held_monitor_primary_belief_read_cost_basis_seconds()
+
+    # Far above the ~0.29s mean of the sample set -- the single 4.9s read
+    # dominates, not is diluted by the other 49 fast reads.
+    assert basis == pytest.approx(4.9)
+
+
+def test_monitor_budget_coverage_derives_capacity_from_measured_read_cost(monkeypatch):
+    """Once >=50 primary belief reads of ~0.2s have been observed in this
+    process, admission for an 80-position book at the 29s incident-scale
+    claim uses the derived cost basis (the 0.27s floor, since 0.2 < 0.27),
+    not the 5.0s worst-case ceiling. FAILS on parent, where capacity is
+    pinned at 2 regardless of measured read cost.
+    """
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"derived-book-{index}",
+            token_id=f"derived-book-token-{index}",
+        )
+        for index in range(80)
+    ]
+    seed_samples = [0.2] * cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES
+    summary = _run_monitor_coverage_pipeline(
+        monkeypatch,
+        positions=positions,
+        budget_seconds=29.0,
+        label="test_budget_coverage_derived_80_29",
+        seed_read_cost_samples=seed_samples,
+    )
+
+    # cost basis = min(5.0, max(0.27, 0.2)) = 0.27
+    # capacity = floor(max(0.27, 14.5) / 0.27) = floor(53.7...) = 53
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(
+        53 * 0.27
+    )
+    assert summary["held_monitor_budget_reservation_count"] == 53
+    assert len(summary["held_monitor_budget_coverage_positions"]) == 53
+
+
 def test_monitor_primary_belief_read_elapsed_seconds_present_in_summary(monkeypatch):
     """The per-cycle summary carries each admitted position's measured
     primary-belief-read elapsed seconds, for one-day-in-production comparison
@@ -2799,6 +2903,31 @@ def test_monitor_primary_belief_read_elapsed_seconds_present_in_summary(monkeypa
 
     elapsed_samples = summary["held_monitor_primary_belief_read_elapsed_seconds"]
     assert elapsed_samples == [0.18]
+
+
+def test_monitor_primary_reserve_never_exceeds_its_own_claim_budget_with_derived_single_read():
+    """The pre-existing safety property -- reserved time never exceeds the
+    claim -- must hold for every derived ``single_read_seconds`` basis, not
+    just the 5.0s ceiling.
+    """
+    from src.engine import cycle_runtime
+
+    for single_read in (0.05, 0.27, 1.0, 4.9, 5.0, 9.0):
+        effective_single_read = min(5.0, max(0.0, single_read))
+        for budget in (0.0, 1.0, 4.9, 5.0, 15.88, 29.0, 30.0, 75.0, 200.0):
+            for position_count in (0, 1, 2, 13, 80, 500):
+                admitted, reserved_seconds = (
+                    cycle_runtime._held_position_monitor_primary_reservation(
+                        position_count,
+                        budget,
+                        single_read_seconds=single_read,
+                    )
+                )
+                assert reserved_seconds <= budget + 1e-9
+                if effective_single_read > 0.0:
+                    assert reserved_seconds == pytest.approx(
+                        admitted * effective_single_read
+                    )
 
 
 def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(
@@ -15434,7 +15563,7 @@ def test_monitoring_partial_batch_fallback_targets_only_missing_token(monkeypatc
     monkeypatch.setattr(
         cycle_runtime,
         "_held_position_monitor_primary_reservation",
-        lambda count, _budget: (count, 0.0),
+        lambda count, _budget, **_kwargs: (count, 0.0),
     )
 
     refreshed: list[str] = []

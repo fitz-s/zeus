@@ -151,6 +151,8 @@ _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
 # commit; a one-second retry repeatedly dropped otherwise-complete decisions.
 _MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 5_000
 _HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP = 200
+_HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES = 50
+_HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS = 0.27
 _held_monitor_primary_belief_read_elapsed_samples: "deque[float]" = deque(
     maxlen=_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
 )
@@ -160,10 +162,9 @@ def _record_held_monitor_primary_belief_read_elapsed_seconds(
     elapsed_seconds: float,
 ) -> None:
     """Append one completed primary-belief-read's wall time to the process-
-    lifetime rolling sample.  Bounded by
+    lifetime rolling sample used to size admission capacity.  Bounded by
     ``_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP``; not persisted
-    across process restarts. Not yet consulted by admission sizing -- this is
-    the measurement this process accumulates for that follow-up."""
+    across process restarts."""
 
     try:
         value = float(elapsed_seconds)
@@ -174,9 +175,38 @@ def _record_held_monitor_primary_belief_read_elapsed_seconds(
     _held_monitor_primary_belief_read_elapsed_samples.append(value)
 
 
+def _held_monitor_primary_belief_read_cost_basis_seconds() -> float:
+    """This claim's per-read cost basis: a conservative tail of recently
+    observed reads once enough exist, else the worst-case ceiling.
+
+    Before ``_HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES`` completed
+    reads have been observed in this process, there is no basis for a
+    measured figure -- fall back to the ceiling exactly as before this
+    function existed. Once enough observations exist, use the max of the
+    retained samples (never the mean: one slow read must pull the basis back
+    up, not be averaged away), floored so a lucky run of fast/cached reads
+    cannot push the basis unrealistically low, and capped at the ceiling so
+    this can only ever shrink admission relative to the ceiling-based
+    default, never grow it past what the safety valve already allows.
+    """
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    ceiling = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    samples = tuple(_held_monitor_primary_belief_read_elapsed_samples)
+    if len(samples) < _HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES:
+        return ceiling
+    return min(
+        ceiling,
+        max(_HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS, max(samples)),
+    )
+
+
 def _held_position_monitor_primary_reservation(
     position_count: int,
     monitor_budget_seconds: float,
+    *,
+    single_read_seconds: float | None = None,
 ) -> tuple[int, float]:
     """Reserve one belief-read tranche per position this claim can actually fund.
 
@@ -204,13 +234,25 @@ def _held_position_monitor_primary_reservation(
     selection limit, with no independent re-derivation.  What this claim can
     fund is derived fresh from its own budget every call; there is nothing
     else to re-derive.
+
+    ``single_read_seconds``, when given, sizes ``capacity`` on that measured
+    per-read cost instead of the worst-case ceiling; the ceiling remains the
+    per-position deadline callers apply around the read itself (unaffected by
+    this parameter), so an under-estimate here degrades to next-cycle
+    deferral rather than a claim overrun. Omitted or ``None`` reproduces the
+    exact ceiling-only behavior this function always had.
     """
 
     from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
 
     budget = max(0.0, float(monitor_budget_seconds))
-    single_read = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
-    if budget < single_read:
+    ceiling = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    single_read = (
+        ceiling
+        if single_read_seconds is None
+        else min(ceiling, max(0.0, float(single_read_seconds)))
+    )
+    if single_read <= 0.0 or budget < single_read:
         # A claim shorter than one complete q read has no statistical
         # admission capacity.  SCOPE: this pass's statistical slice.  DRAIN:
         # the next recurring pass recomputes capacity from its own claim.
@@ -7888,6 +7930,7 @@ def execute_monitoring_phase(
     ) = _held_position_monitor_primary_reservation(
         portfolio_position_count,
         monitor_budget_seconds,
+        single_read_seconds=_held_monitor_primary_belief_read_cost_basis_seconds(),
     )
     auxiliary_deadline = monitor_deadline - primary_reserve_seconds
     global_sell_debt_deadline = auxiliary_deadline
