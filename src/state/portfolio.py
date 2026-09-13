@@ -2266,6 +2266,7 @@ def load_portfolio(
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
         get_connection,
+        get_connection_read_only,
         get_trade_connection_with_world,
         query_chain_only_quarantine_rows,
         query_authoritative_settlement_rows,
@@ -2290,7 +2291,19 @@ def load_portfolio(
         else:
             trade_db = path.parent / "zeus_trades.db"
             if trade_db.exists():
-                conn = get_connection(trade_db, write_class="live")
+                # T-chainsync (2026-09-13): this bare connection is opened,
+                # queried, and closed entirely within this function (never
+                # returned to the caller) -- load_portfolio and every helper
+                # it calls on this conn (_query_edli_entry_proof_review_reasons,
+                # query_portfolio_loader_view, query_authoritative_settlement_rows,
+                # query_chain_only_quarantine_rows, query_token_suppression_tokens)
+                # only SELECT/ATTACH, never write. A genuine mode=ro connection
+                # is provably never blocked by concurrent WAL writers (15-min
+                # live A/B, zero stalls), unlike the write-capable connect/PRAGMA
+                # journal_mode step this replaces, which occasionally stalled up
+                # to 2.6s under this daemon's own commit cadence and compounded
+                # into chain_sync_read_cycle's 15-77s child kills.
+                conn = get_connection_read_only(trade_db)
             elif mode_override is not None:
                 conn = get_trade_connection_with_world(write_class="live")
             else:

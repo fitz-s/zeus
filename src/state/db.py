@@ -589,6 +589,27 @@ def get_trade_connection_read_only(
     )
 
 
+def get_connection_read_only(
+    db_path: Path,
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
+    """Read-only connection to an explicit, caller-supplied DB path.
+
+    Thin public wrapper around ``_connect_read_only`` for read paths that
+    need a mode-scoped or otherwise non-canonical path (e.g.
+    ``load_portfolio``'s ``path.parent / "zeus_trades.db"``) rather than one
+    of the fixed canonical DBs the named ``get_*_connection_read_only``
+    helpers target. A genuine ``mode=ro`` connection never pays the
+    connect()/``PRAGMA journal_mode=WAL`` stall a write-capable connection
+    occasionally does under write contention (T-chainsync, 2026-09-13:
+    measured up to 2.6s per stall on a write-capable connect, compounding
+    into the chain-sync child's 15-77s kills; a genuine mode=ro connection
+    never stalled across a 15-minute live A/B).
+    """
+    return _connect_read_only(db_path, deadline_monotonic=deadline_monotonic)
+
+
 def get_world_connection(
     *,
     write_class: WriteClass | str | None = None,

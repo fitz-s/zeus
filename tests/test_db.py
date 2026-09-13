@@ -1744,6 +1744,74 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+def test_load_portfolio_bare_path_opens_trade_connection_read_only(tmp_path, monkeypatch):
+    """T-chainsync (2026-09-13): when load_portfolio() is called bare (no
+    connection=) and ``path.parent / "zeus_trades.db"`` exists, it must open that
+    connection via get_connection_read_only (a genuine mode=ro connection) rather than
+    a write-capable one -- every downstream query on this connection is a SELECT/ATTACH,
+    and the connection is opened and closed entirely inside load_portfolio, never
+    returned to the caller. A genuine mode=ro connection is provably never blocked by
+    concurrent WAL writers, unlike the write-capable connect()/PRAGMA journal_mode=WAL
+    step this replaces (measured stalling up to 2.6s under write contention, compounding
+    into chain_sync_read_cycle's 77s child kills). Also proves the bare path and an
+    explicit connection= path return the same portfolio on the same fixture DB.
+    """
+    from src.state import db as db_module
+    from src.state.db import get_connection, init_schema
+    from src.state.portfolio import load_portfolio
+
+    trade_db = tmp_path / "zeus_trades.db"
+    setup_conn = get_connection(trade_db)
+    init_schema(setup_conn)
+    setup_conn.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+         direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+         entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+         order_id, order_status, updated_at, temperature_metric)
+        VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-04-01','39-40°F',
+                'buy_yes','F',8.0,20.0,8.0,0.4,0.6,'ens_member_counting','center_buy',
+                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z', 'high')
+        """
+    )
+    setup_conn.commit()
+    setup_conn.close()
+
+    calls: list = []
+    real_get_connection_read_only = db_module.get_connection_read_only
+
+    def _spy_get_connection_read_only(db_path, **kwargs):
+        calls.append(db_path)
+        conn = real_get_connection_read_only(db_path, **kwargs)
+        # Genuinely read-only: any write attempt on THIS connection must fail.
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "UPDATE position_current SET phase='poisoned' WHERE position_id='t1'"
+            )
+        return conn
+
+    monkeypatch.setattr(
+        db_module, "get_connection_read_only", _spy_get_connection_read_only
+    )
+
+    state_bare = load_portfolio(tmp_path / "positions.json")
+
+    assert calls == [trade_db]
+    assert len(state_bare.positions) == 1
+    assert state_bare.positions[0].trade_id == "t1"
+
+    # Same fixture DB via an explicit connection= must return an equivalent portfolio.
+    check_conn = get_connection(trade_db)
+    state_via_connection = load_portfolio(
+        tmp_path / "positions.json", connection=check_conn
+    )
+    check_conn.close()
+
+    assert len(state_via_connection.positions) == 1
+    assert state_via_connection.positions[0].trade_id == "t1"
+
+
 def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
     import sqlite3
 
