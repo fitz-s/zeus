@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_right
+from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import is_dataclass, replace
@@ -149,6 +150,28 @@ _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
 # but the monitor must wait long enough for that one incumbent transaction to
 # commit; a one-second retry repeatedly dropped otherwise-complete decisions.
 _MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 5_000
+_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP = 200
+_held_monitor_primary_belief_read_elapsed_samples: "deque[float]" = deque(
+    maxlen=_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
+)
+
+
+def _record_held_monitor_primary_belief_read_elapsed_seconds(
+    elapsed_seconds: float,
+) -> None:
+    """Append one completed primary-belief-read's wall time to the process-
+    lifetime rolling sample.  Bounded by
+    ``_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP``; not persisted
+    across process restarts. Not yet consulted by admission sizing -- this is
+    the measurement this process accumulates for that follow-up."""
+
+    try:
+        value = float(elapsed_seconds)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(value) or value < 0.0:
+        return
+    _held_monitor_primary_belief_read_elapsed_samples.append(value)
 
 
 def _held_position_monitor_primary_reservation(
@@ -7090,6 +7113,7 @@ def execute_monitoring_phase(
         _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
         install_monitor_day0_family_cache,
         install_monitor_replacement_hwm_snapshot,
         monitor_quote_refresh,
@@ -7883,6 +7907,7 @@ def execute_monitoring_phase(
     summary["held_monitor_primary_belief_failed_position_ids"] = []
     summary["held_monitor_primary_belief_failed_stages"] = []
     summary["held_monitor_primary_belief_deferred_position_ids"] = []
+    summary["held_monitor_primary_belief_read_elapsed_seconds"] = []
     summary["held_monitor_optional_maintenance_deferred"] = 0
 
     # Freeze current probability authority before pending-exit recovery can
@@ -9666,6 +9691,25 @@ def execute_monitoring_phase(
                     ].append(str(getattr(pos, "trade_id", "") or ""))
                     edge_ctx = refresh_position(conn, clob, pos)
                     admitted_child_stage = None
+                    _primary_read_elapsed = getattr(
+                        pos,
+                        _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
+                        None,
+                    )
+                    if _primary_read_elapsed is not None:
+                        _record_held_monitor_primary_belief_read_elapsed_seconds(
+                            _primary_read_elapsed
+                        )
+                        summary[
+                            "held_monitor_primary_belief_read_elapsed_seconds"
+                        ].append(_primary_read_elapsed)
+                        try:
+                            delattr(
+                                pos,
+                                _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
+                            )
+                        except AttributeError:
+                            pass
                     if is_durable_debt_network_attempt and held_token_id:
                         _mark_held_monitor_orderbook_attempted(
                             clob,

@@ -2543,13 +2543,24 @@ def test_monitor_primary_reserve_never_exceeds_the_book_across_budgets():
             assert admitted <= max(0, position_count)
 
 
-def _run_monitor_coverage_pipeline(monkeypatch, *, positions, budget_seconds, label):
+def _run_monitor_coverage_pipeline(
+    monkeypatch,
+    *,
+    positions,
+    budget_seconds,
+    label,
+    primary_read_elapsed_seconds=None,
+):
     """Drive execute_monitoring_phase against a fixed position list, with all
     network/DB-bound prefetch work stubbed out, and return its summary.
 
     Used to assert on the real production admission gate
     (``held_monitor_budget_coverage_positions`` / ``held_monitor_budget_reservation_count``),
     not just the isolated ``_held_position_monitor_primary_reservation`` helper.
+
+    ``primary_read_elapsed_seconds``, when given, makes the mocked
+    ``refresh_position`` stamp that value onto each position the way the
+    real function stamps a measured elapsed read.
     """
     from src.engine import cycle_runtime
 
@@ -2573,9 +2584,21 @@ def _run_monitor_coverage_pipeline(monkeypatch, *, positions, budget_seconds, la
         "_prefetch_held_replacement_artifact_hwm",
         lambda *_args, **_kwargs: None,
     )
+
+    def _mock_refresh_position(_conn, _clob, position):
+        if primary_read_elapsed_seconds is not None:
+            from src.engine import monitor_refresh
+
+            setattr(
+                position,
+                monitor_refresh._MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
+                primary_read_elapsed_seconds,
+            )
+        return _monitor_test_edge_context(position)
+
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+        _mock_refresh_position,
     )
     monkeypatch.setattr(
         Position,
@@ -2697,6 +2720,85 @@ def test_monitor_budget_coverage_positions_never_exceeds_a_tiny_book(monkeypatch
     assert summary["held_monitor_budget_reservation_count"] == 1
     assert len(summary["held_monitor_budget_coverage_positions"]) == 1
     assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(5.0)
+
+
+def test_monitor_primary_belief_read_elapsed_seconds_recorded_on_position():
+    """``refresh_position`` must stamp the position with how long its
+    primary belief read (``monitor_probability_refresh``) took, so a caller
+    can fold it into the process-lifetime cost-sizing sample.
+    """
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        state="day0_window",
+        city="Chicago",
+        target_date="2026-04-01",
+        entry_method="ens_member_counting",
+        selected_method="",
+        applied_validations=[],
+    )
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.43, 100.0, 100.0
+
+    def fake_recompute(position, current_p_market, registry, **context):
+        time.sleep(0.02)
+        position.selected_method = position.entry_method
+        position.applied_validations = [position.entry_method]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.52
+
+    with patch.object(monitor_refresh, "recompute_native_probability", fake_recompute):
+        monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    elapsed = getattr(
+        pos,
+        monitor_refresh._MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
+        None,
+    )
+    assert isinstance(elapsed, float)
+    assert 0.02 <= elapsed < 5.0
+
+
+def test_monitor_primary_belief_read_elapsed_samples_bounded():
+    """The process-lifetime read-cost sample buffer never grows unbounded."""
+    from src.engine import cycle_runtime
+
+    samples = cycle_runtime.deque(
+        maxlen=cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
+    )
+    with patch.object(
+        cycle_runtime, "_held_monitor_primary_belief_read_elapsed_samples", samples
+    ):
+        for _ in range(
+            cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP + 50
+        ):
+            cycle_runtime._record_held_monitor_primary_belief_read_elapsed_seconds(0.1)
+        assert (
+            len(cycle_runtime._held_monitor_primary_belief_read_elapsed_samples)
+            == cycle_runtime._HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
+        )
+
+
+def test_monitor_primary_belief_read_elapsed_seconds_present_in_summary(monkeypatch):
+    """The per-cycle summary carries each admitted position's measured
+    primary-belief-read elapsed seconds, for one-day-in-production comparison
+    against the tracer's out-of-process replay figures.
+    """
+    positions = [
+        _make_position(trade_id="elapsed-summary-0", token_id="elapsed-summary-token-0"),
+    ]
+    summary = _run_monitor_coverage_pipeline(
+        monkeypatch,
+        positions=positions,
+        budget_seconds=29.0,
+        label="test_primary_belief_read_elapsed_seconds_present",
+        primary_read_elapsed_seconds=0.18,
+    )
+
+    elapsed_samples = summary["held_monitor_primary_belief_read_elapsed_seconds"]
+    assert elapsed_samples == [0.18]
 
 
 def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(

@@ -105,6 +105,9 @@ _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_author
 _GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
 _GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
 _MONITOR_PROBABILITY_RECEIPT_ATTR = "_monitor_probability_receipt"
+_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR = (
+    "_monitor_primary_belief_read_elapsed_seconds"
+)
 _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
@@ -7331,6 +7334,7 @@ def refresh_position(
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
     ):
         try:
             delattr(pos, attr)
@@ -7384,6 +7388,7 @@ def refresh_position(
             day0_family_cache = None
         if monitor_deadline is None:
             day0_family_cache = None
+        _primary_belief_read_started_at = time.perf_counter()
         refreshed_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
             pos,
             conn=conn,
@@ -7391,6 +7396,11 @@ def refresh_position(
             target_d=target_d,
             day0_family_cache=day0_family_cache,
             deadline_monotonic=monitor_deadline,
+        )
+        setattr(
+            pos,
+            _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
+            time.perf_counter() - _primary_belief_read_started_at,
         )
         pos.selected_method = refresh_pos.selected_method
         pos.applied_validations = list(getattr(refresh_pos, "applied_validations", []) or [])
