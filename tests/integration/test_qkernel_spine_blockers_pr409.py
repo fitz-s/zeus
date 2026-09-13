@@ -2066,6 +2066,97 @@ def test_selection_exposure_still_fails_closed_when_locked_not_interrupted():
         )
 
 
+class _FailOnColumnsProbeConn:
+    """Forwards the exposure SELECT to a real conn; injects one error on the PRAGMA schema probe.
+
+    Companion to ``_FailOnExposureSelectConn``: covers the OTHER window in
+    which the held-position monitor's Connection.interrupt() can land —
+    during ``_position_current_columns``'s own PRAGMA table_info read, which
+    runs before the exposure SELECT in the same try-block and wraps whatever
+    it catches into its own RuntimeError("OPEN_POSITION_TRUTH_UNAVAILABLE:...")
+    before this test's target exception handler ever sees the raw
+    OperationalError.
+    """
+
+    def __init__(self, real_conn, error):
+        self._real = real_conn
+        self._error = error
+
+    def execute(self, sql, params=()):
+        if "PRAGMA" in sql and "table_info" in sql:
+            raise self._error
+        return self._real.execute(sql, params)
+
+
+def test_selection_exposure_propagates_columns_probe_interrupt_unwrapped():
+    """A held-monitor interrupt landing during the PRAGMA columns probe must also cancel, not fail.
+
+    _position_current_columns (called before the exposure SELECT, inside the
+    same try-block) wraps any exception from its own PRAGMA reads into a
+    plain RuntimeError("OPEN_POSITION_TRUTH_UNAVAILABLE:..."). If the
+    held-position monitor's Connection.interrupt() lands there instead of on
+    the SELECT, the resulting OperationalError must still surface unwrapped
+    (via its __cause__) so the winner-preflight fence's interrupt_reason
+    authority classifies it as a cancellation — not a second, unrelated
+    OPEN_POSITION_TRUTH_UNAVAILABLE-shaped failure that the fence can no
+    longer recognize.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    conn = _FailOnColumnsProbeConn(
+        _readable_position_current_conn(),
+        sqlite3.OperationalError("interrupted"),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
+def test_selection_exposure_still_fails_closed_when_columns_probe_locked():
+    """A genuine lock error during the PRAGMA columns probe must still fail closed."""
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    conn = _FailOnColumnsProbeConn(
+        _readable_position_current_conn(),
+        sqlite3.OperationalError("database is locked"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "EDLI_SELECTION_EXPOSURE_UNAVAILABLE:RuntimeError:"
+            "OPEN_POSITION_TRUTH_UNAVAILABLE:OperationalError:database is locked"
+        ),
+    ):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
 # ===========================================================================
 # BLOCKER 5 — the spine->legacy overlay must write one coherent qkernel-selected
 # probability authority into the proof fields consumed by receipts, submit, monitor, and

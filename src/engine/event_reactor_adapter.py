@@ -34174,6 +34174,27 @@ def _family_existing_exposure_by_bin_id(
     return {selected_bin_id: exposure_usd}
 
 
+def _is_held_monitor_interrupt(exc: sqlite3.OperationalError) -> bool:
+    """True when ``exc`` is the held-position monitor's Connection.interrupt() signal.
+
+    ``_global_preflight_sqlite_fence`` fences held_position_conn (== trade_conn)
+    alongside world/forecast/trade during winner preflight and calls
+    ``Connection.interrupt()`` on it to reclaim the write path for the held-
+    position monitor. That raises exactly this OperationalError with no other
+    typed shape available on the connection itself; recognizing it lets a
+    caller propagate it unwrapped so the fence's own ``interrupt_reason``
+    authority classifies it as the cancellation the rest of the cut already
+    uses (GLOBAL_SELECTION_CANCELLED / DEFERRED_PREEMPTED) instead of a
+    fabricated failure. ``sqlite_errorcode`` is authoritative on this runtime
+    (always populated for driver-raised errors); the message check is a
+    fallback for interpreters where it is absent, not an alternate match.
+    """
+    errorcode = getattr(exc, "sqlite_errorcode", None)
+    if errorcode is not None:
+        return errorcode == getattr(sqlite3, "SQLITE_INTERRUPT", 9)
+    return "interrupted" in str(exc).lower()
+
+
 def _family_existing_exposure_for_selection_by_bin_id(
     *,
     proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
@@ -34380,27 +34401,29 @@ def _family_existing_exposure_for_selection_by_bin_id(
             if exposure_by_bin:
                 return exposure_by_bin
         except sqlite3.OperationalError as exc:
-            # The held-position monitor reclaims this connection's write path by
-            # calling Connection.interrupt() on it (see
-            # _global_preflight_sqlite_fence, which fences exactly this
-            # held_position_conn alongside world/forecast/trade during winner
-            # preflight). That call raises this OperationalError with no other
-            # shape available to distinguish it, so propagate it UNCHANGED: the
-            # fence's own preflight_fence.interrupt_reason authority then
-            # classifies it as the existing "cancelled" cut-preemption
-            # (GLOBAL_SELECTION_CANCELLED / DEFERRED_PREEMPTED) instead of a
-            # fabricated exposure failure. Every other OperationalError (locked,
-            # disk I/O, malformed) still fails closed below.
-            if (
-                getattr(exc, "sqlite_errorcode", None)
-                == getattr(sqlite3, "SQLITE_INTERRUPT", 9)
-                or "interrupted" in str(exc).lower()
-            ):
+            # Propagate a held-monitor interrupt UNCHANGED: the fence's own
+            # preflight_fence.interrupt_reason authority (global_batch_runtime.py)
+            # then classifies it as the existing "cancelled" cut-preemption
+            # instead of a fabricated exposure failure. Every other
+            # OperationalError (locked, disk I/O, malformed) fails closed below.
+            if _is_held_monitor_interrupt(exc):
                 raise
             raise RuntimeError(
                 f"EDLI_SELECTION_EXPOSURE_UNAVAILABLE:{type(exc).__name__}:{exc}"
             ) from exc
         except Exception as exc:  # noqa: BLE001 - exposure ambiguity must not flatten live risk.
+            # _position_current_columns (called earlier in this same try-block)
+            # wraps its own PRAGMA reads into a plain RuntimeError, so a
+            # held-monitor interrupt landing there instead of on the SELECT
+            # above arrives here as RuntimeError(...) from the original
+            # OperationalError. Unwrap that cause and propagate IT unchanged
+            # (never the wrapper) so it reaches the fence's classifier the same
+            # way the direct-SELECT interrupt does above.
+            cause = exc.__cause__
+            if isinstance(cause, sqlite3.OperationalError) and _is_held_monitor_interrupt(
+                cause
+            ):
+                raise cause from exc
             raise RuntimeError(
                 f"EDLI_SELECTION_EXPOSURE_UNAVAILABLE:{type(exc).__name__}:{exc}"
             ) from exc
