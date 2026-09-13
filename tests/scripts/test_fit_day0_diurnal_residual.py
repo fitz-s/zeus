@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import sqlite3
 
-from scripts.fit_day0_diurnal_residual import _hourly_days, build_records
+from scripts.fit_day0_diurnal_residual import (
+    MIN_HOURS_ALT,
+    MIN_HOURS_WU,
+    _hourly_days,
+    build_records,
+)
 
 _OBS_SCHEMA = """
 CREATE TABLE observation_instants (
@@ -120,6 +125,75 @@ def test_day_with_both_ledgers_uses_only_the_eras_settlement_ledger(tmp_path) ->
     assert all(hi not in (80.0, 90.0) for hi, _lo in bucket.values())
     assert bucket[16][0] == 82.3
     assert unit["Atlanta"] == "F"
+
+
+def test_short_ogimet_day_falls_back_to_full_wu_history_same_station(tmp_path) -> None:
+    """Atlanta, an OGIMET_METAR-era day whose ogimet_metar_katl bucket is short of
+    MIN_HOURS_ALT, but whose wu_icao_history bucket for the SAME day is full (>=
+    MIN_HOURS_WU) and carries the SAME station_id as city.wu_station (KATL): the
+    fitter must fall back to the WU day whole, never mix the two ledgers' hours."""
+
+    day = "2026-08-25"  # OGIMET_METAR era (after the 2026-08-23 effective_date)
+    ogimet_short = {h: (80.5 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_ALT - 5)}
+    wu_full = {h: (81.0 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_WU)}
+
+    world = tmp_path / "world.db"
+    rows = _hourly_rows("Atlanta", day, "ogimet_metar_katl", "KATL", ogimet_short)
+    rows += _hourly_rows("Atlanta", day, "wu_icao_history", "KATL", wu_full)
+    _make_world_db(str(world), rows)
+
+    kept, unit, source_used = _hourly_days(str(world))
+    assert source_used[("Atlanta", day)] == "wu_icao_history"
+    bucket = kept[("Atlanta", day)]
+    assert len(bucket) == MIN_HOURS_WU
+    # Every surviving hour comes from the WU bucket's value law (81.0 + 0.1*h), never
+    # the ogimet bucket's (80.5 + 0.1*h) -- confirms a whole-bucket swap, not a merge.
+    for hour, (hi, _lo) in bucket.items():
+        assert hi == 81.0 + hour * 0.1
+    assert unit["Atlanta"] == "F"
+
+
+def test_wu_fallback_refused_when_station_id_does_not_match_city_icao(tmp_path) -> None:
+    """Same short-ogimet / full-WU shape as above, but the WU rows carry a DIFFERENT
+    station_id than Atlanta's configured settlement ICAO (KATL). This must never be
+    treated as a same-station fallback -- the day is dropped entirely, not served
+    from the wrong physical station and not mixed with the (also short) ogimet day."""
+
+    day = "2026-08-25"
+    ogimet_short = {h: (80.5 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_ALT - 5)}
+    wu_full_wrong_station = {h: (81.0 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_WU)}
+
+    world = tmp_path / "world.db"
+    rows = _hourly_rows("Atlanta", day, "ogimet_metar_katl", "KATL", ogimet_short)
+    rows += _hourly_rows(
+        "Atlanta", day, "wu_icao_history", "KXYZ", wu_full_wrong_station
+    )
+    _make_world_db(str(world), rows)
+
+    kept, unit, source_used = _hourly_days(str(world))
+    assert ("Atlanta", day) not in kept
+    assert ("Atlanta", day) not in source_used
+    assert "Atlanta" not in unit
+
+
+def test_short_ogimet_and_short_wu_day_is_dropped(tmp_path) -> None:
+    """Both ledgers present for the day, both short of their own floor: no fallback
+    rescues it, and the day contributes no records at all (no cross-ledger merge to
+    reach a combined floor)."""
+
+    day = "2026-08-25"
+    ogimet_short = {h: (80.5 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_ALT - 5)}
+    wu_short = {h: (81.0 + h * 0.1, 60.0, "F") for h in range(MIN_HOURS_WU - 5)}
+
+    world = tmp_path / "world.db"
+    rows = _hourly_rows("Atlanta", day, "ogimet_metar_katl", "KATL", ogimet_short)
+    rows += _hourly_rows("Atlanta", day, "wu_icao_history", "KATL", wu_short)
+    _make_world_db(str(world), rows)
+
+    kept, unit, source_used = _hourly_days(str(world))
+    assert ("Atlanta", day) not in kept
+    assert ("Atlanta", day) not in source_used
+    assert "Atlanta" not in unit
 
 
 def test_ogimet_tenths_cumulative_grids_against_the_served_anchor(tmp_path) -> None:
