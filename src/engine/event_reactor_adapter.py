@@ -10948,7 +10948,23 @@ def event_bound_live_adapter_from_trade_conn(
             )
             # One line per cut stating how much of the universe this cut rebinds
             # through current Gamma, so the delta win (or its loss) is measurable
-            # in the live log without another code change.
+            # in the live log without another code change. A reduce-only cut asks
+            # Gamma only for its held tokens' conditions (_reduce_only_tokens ->
+            # required_token_ids), so count the conditions that actually carry a
+            # requested token rather than every binding in the slice: counting
+            # bindings overstated a reduce-only rebind by ~10x (1958 reported for
+            # 198 fetched) on exactly the cuts that look most expensive.
+            rebind_scope_tokens = (
+                None
+                if reduce_only_book_tokens is None
+                else frozenset(
+                    _reduce_only_tokens(
+                        _global_book_prefetch_tokens(bind_slice),
+                        bind_slice,
+                    )
+                    or ()
+                )
+            )
             logging.getLogger(__name__).info(
                 "global book gamma rebind scope: miss_reason=%s families_total=%d "
                 "families_delta=%d conditions_fetched=%d families_retained=%d "
@@ -10958,15 +10974,24 @@ def event_bound_live_adapter_from_trade_conn(
                 len(bind_slice),
                 len(
                     {
-                        condition_id
+                        str(getattr(binding, "condition_id", "") or "").strip()
                         for witness in bind_slice.values()
                         for binding in tuple(
                             getattr(witness, "bindings", ()) or ()
                         )
-                        if (
-                            condition_id := str(
-                                getattr(binding, "condition_id", "") or ""
-                            ).strip()
+                        if str(getattr(binding, "condition_id", "") or "").strip()
+                        and (
+                            rebind_scope_tokens is None
+                            or rebind_scope_tokens.intersection(
+                                {
+                                    str(
+                                        getattr(binding, "yes_token_id", "") or ""
+                                    ).strip(),
+                                    str(
+                                        getattr(binding, "no_token_id", "") or ""
+                                    ).strip(),
+                                }
+                            )
                         )
                     }
                 ),

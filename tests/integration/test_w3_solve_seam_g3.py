@@ -17094,6 +17094,85 @@ def test_delta_gamma_fetch_failure_keeps_todays_fail_closed_reason(monkeypatch):
         assert h.prebook_batches == [(h.condition_of("Austin"),)]
 
 
+def test_rebind_scope_counts_only_conditions_a_reduce_only_cut_requests():
+    """The measurability line must not overstate a reduce-only rebind.
+
+    A reduce-only cut narrows its Gamma request to the exact held tokens
+    (`_reduce_only_tokens` -> `required_token_ids`), so a rebind-scope count that
+    walks every binding in the slice reports ~10x the conditions actually
+    fetched -- observed live as `conditions_fetched=1958` for a bind whose own
+    completion line reported `metadata=396` (198 conditions). This pins the
+    counting rule the log line uses: a condition counts only when one of its
+    tokens is inside the requested scope.
+    """
+
+    def probability(family_key, *, held_bin_tokens, unheld_bins):
+        bindings = [
+            SimpleNamespace(
+                bin_id=f"{family_key}-held-bin",
+                condition_id=f"{family_key}-held-condition",
+                yes_token_id=held_bin_tokens[0],
+                no_token_id=held_bin_tokens[1],
+            )
+        ]
+        bindings.extend(
+            SimpleNamespace(
+                bin_id=f"{family_key}-unheld-bin-{index}",
+                condition_id=f"{family_key}-unheld-condition-{index}",
+                yes_token_id=f"{family_key}-unheld-yes-{index}",
+                no_token_id=f"{family_key}-unheld-no-{index}",
+            )
+            for index in range(unheld_bins)
+        )
+        return SimpleNamespace(family_key=family_key, bindings=tuple(bindings))
+
+    # One family, 11 bins as in live, exactly one of them held.
+    bind_slice = {
+        "family-a": probability(
+            "family-a",
+            held_bin_tokens=("held-yes", "held-no"),
+            unheld_bins=10,
+        )
+    }
+    held_tokens_by_family = {"family-a": {"held-yes"}}
+
+    # Counting every binding is the defect: 11 conditions for a cut that asks
+    # Gamma about 1.
+    assert len(
+        {
+            binding.condition_id
+            for witness in bind_slice.values()
+            for binding in witness.bindings
+        }
+    ) == 11
+
+    # The requested scope is the held token only, so exactly one condition
+    # carries a requested token.
+    scope = frozenset(
+        era._global_reduce_only_book_tokens(
+            bind_slice,
+            held_tokens_by_family,
+            era._global_book_prefetch_tokens(bind_slice),
+        )
+    )
+    assert scope == {"held-yes"}
+    counted = {
+        binding.condition_id
+        for witness in bind_slice.values()
+        for binding in witness.bindings
+        if scope.intersection({binding.yes_token_id, binding.no_token_id})
+    }
+    assert counted == {"family-a-held-condition"}
+
+    # A non-reduce-only cut has no token scope and must still count every
+    # condition it will fetch.
+    assert era._global_reduce_only_book_tokens(
+        bind_slice,
+        held_tokens_by_family,
+        None,
+    ) == ("held-yes",)
+
+
 def test_global_probability_authority_is_materialized_once_per_family(monkeypatch):
     calls = []
     authority_a = object()
