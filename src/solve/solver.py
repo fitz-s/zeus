@@ -2307,10 +2307,11 @@ def global_candidates_from_native(
                     "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
                 )
             elif (
-                witnessed_token_shares < Decimal(curve.min_order_size)
+                witnessed_token_shares < _SIZE_QUANTUM
                 and not settlement_locked_exact_payoff
             ):
-                # Statistical partial fills need an existing legal exit lot.
+                # Statistical partial fills need an existing immediate-SELL
+                # lot. FAK exits use the share grid, not the resting BUY floor.
                 # A typed absorbing winner can retain any prefix to settlement;
                 # its maker proposal still requires current liquidation capacity.
                 maker_eligibility_reason = "MAKER_REST_EXITABILITY_SEED_REQUIRED"

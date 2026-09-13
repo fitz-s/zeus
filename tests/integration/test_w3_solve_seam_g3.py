@@ -4164,7 +4164,8 @@ def test_current_maker_fill_outcomes_close_simplex_edges(
     assert abs(fill_probability - sample.fill_probability_lcb) <= Decimal("1e-26")
 
 
-def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
+@pytest.mark.parametrize("seed_shares", [Decimal("0.01"), Decimal("0.015"), Decimal("2"), Decimal("4.99"), Decimal("5")])
+def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_shares):
     at = _dt.datetime(2026, 8, 11, 12, 0, tzinfo=_dt.timezone.utc)
     binding = OutcomeTokenBinding(
         bin_id="bin",
@@ -4476,7 +4477,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
         include_maker=True,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
-        current_token_shares=curve.min_order_size,
+        current_token_shares=seed_shares,
         neg_risk=False,
     )
 
@@ -4488,6 +4489,31 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
         candidate for candidate in candidates if candidate.execution_mode == "MAKER_REST"
     )
     assert maker.eligibility_reason is None
+    from src.contracts.venue_submission_envelope import assert_live_order_size
+    from src.solve.solver import _single_order_min_buy_shares
+
+    # The maker BUY still rests at five shares; its existing inventory can
+    # leave via the normal immediate SELL grammar after a partial fill.
+    assert _single_order_min_buy_shares(maker) == curve.min_order_size
+    for partial in (Decimal("0"), Decimal("0.003"), Decimal("0.5"), Decimal("5")):
+        sell_shares = ((seed_shares + partial) / Decimal("0.01")).to_integral_value(
+            rounding="ROUND_FLOOR"
+        ) * Decimal("0.01")
+        assert assert_live_order_size(
+            sell_shares, curve.min_order_size, order_type="FAK", post_only=False
+        ) == sell_shares
+    if seed_shares < curve.min_order_size:
+        with pytest.raises(ValueError, match="below venue minimum"):
+            assert_live_order_size(seed_shares, curve.min_order_size, order_type="GTC", post_only=True)
+    for dust_seed in (Decimal("0"), Decimal("0.009")):
+        _, dust_maker = global_candidates_from_native(
+            native, probability_witness=probability, ledger_snapshot_id="ledger",
+            book_captured_at_utc=at, native_bid_levels=asset.bid_levels,
+            include_maker=True, maker_fill_witness=maker_witness,
+            asset_epoch_identity=epoch.witness_identity,
+            current_token_shares=dust_seed, neg_risk=False,
+        )
+        assert dust_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
     assert maker.fill_probability == pytest.approx(0.05)
     assert maker.maker_fill_witness.expected_fill_fraction == pytest.approx(0.0375)
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
