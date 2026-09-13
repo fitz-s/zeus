@@ -50,7 +50,10 @@
 # refit LOWERED Denver's floor against a fresh 08-23..09-12 residual MAD that says it should rise).
 # ONE RESIDUAL PER EVENT: forecast_posteriors carries many rows per (city, target_date, metric) —
 # one per forecast cycle — so a raw join weights the floor by how often a family was materialized,
-# not by evidence. Only the LATEST no-leak posterior per event is kept.
+# not by evidence. Each event's residual is the MEDIAN over its lead-1 (day-before) cycles, not the
+# single cycle closest to settlement — the last cycle of the day is the most-converged (and so
+# artificially tightest) anchor by construction, which understates the dispersion an earlier
+# same-day decision actually faced (see _load_residuals docstring for the measured effect).
 """Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS.
 
 Output: state/settlement_sigma_floor.json
@@ -175,11 +178,23 @@ def _load_residuals(fcst_path: str, *, asof: _dt.date, trailing_days: int):
     """Return [(city, metric, target_date, residual_c)] for no-leak VERIFIED residual pairs.
 
     residual = settled_c − fused_center_c, ONE PER SETTLED EVENT: forecast_posteriors carries many
-    rows per (city, target_date, metric) — one per forecast cycle/lead — so joining and MAD-ing the
-    raw rows weights the floor by how often a family was materialized, not by evidence (a city
-    computed every hour dominates one computed daily). Kept: the LATEST no-leak posterior per event
-    (max source_cycle_time strictly before target_date), i.e. the last forecast before the target
-    day resolves — the closest-to-settlement, most-informed call for that event.
+    rows per (city, target_date, metric) — one per forecast cycle — so joining and MAD-ing the raw
+    rows weights the floor by how often a family was materialized, not by evidence (a city computed
+    every hour dominates one computed daily).
+
+    EVENT REPRESENTATIVE (2026-09-13, revised — R-P review on 2c7e03a75): the event's residual is
+    the MEDIAN over its LEAD-1 cycles (source_cycle_time exactly one calendar day before
+    target_date), falling back to the median over ALL no-leak cycles for that event when it has no
+    lead-1 cycle. An earlier version took the single LATEST no-leak cycle (closest to settlement) as
+    the representative — that always resolves to the last lead-1 cycle of the day (each event has
+    dozens of forecast_posteriors rows on its lead-1 day), which is the MOST-CONVERGED anchor of the
+    day by construction (accuracy improves intraday as the target approaches) and so is measurably
+    TIGHTER than the dispersion a decision made earlier that same lead-1 day actually faced — the
+    wrong direction for a floor that exists to bound realized miss (verified: dedup-to-latest gave
+    Busan 2.11 vs the same-day lead-1-pooled 3.20, LA 1.55 vs 1.82, SF 1.11 vs 1.35, Denver 1.32 vs
+    the pooled 1.49 — itself still below the fresh ground-truth MAD of 1.71). The median over the
+    day's lead-1 cycles is a single per-event number (no forecast-cycle-count weighting) that is NOT
+    an extremum, so it does not inherit the last-cycle's artificially tight convergence.
 
     TRAILING WINDOW: target_date in (asof − trailing_days, asof] — replaces the old fixed-start
     cumulative window so a refit is dominated by recent regime, not increasingly-stale history.
@@ -194,7 +209,7 @@ def _load_residuals(fcst_path: str, *, asof: _dt.date, trailing_days: int):
         rows = cur.fetchall()
     finally:
         con.close()
-    latest: dict = {}  # (city, metric, target_date) -> (source_cycle_time_str, residual_c)
+    per_event: dict = defaultdict(list)  # (city, metric, target_date) -> [(lead_days, residual_c)]
     for city, metric, tdate, center, sval, sunit, sct in rows:
         if not city or not tdate or not metric or center is None:
             continue
@@ -216,11 +231,14 @@ def _load_residuals(fcst_path: str, *, asof: _dt.date, trailing_days: int):
         if s is None or not (np.isfinite(c) and np.isfinite(s)):
             continue
         key = (str(city), str(metric).lower(), td)
-        sct_str = str(sct)
-        prev = latest.get(key)
-        if prev is None or sct_str > prev[0]:
-            latest[key] = (sct_str, float(s) - float(c))
-    return [(k[0], k[1], k[2], v[1]) for k, v in latest.items()]
+        lead_days = (td - cyc).days
+        per_event[key].append((lead_days, float(s) - float(c)))
+    out: list = []
+    for (city, metric, td), items in per_event.items():
+        lead1 = [r for (ld, r) in items if ld == 1]
+        pool = lead1 if lead1 else [r for (_, r) in items]
+        out.append((city, metric, td, float(np.median(np.asarray(pool, dtype=float)))))
+    return out
 
 
 def fit_floors(

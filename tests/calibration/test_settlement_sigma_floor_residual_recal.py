@@ -208,25 +208,52 @@ def test_trailing_window_excludes_old_includes_recent(tmp_path):
     assert "OldCity" not in cities, "a residual at/before the trailing-window cutoff must be excluded"
 
 
-def test_two_posterior_rows_for_one_event_count_once(tmp_path):
-    """Two forecast_posteriors rows for the same (city, target_date, metric) settled event must
-    collapse to ONE residual — the latest no-leak posterior — not two."""
+def test_event_representative_is_median_of_lead1_cycles_not_the_latest(tmp_path):
+    """One settled event with THREE lead-1 (day-before) cycles must collapse to ONE residual —
+    the MEDIAN of those cycles — not the single cycle closest to settlement.
+
+    The old (2026-09-13, pre-R-P-review) behaviour picked the LATEST no-leak cycle as the event's
+    representative, which always resolves to the last lead-1 cycle of the day — the most-converged
+    (and so artificially tightest) anchor by construction. Here the LATEST cycle's residual (-1.0,
+    an outlier) is deliberately NOT the median (2.0), so a regression to "pick the latest" would
+    fail this assertion.
+    """
     import datetime as dt
 
     asof = dt.date(2026, 9, 12)
+    target = "2026-09-10"
     rows = [
-        # earlier cycle for the SAME event, anchor far from settlement (would skew a raw pool)
-        ("DupCity", "high", "2026-09-10", "2026-09-05T00:00:00+00:00", 5.0, 12.0, "C", "VERIFIED"),
-        # later (closer-to-settlement) cycle for the SAME event -> this one must be kept
-        ("DupCity", "high", "2026-09-10", "2026-09-09T00:00:00+00:00", 11.0, 12.0, "C", "VERIFIED"),
+        # three lead-1 cycles (all source_cycle_time on 2026-09-09, one day before target)
+        ("MedianCity", "high", target, "2026-09-09T00:00:00+00:00", 9.0, 12.0, "C", "VERIFIED"),   # r=3.0
+        ("MedianCity", "high", target, "2026-09-09T06:00:00+00:00", 10.0, 12.0, "C", "VERIFIED"),  # r=2.0 (median)
+        ("MedianCity", "high", target, "2026-09-09T23:00:00+00:00", 13.0, 12.0, "C", "VERIFIED"),  # r=-1.0 (LATEST cycle, an outlier)
     ]
     db_path = _make_fcst_db(tmp_path, rows)
     residuals = script._load_residuals(db_path, asof=asof, trailing_days=60)
-    dup = [r for r in residuals if r[0] == "DupCity"]
-    assert len(dup) == 1, "two posterior rows for one settled event must count once"
-    # residual = settled(12.0) - anchor(11.0) = 1.0, from the LATER (2026-09-09) cycle, not the
-    # earlier (2026-09-05) cycle's residual of 12.0-5.0=7.0.
-    assert dup[0][3] == pytest.approx(1.0), "must keep the LATEST no-leak posterior's residual"
+    ev = [r for r in residuals if r[0] == "MedianCity"]
+    assert len(ev) == 1, "three posterior rows for one settled event must count once"
+    assert ev[0][3] == pytest.approx(2.0), (
+        "must be the MEDIAN of the lead-1 cycles (2.0), not the latest cycle's residual (-1.0)"
+    )
+
+
+def test_event_falls_back_to_median_of_all_cycles_when_no_lead1(tmp_path):
+    """An event with no lead-1 cycle falls back to the median over whatever no-leak cycles it has
+    (here two lead-2 cycles), still collapsing to ONE residual."""
+    import datetime as dt
+
+    asof = dt.date(2026, 9, 12)
+    target = "2026-09-10"
+    rows = [
+        # both cycles are lead-2 (source_cycle_time two days before target) -- no lead-1 cycle exists
+        ("NoLead1City", "high", target, "2026-09-08T00:00:00+00:00", 9.0, 12.0, "C", "VERIFIED"),   # r=3.0
+        ("NoLead1City", "high", target, "2026-09-08T12:00:00+00:00", 11.0, 12.0, "C", "VERIFIED"),  # r=1.0
+    ]
+    db_path = _make_fcst_db(tmp_path, rows)
+    residuals = script._load_residuals(db_path, asof=asof, trailing_days=60)
+    ev = [r for r in residuals if r[0] == "NoLead1City"]
+    assert len(ev) == 1, "an event with no lead-1 cycle must still collapse to one residual"
+    assert ev[0][3] == pytest.approx(2.0), "must be the median of the available (lead-2) cycles"
 
 
 def test_meta_carries_trailing_days_and_asof(tmp_path, monkeypatch):
