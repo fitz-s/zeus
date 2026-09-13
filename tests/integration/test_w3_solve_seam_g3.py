@@ -40430,20 +40430,36 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         for family_key in (family_a, family_b)
     )
 
-    def proof_for(evaluation: SimpleNamespace) -> SimpleNamespace:
+    def proof_for(evaluation: SimpleNamespace, q: float = 0.65) -> SimpleNamespace:
         # Live BUY candidates predate the explicit action field and rely on the
         # solver's canonical BUY default. The shadow writer must preserve that
         # runtime shape while matching the candidate id back to the gated row.
         proof_candidate_fields = dict(vars(evaluation))
         proof_candidate_fields.pop("action", None)
+        from src.solve.solver import ExpectedBuyTerminalWealthCertificate
+
+        cost, shares, wealth = Decimal("1.01"), Decimal("5"), Decimal("100")
+        ev = q * float(shares) - float(cost)
+        growth = (1 - q) * math.log(float((wealth - cost) / wealth)) + q * math.log(
+            float((wealth + shares - cost) / wealth)
+        )
+        terminal = ExpectedBuyTerminalWealthCertificate(
+            probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+            win_probability_mean=q, loss_probability_mean=1 - q,
+            loss_payoff_usd=-cost, win_payoff_usd=shares - cost,
+            wealth_after_loss_usd=wealth - cost,
+            wealth_after_win_usd=wealth + shares - cost,
+            expected_delta_log_wealth=growth, expected_ev_usd=ev,
+        )
         return SimpleNamespace(
             decision=SimpleNamespace(
                 candidate=SimpleNamespace(**proof_candidate_fields),
+                expected_terminal_wealth=terminal,
                 shares=Decimal("5"),
                 cost_usd=Decimal("1.01"),
                 expected_growth=SimpleNamespace(
-                    expected_delta_log_wealth=0.01,
-                    expected_ev_usd=1.0,
+                    expected_delta_log_wealth=growth,
+                    expected_ev_usd=ev,
                 ),
             )
         )
@@ -40463,7 +40479,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         )
         for family_key in (family_a, family_b)
     )
-    events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+    writer_kwargs = dict(
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=evaluations)
         ),
@@ -40493,9 +40509,21 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         decision_at_utc=at,
     )
 
+    events = global_batch_runtime._day0_market_relative_alpha_shadow_events(**writer_kwargs)
+    for field, bad_value in (("expected_terminal_wealth", None), ("cost_usd", Decimal("2"))):
+        bad_proof = proof_for(evaluations[0])
+        setattr(bad_proof.decision, field, bad_value)
+        assert global_batch_runtime._day0_market_relative_alpha_shadow_events(
+            **{**writer_kwargs, "proof_selected": bad_proof}
+        ) == ()
+    exact_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        **{**writer_kwargs, "proof_selected": proof_for(evaluations[0], q=1.0)}
+    )
+    assert len(exact_events) == 1 and exact_events[0].q_live == 1.0
+
     assert len(events) == 1
     assert events[0].city == "Alpha"
-    assert events[0].q_live == pytest.approx(0.90)
+    assert events[0].q_live == pytest.approx(0.65)
     assert events[0].hypothetical_fill_price == pytest.approx(0.20)
     envelope = json.loads(events[0].envelope_json)
     assert envelope["schema_version"] == 3
@@ -40508,14 +40536,20 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     )
     assert envelope["global_proof_winner"] is True
     assert envelope["global_proof_candidate_id"] == "candidate-family-a"
-    assert envelope["q"] == pytest.approx(0.90)
-    assert envelope["expected_net_edge_per_share"] > 0.0
+    assert envelope["q"] == pytest.approx(0.65)
+    assert envelope["expected_net_edge_per_share"] == pytest.approx(
+        0.65 - events[0].c_fee_adjusted
+    )
+    assert envelope["q"] == pytest.approx(
+        (envelope["global_proof_expected_ev_usd"] + float(envelope["global_proof_cost_usd"]))
+        / float(envelope["global_proof_shares"])
+    )
 
     no_capital_edge = global_batch_runtime._day0_market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=evaluations)
         ),
-        proof_selected=proof_for(evaluations[0]),
+        proof_selected=proof_for(evaluations[0], q=0.10),
         probability_witnesses={
             family_a: witness(family_a, 0.10),
             family_b: witness(family_b, 0.20),
@@ -40664,7 +40698,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v6-city-date-cluster:"
+            "market-relative-alpha-shadow-v7-acting-probability:"
         )
         and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         in event.event_id
@@ -40803,6 +40837,16 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 3
+
+    legacy_event = replace(events[0], event_id=events[0].event_id.replace(
+        "market-relative-alpha-shadow-v7-acting-probability:",
+        "market-relative-alpha-shadow-v6-city-date-cluster:",
+    ))
+    legacy_envelope = json.loads(legacy_event.envelope_json)
+    legacy_envelope["q"] = 0.90
+    legacy_event = replace(legacy_event, q_live=0.90, envelope_json=json.dumps(legacy_envelope))
+    assert global_batch_runtime._record_market_relative_alpha_shadows(conn, (legacy_event,)) != first
+    assert conn.execute("SELECT COUNT(*) FROM no_trade_regret_events").fetchone()[0] == 4
 
     exit_at = at + _dt.timedelta(hours=1)
     wealth = SimpleNamespace(
@@ -40943,7 +40987,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert first_exit == second_exit
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 4
+    ).fetchone()[0] == 5
     conn.close()
 
 

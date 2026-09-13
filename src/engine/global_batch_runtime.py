@@ -76,6 +76,7 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     DeterministicBinPayoffWitness,
     ExecutableSellCurve,
+    ExpectedBuyTerminalWealthCertificate,
     MakerFillOutcome,
     current_maker_fill_witness_identity,
     executable_curve_identity,
@@ -5306,10 +5307,11 @@ _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
 _ALPHA_SHADOW_ENTRY_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v6-city-date-cluster"
+    "market-relative-alpha-shadow-v7-acting-probability"
 )
 _ALPHA_SHADOW_ENTRY_EVENT_PREFIXES = (
     "market-relative-alpha-shadow-v5-global-selection:",
+    "market-relative-alpha-shadow-v6-city-date-cluster:",
     f"{_ALPHA_SHADOW_ENTRY_EVENT_VERSION}:",
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
@@ -5461,6 +5463,13 @@ def _market_relative_alpha_shadow_events(
     ).upper()
     proof_execution_mode = _global_candidate_execution_mode(proof_candidate)
     proof_growth = getattr(proof_decision, "expected_growth", None)
+    # SCOPE: this proof-selected taker BUY shadow only. DRAIN: the next
+    # complete cut supplies its typed terminal transcript. RESET: terminal q,
+    # EV, cost and shares agree, allowing the v7 record to be frozen.
+    proof_terminal = getattr(proof_decision, "expected_terminal_wealth", None)
+    if not isinstance(proof_terminal, ExpectedBuyTerminalWealthCertificate):
+        return ()
+    q = proof_terminal.win_probability_mean
     try:
         proof_shares = Decimal(
             str(getattr(proof_decision, "shares", "0") or "0")
@@ -5488,6 +5497,14 @@ def _market_relative_alpha_shadow_events(
         or not math.isfinite(proof_ev_usd)
         or proof_delta_log_wealth <= 0.0
         or proof_ev_usd <= 0.0
+        or not math.isclose(
+            proof_ev_usd, proof_terminal.expected_ev_usd,
+            rel_tol=0.0, abs_tol=1e-12,
+        )
+        or not math.isclose(
+            q, (proof_ev_usd + float(proof_cost)) / float(proof_shares),
+            rel_tol=0.0, abs_tol=1e-12,
+        )
     ):
         return ()
     assets = {
@@ -5581,7 +5598,6 @@ def _market_relative_alpha_shadow_events(
             or not probability_ready
         ):
             continue
-        q = family_payoff_point_q(witness, bin_id=bin_id, side=side)
         market_prices = _native_buy_min_order_vwap(asset.curve)
         if (
             q is None
@@ -5766,7 +5782,7 @@ def _market_relative_alpha_shadow_exit_events(
             "FROM no_trade_regret_events "
             "WHERE rejection_stage='RISK_GUARD' "
             "AND rejection_reason IN (?,?) "
-            "AND (event_id LIKE ? OR event_id LIKE ?) "
+            "AND (event_id LIKE ? OR event_id LIKE ? OR event_id LIKE ?) "
             "ORDER BY decision_time,regret_event_id",
             (
                 _DAY0_ALPHA_SHADOW_REASON,
@@ -5831,6 +5847,19 @@ def _market_relative_alpha_shadow_exit_events(
             or entry_cost <= 0
             or entry_at.tzinfo is None
             or entry_at.astimezone(UTC) >= decision_at_utc
+        ):
+            continue
+        # SCOPE: exit evidence derived from this mismatched BUY shadow only.
+        # DRAIN: a subsequent complete cut writes a valid v7 entry. RESET:
+        # entry q, EV, cost and shares satisfy the risk reader's same identity.
+        try:
+            entry_q = float(envelope["q"])
+            entry_ev = float(envelope["global_proof_expected_ev_usd"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isclose(
+            entry_q, (entry_ev + float(entry_cost)) / float(shares),
+            rel_tol=0.0, abs_tol=1e-12,
         ):
             continue
         entry_at = entry_at.astimezone(UTC)

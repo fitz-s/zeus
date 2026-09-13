@@ -2612,6 +2612,16 @@ def _settled_market_relative_alpha_shadow_rows(
         ):
             block("certificate_value_mismatch")
             continue
+        # SCOPE: only shadow records that grade a different q than their
+        # selected BUY. DRAIN: the next cut freezes the acting q under a new
+        # event identity. RESET: q * shares - cost reproduces the proof EV.
+        # Actual fills retain their independent immutable-certificate path.
+        if not math.isclose(
+            q, (proof_ev_usd + proof_cost) / proof_shares,
+            rel_tol=0.0, abs_tol=1e-12,
+        ):
+            block("selected_probability_economics_mismatch")
+            continue
         certificates.append(
             {
                 **row,

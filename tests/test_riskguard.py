@@ -7270,7 +7270,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "global_proof_shares": "5",
             "global_proof_cost_usd": "1.05",
             "global_proof_expected_delta_log_wealth": 0.01,
-            "global_proof_expected_ev_usd": 3.95,
+            "global_proof_expected_ev_usd": 3.45,
         }
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
@@ -7408,6 +7408,34 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 ),
             }
         ]
+        # Old writer: raw q=.90 despite an acting q=.65 winner. Internal
+        # q/edge consistency alone must not let it grade the calibrated policy.
+        envelope["global_proof_expected_ev_usd"] = 0.65 * 5 - 1.05
+        conn.execute(
+            "UPDATE no_trade_regret_events SET envelope_json=?",
+            (json.dumps(envelope, sort_keys=True),),
+        )
+        legacy_rows, legacy_status = riskguard_module._settled_day0_market_relative_alpha_shadow_rows(
+            conn, window_days=7.0,
+            as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            forecasts_connection_factory=lambda: sqlite3.connect(forecasts_path),
+        )
+        assert legacy_rows == []
+        assert legacy_status["blocked_reasons"] == {
+            "selected_probability_economics_mismatch": 1,
+        }
+        actual_negative = {
+            **rows[0], "trade_id": "actual-filled-winner", "p_posterior": 0.99,
+            "outcome": 0, "capital_evidence_source": "actual_global_winner_fill",
+            "hypothetical_realized_pnl_usd": -1.05,
+        }
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            [actual_negative] + legacy_rows, strategy_key="day0_nowcast_entry",
+            rejection_evalue=10.0, window_days=7.0,
+            as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
+        )
+        assert evidence["rejected"] is True
+        envelope["global_proof_expected_ev_usd"] = 3.45
         envelope["global_selection_revision"] = (
             "global_single_order_posterior_mean_expected_growth_v1"
         )
@@ -7512,7 +7540,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "global_proof_shares": "5",
             "global_proof_cost_usd": "1.05",
             "global_proof_expected_delta_log_wealth": 0.01,
-            "global_proof_expected_ev_usd": 3.95,
+            "global_proof_expected_ev_usd": 3.45,
         }
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
