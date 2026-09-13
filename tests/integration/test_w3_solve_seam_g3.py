@@ -25787,6 +25787,250 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
     )
 
 
+def test_global_book_asset_materialization_failure_excludes_only_its_family(
+    caplog,
+):
+    """One malformed book asset must exclude only its own family.
+
+    Regression coverage for GLOBAL_AUCTION_RECEIPT_BUY_BOOK_MATERIALIZATION_MISMATCH:
+    a single asset that fails ``global_candidates_from_native`` used to abort
+    the whole cut via ``_no_trade`` (wiping every family's candidates), which
+    then made the book-side receipt demand full coverage against an empty
+    ``candidate_evaluations``. It must instead: (a) leave every other family
+    fully evaluated, (b) record the failing family in a typed, non-silent
+    exclusion map, (c) drop that family's own already-materialized siblings
+    from the same cut, and (d) log a WARNING naming the asset.
+    """
+
+    family, proofs, payload = _corpus()[0]
+    decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    captured_at = "2026-06-13T11:59:59.900000+00:00"
+    proofs = tuple(
+        replace(proof, row={**proof.row, "captured_at": captured_at})
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    current_scope = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Chicago", source_run_id="posterior-chicago-current"
+            ),
+            _global_scope_event(
+                city="London", source_run_id="posterior-london-current"
+            ),
+        ),
+        captured_at_utc=decision_at,
+    )
+
+    prepared_by_event = {}
+    for suffix, family_key in zip(("a", "b"), current_scope.family_keys):
+        scoped_family = replace(
+            family,
+            family_id=family_key,
+            event_id=f"event-{suffix}",
+        )
+        result = bridge.decide_family_via_spine(
+            family=scoped_family,
+            payload=payload,
+            proofs=proofs,
+            decision_time=decision_at,
+            native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+            global_native_side_candidate_from_proof=(
+                era._full_depth_native_side_candidate_from_proof
+            ),
+            require_global_probability_witness=True,
+            global_probability_max_age=_dt.timedelta(seconds=1),
+            candidate_bin_id=era._candidate_bin_id,
+            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+            exposure_builder=era._robust_marginal_utility_exposure,
+            baseline_usd_provider=lambda: Decimal("1000"),
+            per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+            extra_exposure_by_bin_id=None,
+        )
+        assert result.global_family is not None
+        prepared_by_event[f"event-{suffix}"] = result.global_family
+
+    prepared_by_event = global_batch_runtime._bind_selection_holdings(
+        prepared_by_event,
+        portfolio_state=SimpleNamespace(positions=()),
+        wealth_witness=SimpleNamespace(
+            ledger_snapshot_id="ledger-current",
+            native_holdings_micro=(),
+            strategy_capital_allocation=_test_strategy_allocation(),
+        ),
+    )
+    assets = [
+        CurrentGlobalBookAsset(
+            family_key=prepared.probability_witness.family_key,
+            bin_id=seed.native_candidate.bin_id,
+            condition_id=seed.native_candidate.condition_id,
+            gamma_market_id=f"gamma-{seed.native_candidate.condition_id}",
+            market_event_id=f"market-event-{prepared.probability_witness.family_key}",
+            side=seed.native_candidate.side,
+            token_id=seed.native_candidate.token_id,
+            curve=seed.native_candidate.executable_cost_curve,
+            bid_levels=(
+                BidBookLevel(price=Decimal("0.06"), size=Decimal("1000")),
+            ),
+            captured_at_utc=decision_at,
+            neg_risk=True,
+        )
+        for prepared in prepared_by_event.values()
+        for seed in prepared.candidate_seeds
+    ]
+    failing_family_key = assets[0].family_key
+    # assets[0] and assets[1] are the NO/YES sides of the same bin of the
+    # same family: corrupting the SECOND one means the first has already
+    # materialized a candidate for this family before the exception fires.
+    assert assets[1].family_key == failing_family_key
+    assert assets[1].bin_id == assets[0].bin_id
+    healthy_family_keys = {
+        asset.family_key for asset in assets if asset.family_key != failing_family_key
+    }
+    assert healthy_family_keys
+
+    assets[1] = replace(assets[1], bin_id="NONEXISTENT_BIN_ID")
+    assets = tuple(assets)
+
+    asset_states = tuple(
+        (
+            asset.family_key,
+            asset.bin_id,
+            asset.condition_id,
+            asset.side,
+            asset.token_id,
+            "EXECUTABLE",
+            asset.curve.book_hash,
+            asset.market_event_id,
+            asset.gamma_market_id,
+            str(asset.neg_risk),
+        )
+        for asset in assets
+    )
+    book_venue_identity = current_global_book_epoch_identity(
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+    )
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=assets,
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=book_venue_identity,
+    )
+    wealth = _test_wealth_witness(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+    )
+    probabilities = {
+        prepared.probability_witness.family_key: prepared.probability_witness
+        for prepared in prepared_by_event.values()
+    }
+    auction_kwargs = dict(
+        selection_epoch_identity="selection-epoch-current",
+        selection_cut_at_utc=decision_at,
+        current_scope=current_scope,
+        current_scope_identity_resolver=lambda: current_scope.scope_identity,
+        venue_universe_identity=book_venue_identity,
+        current_venue_universe_identity_resolver=lambda: book_venue_identity,
+        universe_max_age=_dt.timedelta(seconds=1),
+        current_probability_resolver=lambda key: (
+            CurrentFamilyProbabilityAuthority.from_witness(probabilities[key])
+        ),
+        current_execution_resolver=lambda candidate: CurrentExecutionAuthority(
+            token_id=candidate.token_id,
+            side=candidate.side,
+            book_snapshot_id=candidate.book_snapshot_id,
+            execution_curve_identity=candidate.execution_curve_identity,
+            action=getattr(candidate, "action", "BUY"),
+            neg_risk=candidate.neg_risk,
+        ),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth,
+        capital_limit_usd=Decimal("100"),
+        decision_at_utc=decision_at,
+        book_epoch=book_epoch,
+        current_capital_limit_resolver=(
+            lambda candidate, gamma_market_id, market_event_id, owner_event_id: (
+                Decimal("100")
+            )
+        ),
+    )
+
+    with caplog.at_level(
+        "WARNING", logger="src.engine.global_single_order_auction"
+    ):
+        result = select_prepared_global_auction(
+            prepared_by_event,
+            **auction_kwargs,
+        )
+
+    # (a) every OTHER family is still fully evaluated; the failing family
+    # contributes zero evaluation rows (neither SCORED, REJECTED, nor
+    # SELECTED) rather than wiping the whole cut.
+    evaluated_families = {
+        row.family_key for row in result.decision.candidate_evaluations
+    }
+    assert evaluated_families & healthy_family_keys
+    assert failing_family_key not in evaluated_families
+    assert result.decision.candidate is None or (
+        result.decision.candidate.family_key in healthy_family_keys
+    )
+
+    # (b) the failing family is recorded as a typed, non-silent exclusion.
+    assert failing_family_key in result.materialization_excluded_by_family
+    reason = result.materialization_excluded_by_family[failing_family_key]
+    assert reason.startswith(
+        "GLOBAL_BOOK_CANDIDATE_MATERIALIZATION_FAILED:ValueError:"
+    )
+
+    # The book-side receipt check this defect used to break must now pass:
+    # once the family is excluded, missing/extra both resolve to zero even
+    # though buy_candidate_index only covers the healthy family.
+    buy_candidate_index = tuple(
+        (
+            row.candidate_id,
+            row.family_key,
+            row.bin_id,
+            row.condition_id,
+            row.side,
+            row.token_id,
+        )
+        for row in result.decision.candidate_evaluations
+        if row.action == "BUY"
+    )
+    global_batch_runtime._book_native_side_receipt(
+        asset_states=asset_states,
+        probability_keys=tuple(probabilities),
+        buy_candidate_index=buy_candidate_index,
+        excluded_by_family=result.materialization_excluded_by_family,
+    )
+
+    # (d) the WARNING names the asset: family, condition, token, bin, side,
+    # and the concrete exception.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "src.engine.global_single_order_auction"
+        and record.levelname == "WARNING"
+    ]
+    assert warnings
+    combined = " ".join(record.getMessage() for record in warnings)
+    assert failing_family_key in combined
+    assert assets[1].condition_id in combined
+    assert assets[1].token_id in combined
+    assert "NONEXISTENT_BIN_ID" in combined
+    assert assets[1].side in combined
+    assert "ValueError" in combined
+
+
 def _wealth_test_conn(
     *,
     captured_at: _dt.datetime,

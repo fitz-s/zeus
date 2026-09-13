@@ -9,7 +9,8 @@ Actuation and JIT recapture remain outside this module.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ from src.solve.solver import (
     executable_curve_identity,
     select_global_single_order,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,13 @@ class PreparedGlobalAuctionResult:
     winner_event_id: str | None
     actuation: "GlobalSingleOrderActuation | None" = None
     holding_coverage: tuple[GlobalHoldingAuctionCoverage, ...] = ()
+    # Families excluded mid-cut because their book asset failed candidate
+    # materialization (see the book-asset loop below).  Kept distinct from
+    # the caller's preflight ``excluded_by_family`` map so the receipt can
+    # merge both without the caller having to anticipate this failure mode.
+    materialization_excluded_by_family: Mapping[str, str] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if (self.decision.candidate is None) != (self.winner_event_id is None):
@@ -842,7 +852,7 @@ def select_prepared_global_auction(
         for family_key, reason in excluded_by_family.items()
     ):
         return _no_trade("GLOBAL_EXCLUDED_FAMILY_INVALID")
-    excluded = frozenset(excluded_by_family)
+    excluded: set[str] = set(excluded_by_family)
     buy_disabled = frozenset(buy_disabled_family_keys or ())
     probability_witnesses = {}
     event_by_family: dict[str, str] = {}
@@ -958,6 +968,7 @@ def select_prepared_global_auction(
             )
 
         candidates = []
+        materialization_excluded_by_family: dict[str, str] = {}
 
         def maker_witness_for(
             *,
@@ -1028,11 +1039,37 @@ def select_prepared_global_auction(
                         neg_risk=asset.neg_risk,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 - one malformed asset invalidates globality
-                return _no_trade(
+            except Exception as exc:  # noqa: BLE001 - excludes only this family, not the batch
+                reason = (
                     "GLOBAL_BOOK_CANDIDATE_MATERIALIZATION_FAILED:"
                     f"{type(exc).__name__}:{exc}"
                 )
+                _LOG.warning(
+                    "global book candidate materialization failed, excluding "
+                    "family for this cut: family=%s condition_id=%s "
+                    "token_id=%s bin_id=%s side=%s error=%s",
+                    asset.family_key,
+                    asset.condition_id,
+                    asset.token_id,
+                    asset.bin_id,
+                    asset.side,
+                    reason,
+                )
+                # A malformed book asset is fatal only to its own family, not
+                # to globality: the family stays in probability_witnesses /
+                # event_by_family (per the module docstring, "its family
+                # remains in the probability/book universe"), this is a
+                # typed, logged, receipt-visible exclusion rather than a
+                # silent drop, and every other family is still evaluated.
+                materialization_excluded_by_family[asset.family_key] = reason
+                excluded_by_family[asset.family_key] = reason
+                excluded.add(asset.family_key)
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.family_key != asset.family_key
+                ]
+                continue
         for family_key, holdings in holdings_by_family.items():
             probability = probability_witnesses[family_key]
             prepared = prepared_by_family[family_key]
@@ -1418,6 +1455,9 @@ def select_prepared_global_auction(
         return PreparedGlobalAuctionResult(
             decision=decision,
             winner_event_id=None,
+            materialization_excluded_by_family=dict(
+                materialization_excluded_by_family
+            ),
         )
     evaluated = {
         candidate_id: row.position_id
@@ -1437,6 +1477,9 @@ def select_prepared_global_auction(
             decision=decision,
             winner_event_id=None,
             holding_coverage=tuple(holding_coverage),
+            materialization_excluded_by_family=dict(
+                materialization_excluded_by_family
+            ),
         )
     winner_event_id = event_by_family.get(decision.candidate.family_key)
     if winner_event_id is None:
@@ -1474,4 +1517,7 @@ def select_prepared_global_auction(
             ),
         ),
         holding_coverage=tuple(holding_coverage),
+        materialization_excluded_by_family=dict(
+            materialization_excluded_by_family
+        ),
     )

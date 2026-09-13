@@ -8851,6 +8851,19 @@ def process_current_global_batch(
                     str(getattr(exit_event, "event_id", "")),
                     exit_event,
                 )
+            # A book asset that failed candidate materialization mid-cut is
+            # discovered inside select_prepared_global_auction, after this
+            # cut's own preflight_excluded_by_family was already fixed. Merge
+            # it in here so the book-side receipt sees the same exclusion the
+            # selection loop already applied, instead of re-demanding full
+            # coverage against a family it never scored.
+            book_side_excluded_by_family = {
+                **(preflight_excluded_by_family or {}),
+                **(
+                    getattr(selected, "materialization_excluded_by_family", None)
+                    or {}
+                ),
+            }
             receipt_store_started = time.monotonic()
             if held_completion_expired():
                 return reject("HELD_SELL_DEADLINE_EXPIRED")
@@ -8889,7 +8902,7 @@ def process_current_global_batch(
                             getattr(attempt_book_epoch, "assets", ()) or ()
                         )
                         if str(getattr(asset, "family_key", "") or "")
-                        not in (preflight_excluded_by_family or {})
+                        not in book_side_excluded_by_family
                     )
                     + sum(
                         1
@@ -8897,7 +8910,7 @@ def process_current_global_batch(
                             getattr(attempt_book_epoch, "sell_assets", ()) or ()
                         )
                         if str(getattr(asset, "family_key", "") or "")
-                        not in (preflight_excluded_by_family or {})
+                        not in book_side_excluded_by_family
                     )
                     if attempt_book_epoch is not None
                     else None
@@ -8911,7 +8924,7 @@ def process_current_global_batch(
                 ),
                 wealth_witness=selection_wealth,
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
-                excluded_by_family=preflight_excluded_by_family,
+                excluded_by_family=book_side_excluded_by_family,
                 excluded_by_candidate=preflight_excluded_by_candidate,
                 book_captured_at_utc=(
                     attempt_book_epoch.captured_at_utc
