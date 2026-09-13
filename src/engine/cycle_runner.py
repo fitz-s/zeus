@@ -551,8 +551,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _run_chain_sync(portfolio: PortfolioState, clob, conn):
-    return _runtime.run_chain_sync(portfolio, clob, conn=conn, deps=sys.modules[__name__])
+def _run_chain_sync(portfolio: PortfolioState, clob, conn, *, write_scope=None):
+    return _runtime.run_chain_sync(
+        portfolio, clob, conn=conn, deps=sys.modules[__name__], write_scope=write_scope
+    )
 
 
 def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob, conn=None) -> int:

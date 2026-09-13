@@ -448,8 +448,14 @@ def test_chain_sync_read_lane_cannot_submit_exits():
 
     chain_source = inspect.getsource(post_trade_capital.chain_sync_read_cycle)
     exit_source = inspect.getsource(exit_lifecycle.run_exit_monitor_cycle)
+    chain_source_flat = " ".join(chain_source.split())
 
-    assert "_run_chain_sync(portfolio, clob, conn)" in chain_source
+    # T-collateral-busy (2026-09-13): chain_sync_read_cycle now passes a coordinator
+    # lease scope as a trailing kwarg (write_scope=...) so reconcile's DML/commit is
+    # admission-gated against write_coordinator; the exact positional prefix (still
+    # portfolio, clob, conn, in that order) is what this test protects, not the
+    # absence of any further kwarg.
+    assert "_run_chain_sync( portfolio, clob, conn, write_scope=" in chain_source_flat
     assert "conn.commit()" in chain_source
     assert "_execute_monitoring_phase(" not in chain_source
     retired_switch = "exit_order_" + "submit_enabled"

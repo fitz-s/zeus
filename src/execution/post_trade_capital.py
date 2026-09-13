@@ -673,12 +673,25 @@ def chain_sync_read_cycle() -> None:
     INV-37: ``get_connection`` opens the sanctioned trade+world (+forecasts RO ATTACH)
     connection via ``connect_or_degrade`` — the same path the order daemon used; the
     cross-DB ATTACH is not relaxed.
+
+    T-collateral-busy (2026-09-13): the reconcile DML and its commit run inside the
+    TRADE write coordinator's admission lease, so this connection's ordinary commit
+    is no longer invisible to ``collateral_snapshot_persist``'s zero-retry coordinator
+    BEGIN (write_coordinator.py:~816-822). ``lease()`` (not ``transaction()``) is used
+    so the connection above — carrying the sanctioned trade+world ATTACH — stays open
+    for the whole cycle instead of being replaced by a fresh factory connection; the
+    lease scope wraps the DML AND the commit (mirrors harvester_pnl_resolver.py's
+    ``_settlement_writer_transaction``) so the real SQLite write lock is never held
+    after the coordinator's advisory gate is released. No HTTP runs inside the lease —
+    it wraps only ``reconcile_with_chain``'s DML, never ``run_chain_sync``'s API call.
     """
     # Lazy imports (mirror src/main.py:_chain_sync_and_exit_monitor_cycle). The chain-sync
     # READ helpers live in the order-runtime cycle_runner; we import ONLY the read-phase
     # entry points (run_chain_sync + connection/portfolio helpers) and NEVER the monitoring
     # phase. Lazy so importing this module does not eagerly drag the trading lane into the
     # P4 process at import time (it is pulled only when the chain-sync job actually fires).
+    from contextlib import contextmanager
+
     from src.data.polymarket_client import PolymarketClient
     from src.engine.cycle_runner import (
         _run_chain_sync,
@@ -686,10 +699,48 @@ def chain_sync_read_cycle() -> None:
         load_portfolio,
         save_portfolio,
     )
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
 
     conn = get_connection()
     if conn is None:
         raise RuntimeError("chain_sync_read: DB write-lock degraded before cycle")
+
+    # STANDARD priority / deadline_ms=1_500 / max_hold_ms=500 mirror the comparable
+    # non-MONITOR TRADE sidecar convention in
+    # src/engine/event_reactor_adapter.py::_persist_global_jit_authority_snapshot_isolated
+    # (owner differs; parameters are the cited sibling's, not invented here).
+    @contextmanager
+    def _coordinated_reconcile_commit():
+        old_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        with default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner="chain_sync_read",
+            write_class="live",
+            priority=WritePriority.STANDARD,
+            deadline_ms=1_500,
+            max_hold_ms=500,
+        ):
+            # Force fail-fast BUSY at the reconcile's implicit BEGIN (mirrors
+            # write_coordinator.transaction()'s own busy_timeout=0-before-BEGIN):
+            # a raw/legacy writer's ordinary commit must not block this admitted
+            # slot for up to the connection's live default busy_timeout.
+            conn.execute("PRAGMA busy_timeout = 0")
+            try:
+                yield
+            finally:
+                # Unconditional commit preserves the pre-existing behavior of this
+                # cycle (see below): the reconcile writes are committed whether or
+                # not reconcile raised, while still holding the coordinator lease
+                # so the real SQLite write lock is released before the advisory
+                # gate is.
+                try:
+                    conn.commit()
+                finally:
+                    conn.execute(f"PRAGMA busy_timeout = {old_busy_timeout}")
 
     summary: dict = {}
     failure: Exception | None = None
@@ -698,8 +749,18 @@ def chain_sync_read_cycle() -> None:
         with PolymarketClient() as clob:
             # chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
             # Degrades gracefully if Keychain funder_address is absent (REST call fails -> caught).
+            # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix, now §8 Step 2):
+            # the chain-sync reconcile opened an implicit DEFERRED txn on the first DML
+            # (chain_shares / chain_state updates) which upgrades to the exclusive WAL write
+            # lock on zeus_trades.db. run_chain_sync commits (via write_scope, above) right
+            # after the reconcile DML so the WAL write lock is released and the writes are
+            # durable before this cycle does anything else. In the order daemon this commit
+            # sat BETWEEN the two phases (before Phase-2 HTTP); in P4 there is no Phase-2, so
+            # this commit is the cycle's final write and the lock is released on return.
             try:
-                chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
+                chain_stats, _ = _run_chain_sync(
+                    portfolio, clob, conn, write_scope=_coordinated_reconcile_commit
+                )
                 if chain_stats:
                     summary["chain_sync"] = chain_stats
             except Exception as exc:  # noqa: BLE001
@@ -709,13 +770,13 @@ def chain_sync_read_cycle() -> None:
                 summary["chain_sync_error"] = str(exc)
                 failure = exc
 
-            # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix, now §8 Step 2):
-            # the chain-sync reconcile opened an implicit DEFERRED txn on the first DML
-            # (chain_shares / chain_state updates) which upgrades to the exclusive WAL write
-            # lock on zeus_trades.db. Commit HERE so the WAL write lock is released and the
-            # writes are durable before the cycle returns. In the order daemon this commit
-            # sat BETWEEN the two phases (before Phase-2 HTTP); in P4 there is no Phase-2, so
-            # this commit is the cycle's final write and the lock is released on return.
+            # Unconditional safety-net commit, preserved verbatim from the pre-coordinator
+            # cycle: _run_chain_sync's own coordinated commit above already released the
+            # WAL write lock in the normal path, so this is a no-op (no pending transaction)
+            # whenever that ran. It stays because a caller-swapped/failed-before-DML chain
+            # sync (e.g. HTTP failure, or the read-phase raising before reaching reconcile)
+            # never enters the lease scope at all, and this is what finalizes/releases conn
+            # in that case before close() below.
             try:
                 conn.commit()
             except Exception as exc:  # noqa: BLE001

@@ -1152,6 +1152,186 @@ def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):
     assert conn.closed is True
 
 
+def test_chain_sync_read_reconcile_dml_runs_inside_trade_coordinator_lease(monkeypatch):
+    """T-collateral-busy (2026-09-13): the reconcile DML is admission-gated.
+
+    chain_sync_read_cycle must acquire default_runtime_write_coordinator().lease() for
+    DBIdentity.TRADE (owner="chain_sync_read", write_class="live",
+    priority=WritePriority.STANDARD, deadline_ms=1_500, max_hold_ms=500 -- the
+    src/engine/event_reactor_adapter.py::_persist_global_jit_authority_snapshot_isolated
+    sibling convention) around _run_chain_sync's write phase, and the write phase's own
+    commit must happen while that lease is still held (never after it is released).
+    """
+    import contextlib
+
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.state import write_coordinator as coordinator_mod
+    from src.state.write_coordinator import DBIdentity, WritePriority
+
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _RecordingCoordinator:
+        def __init__(self):
+            self.lease_calls: list[dict] = []
+            self.active_leases = 0
+
+        @contextlib.contextmanager
+        def lease(self, dbs, *, owner, write_class, priority, deadline_ms, max_hold_ms):
+            self.lease_calls.append(
+                {
+                    "dbs": tuple(dbs),
+                    "owner": owner,
+                    "write_class": write_class,
+                    "priority": priority,
+                    "deadline_ms": deadline_ms,
+                    "max_hold_ms": max_hold_ms,
+                }
+            )
+            self.active_leases += 1
+            try:
+                yield SimpleNamespace()
+            finally:
+                self.active_leases -= 1
+
+    coordinator = _RecordingCoordinator()
+    commit_active_lease_counts: list[int] = []
+
+    class _Connection:
+        def __init__(self):
+            self.commits = 0
+            self.closed = False
+            self.busy_timeout_writes: list[str] = []
+
+        def execute(self, sql, *args):
+            normalized = " ".join(sql.split()).upper()
+            if normalized == "PRAGMA BUSY_TIMEOUT":
+                return _Cursor((30_000,))
+            if normalized.startswith("PRAGMA BUSY_TIMEOUT"):
+                self.busy_timeout_writes.append(normalized)
+                return _Cursor(None)
+            raise AssertionError(f"unexpected conn.execute: {sql!r}")
+
+        def commit(self):
+            self.commits += 1
+            # Recorded from inside commit() itself: proves the commit fires while
+            # write_scope's lease is still the active one, not after it releases.
+            commit_active_lease_counts.append(coordinator.active_leases)
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    conn = _Connection()
+
+    def _fake_run_chain_sync(portfolio, clob, passed_conn, *, write_scope=None):
+        assert passed_conn is conn
+        assert write_scope is not None, "chain_sync_read_cycle must pass a write_scope"
+        with write_scope():
+            pass  # simulates reconcile_with_chain's DML; the scope's own commit fires on exit
+        return {"synced": 1}, True
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+    monkeypatch.setattr(
+        coordinator_mod, "default_runtime_write_coordinator", lambda: coordinator
+    )
+
+    post_trade_capital.chain_sync_read_cycle()
+
+    assert len(coordinator.lease_calls) == 1
+    call = coordinator.lease_calls[0]
+    assert call["dbs"] == (DBIdentity.TRADE,)
+    assert call["owner"] == "chain_sync_read"
+    assert call["write_class"] == "live"
+    assert call["priority"] is WritePriority.STANDARD
+    assert call["deadline_ms"] == 1_500
+    assert call["max_hold_ms"] == 500
+    # Two commits fire: the coordinated one inside write_scope's lease (active_leases==1
+    # at that instant -- the real SQLite write lock is released before the coordinator's
+    # advisory gate is), and chain_sync_read_cycle's own pre-existing unconditional
+    # safety-net commit afterward, outside any lease (active_leases==0, a harmless no-op
+    # on an already-committed connection; see test_chain_sync_read_failure_reaches_child_
+    # exit_status, which requires this outer commit to still fire when write_scope is
+    # never entered at all).
+    assert commit_active_lease_counts == [1, 0]
+    assert conn.busy_timeout_writes == ["PRAGMA BUSY_TIMEOUT = 0", "PRAGMA BUSY_TIMEOUT = 30000"]
+    assert conn.closed is True
+
+
+def test_chain_sync_read_write_lease_timeout_reaches_child_exit_status(monkeypatch):
+    """A WriteLeaseTimeout on the coordinated write phase fails the cycle the same way
+    as any other chain-sync failure (T-collateral-busy, 2026-09-13): logged, the cycle
+    still raises RuntimeError('chain_sync_read cycle failed') so the killable child
+    reports FAILED, and the connection is still closed -- no partial/silent success.
+    """
+    import contextlib
+
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.state import write_coordinator as coordinator_mod
+
+    class _Connection:
+        def __init__(self):
+            self.commits = 0
+            self.closed = False
+
+        def commit(self):
+            self.commits += 1
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FailingCoordinator:
+        @contextlib.contextmanager
+        def lease(self, dbs, *, owner, write_class, priority, deadline_ms, max_hold_ms):
+            raise coordinator_mod.WriteLeaseTimeout(
+                f"SQLite write deferred at BEGIN for owner={owner}"
+            )
+            yield  # pragma: no cover - contextmanager requires a yield statement
+
+    conn = _Connection()
+
+    def _fake_run_chain_sync(portfolio, clob, passed_conn, *, write_scope=None):
+        with write_scope():
+            raise AssertionError("must never reach the DML when the lease itself fails")
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+    monkeypatch.setattr(
+        coordinator_mod, "default_runtime_write_coordinator", lambda: _FailingCoordinator()
+    )
+
+    with pytest.raises(RuntimeError, match="chain_sync_read cycle failed"):
+        post_trade_capital.chain_sync_read_cycle()
+
+    assert conn.closed is True
+
+
 def test_payout_observer_runs_in_killable_child(monkeypatch):
     from src.ingest import post_trade_capital_daemon as daemon
 

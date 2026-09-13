@@ -2133,7 +2133,15 @@ def _assert_token_aggregate_invariant(
     )
 
 
-def run_chain_sync(portfolio, clob, conn=None, *, deps):
+def run_chain_sync(portfolio, clob, conn=None, *, deps, write_scope=None):
+    """Run one chain-truth sync: HTTP read, then the reconcile DML.
+
+    ``write_scope`` (T-collateral-busy, 2026-09-13): an optional zero-arg context
+    manager factory the caller wraps ONLY the reconcile DML in (never the HTTP
+    above it). Callers that already gate ``conn``'s writes some other way (the
+    live order daemon's own monitoring cycle) pass nothing and get the prior,
+    unwrapped behavior unchanged.
+    """
     api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     if api_positions is None:
         raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
@@ -2143,7 +2151,11 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
         api_positions,
         ChainPosition=deps.ChainPosition,
     )
-    reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
+    if write_scope is not None:
+        with write_scope():
+            reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
+    else:
+        reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
     reconcile_stats.update(ctf_stats)
     # Gate the invariant on authoritative chain state only.
     # reconcile() sets "skipped_void_incomplete_api" in stats when it detects
