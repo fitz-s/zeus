@@ -65,6 +65,7 @@ from src.data.replacement_forecast_readiness import (
 )
 from src.data.replacement_input_hwm import ensemble_source_authority_sql
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+from src.calibration import center_debias_live_fit
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.replacement_pipeline_files import (
     DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
@@ -6038,8 +6039,13 @@ def _compute_posterior_payload(
     not live-eligible" from "compute blocked"; ``_insert_posterior`` maps
     ``not live_eligible -> None`` to keep the write contract byte-identical.
     """
-    # Current provider evidence owns the served center. Historical residual
-    # fits remain offline evaluation artifacts and cannot shift live q.
+    # The 2026-06-18 RAW no-de-bias law was REVERSED by operator instruction on 2026-09-04
+    # (evidence: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md items 26-32).
+    # The raw OM9 seam below is no longer the correction point: a shift here would be
+    # re-weighted by the fusion, so it cannot deliver a known correction to the served
+    # center. The served center is corrected instead at ``_mu_anchor``, AFTER fusion, from
+    # src/calibration/center_debias_live_fit.py. ``bias_shift_c`` stays None and is kept
+    # only because the expression below still consumes it.
     bias_shift_c: float | None = None
     # BAYES_PRECISION_FUSION-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
     # with the multi-model Bayesian posterior. Computed from the EB-corrected anchor center so it
@@ -6155,8 +6161,9 @@ def _compute_posterior_payload(
     _day0_center_delta_c: float = 0.0
     _day0_center_vector_id: str | None = None
     _day0_center_hours_remaining: float | None = None
-    # Retained nullable provenance fields preserve the persisted row shape.
-    # Live current-evidence q never applies a historical center shift.
+    # Served-center de-bias (2026-09-04). None means no shift was applied — a
+    # disabled metric, too little settled evidence, or an unreadable fit — and the
+    # served center is then the uncorrected fused center.
     _center_debias_c: float | None = None
     _center_debias_param_hash: str | None = None
     _center_debias_training_cutoff: str | None = None
@@ -6328,7 +6335,32 @@ def _compute_posterior_payload(
                 _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(
                     _city_unit
                 )
-            _mu_anchor = float(bayes_precision_fusion_override.anchor_value_c)
+            # SERVED-CENTER DE-BIAS (2026-09-04, reversal_plan items 26-32). The fused
+            # center is systematically low for HIGH by a per-city amount (+0.34 degC
+            # pooled, Chicago -0.80 .. Guangzhou +1.65 per city over 4204 settled rows).
+            # Shift the PARENT center here, before every consumer, so the point q, the
+            # finite-evidence floors, the bootstrap bounds and the day0 conditioner all
+            # integrate ONE corrected center — the day0 delta below composes on top of
+            # it and needs no compensation. None (LOW, thin evidence, unreadable DB) is
+            # the uncorrected center, byte-identical to before this change.
+            _center_debias = center_debias_live_fit.PROVIDER.correction(
+                conn,
+                city=request.city,
+                metric=metric,
+                now=_to_utc(request.computed_at, field_name="computed_at"),
+            )
+            _center_debias_c = (
+                None if _center_debias is None else float(_center_debias.shift_c)
+            )
+            _center_debias_param_hash = (
+                None if _center_debias is None else str(_center_debias.param_hash)
+            )
+            _center_debias_training_cutoff = (
+                None if _center_debias is None else str(_center_debias.training_cutoff)
+            )
+            _mu_anchor = float(bayes_precision_fusion_override.anchor_value_c) + (
+                0.0 if _center_debias_c is None else _center_debias_c
+            )
             # T0-1 remaining-window Day0 CENTER correction (audit §7 2026-07-18). Post-peak
             # the whole-day center over-disperses the remaining-day extreme; shift the Day0
             # center toward the remaining-window value: HIGH mu - delta, LOW mu + delta.
@@ -6930,6 +6962,20 @@ def _compute_posterior_payload(
                 ),
             }
         )
+    # The served-center de-bias is an INPUT that shaped this row's q, so it belongs in the
+    # config identity. posterior_config otherwise carries only the UNCORRECTED fused center
+    # (bayes_precision_fusion_anchor_value_c above), so two rows fitted under different 6h
+    # windows — different shift, different served center, different q — would hash
+    # identically without this. The hash is consumed as a dedup key
+    # (scripts/fit_sigma_tau_calibration.py:344 dedup_key, :416 dedup) and as part of the
+    # bound-posterior identity (src/engine/event_reactor_adapter.py:38207, :38643, :39795),
+    # so an unmoved hash would let a stale-shift row stand in for a refitted one.
+    # KEY PRESENT ONLY WHEN THE SHIFT ACTUALLY FIRED, matching the staleness-inflation
+    # invariant at :4104: a fail-open row (LOW, thin evidence, unreadable fit) must hash
+    # byte-identically to the same row before this change, or deploying the correction
+    # would churn the identity of every row it does not touch.
+    if _center_debias_param_hash:
+        posterior_config["center_debias_param_hash"] = _center_debias_param_hash
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
     # FIX 5 (2026-06-09) — capture-status provenance (recording only; the FIX-1 live gate is the
@@ -7018,8 +7064,12 @@ def _compute_posterior_payload(
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
-        # Current fused center; historical residual fitting may grade this row
-        # offline but cannot feed back into the decision-time probability.
+        # THE UNCORRECTED FUSED CENTER, deliberately. This field is the residual
+        # basis src/calibration/center_debias_live_fit.py fits on; storing the
+        # de-biased center here instead would make the next fit measure an
+        # already-corrected error, drive the shift to zero, and silently unwind
+        # the correction. The shift lives beside it in ``center_debias_c``, so the
+        # served center is reconstructible as the sum of the two.
         "anchor_value_c": _prov_anchor_value_c,
         "center_debias_c": _center_debias_c,
         "center_debias_param_hash": _center_debias_param_hash,
