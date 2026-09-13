@@ -5595,3 +5595,236 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     assert cycle_advance._day0_bridge_status_retryable(
         "SAME_CYCLE_RECOMPUTE_RETRY_PENDING"
     ) is True
+
+
+def _near_dated_priority(paths, payloads, *, now_utc):
+    """Rank generic-band requests with no capital, scope, or held claim."""
+
+    return materialization_queue._cycle_advance_seed_priority_map(
+        None,
+        paths,
+        payloads,
+        current_money_risk=frozenset(),
+        current_global_scope=frozenset(),
+        now_utc=now_utc,
+    )
+
+
+def _generic_band_payload(city, target_date, *, computed_at):
+    return {
+        "city": city,
+        "target_date": target_date,
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-09-13T06:00:00+00:00",
+        "computed_at": computed_at,
+    }
+
+
+def test_near_dated_refresh_leads_far_lead_refresh_in_generic_band(tmp_path) -> None:
+    """A same-day family must not inherit the whole far-lead backlog."""
+    day0_path = tmp_path / "day0.json"
+    day6_path = tmp_path / "day6.json"
+    for path in (day0_path, day6_path):
+        path.write_text("{}", encoding="utf-8")
+    # The Day6 request is OLDER, so FIFO alone would rank it first.
+    payloads = {
+        day6_path: _generic_band_payload(
+            "Miami", "2026-09-19", computed_at="2026-09-13T06:10:00+00:00"
+        ),
+        day0_path: _generic_band_payload(
+            "Miami", "2026-09-13", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+    }
+    now = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+
+    priority = _near_dated_priority(
+        (day6_path, day0_path), payloads, now_utc=now
+    )
+
+    ordered = sorted(
+        (day6_path, day0_path),
+        key=lambda path: materialization_queue._cycle_advance_file_sort_key(
+            path, priority
+        ),
+    )
+    assert ordered[0] == day0_path
+    assert priority[day0_path.name][0] < priority[day6_path.name][0]
+    # Only the fixed near-dated lead separates them; the band is unchanged.
+    assert priority[day6_path.name][0] - priority[day0_path.name][0] == (
+        materialization_queue._NEAR_DATED_TIER_LEAD
+    )
+
+
+def test_near_dated_window_is_city_local_not_utc(tmp_path) -> None:
+    """The window follows the city's own calendar, not the UTC date.
+
+    At 2026-09-13T23:00Z Tokyo is already on 09-14 local while the UTC date is
+    still 09-13, so the two calendars disagree in both directions. Both cases
+    below are ranked wrongly by a UTC comparison:
+
+      * Tokyo 09-15 is Tokyo's local tomorrow, so it is near-dated, yet it sits
+        outside the UTC window [09-13, 09-14].
+      * Tokyo 09-13 is already yesterday in Tokyo, so it must NOT be promoted,
+        yet it is the UTC "today".
+    """
+    tomorrow_path = tmp_path / "tokyo_local_tomorrow.json"
+    yesterday_path = tmp_path / "tokyo_local_yesterday.json"
+    for path in (tomorrow_path, yesterday_path):
+        path.write_text("{}", encoding="utf-8")
+    payloads = {
+        tomorrow_path: _generic_band_payload(
+            "Tokyo", "2026-09-15", computed_at="2026-09-13T23:00:00+00:00"
+        ),
+        yesterday_path: _generic_band_payload(
+            "Tokyo", "2026-09-13", computed_at="2026-09-13T23:00:00+00:00"
+        ),
+    }
+    now = datetime(2026, 9, 13, 23, tzinfo=timezone.utc)
+
+    priority = _near_dated_priority(
+        (tomorrow_path, yesterday_path), payloads, now_utc=now
+    )
+
+    assert priority[tomorrow_path.name][0] < priority[yesterday_path.name][0]
+    assert priority[yesterday_path.name][0] - priority[tomorrow_path.name][0] == (
+        materialization_queue._NEAR_DATED_TIER_LEAD
+    )
+
+
+def test_near_dated_lead_never_overtakes_a_named_tier(tmp_path) -> None:
+    """Being same-day is weaker than current capital or auction scope."""
+    day0_path = tmp_path / "day0.json"
+    scoped_path = tmp_path / "scoped.json"
+    for path in (day0_path, scoped_path):
+        path.write_text("{}", encoding="utf-8")
+    payloads = {
+        day0_path: _generic_band_payload(
+            "Miami", "2026-09-13", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+        scoped_path: _generic_band_payload(
+            "Tokyo", "2026-09-19", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+    }
+    now = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+
+    priority = materialization_queue._cycle_advance_seed_priority_map(
+        None,
+        (day0_path, scoped_path),
+        payloads,
+        current_money_risk=frozenset(),
+        # The far-lead Tokyo family is in this epoch's auction scope.
+        current_global_scope=frozenset({("Tokyo", "2026-09-19", "high")}),
+        now_utc=now,
+    )
+
+    assert priority[scoped_path.name][0] < priority[day0_path.name][0]
+
+
+def test_named_tier_is_not_shifted_by_being_near_dated(tmp_path) -> None:
+    """The lead applies to the generic band only, never to a named tier.
+
+    A same-day family that ALSO holds a named claim keeps that tier's exact
+    value. Subtracting the lead there would move a money-risk or auction-scope
+    request off its own rung and reorder it against its stale-cycle sibling.
+    """
+    scoped_path = tmp_path / "scoped_day0.json"
+    generic_path = tmp_path / "generic_day0.json"
+    for path in (scoped_path, generic_path):
+        path.write_text("{}", encoding="utf-8")
+    payloads = {
+        scoped_path: _generic_band_payload(
+            "Miami", "2026-09-13", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+        generic_path: _generic_band_payload(
+            # At 16:00Z Tokyo is already on 09-14, which is its local today.
+            "Tokyo", "2026-09-14", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+    }
+    now = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+
+    priority = materialization_queue._cycle_advance_seed_priority_map(
+        None,
+        (scoped_path, generic_path),
+        payloads,
+        current_money_risk=frozenset(),
+        # Miami is same-day AND in auction scope: base_tier -1.5 -> tier -3.0.
+        current_global_scope=frozenset({("Miami", "2026-09-13", "high")}),
+        now_utc=now,
+    )
+
+    assert priority[scoped_path.name][0] == -3.0
+    # Tokyo is same-day with no named claim, so it alone takes the lead.
+    assert priority[generic_path.name][0] == 2 - (
+        materialization_queue._NEAR_DATED_TIER_LEAD
+    )
+
+
+def test_near_dated_window_excludes_day_two(tmp_path) -> None:
+    """The window is today and tomorrow; a Day2 target is ordinary work."""
+    day1_path = tmp_path / "day1.json"
+    day2_path = tmp_path / "day2.json"
+    for path in (day1_path, day2_path):
+        path.write_text("{}", encoding="utf-8")
+    payloads = {
+        day1_path: _generic_band_payload(
+            "Miami", "2026-09-14", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+        day2_path: _generic_band_payload(
+            "Miami", "2026-09-15", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+    }
+    # 12:00Z is 08:00 local in Miami, so 09-13 is its local today.
+    now = datetime(2026, 9, 13, 12, tzinfo=timezone.utc)
+
+    priority = _near_dated_priority((day1_path, day2_path), payloads, now_utc=now)
+
+    assert priority[day1_path.name][0] == 2 - (
+        materialization_queue._NEAR_DATED_TIER_LEAD
+    )
+    assert priority[day2_path.name][0] == 2
+
+
+def test_unknown_city_timezone_keeps_its_existing_order(tmp_path) -> None:
+    """An unconfigured city proves nothing about its local day."""
+    unknown_path = tmp_path / "unknown.json"
+    far_path = tmp_path / "far.json"
+    for path in (unknown_path, far_path):
+        path.write_text("{}", encoding="utf-8")
+    payloads = {
+        unknown_path: _generic_band_payload(
+            "Atlantis", "2026-09-13", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+        far_path: _generic_band_payload(
+            "Miami", "2026-09-19", computed_at="2026-09-13T12:00:00+00:00"
+        ),
+    }
+    now = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+
+    priority = _near_dated_priority(
+        (unknown_path, far_path), payloads, now_utc=now
+    )
+
+    assert priority[unknown_path.name][0] == priority[far_path.name][0]
+
+
+def test_near_dated_lead_does_not_collide_with_an_existing_tier(tmp_path) -> None:
+    """The lead must interleave the ladder, never land on an occupied rung.
+
+    Tiers are ``base_tier * 2 + int(older_queued_cycle)``, optionally minus the
+    0.5 fresh-Day0-print nudge, so the generic band already occupies every 0.5
+    step. A 0.5 lead would put a near-dated request on a rung a generic request
+    can also hold, making their relative order depend on the filename tiebreak
+    instead of on lead time. Pin the property rather than the constant.
+    """
+    lead = materialization_queue._NEAR_DATED_TIER_LEAD
+    assert 0.0 < lead < 0.5
+
+    held_tiers = {0 * 2 + older - nudge for older in (0, 1) for nudge in (0.0, 0.5)}
+    generic_tiers = {1 * 2 + older - nudge for older in (0, 1) for nudge in (0.0, 0.5)}
+    near_dated_tiers = {tier - lead for tier in generic_tiers}
+
+    assert not near_dated_tiers & (generic_tiers | held_tiers)
+    # Every near-dated request still leads its own generic counterpart, and
+    # still yields to every held-position rung.
+    assert min(near_dated_tiers) > max(held_tiers)
+    assert max(near_dated_tiers) < max(generic_tiers)

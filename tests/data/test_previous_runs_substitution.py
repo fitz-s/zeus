@@ -1878,9 +1878,15 @@ def test_cycle_priority_does_not_promote_expired_or_stale_baseline_day0(
         now_utc=datetime(2026, 8, 23, 9, 10, tzinfo=timezone.utc),
     )
 
-    assert priority[expired.name][0] == 2
-    assert priority[stale_baseline.name][0] == 2
-    assert priority[current.name][0] == 1.5
+    # Madrid is on its local target date at 09:10Z, so all three requests are
+    # near-dated and share that tier lead. What must hold is the separation:
+    # only the fresh-print row earns the extra rung, and the expired and
+    # stale-baseline rows stay together behind it.
+    assert priority[expired.name][0] == priority[stale_baseline.name][0]
+    assert priority[current.name][0] < priority[expired.name][0]
+    assert priority[expired.name][0] - priority[current.name][0] == (
+        0.5 - queue_mod._NEAR_DATED_TIER_LEAD
+    )
 
 
 def test_cycle_priority_selects_newest_queued_source_cycle_within_tier(tmp_path) -> None:

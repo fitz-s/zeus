@@ -1993,6 +1993,69 @@ def _is_own_clock_station_input_revision(
     )
 
 
+def _city_local_today(city_name: str, now_utc: datetime) -> date | None:
+    """Today in the city's settlement calendar, or None when it is unknown."""
+
+    from src.config import runtime_cities_by_name  # noqa: PLC0415
+    from src.engine.time_context import city_local_date_at  # noqa: PLC0415
+
+    city = runtime_cities_by_name().get(city_name)
+    if city is None or not city.timezone:
+        return None
+    try:
+        return city_local_date_at(city.timezone, now_utc)
+    except (KeyError, ValueError):
+        return None
+
+
+def _is_near_dated_target_day(
+    *,
+    city_name: str,
+    target_day: date | None,
+    now_utc: datetime,
+    local_today_cache: dict[str, date | None],
+) -> bool:
+    """Whether this target date is the city's own today or tomorrow.
+
+    Day0 is a city-local fact: at 2026-09-13T23:00Z Tokyo is already on the
+    14th while Los Angeles is still on the 13th, so a UTC date comparison
+    mislabels a genuine Day0 family on part of the fleet at any instant. An
+    unknown city or timezone proves nothing about the local day, so it is not
+    promoted and keeps the exact ordering it has today.
+    """
+
+    if target_day is None:
+        return False
+    if city_name not in local_today_cache:
+        local_today_cache[city_name] = _city_local_today(city_name, now_utc)
+    local_today = local_today_cache[city_name]
+    if local_today is None:
+        return False
+    return local_today <= target_day <= local_today + timedelta(days=1)
+
+
+# Day0/Day1 refreshes sorted at the generic `base_tier = 1` alongside Day2-6
+# work, so a same-day family inherited the whole fleet-wide backlog: a median
+# 72 min of REPLACEMENT_RAW_INPUT_HWM entry-ineligibility after every provider
+# cycle (T-hwmdrain §4). This subtracts a fixed nudge inside the generic band
+# so a near-dated refresh leads a far-lead one. It reorders the same claimed
+# queue and admits no extra work.
+#
+# The ladder is `base_tier * 2 + int(older_queued_cycle)`, optionally minus the
+# 0.5 fresh-Day0-print nudge below, giving occupied tiers at every 0.5 step:
+# held {0, 0.5, 1}, generic {1.5, 2, 2.5, 3}. A 0.5 lead would therefore
+# collide (near-dated 1.5 lands exactly on generic's fresh-print 1.5, and its
+# stale sibling 2.5 on generic's stale fresh-print), and no base strictly
+# between held and generic exists at all, since those two bases are adjacent.
+# 0.25 collides with nothing: near-dated occupies {1.75, 2.75}, interleaved
+# below each generic counterpart and still behind every held-position tier.
+# The lead is also exclusive with the fresh-print rung rather than stacked on
+# it, so a print keeps its full separation from its own stale siblings. Every
+# pre-existing tier, including the money-risk/global-scope overlaps, is left
+# exactly where it is.
+_NEAR_DATED_TIER_LEAD = 0.25
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
@@ -2196,6 +2259,7 @@ def _cycle_advance_seed_priority_map(
         for scope, names in names_by_scope.items()
         if any(name in current_baseline_names for name in names)
     }
+    local_today_by_city: dict[str, date | None] = {}
     for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
         try:
@@ -2221,6 +2285,15 @@ def _cycle_advance_seed_priority_map(
             and scope_cycle < latest_cycle
         )
         tier = base_tier * 2 + int(older_queued_cycle)
+        near_dated_lead = (
+            base_tier == 1
+            and _is_near_dated_target_day(
+                city_name=fam_scope[0],
+                target_day=target_day,
+                now_utc=priority_now,
+                local_today_cache=local_today_by_city,
+            )
+        )
         for name in names:
             payload = payload_by_name[name]
             current_day0_identity = (
@@ -2281,6 +2354,16 @@ def _cycle_advance_seed_priority_map(
                     f"{inverse_observation_clock:018d}|{request_time}"
                 )
                 priority_tier = tier - 0.5
+            elif near_dated_lead:
+                # Only the generic band is reordered, and only for a request
+                # that did not already earn the fresh-print rung above: that
+                # rung is a strictly stronger claim on the same tier, so
+                # stacking both leads would pull the two together instead of
+                # keeping the print ahead. Every named tier also encodes a
+                # stronger claim (current capital, auction scope, never-priced,
+                # held marker), so a near-dated refresh must not overtake one
+                # merely by being same-day.
+                priority_tier = tier - _NEAR_DATED_TIER_LEAD
             else:
                 priority_tier = tier
             if current_debt_day0:
