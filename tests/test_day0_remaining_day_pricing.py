@@ -171,7 +171,13 @@ def test_day0_causal_bundle_binds_vector_and_observation_context() -> None:
     assert validation.receipt()["actual_bundle_identity"] == actual["bundle_identity"]
 
 
-def _capture_equivalence_fixture(*, changed_payload: bool = False, changed_run: bool = False):
+def _capture_equivalence_fixture(
+    *,
+    changed_payload: bool = False,
+    changed_run: bool = False,
+    window_shift_hours: int = 0,
+    disjoint_window: bool = False,
+):
     import src.data.day0_hourly_vectors as hourly
 
     conn = _conn()
@@ -181,8 +187,25 @@ def _capture_equivalence_fixture(*, changed_payload: bool = False, changed_run: 
     cycle = "2026-06-10T00:00:00+00:00"
     endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
 
+    def _current_times_and_temps() -> tuple[list[str], list[float]]:
+        # A wall-clock-rolling capture window (past_hours/forecast_hours, no
+        # pinned date range) means a later recapture of the identical
+        # provider cycle is index-shifted rather than byte-identical, even
+        # though every shared hour still agrees exactly.
+        if disjoint_window:
+            hours = range(100, 124)
+        else:
+            hours = range(window_shift_hours, window_shift_hours + 24)
+        return (
+            [f"2026-06-10T{hour:02d}:00" for hour in hours],
+            [18.0 + hour * 0.1 for hour in hours],
+        )
+
     def insert(vector_id: str, captured: str, request_hash: str, *, current: bool = False):
-        row_temps = list(temps)
+        if current and (window_shift_hours or disjoint_window):
+            row_times, row_temps = _current_times_and_temps()
+        else:
+            row_times, row_temps = list(times), list(temps)
         if current and changed_payload:
             row_temps[8] += 1.0
         run_id = "openmeteo:icon_d2:2026-06-10T00:00:00+00:00"
@@ -238,7 +261,7 @@ def _capture_equivalence_fixture(*, changed_payload: bool = False, changed_run: 
                 "openmeteo",
                 endpoint,
                 request_hash,
-                json.dumps(times),
+                json.dumps(row_times),
                 json.dumps(row_temps),
                 json.dumps(meta, sort_keys=True),
             ),
@@ -400,6 +423,101 @@ def test_day0_v1_capture_equivalence_rejects_payload_or_issue_change(
         "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH",
         "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PROVIDER_BINDING_INVALID",
     }
+
+
+def test_day0_v1_capture_equivalence_accepts_window_slid_recapture_with_equal_overlap():
+    # A wall-clock-rolling capture window (past_hours/forecast_hours, no
+    # pinned date range) makes a later recapture of the identical provider
+    # cycle index-shifted rather than byte-identical, even though every
+    # shared hour agrees exactly. Raw tuple equality falsely rejects this;
+    # timestamp-aligned comparison must accept it.
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(window_shift_hours=2)
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is True
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENT"
+
+
+def test_day0_v1_capture_equivalence_rejects_disagreement_on_a_shared_timestamp():
+    # Same window-shifted shape as the accept case, but one overlapping hour
+    # genuinely differs: that must still be a PAYLOAD_MISMATCH.
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(window_shift_hours=2, changed_payload=True)
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is False
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"
+    # window_shift_hours=2 shifts the current row's index 8 (mutated by
+    # changed_payload) to hour 2+8=10, which is still inside the expected
+    # row's shared hour range (0-23).
+    assert proof["first_disagreeing_timestamp"] == "2026-06-10T10:00"
+
+
+def test_day0_v1_capture_equivalence_rejects_disjoint_timestamps_fail_closed():
+    # Zero timestamp overlap must never be treated as vacuously equivalent.
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(disjoint_window=True)
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is False
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"
+    assert proof["shared_timestamp_count"] == 0
+    assert proof["first_disagreeing_timestamp"] is None
 
 
 def _bundle_wide_request_params_json(*, own_run: str, sibling_run: str) -> str:

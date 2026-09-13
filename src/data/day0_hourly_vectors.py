@@ -885,12 +885,34 @@ def prove_day0_causal_capture_equivalence(
         for model in expected_rows:
             expected_row = expected_rows[model]
             current_row = current_rows[model]
-            if (
+            identity_mismatch = (
                 expected_row["model"], expected_row["city"], expected_row["target_date"], expected_row["timezone_name"]
             ) != (
                 current_row["model"], current_row["city"], current_row["target_date"], current_row["timezone_name"]
-            ) or expected_row["times"] != current_row["times"] or expected_row["temps_c"] != current_row["temps_c"]:
-                return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH", "model": model}
+            )
+            # The underlying capture for non-single_runs endpoints is a
+            # wall-clock-rolling window (past_hours/forecast_hours, no pinned
+            # date range), so two recaptures of the same provider cycle are
+            # index-shifted even when every shared hour agrees exactly. Align
+            # by timestamp label and require exact value equality on the
+            # intersection; an empty intersection stays a mismatch (fail
+            # closed) rather than being treated as vacuously equivalent.
+            expected_series = dict(zip(expected_row["times"], expected_row["temps_c"]))
+            current_series = dict(zip(current_row["times"], current_row["temps_c"]))
+            shared_times = sorted(expected_series.keys() & current_series.keys())
+            first_disagreement = next(
+                (t for t in shared_times if expected_series[t] != current_series[t]),
+                None,
+            )
+            payload_mismatch = not shared_times or first_disagreement is not None
+            if identity_mismatch or payload_mismatch:
+                return {
+                    "ok": False,
+                    "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH",
+                    "model": model,
+                    "shared_timestamp_count": len(shared_times),
+                    "first_disagreeing_timestamp": first_disagreement,
+                }
             if _day0_json_hash(expected_row["semantic_meta"]) != _day0_json_hash(current_row["semantic_meta"]):
                 return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH", "model": model}
         return {
