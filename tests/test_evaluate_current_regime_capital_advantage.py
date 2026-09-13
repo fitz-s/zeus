@@ -11,7 +11,7 @@ import base64
 import json
 import sqlite3
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1847,6 +1847,7 @@ def test_hold_receipt_scan_frontier_round_trips_and_resumes():
         conn, forecasts, as_of=as_of
     )
     assert first["receipt_scan_frontier"] == {
+        "as_of": as_of.isoformat(),
         "max_decision_log_id": 8,
         "frontier_mode": "global_single_order_auction",
         "frontier_timestamp": "2026-08-13T00:00:00+00:00",
@@ -2022,6 +2023,79 @@ def test_hold_receipt_scan_regrades_a_rewritten_coverage_blob():
     assert evaluator._canonical_json_bytes(
         resumed
     ) == evaluator._canonical_json_bytes(walked)
+
+
+def test_hold_receipt_frontier_from_a_later_as_of_forces_a_full_walk():
+    conn = _hold_receipt_scan_fixture()
+    forecasts = _hold_settlement_forecasts()
+    later = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    earlier = later - timedelta(days=1)
+
+    # A receipt whose timestamp sits between the two runs' cutoffs, at an id
+    # BELOW the frontier: out of window at the later as_of (cutoff 2026-08-16),
+    # in window at the earlier one (cutoff 2026-08-15).  Naming survivors is
+    # only complete while as_of advances.  Its decision_at is later than the
+    # frontier row's, so admitting it changes which receipt wins the position --
+    # the divergence is visible in the graded curve, not just in the id list.
+    conn.execute(
+        "UPDATE decision_log SET mode=?,timestamp=?,artifact_json=? WHERE id=4",
+        (
+            "global_single_order_auction",
+            "2026-08-15T00:00:00+00:00",
+            json.dumps(
+                {
+                    "summary": _hold_coverage_summary(
+                        "position-hold",
+                        decision_at="2026-08-13T12:00:00+00:00",
+                    )
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        "UPDATE decision_log SET timestamp=? WHERE id=8",
+        ("2026-09-19T00:00:00+00:00",),
+    )
+
+    at_later = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=later
+    )
+    assert at_later["receipt_scan_frontier"]["as_of"] == later.isoformat()
+    # id 4 is out of window at the later as_of, so it was never named.
+    assert at_later["receipt_scan_frontier"]["candidate_decision_log_ids"] == [8]
+
+    # Resuming that artifact at the EARLIER as_of must not trust it: the
+    # widened window admits id 4, which the named-id re-read would never visit.
+    resumed = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=earlier, prior=at_later
+    )
+    walked = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=earlier
+    )
+    assert walked["receipt_scan_frontier"]["candidate_decision_log_ids"] == [4, 8]
+    assert walked["curve"][0]["global_auction_decision_log_id"] == 4
+    assert at_later["curve"][0]["global_auction_decision_log_id"] == 8
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(walked)
+
+    # A frontier with no recorded as_of is likewise not trusted.
+    legacy = json.loads(json.dumps(at_later))
+    del legacy["receipt_scan_frontier"]["as_of"]
+    walked_legacy = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=earlier, prior=legacy
+    )
+    assert evaluator._canonical_json_bytes(
+        walked_legacy
+    ) == evaluator._canonical_json_bytes(walked)
+
+    # An equal as_of still resumes -- the guard refuses only a LATER one.
+    same = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=later, prior=at_later
+    )
+    assert evaluator._canonical_json_bytes(
+        same
+    ) == evaluator._canonical_json_bytes(at_later)
 
 
 def test_prior_hold_settlement_quality_missing_or_invalid_means_full_walk(tmp_path):

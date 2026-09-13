@@ -148,6 +148,21 @@ is what makes departures exact: a row that retention deleted, or that the
 advancing cutoff pushed out of window, simply fails the predicate and drops out
 of the resumed run exactly as it drops out of a full one.
 
+That monotonicity is a property of **advancing** `as_of`, not of the artifact,
+so the frontier records the `as_of` it was computed under and the verifier
+refuses a prior recorded at a **later** `as_of`. `evaluate(as_of=...)` is public
+and a replay or backfill caller can hand it the live artifact, so this is
+reachable: a run at an earlier `as_of` widens the window's lower end and newly
+admits rows whose `timestamp` lands in the opened interval at an id at or below
+the frontier. Those rows were never named, and neither the named-id re-read nor
+the `id > frontier` walk would visit them, so that run walks in full. A frontier
+with no recorded `as_of` is likewise not trusted. Regression:
+`test_hold_receipt_frontier_from_a_later_as_of_forces_a_full_walk`, which fails
+with the guard removed (the resumed run grades receipt 8 where a full walk
+grades receipt 4). Found by review R-E2 on `acbe2ba96` and fixed in the
+follow-up commit; the sibling `_verified_prior_exit_scan_frontier` records
+`as_of` for the same reason.
+
 The frontier names **rows, never grades**. Every named row's `artifact_json` is
 re-read, its coverage blob re-decompressed, re-hashed against
 `holding_auction_coverage_sha256`, re-checked by
@@ -173,6 +188,17 @@ committed), one `as_of`, `_canonical_json_bytes` over the whole hop output:
 `BYTE_EQUALITY: identical = true`. `BYTE_EQUALITY_2ND_HOP: identical = true` —
 resuming from a resumed artifact reproduces the full walk exactly, so the
 frontier does not decay across chained runs.
+
+Re-proved after the `as_of` guard landed, since it sits on the resume path
+(fresh snapshot, so different absolute numbers and a different window):
+
+| run | wall time | candidates | bytes |
+| --- | --- | --- | --- |
+| full walk (`prior=None`) | 64.699 s | 87 | 1,316 |
+| incremental (`prior=` the full walk's output) | 2.857 s | 87 | 1,316 |
+| incremental again (`prior=` the incremental output) | 2.374 s | 87 | 1,316 |
+
+`BYTE_EQUALITY: identical = true`, `BYTE_EQUALITY_2ND_HOP: identical = true`.
 
 Cross-`as_of`, which is the actual daemon path (the prior artifact is always
 from an earlier cycle):

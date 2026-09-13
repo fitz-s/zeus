@@ -2344,20 +2344,38 @@ resumed run exactly as it drops out of a full one.
 def _verified_prior_hold_receipt_scan(
     conn: sqlite3.Connection,
     prior: Mapping[str, object] | None,
+    *,
+    as_of: datetime,
 ) -> tuple[int, tuple[int, ...]] | None:
     """Return the prior run's (scanned frontier id, candidate ids), or None.
 
     The candidate list is the prior run's answer to "which decision_log rows in
     the receipt tail carry a schema-22 holding coverage blob".  It is trusted
-    only when the row still sitting at the recorded frontier ``id`` carries the
+    only when two things hold.
+
+    First, the row still sitting at the recorded frontier ``id`` must carry the
     recorded ``mode`` and ``timestamp``: ``decision_log`` is append-only under
     ``id INTEGER PRIMARY KEY AUTOINCREMENT`` (the sole writer is
     ``src/state/decision_chain.py``, which only ever ``INSERT``s and retention-
     ``DELETE``s -- no statement in ``src/`` or ``scripts/`` rewrites
     ``artifact_json``, ``mode`` or ``timestamp``), so a matching identity at the
-    frontier proves the ids at or below it still name the same rows.  No prior,
-    a malformed entry, a candidate above its own frontier, or a different
-    identity at the frontier means a full walk.
+    frontier proves the ids at or below it still name the same rows.
+
+    Second, the recorded ``as_of`` must not be later than this run's.  Naming
+    the prior run's survivors is only complete while the scanned set shrinks,
+    and the window's lower bound is ``as_of - WINDOW_DAYS``: a run at an
+    EARLIER ``as_of`` widens the window backwards and newly admits rows whose
+    ``timestamp`` falls in the opened interval and whose ``id`` is at or below
+    the frontier -- rows no prior run ever named, which neither the named-id
+    re-read nor the ``id > frontier`` walk would visit.  ``evaluate(as_of=...)``
+    is public and replay or backfill callers can hand this an artifact from a
+    later clock, so that run must walk in full.  The sibling
+    :func:`_verified_prior_exit_scan_frontier` records ``as_of`` for the same
+    reason.
+
+    No prior, a malformed entry, a candidate above its own frontier, a
+    different identity at the frontier, or a prior ``as_of`` ahead of this run
+    means a full walk.
     """
 
     if not isinstance(prior, Mapping):
@@ -2369,12 +2387,15 @@ def _verified_prior_hold_receipt_scan(
         frontier_id = int(frontier["max_decision_log_id"])
         frontier_mode = str(frontier["frontier_mode"])
         frontier_timestamp = str(frontier["frontier_timestamp"])
+        frontier_as_of = _parse_aware(frontier["as_of"])
         candidates = tuple(
             int(value) for value in frontier["candidate_decision_log_ids"]
         )
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
     if frontier_id <= 0 or not frontier_mode or not frontier_timestamp:
+        return None
+    if frontier_as_of > as_of:
         return None
     if any(value <= 0 or value > frontier_id for value in candidates):
         return None
@@ -2427,13 +2448,16 @@ def _held_to_binary_settlement_quality(
         *GLOBAL_AUCTION_RECEIPT_MODES,
         CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     )
-    prior_scan = _verified_prior_hold_receipt_scan(conn, prior)
+    prior_scan = _verified_prior_hold_receipt_scan(conn, prior, as_of=as_of)
     # Both bounds of the shipped window are monotone non-decreasing in as_of:
     # the id floor rises with MAX(id) and the timestamp cutoff rises with
     # as_of, so a row can only ever leave this set, never re-enter it.  That is
     # why naming the prior run's survivors is complete -- no unscanned row
     # below the frontier can become eligible later -- and why re-applying the
     # predicate to each named id is exact: a row that left drops out here.
+    # Monotonicity is a property of advancing as_of, not of the artifact, so
+    # the verifier above refuses a prior recorded at a LATER as_of: walking
+    # backwards reopens the window's lower end over rows no prior run named.
     # id<=frontier is free inside evaluate()'s read snapshot (MAX(id) and the
     # scan see the same pages) and it keeps the recorded frontier honest.
     if prior_scan is not None and prior_scan[0] <= max_decision_log_id:
@@ -2478,6 +2502,7 @@ def _held_to_binary_settlement_quality(
             ),
         ).fetchall()
     receipt_scan_frontier = {
+        "as_of": as_of.isoformat(),
         "max_decision_log_id": max_decision_log_id,
         "frontier_mode": str(frontier_row[0]) if frontier_row else "",
         "frontier_timestamp": str(frontier_row[1]) if frontier_row else "",
