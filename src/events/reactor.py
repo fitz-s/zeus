@@ -4298,9 +4298,32 @@ class OpportunityEventReactor:
             )
 
         payload = _payload_dict(event)
+        reason_text = str(reason or "")
+        family_level_all_rejected = reason_text.startswith(
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
+        )
+        family_level_qkernel_no_trade = reason_text.startswith("QKERNEL_SPINE_NO_TRADE:")
+        family_level_no_trade = family_level_all_rejected or family_level_qkernel_no_trade
         qkernel_economics = (
             _qkernel_regret_economics(receipt) if receipt is not None else None
         )
+        # Family-level rejections write one row per candidate below, each with
+        # its OWN trade_score/objective (one bin's cert may be the mean
+        # functional, another's the robust one) -- but every row shares this
+        # single envelope_json string. Materialize the candidate rows now so
+        # the shared envelope can carry a per-candidate objective map instead
+        # of silently applying one candidate's (or no candidate's) objective
+        # to every row.
+        candidate_rows = (
+            _all_candidates_rejected_candidate_rows(receipt, family_reason=reason_text)
+            if family_level_no_trade
+            else []
+        )
+        objective_by_candidate = {
+            str(candidate_row["candidate_id"]): str(candidate_row["objective"])
+            for candidate_row in candidate_rows
+            if candidate_row.get("candidate_id") and candidate_row.get("objective")
+        }
         envelope_json = self._build_regret_envelope_json(
             event,
             stage,
@@ -4309,13 +4332,8 @@ class OpportunityEventReactor:
             decision_time=decision_time,
             payload=payload,
             objective=(qkernel_economics or {}).get("objective"),
+            objective_by_candidate=objective_by_candidate or None,
         )
-        reason_text = str(reason or "")
-        family_level_all_rejected = reason_text.startswith(
-            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
-        )
-        family_level_qkernel_no_trade = reason_text.startswith("QKERNEL_SPINE_NO_TRADE:")
-        family_level_no_trade = family_level_all_rejected or family_level_qkernel_no_trade
         condition_id = _receipt_or_payload(receipt, payload, "condition_id")
         token_id = _receipt_or_payload(receipt, payload, "token_id")
         outcome_label = _receipt_or_payload(receipt, payload, "outcome_label")
@@ -4394,7 +4412,7 @@ class OpportunityEventReactor:
         )
         _edli_note_day0_pause_rejection(event.event_type, reason_text)
         if family_level_no_trade:
-            for candidate_row in _all_candidates_rejected_candidate_rows(receipt, family_reason=reason_text):
+            for candidate_row in candidate_rows:
                 candidate_reason = str(candidate_row["rejection_reason"])
                 self._regret_ledger.insert_idempotent(
                     NoTradeRegretEvent(
@@ -4452,6 +4470,7 @@ class OpportunityEventReactor:
         decision_time: datetime | None,
         payload: dict[str, Any],
         objective: str | None = None,
+        objective_by_candidate: Mapping[str, str] | None = None,
     ) -> str | None:
         """Fail-soft DecisionProvenanceEnvelope JSON for a rejection (operator law 2026-06-11).
 
@@ -4468,6 +4487,13 @@ class OpportunityEventReactor:
         route this rejection concerns (``POSTERIOR_PREDICTIVE_MEAN`` or ``ROBUST``) — a queryable
         marker so a reader can tell which edge the row's ``trade_score`` reflects.
 
+        ``objective_by_candidate`` (family/multi-candidate rejections only) maps each rejected
+        candidate's id to ITS OWN objective. All rows written for one family rejection share this
+        one envelope_json, so when given it overrides ``objective`` with the single agreed value if
+        every candidate shares one objective, or the literal ``"MIXED_PER_CANDIDATE"`` when they
+        disagree — a reader must join a row's own candidate identifier against this map, never trust
+        a bare ``rejection.objective`` on a family row when candidates disagree.
+
         FALLBACK path: receipts without an attached envelope (pre-receipt rejections, foreign
         receipt builders) get the minimal envelope built from what the reactor can reach.
         """
@@ -4480,6 +4506,15 @@ class OpportunityEventReactor:
             rejection = {"stage": stage, "reason": reason}
             if objective is not None:
                 rejection["objective"] = objective
+            if objective_by_candidate:
+                distinct_objectives = {
+                    value for value in objective_by_candidate.values() if value
+                }
+                if len(distinct_objectives) == 1:
+                    rejection["objective"] = next(iter(distinct_objectives))
+                elif len(distinct_objectives) > 1:
+                    rejection["objective"] = "MIXED_PER_CANDIDATE"
+                rejection["objective_by_candidate"] = dict(objective_by_candidate)
 
             if receipt is not None and getattr(receipt, "envelope_json", None):
                 try:
@@ -4755,6 +4790,7 @@ def _all_candidates_rejected_candidate_rows(
             c_cost_95pct = qkernel_economics["c_cost_95pct"]
             candidate_trade_score = qkernel_economics["trade_score"]
             q_live = qkernel_economics["q_live"]
+            candidate_objective = qkernel_economics["objective"]
         else:
             if (
                 trade_score is None
@@ -4768,12 +4804,14 @@ def _all_candidates_rejected_candidate_rows(
             c_cost_95pct = _optional_float(raw.get("c_cost_95pct")) or execution_price
             candidate_trade_score = trade_score
             q_live = _optional_float(raw.get("q_posterior"))
+            candidate_objective = None
         reason = (
             "EVENT_BOUND_CANDIDATE_REJECTED:"
             f"{candidate_missing_reason}:candidate_id={candidate_id}"
         )
         out.append(
             {
+                "candidate_id": candidate_id,
                 "rejection_reason": reason,
                 "family_id": raw.get("family_id"),
                 "condition_id": raw.get("condition_id"),
@@ -4787,6 +4825,7 @@ def _all_candidates_rejected_candidate_rows(
                 "c_cost_95pct": c_cost_95pct,
                 "p_fill_lcb": _optional_float(raw.get("p_fill_lcb")),
                 "trade_score": candidate_trade_score,
+                "objective": candidate_objective,
                 "native_quote_available": _optional_bool(raw.get("native_quote_available")),
                 "executable_snapshot_id": receipt.executable_snapshot_id,
             }

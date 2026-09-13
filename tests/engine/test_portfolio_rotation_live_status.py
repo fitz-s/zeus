@@ -121,6 +121,55 @@ def test_rotation_candidates_bounds_the_index_scan_by_lookback(tmp_path) -> None
     assert progress_calls <= 20
 
 
+def test_rotation_candidates_admits_positive_mean_route_row_excludes_nonpositive_robust_row(
+    tmp_path,
+) -> None:
+    """Pin the live-behavior change from src/events/reactor.py's regret
+    trade_score fix (commit 70ba2e88a): a POSTERIOR_PREDICTIVE_MEAN regret row
+    now carries trade_score = edge_expected instead of edge_lcb, so this SQL
+    gate (``trade_score > 0``) admits a new population of mean-route
+    rejections into portfolio-rotation candidate sourcing that it never saw
+    before. A robust-route row's trade_score is still edge_lcb, unchanged by
+    the fix, and a non-positive value there is still excluded exactly as
+    before.
+    """
+    world_path = tmp_path / "world.db"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    _create_world_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO world.no_trade_regret_events VALUES (
+            'mean-route-positive', 'KELLY', 'KELLY_REJECTED:corr_budget',
+            'Seoul', '2026-06-07', 'high', 'mean-bin', 'buy_no',
+            0.60, 0.50, 1.0, 0.03,
+            'mean-token', 'mean-condition', '2026-06-07T05:00:00+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO world.no_trade_regret_events VALUES (
+            'robust-route-nonpositive', 'KELLY', 'KELLY_REJECTED:corr_budget',
+            'Seoul', '2026-06-07', 'high', 'robust-bin', 'buy_no',
+            0.60, 0.50, 1.0, -0.0016,
+            'robust-token', 'robust-condition', '2026-06-07T05:05:00+00:00'
+        )
+        """
+    )
+
+    candidates, missing = _rotation_candidates(
+        conn,
+        decision_time=datetime(2026, 6, 7, 6, 30, tzinfo=timezone.utc),
+    )
+
+    assert missing == []
+    event_ids = {candidate.event_id for candidate in candidates}
+    assert "mean-route-positive" in event_ids
+    assert "robust-route-nonpositive" not in event_ids
+
+
 def test_portfolio_rotation_evaluation_status_reports_positive_value_without_actuator(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")

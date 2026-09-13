@@ -14666,6 +14666,155 @@ def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
     assert candidate[5:10] == (0.779, 0.748, 0.74962, 0.74962, -0.00162)
 
 
+def test_qkernel_family_rejection_stamps_per_candidate_objective_map_when_candidates_disagree():
+    # All rows written for one family rejection share ONE envelope_json string
+    # (built once from the top-level receipt, before the per-candidate loop),
+    # so a bare rejection.objective cannot reflect two candidates that were
+    # decided by different functionals. This pins the fix: the shared envelope
+    # carries objective_by_candidate (candidate_id -> its own objective) and
+    # sets rejection.objective to "MIXED_PER_CANDIDATE" when they disagree.
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "family_id": "family-beijing",
+            "city": "Beijing",
+            "target_date": "2026-06-26",
+            "metric": "high",
+        }
+    )
+    event = replace(
+        event,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city="Beijing",
+        target_date="2026-06-26",
+        metric="high",
+        family_id="family-beijing",
+        executable_snapshot_id="exec-qkernel",
+        opportunity_book={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-buy-no-33c",
+                    "family_id": "family-beijing",
+                    "condition_id": "condition-33",
+                    "token_id": "no-token-33",
+                    "direction": "buy_no",
+                    "bin_label": "bin-33",
+                    "execution_price": 0.74962,
+                    "q_posterior": 0.8054,
+                    "q_lcb_5pct": 0.773718,
+                    "c_cost_95pct": 0.74962,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": 0.0084,
+                    "native_quote_available": True,
+                    "missing_reason": None,
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                        "route_id": "DIRECT_NO:bin-33@proof",
+                        "payoff_q_point": 0.779,
+                        "payoff_q_lcb": 0.748,
+                        "edge_lcb": -0.00162,
+                        "edge_expected": 0.02938,
+                        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+                        "point_ev": 0.031,
+                        "delta_u_at_min": -0.0004,
+                        "optimal_stake_usd": "0",
+                        "optimal_delta_u": 0.0,
+                        "q_dot_payoff": 0.779,
+                        "cost": 0.74962,
+                    },
+                },
+                {
+                    "candidate_id": "candidate-buy-no-34c",
+                    "family_id": "family-beijing",
+                    "condition_id": "condition-34",
+                    "token_id": "no-token-34",
+                    "direction": "buy_no",
+                    "bin_label": "bin-34",
+                    "execution_price": 0.70000,
+                    "q_posterior": 0.70000,
+                    "q_lcb_5pct": 0.65000,
+                    "c_cost_95pct": 0.70000,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": 0.0050,
+                    "native_quote_available": True,
+                    "missing_reason": None,
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "candidate_id": "NO:bin-34:DIRECT_NO:bin-34@proof",
+                        "route_id": "DIRECT_NO:bin-34@proof",
+                        "payoff_q_point": 0.70000,
+                        "payoff_q_lcb": 0.65000,
+                        "edge_lcb": -0.05000,
+                        "edge_expected": 0.00000,
+                        "global_probability_functional": "LOWER_CVAR_PARAMETER_DRAWS",
+                        "point_ev": 0.0,
+                        "delta_u_at_min": -0.0004,
+                        "optimal_stake_usd": "0",
+                        "optimal_delta_u": 0.0,
+                        "q_dot_payoff": 0.70000,
+                        "cost": 0.70000,
+                    },
+                },
+            ]
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+        receipt=receipt,
+        decision_time=datetime(2026, 6, 25, 5, 24, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT rejection_reason, condition_id, trade_score, envelope_json
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+         ORDER BY rejection_reason
+        """,
+        (event.event_id,),
+    ).fetchall()
+    assert len(rows) == 3
+    candidate_33 = next(row for row in rows if row[1] == "condition-33")
+    candidate_34 = next(row for row in rows if row[1] == "condition-34")
+    family_summary = next(row for row in rows if row[1] is None)
+
+    # Per-candidate trade_score is still correct (this commit's Task 1 fix).
+    assert candidate_33[2] == pytest.approx(0.02938)  # edge_expected, mean route
+    assert candidate_34[2] == pytest.approx(-0.05000)  # edge_lcb, robust route
+
+    # Every row for this family rejection shares one envelope_json, and it
+    # must carry the disagreement rather than silently picking one candidate.
+    for row in (candidate_33, candidate_34, family_summary):
+        materials = json.loads(row[3])
+        assert materials["rejection"]["objective"] == "MIXED_PER_CANDIDATE"
+        objective_by_candidate = materials["rejection"]["objective_by_candidate"]
+        assert objective_by_candidate == {
+            "candidate-buy-no-33c": "POSTERIOR_PREDICTIVE_MEAN",
+            "candidate-buy-no-34c": "ROBUST",
+        }
+
+
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
     conn, store = _store()
     event = _day0_event()

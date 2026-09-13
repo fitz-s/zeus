@@ -359,8 +359,10 @@ def build_decision_provenance_envelope(
     `executable_snapshot_row` is an executable_market_snapshots row (sqlite3.Row / Mapping).
     `economics` carries the decision economics (q_live / q_lcb / price / trade_score / kelly_size_usd).
     `rejection` carries {"stage": ..., "reason": <FULL text, never truncated>, "objective": <optional
-    global_probability_functional that decided the route, when known>} for REJECTED receipts; None /
-    absent for ACCEPTED receipts.
+    global_probability_functional that decided the route, when known; "MIXED_PER_CANDIDATE" for a
+    family rejection whose candidates disagree>, "objective_by_candidate": <optional {candidate_id:
+    objective} map for family/multi-candidate rejections, one envelope shared by several rows>} for
+    REJECTED receipts; None / absent for ACCEPTED receipts.
 
     Returns a dict. NEVER raises: any sub-truth that cannot be assembled becomes an
     "UNAVAILABLE: <why>" string in its slot.
@@ -411,6 +413,9 @@ def build_decision_provenance_envelope(
         objective = rejection.get("objective")
         if objective is not None:
             rejection_field["objective"] = objective
+        objective_by_candidate = rejection.get("objective_by_candidate")
+        if objective_by_candidate is not None:
+            rejection_field["objective_by_candidate"] = objective_by_candidate
 
     envelope: dict[str, Any] = {
         "envelope_version": 1,

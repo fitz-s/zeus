@@ -1241,6 +1241,10 @@ def test_latest_beliefs_dedupe_dynamic_family_hash_by_stable_market_identity():
 
 
 def test_entry_screen_blocks_after_recent_full_economics_negative_until_price_improves():
+    # Paired with test_entry_screen_bypasses_backoff_for_positive_mean_route_trade_score
+    # below: a non-positive trade_score (the ROBUST functional's edge_lcb, or a
+    # mean-route row whose edge_expected itself is <= 0) is still conservative
+    # backoff evidence and must wait for price or belief to improve.
     conn = _mem_world()
     _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
     key = ("Wuhan|2026-06-01|high", "b30", "buy_yes")
@@ -1271,6 +1275,50 @@ def test_entry_screen_blocks_after_recent_full_economics_negative_until_price_im
         conn,
         decision_time="2026-05-31T00:30:00+00:00",
         price_lookup=improved_price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    )
+    assert len(enqueued) == 1
+
+
+def test_entry_screen_bypasses_backoff_for_positive_mean_route_trade_score():
+    """Pin the live-behavior change from src/events/reactor.py's regret
+    trade_score fix (commit 70ba2e88a): a POSTERIOR_PREDICTIVE_MEAN regret row
+    now carries trade_score = edge_expected (payoff_q_point - cost) instead of
+    edge_lcb, so a mean route that was rejected downstream (e.g. by the
+    submit-boundary re-check) but had genuine positive expected edge now reads
+    trade_score > 0 here. _full_economics_reject_still_blocks treats any
+    positive trade_score as "the rejection did not prove non-value" and skips
+    the price/q_lcb-improvement backoff entirely -- re-entry is allowed on the
+    very next screen cycle even with NO price or belief improvement at all.
+    This is the intended semantics ("did the rejection have positive edge
+    under its own deciding objective") but is a materially wider bypass
+    population than before this fix, when almost every mean-route row carried
+    a non-positive edge_lcb and fell into the same backoff path exercised by
+    test_entry_screen_blocks_after_recent_full_economics_negative_until_price_improves
+    above.
+    """
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
+    key = ("Wuhan|2026-06-01|high", "b30", "buy_yes")
+    rejection = {
+        key: cr.FullEconomicsReject(
+            execution_price=cr._all_in_cost(0.70),
+            q_lcb_5pct=0.90,
+            trade_score=0.03,  # edge_expected > 0 for a POSTERIOR_PREDICTIVE_MEAN route
+            created_at="2026-05-31T00:20:00+00:00",
+        )
+    }
+
+    # Same price as the prior rejection, no improvement at all -- the
+    # negative-trade_score sibling test blocks under this exact setup.
+    unchanged_price = {
+        key: cr.PriceQuote(price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"),
+    }
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=unchanged_price,
         min_edge=0.01,
         recent_full_economics_rejections=rejection,
     )
