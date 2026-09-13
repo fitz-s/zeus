@@ -32,6 +32,8 @@ from src.engine.event_reactor_adapter import (
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
+    _durable_live_cap_represented_pairs,
+    _durable_live_cap_usage_is_represented_in_trade_truth,
     _durable_unmaterialized_live_cap_reservations,
     _seed_portfolio_reservations_from_durable_live_cap,
     _snapshot_p_cal,
@@ -4297,6 +4299,270 @@ def test_107_durable_live_cap_seed_query_error_fails_closed():
         _seed_portfolio_reservations_from_durable_live_cap(
             PortfolioReservationLedger(),
             conn,
+        )
+
+
+class _FailOnLiveCapSqlShapeConn:
+    """Forwards execute()/getlimit() to a real conn; raises `error` on one SQL shape.
+
+    ``shape_substrings`` must ALL appear (substring match) in the SQL text for
+    the injected error to fire; every other statement passes through to the
+    real connection unchanged. Mirrors the X-Q fix's
+    ``_FailOnExposureSelectConn``/``_FailOnColumnsProbeConn`` test doubles
+    (test_qkernel_spine_blockers_pr409.py), applied to the durable live-cap
+    trade-truth reads instead of the selection-exposure read.
+    """
+
+    def __init__(self, real_conn, shape_substrings, error):
+        self._real = real_conn
+        self._shapes = shape_substrings
+        self._error = error
+
+    def execute(self, sql, params=()):
+        if all(shape in sql for shape in self._shapes):
+            raise self._error
+        return self._real.execute(sql, params)
+
+    def getlimit(self, category):
+        return self._real.getlimit(category)
+
+
+def _live_cap_trade_truth_venue_commands_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT, decision_id TEXT, state TEXT, intent_kind TEXT,
+            updated_at TEXT, created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-a', 'cmd-a', 'ACKED', 'ENTRY', '1', '1')"
+    )
+    conn.commit()
+    return conn
+
+
+def test_107_durable_live_cap_trade_truth_batch_propagates_held_monitor_interrupt_unwrapped():
+    """A held-position-monitor interrupt() on trade_conn must not become a failure.
+
+    ``_durable_live_cap_represented_pairs`` runs inside
+    ``bounded_work_sqlite(trade_conn, ..., shared_connection=True)``, whose
+    ``_watch_shared`` thread calls ``Connection.interrupt()`` on trade_conn
+    when the held-position monitor reclaims the write path
+    (``_global_auction_monitor_cancellation_probe``). Before this fix, the
+    blanket ``except Exception`` here wrapped the resulting
+    ``sqlite3.OperationalError("interrupted")`` into
+    ``DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE`` — a plain RuntimeError that
+    ``bounded_work_sqlite``'s own ``except sqlite3.OperationalError`` handler
+    can no longer recognize, so it never converts to ``WorkDeferred`` and the
+    whole reactor cycle aborts instead of deferring.
+    """
+    conn = _FailOnLiveCapSqlShapeConn(
+        _live_cap_trade_truth_venue_commands_conn(),
+        ["FROM venue_commands", "ORDER BY updated_at"],
+        sqlite3.OperationalError("interrupted"),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        _durable_live_cap_represented_pairs(conn, [("cmd-a", "family:tok-a")])
+
+
+def test_107_durable_live_cap_trade_truth_batch_still_fails_closed_when_locked_not_interrupted():
+    """A genuine 'database is locked' OperationalError must still fail closed.
+
+    Only the held-position-monitor's Connection.interrupt() signal is a
+    designed preemption. Every other OperationalError must keep raising
+    DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE so live-cap sizing never
+    silently treats exposure ambiguity as "no exposure".
+    """
+    conn = _FailOnLiveCapSqlShapeConn(
+        _live_cap_trade_truth_venue_commands_conn(),
+        ["FROM venue_commands", "ORDER BY updated_at"],
+        sqlite3.OperationalError("database is locked"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:OperationalError:database is locked",
+    ):
+        _durable_live_cap_represented_pairs(conn, [("cmd-a", "family:tok-a")])
+
+
+def _live_cap_trade_truth_position_current_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE position_current (token_id TEXT, chain_shares REAL, phase TEXT)"
+    )
+    conn.commit()
+    return conn
+
+
+def test_107_durable_live_cap_trade_truth_propagates_columns_probe_interrupt_unwrapped():
+    """A held-monitor interrupt landing on the PRAGMA columns probe must also defer, not fail.
+
+    ``_position_current_columns`` (reached via
+    ``_durable_live_cap_token_has_materialized_position``) wraps any
+    exception from its own PRAGMA reads into a plain
+    RuntimeError("OPEN_POSITION_TRUTH_UNAVAILABLE:..."). If the held-position
+    monitor's Connection.interrupt() lands there instead of on a SELECT, the
+    resulting OperationalError must still surface unwrapped (via its
+    __cause__) so bounded_work_sqlite classifies it as a deferral — not a
+    second, unrelated DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE-shaped
+    failure.
+    """
+    conn = _FailOnLiveCapSqlShapeConn(
+        _live_cap_trade_truth_position_current_conn(),
+        ["PRAGMA", "table_info(position_current)"],
+        sqlite3.OperationalError("interrupted"),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        _durable_live_cap_usage_is_represented_in_trade_truth(
+            conn,
+            execution_command_id="",
+            final_intent_id="family:tok-a",
+        )
+
+
+def test_107_durable_live_cap_trade_truth_still_fails_closed_when_columns_probe_locked():
+    """A genuine lock error during the PRAGMA columns probe must still fail closed."""
+    conn = _FailOnLiveCapSqlShapeConn(
+        _live_cap_trade_truth_position_current_conn(),
+        ["PRAGMA", "table_info(position_current)"],
+        sqlite3.OperationalError("database is locked"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:RuntimeError:"
+            "OPEN_POSITION_TRUTH_UNAVAILABLE:OperationalError:database is locked"
+        ),
+    ):
+        _durable_live_cap_usage_is_represented_in_trade_truth(
+            conn,
+            execution_command_id="",
+            final_intent_id="family:tok-a",
+        )
+
+
+class _CancelOnTradeTruthSqlErrorCheckpoint:
+    """WorkContext stand-in that only turns cancelling for one exact checkpoint.
+
+    ``bounded_work_sqlite``'s shared-connection watcher polls
+    ``work_context.checkpoint(f"{stage}:sql_interrupt")`` on a background
+    thread and, on a genuine held-monitor interrupt, races to call
+    ``Connection.interrupt()`` before this function's own query returns --
+    inherently timing-dependent. This double instead deterministically models
+    only the FOREGROUND consequence that matters for this fix: once
+    ``_durable_live_cap_represented_pairs`` propagates an unwrapped
+    ``sqlite3.OperationalError``, ``bounded_work_sqlite``'s
+    ``except sqlite3.OperationalError`` handler synchronously calls
+    ``work_context.checkpoint(f"{stage}:sql_error")`` when ``deferred`` is
+    still empty (see global_auction_universe.py:219-223). Matching only that
+    exact stage -- never the background watcher's ``:sql_interrupt`` stage --
+    proves the seed defers precisely because the raw OperationalError reached
+    this checkpoint, with no reliance on real thread scheduling.
+    """
+
+    def __init__(self, real_context):
+        self._real = real_context
+
+    def remaining(self):
+        return self._real.remaining()
+
+    def checkpoint(self, stage):
+        if stage.endswith(":sql_error") and "trade_truth" in stage:
+            from src.engine.global_auction_universe import (
+                WorkDeferred,
+                WorkDeferredCode,
+            )
+
+            raise WorkDeferred(
+                WorkDeferredCode.PREEMPTED,
+                stage=stage,
+                remaining_s=self.remaining(),
+            )
+        return self._real.checkpoint(stage)
+
+
+def test_107_durable_live_cap_seed_defers_on_held_monitor_trade_truth_interrupt():
+    """End-to-end: a held-monitor interrupt on trade_conn defers the seed, not the cycle.
+
+    Before this fix, _durable_live_cap_represented_pairs caught the
+    held-monitor's sqlite3.OperationalError("interrupted") in its blanket
+    except Exception and wrapped it into
+    RuntimeError("DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:..."). That
+    RuntimeError does not match bounded_work_sqlite's
+    ``except sqlite3.OperationalError`` handler, so it never reaches the
+    ``:sql_error`` checkpoint that would classify it as a deferral -- it
+    propagates straight through as a RuntimeError, and
+    _durable_unmaterialized_live_cap_reservations' outer handler turns it into
+    DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE, aborting the whole reactor
+    cycle. After this fix, the unwrapped OperationalError DOES reach that
+    checkpoint, which the double below turns into WorkDeferred -- the
+    graceful "deferred, retry" path the reactor already has.
+    """
+    from src.engine.global_auction_universe import (
+        WorkContext,
+        WorkDeferred,
+        WorkDeferredCode,
+    )
+
+    conn = _live_cap_seed_conn()
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, reserved_notional_usd, reservation_status,
+            final_intent_id, execution_command_id
+        )
+        VALUES ('usage-x', 'event-x', 5.0, 'RESERVED', 'family:tok-x', 'cmd-x')
+        """
+    )
+    conn.commit()
+
+    trade_conn = _FailOnLiveCapSqlShapeConn(
+        _live_cap_trade_truth_venue_commands_conn(),
+        ["FROM venue_commands", "ORDER BY updated_at"],
+        sqlite3.OperationalError("interrupted"),
+    )
+    context = _CancelOnTradeTruthSqlErrorCheckpoint(
+        WorkContext(deadline_monotonic=None)
+    )
+
+    with pytest.raises(WorkDeferred, match="trade_truth:sql_error"):
+        _durable_unmaterialized_live_cap_reservations(
+            conn,
+            trade_conn=trade_conn,
+            work_context=context,
+        )
+
+
+def test_107_durable_live_cap_seed_still_fails_closed_when_trade_truth_locked():
+    """A genuine trade_conn error must still abort the seed, not defer it."""
+
+    class _LockedTradeConn:
+        def execute(self, sql, params=()):
+            raise sqlite3.OperationalError("database is locked")
+
+    conn = _live_cap_seed_conn()
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, reserved_notional_usd, reservation_status,
+            final_intent_id, execution_command_id
+        )
+        VALUES ('usage-y', 'event-y', 5.0, 'RESERVED', 'family:tok-y', 'cmd-y')
+        """
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE"):
+        _durable_unmaterialized_live_cap_reservations(
+            conn,
+            trade_conn=_LockedTradeConn(),
         )
 
 

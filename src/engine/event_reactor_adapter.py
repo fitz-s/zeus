@@ -4813,7 +4813,27 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
 
         if token and _durable_live_cap_token_has_materialized_position(trade_conn, token):
             return True
+    except sqlite3.OperationalError as exc:
+        # A held-position-monitor Connection.interrupt() on trade_conn (see
+        # _is_held_monitor_interrupt) must propagate UNCHANGED so
+        # bounded_work_sqlite's own OperationalError handler converts it to
+        # WorkDeferred instead of this construction-phase read reporting a
+        # fabricated live-cap failure that aborts the whole reactor cycle.
+        if _is_held_monitor_interrupt(exc):
+            raise
+        raise RuntimeError(
+            f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
+        # _position_current_columns (reached via
+        # _durable_live_cap_token_has_materialized_position) wraps its own
+        # PRAGMA reads into a plain RuntimeError, so a held-monitor interrupt
+        # landing on that probe instead of a SELECT above arrives here as
+        # RuntimeError(...) from the original OperationalError. Unwrap that
+        # cause and propagate IT unchanged, never the wrapper.
+        cause = exc.__cause__
+        if isinstance(cause, sqlite3.OperationalError) and _is_held_monitor_interrupt(cause):
+            raise cause from exc
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
@@ -4970,7 +4990,26 @@ def _durable_live_cap_represented_pairs(
             in _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES
             or token_by_pair[pair] in materialized_tokens
         )
+    except sqlite3.OperationalError as exc:
+        # Same held-monitor Connection.interrupt() signal as
+        # _durable_live_cap_usage_is_represented_in_trade_truth above:
+        # propagate UNCHANGED so bounded_work_sqlite's OperationalError
+        # handler converts it to WorkDeferred instead of this construction-
+        # phase batch read reporting a fabricated live-cap failure.
+        if _is_held_monitor_interrupt(exc):
+            raise
+        raise RuntimeError(
+            f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
+        # _position_current_columns (called directly above) wraps its own
+        # PRAGMA reads into a plain RuntimeError, so a held-monitor interrupt
+        # landing on that probe instead of a SELECT arrives here as
+        # RuntimeError(...) from the original OperationalError. Unwrap that
+        # cause and propagate IT unchanged, never the wrapper.
+        cause = exc.__cause__
+        if isinstance(cause, sqlite3.OperationalError) and _is_held_monitor_interrupt(cause):
+            raise cause from exc
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
