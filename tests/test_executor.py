@@ -2055,6 +2055,195 @@ class TestExecutor:
             "order_type": "GTC",
         }
 
+    def test_reduce_only_exit_persists_certificate_before_venue_call(self, monkeypatch):
+        """Audit spine parity: execute_exit_order must persist exactly one
+        ReduceOnlyExitCertificate, carrying the position identity, BEFORE the
+        venue call — mirroring the entry path's
+        _persist_live_command_certificates_before_executor_submit discipline."""
+        from src.decision_kernel import claims
+
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.persist_signed_identity = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                rows = _TEST_CONN.execute(
+                    "SELECT certificate_type, payload_json FROM decision_certificates"
+                ).fetchall()
+                captured["rows_before_venue_call"] = [
+                    (row["certificate_type"], json.loads(row["payload_json"]))
+                    for row in rows
+                ]
+                return _final_submit_result(self.bound_envelope, order_id="sell-cert-1")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-cert-exit",
+                token_id="yes-token-cert",
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                **_snapshot_kwargs("yes-token-cert"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        assert result.status == "pending"
+        # Exactly one certificate exists, and it was already durable BEFORE
+        # place_limit_order was invoked (ordering, not just eventual presence).
+        assert len(captured["rows_before_venue_call"]) == 1
+        cert_type, payload = captured["rows_before_venue_call"][0]
+        assert cert_type == claims.REDUCE_ONLY_EXIT
+        assert payload["position_id"] == "trade-cert-exit"
+        assert payload["token_id"] == "yes-token-cert"
+        assert payload["side"] == "SELL"
+
+        # And it is still exactly one row after the venue call completes —
+        # no duplicate persisted on the ack path.
+        after_rows = _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM decision_certificates WHERE certificate_type = ?",
+            (claims.REDUCE_ONLY_EXIT,),
+        ).fetchone()[0]
+        assert after_rows == 1
+
+    def test_reduce_only_exit_certificate_persist_failure_does_not_block_submit(
+        self, monkeypatch, caplog
+    ):
+        """A broken audit-spine write must never block a reduce-only exit: the
+        submit still proceeds and reaches the venue, with an ERROR logged."""
+        import logging
+
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.persist_signed_identity = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured["called"] = True
+                return _final_submit_result(self.bound_envelope, order_id="sell-cert-fail-1")
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated certificate ledger failure")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.decision_kernel.ledger.DecisionCertificateLedger.persist_all",
+            _boom,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="src.execution.executor"):
+            result = execute_exit_order(
+                create_exit_order_intent(
+                    trade_id="trade-cert-exit-fail",
+                    token_id="yes-token-cert-fail",
+                    shares=5.0,
+                    current_price=0.50,
+                    best_bid=0.49,
+                    **_snapshot_kwargs("yes-token-cert-fail"),
+                ),
+                conn=_TEST_CONN,
+            )
+
+        assert result.status == "pending"
+        assert captured.get("called") is True
+        assert any(
+            "reduce-only exit certificate persist failed" in record.message
+            for record in caplog.records
+            if record.levelno == logging.ERROR
+        )
+        # No certificate row exists — the failed write never landed — but the
+        # exit itself was not blocked by it (asserted above).
+        after_rows = _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM decision_certificates"
+        ).fetchone()[0]
+        assert after_rows == 0
+
+    def test_reduce_only_exit_certificate_validates_through_shared_verifier(self):
+        """The exit certificate must pass through the same ledger/verifier
+        machinery the entry path's certificates use, not a bespoke check."""
+        from datetime import datetime, timezone as _tz
+
+        from src.decision_kernel import claims
+        from src.decision_kernel.certificates.exit import (
+            build_reduce_only_exit_certificate,
+        )
+        from src.decision_kernel.ledger import DecisionCertificateLedger
+
+        decision_time = datetime.now(_tz.utc)
+        cert = build_reduce_only_exit_certificate(
+            payload={
+                "position_id": "trade-verify-exit",
+                "condition_id": None,
+                "token_id": "yes-token-verify",
+                "side": "SELL",
+                "size": 5.0,
+                "limit_price": 0.5,
+                "exit_reason": "REDUCE_ONLY_EXIT",
+                "monitor_snapshot": {"current_price": 0.5, "best_bid": 0.49, "q_version": None},
+                "command_id": "cmd-verify-1",
+                "decision_id": "decision-verify-1",
+                "order_type": "GTC",
+                "idempotency_key": "idem-verify-1",
+                "decision_time": decision_time.isoformat(),
+            },
+            decision_time=decision_time,
+        )
+        assert cert.certificate_type == claims.REDUCE_ONLY_EXIT
+
+        # persist_all runs the certificate through DecisionCertificateLedger's
+        # own _verify_for_persistence dispatch — the same code path every
+        # entry-side certificate (ACTIONABLE_TRADE, EXECUTION_COMMAND, ...)
+        # is verified through before being written.
+        ledger = DecisionCertificateLedger(_TEST_CONN)
+        ledger.persist_all((cert,))
+
+        row = _TEST_CONN.execute(
+            "SELECT certificate_type, verifier_status, semantic_key FROM decision_certificates "
+            "WHERE certificate_type = ?",
+            (claims.REDUCE_ONLY_EXIT,),
+        ).fetchone()
+        assert row is not None
+        assert row["verifier_status"] == "VERIFIED"
+
     @pytest.mark.parametrize(
         "price,tick,expected",
         [

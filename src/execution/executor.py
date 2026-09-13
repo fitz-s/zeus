@@ -6891,6 +6891,24 @@ def place_sell_order(
     return payload
 
 
+def _exit_reason_for_certificate(intent: "ExitOrderIntent") -> str:
+    """Best-effort exit trigger category for the reduce-only exit certificate.
+
+    ExitOrderIntent carries no single canonical "reason" field; the trigger
+    is implied by which execution authority is attached. Falls back to the
+    generic label when none of the typed authorities are present (e.g. an
+    ordinary held-position monitor SELL with no special authority).
+    """
+    protective = intent.protective_sell_execution_authority
+    if protective is not None:
+        return str(getattr(protective, "kind", "") or "PROTECTIVE_SELL")
+    if intent.global_sell_execution_authority is not None:
+        return "GLOBAL_SELL_AUCTION"
+    if intent.marketable_sell_certificate is not None:
+        return "MARKETABLE_SELL"
+    return "REDUCE_ONLY_EXIT"
+
+
 @capability("reduce_only_exit_submit", lease=True)
 def execute_exit_order(
     intent: ExitOrderIntent,
@@ -7880,6 +7898,59 @@ def execute_exit_order(
                     command_id=command_id,
                     command_state="REJECTED",
                 )
+        # AUDIT SPINE PARITY (wave 5, 2026-09-13): every SELL Zeus places was
+        # invisible to decision_certificates — the entry path persists a
+        # durable certificate before its venue call (see
+        # event_reactor_adapter.py::_persist_live_command_certificates_before_executor_submit)
+        # but execute_exit_order never did, for any day, starving every
+        # after-the-fact evaluator that reads decision_certificates
+        # (capital-evidence, evidence_report, calibration replay) of the
+        # exit half of the trade lifecycle. Mirror that discipline: durable
+        # persist first, then actuate. A reduce-only exit must never be
+        # blocked by audit persistence — a stuck position is a bigger risk
+        # than a missing certificate — so a persist failure here is logged
+        # ERROR and the submit proceeds unchanged.
+        try:
+            from src.decision_kernel.certificates.exit import (
+                build_reduce_only_exit_certificate,
+            )
+            from src.decision_kernel.ledger import DecisionCertificateLedger
+
+            exit_certificate_decision_time = datetime.now(timezone.utc)
+            exit_certificate = build_reduce_only_exit_certificate(
+                payload={
+                    "position_id": intent.trade_id,
+                    "condition_id": None,
+                    "token_id": intent.token_id,
+                    "side": "SELL",
+                    "size": shares,
+                    "limit_price": limit_price,
+                    "exit_reason": _exit_reason_for_certificate(intent),
+                    "monitor_snapshot": {
+                        "current_price": current_price,
+                        "best_bid": best_bid,
+                        "q_version": q_version or None,
+                    },
+                    "command_id": command_id,
+                    "decision_id": effective_decision_id,
+                    "order_type": order_type,
+                    "idempotency_key": idem.value,
+                    "decision_time": exit_certificate_decision_time.isoformat(),
+                },
+                decision_time=exit_certificate_decision_time,
+            )
+            DecisionCertificateLedger(conn).persist_all((exit_certificate,))
+            conn.commit()
+        except Exception:
+            logger.error(
+                "execute_exit_order: reduce-only exit certificate persist "
+                "failed (command_id=%s trade_id=%s) — proceeding with the "
+                "exit; audit spine will show a gap for this SELL",
+                command_id,
+                intent.trade_id,
+                exc_info=True,
+            )
+
         # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
         _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:

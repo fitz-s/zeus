@@ -48,6 +48,7 @@ USER_CHANNEL_TRADE = "UserChannelTradeCertificate"
 RECONCILE = "ReconcileCertificate"
 FILL = "FillCertificate"
 SETTLEMENT = "SettlementCertificate"
+REDUCE_ONLY_EXIT = "ReduceOnlyExitCertificate"
 
 PUBLIC_MARKET_CHANNEL_SOURCE = "PUBLIC_MARKET_CHANNEL"
 
