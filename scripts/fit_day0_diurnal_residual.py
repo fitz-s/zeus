@@ -1,25 +1,68 @@
 #!/usr/bin/env python3
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-04
+# Last reused or audited: 2026-09-13
 # Authority basis: diurnal-residual study 2026-09-04 (scratchpad/diurnal/REPORT.md §5).
 #   Row construction mirrors the study's build_clim.py / build_clim2.py / merge_clim.py;
 #   the histogram cells and shrink constants live with the server in
 #   src/calibration/day0_diurnal_residual.py so fit and serve can never disagree.
+#
+# 2026-09-13: The 48-city migration of settlement_source_type to "noaa"
+#   (config/cities.json, commit 274fe3a4b "restore NOAA city universe") starved this
+#   fitter of training rows for those cities from 2026-09-02 onward: it was hard-pinned
+#   to ``wu_icao_history`` (plus a 4-city ALT_SOURCE_CITIES map) and never followed the
+#   era-aware settlement-station switch to the Ogimet METAR mirror. Row selection is now
+#   config-derived per (city, day) via ``src.data.tier_resolver`` -- the SAME era-aware
+#   routing the observation-instants writer and backfill driver already use -- so a
+#   settlement-authority migration in cities.json is picked up here automatically
+#   instead of requiring a parallel edit to this script's hardcoded pins. The
+#   residual-grid arithmetic also now shares the settlement rounding law
+#   (WMO half-up, ``src.contracts.settlement_semantics``) with the server instead of
+#   Python's banker's ``round()``, which silently disagreed with it at .5 cumulative
+#   values (see module docstring "GRID PRECISION" below).
 """Fit the Day0 diurnal-residual artifact ``state/day0_diurnal_residual.json``.
 
 WHAT IS FITTED. The empirical distribution of D = final_extreme - running_extreme by
 (metric, k = hours-to-peak, NWP-gap band), as raw COUNTS per cell. The artifact stores
-counts, not the 2.2M source records, so the loader reads it in milliseconds; the
+counts, not the source records, so the loader reads it in milliseconds; the
 Empirical-Bayes shrink is applied at serve time from those counts.
 
-ROW SOURCE, per city, one hourly ledger family:
-  * ``observation_instants`` source ``wu_icao_history`` for the 50 WU cities;
-  * ``ogimet_metar_*`` for Tel Aviv / Istanbul / Moscow (WU does not cover them);
-  * ``hko_hourly_accumulator`` for Hong Kong -- the openmeteo grid archive carries a
-    -0.8 degC median bias against the HKO settlement station, so it is never used.
+ROW SOURCE, per (city, day), one hourly ledger -- config-derived, era-aware:
+  * ``src.data.tier_resolver.tier_for_city(city, target_date=day)`` resolves the
+    settlement-station family effective on THAT day from ``config/cities.json``
+    (``settlement_source_type`` + its effective-date/previous-type era fields), exactly
+    as the observation-instants writer and backfill driver do. WU_ICAO -> ``source =
+    'wu_icao_history'``; OGIMET_METAR (``settlement_source_type == 'noaa'``) -> ``source
+    = 'ogimet_metar_<icao>'`` for that city's settlement ICAO (``city.wu_station``);
+    HKO_NATIVE (Hong Kong) -> ``source = 'hko_hourly_accumulator'`` (the openmeteo grid
+    archive carries a -0.8 degC median bias against the HKO settlement station, so it is
+    never used).
+  * FALLBACK: when a day's era-correct ledger (OGIMET_METAR only) has fewer than
+    ``MIN_HOURS_ALT`` hours -- typically a day just after the settlement-authority
+    migration, before the Ogimet mirror had ramped up, while WU history for that same
+    physical ICAO was still being written -- the day falls back to that city's
+    ``wu_icao_history`` rows for the SAME station (``station_id`` verified equal to
+    ``city.wu_station``; the two ledgers are never merged into one day's envelope, only
+    one or the other is used whole). WU_ICAO- and HKO_NATIVE-era days never fall back:
+    there is no alternate ledger for the HKO station, and a WU-era day already IS the
+    primary.
 The cumulative extreme is RECOMPUTED per day from the per-hour running_max/running_min
 rather than trusted as stored, and ``final`` is the VERIFIED ``settlement_outcomes``
 value when one exists in the same unit, else the day's own cumulative extreme.
+
+GRID PRECISION. The server (``DiurnalResidualNowcast.bin_probability``) anchors its
+integer settlement grid at ``round_wmo_half_up_value(running_extreme)`` and reads
+final = anchor + j (HIGH) / anchor - j (LOW). This fitter computes the residual against
+that SAME anchor -- ``j = final - round_wmo_half_up_value(cumulative_high)`` for HIGH,
+``round_wmo_half_up_value(cumulative_low) - final`` for LOW -- instead of rounding the
+raw float difference after the fact. The two disagree exactly at a cumulative ending in
+``.5``: e.g. cumulative=78.5, final=80 -> naive ``round(80 - 78.5) == round(1.5) == 2``
+(Python banker's rounding, half-to-even) but the server's own anchor is
+``round_wmo_half_up_value(78.5) == 79``, so the served j is ``80 - 79 == 1``. Since
+ogimet's native-tenths ledger (unlike WU's whole-degree one) actually produces `.5`
+cumulative values, this divergence is real, not theoretical, for NOAA cities. VERIFIED
+settlement values are already integers on the settlement grid (checked empirically:
+13296/13296 in the live forecasts DB); the day-extreme fallback is rounded through the
+same law for consistency.
 
 WALK-FORWARD. Every record whose date is >= ``fit_date`` is DROPPED. That is the whole
 walk-forward guarantee: the server does no date filtering, so an artifact that contained
@@ -52,6 +95,16 @@ from src.calibration.day0_diurnal_residual import (  # noqa: E402
     SCHEMA_VERSION,
     gap_band_index,
 )
+from src.config import cities_by_name  # noqa: E402
+from src.contracts.settlement_semantics import round_wmo_half_up_value  # noqa: E402
+from src.data.tier_resolver import (  # noqa: E402
+    EXPECTED_SOURCE_BY_CITY,
+    TIER_SCHEDULE,
+    Tier,
+    UnsupportedTierError,
+    expected_source_for_city,
+    tier_for_city,
+)
 
 DEFAULT_WORLD_DB = os.path.join(REPO, "state", "zeus-world.db")
 DEFAULT_FORECAST_DB = os.path.join(REPO, "state", "zeus-forecasts.db")
@@ -60,17 +113,25 @@ DEFAULT_OUT = os.path.join(REPO, "state", "day0_diurnal_residual.json")
 HISTORY_START = "2024-01-01"
 # A WU day needs near-complete hourly coverage before its cumulative curve is
 # trustworthy; the ogimet/HKO ledgers are sparser, so they carry their own floor.
+# Keyed by ledger FAMILY (Tier), never by a city list, so a settlement-authority
+# migration in cities.json changes which floor a city's day is held to automatically.
 MIN_HOURS_WU = 22
 MIN_HOURS_ALT = 20
 WU_SOURCE = "wu_icao_history"
-# Cities WU does not cover, pinned to the hourly ledger that agrees with their
-# settlement station (study build_clim2.py).
-ALT_SOURCE_CITIES = {
-    "Hong Kong": "hko_hourly_accumulator",
-    "Tel Aviv": "ogimet_metar_llbg",
-    "Istanbul": "ogimet_metar_ltfm",
-    "Moscow": "ogimet_metar_uuww",
+_FLOOR_BY_TIER: dict[Tier, int] = {
+    Tier.WU_ICAO: MIN_HOURS_WU,
+    Tier.OGIMET_METAR: MIN_HOURS_ALT,
+    Tier.HKO_NATIVE: MIN_HOURS_ALT,
 }
+# Every source string this fitter will ever need to read: wu_icao_history (needed both
+# as the WU_ICAO-tier primary and as the OGIMET_METAR-tier fallback) plus each city's
+# CURRENT non-WU primary (the physical station -- and hence the Ogimet/HKO source
+# string -- does not change across a settlement-authority era switch in this schema).
+_ALT_SOURCES: frozenset[str] = frozenset(
+    EXPECTED_SOURCE_BY_CITY[name]
+    for name, tier in TIER_SCHEDULE.items()
+    if tier is not Tier.WU_ICAO
+)
 
 
 def _ro(path: str) -> sqlite3.Connection:
@@ -88,35 +149,45 @@ def _query(path: str, sql: str, args: tuple = ()) -> list[dict]:
         conn.close()
 
 
-def _hourly_days(world_db: str) -> tuple[dict, dict]:
-    """{(city, date): {hour: (hi, lo)}} and {city: unit} from the pinned ledgers."""
+def _era_source_and_floor(city: str, day: str) -> tuple[str, int] | None:
+    """The settlement-station ledger and hour-floor effective for (city, day).
+
+    Era-aware via ``tier_for_city`` / ``expected_source_for_city`` (config/cities.json
+    ``settlement_source_type`` + effective-date/previous-type fields) -- the same
+    routing the observation-instants writer and backfill driver use. ``None`` for an
+    unknown city (defensive; every configured city has a tier by construction).
+    """
+
+    try:
+        tier = tier_for_city(city, target_date=day)
+        source = expected_source_for_city(city, target_date=day)
+    except UnsupportedTierError:
+        return None
+    return source, _FLOOR_BY_TIER[tier]
+
+
+def _hourly_days(world_db: str) -> tuple[dict, dict, dict]:
+    """{(city, date): {hour: (hi, lo)}}, {city: unit}, {(city, date): source used}."""
 
     rows = _query(
         world_db,
         """
-        SELECT city, target_date, source, local_hour, running_max, running_min,
-               temp_current, temp_unit
+        SELECT city, target_date, source, station_id, local_hour, running_max,
+               running_min, temp_current, temp_unit
         FROM observation_instants
         WHERE target_date >= ? AND local_hour IS NOT NULL
-          AND (source = ? OR (city IN (%s) AND source IN (%s)))
-        ORDER BY city, target_date, local_hour
+          AND (source = ? OR source IN (%s))
+        ORDER BY city, target_date, source, local_hour
         """
-        % (
-            ",".join("?" * len(ALT_SOURCE_CITIES)),
-            ",".join("?" * len(ALT_SOURCE_CITIES)),
-        ),
-        (HISTORY_START, WU_SOURCE, *ALT_SOURCE_CITIES.keys(), *ALT_SOURCE_CITIES.values()),
+        % ",".join("?" * len(_ALT_SOURCES)),
+        (HISTORY_START, WU_SOURCE, *_ALT_SOURCES),
     )
-    days: dict = collections.defaultdict(dict)
-    unit: dict = {}
+    # Buckets are kept PER (city, day, source): the two ledgers are never merged into
+    # one day's envelope, only one of them is selected whole below.
+    buckets: dict = collections.defaultdict(dict)
+    bucket_unit: dict = {}
+    bucket_station: dict = collections.defaultdict(set)
     for row in rows:
-        city = row["city"]
-        source = row["source"]
-        if source != WU_SOURCE and ALT_SOURCE_CITIES.get(city) != source:
-            continue
-        if city in ALT_SOURCE_CITIES and source == WU_SOURCE:
-            # A pinned city uses only its pinned ledger, never a mixed envelope.
-            continue
         try:
             hour = int(round(float(row["local_hour"])))
         except (TypeError, ValueError):
@@ -133,20 +204,52 @@ def _hourly_days(world_db: str) -> tuple[dict, dict]:
             continue
         if low is None:
             low = high
-        key = (city, row["target_date"])
-        bucket = days[key]
+        key = (row["city"], row["target_date"], row["source"])
+        bucket = buckets[key]
         if hour in bucket:
             # Duplicate hour: keep the extreme envelope, as the study does.
             bucket[hour] = (max(bucket[hour][0], high), min(bucket[hour][1], low))
         else:
             bucket[hour] = (high, low)
-        unit[city] = str(row["temp_unit"] or "").strip().upper()
-    kept = {}
-    for (city, day), bucket in days.items():
-        floor = MIN_HOURS_ALT if city in ALT_SOURCE_CITIES else MIN_HOURS_WU
-        if len(bucket) >= floor:
-            kept[(city, day)] = bucket
-    return kept, unit
+        bucket_unit[key] = str(row["temp_unit"] or "").strip().upper()
+        if row["station_id"]:
+            bucket_station[key].add(str(row["station_id"]).strip().upper())
+
+    days = {(city, day) for city, day, _source in buckets}
+    kept: dict = {}
+    unit: dict = {}
+    source_used: dict = {}
+    for city, day in days:
+        selection = _era_source_and_floor(city, day)
+        if selection is None:
+            continue
+        primary_source, floor = selection
+        chosen_key = None
+        primary_key = (city, day, primary_source)
+        primary_bucket = buckets.get(primary_key)
+        if primary_bucket is not None and len(primary_bucket) >= floor:
+            chosen_key = primary_key
+        elif primary_source != WU_SOURCE:
+            # OGIMET_METAR (or, defensively, any other non-WU) era day short of its
+            # floor: fall back to this city's WU history for the SAME physical
+            # station, never a different one. HKO_NATIVE has no such alternate
+            # ledger, so this only ever fires for OGIMET_METAR-era days.
+            wu_key = (city, day, WU_SOURCE)
+            wu_bucket = buckets.get(wu_key)
+            city_icao = str(cities_by_name[city].wu_station or "").strip().upper()
+            if (
+                wu_bucket is not None
+                and len(wu_bucket) >= MIN_HOURS_WU
+                and city_icao
+                and bucket_station.get(wu_key, {city_icao}) == {city_icao}
+            ):
+                chosen_key = wu_key
+        if chosen_key is None:
+            continue
+        kept[(city, day)] = buckets[chosen_key]
+        unit[city] = bucket_unit[chosen_key]
+        source_used[(city, day)] = chosen_key[2]
+    return kept, unit, source_used
 
 
 def _verified_settlements(forecast_db: str) -> dict:
@@ -224,10 +327,13 @@ def _anchor_hours(records: list[dict], metric: str) -> dict:
     return {city: statistics.median(values) for city, values in hours.items() if values}
 
 
-def build_records(world_db: str, forecast_db: str) -> tuple[list[dict], dict]:
-    """Station-hour residual records and the per-city settlement unit."""
+def build_records(
+    world_db: str, forecast_db: str
+) -> tuple[list[dict], dict, dict]:
+    """Station-hour residual records, the per-city settlement unit, and the ledger
+    source used per (city, day) (diagnostic only -- not part of the artifact)."""
 
-    days, unit = _hourly_days(world_db)
+    days, unit, source_used = _hourly_days(world_db)
     settlements = _verified_settlements(forecast_db)
     records: list[dict] = []
     for (city, day), bucket in days.items():
@@ -251,11 +357,18 @@ def build_records(world_db: str, forecast_db: str) -> tuple[list[dict], dict]:
             settled = settlements.get((city, day, metric))
             if settled is not None and settled[1] == city_unit:
                 final = settled[0]
+            # Grid the label onto the settlement integer scale with the SAME WMO
+            # half-up law the server applies to its own anchor. VERIFIED settlement
+            # values are already integers (this is a no-op rounding then); the
+            # day-extreme fallback is native-precision (tenths, for an ogimet-sourced
+            # day) and genuinely needs it.
+            final_grid = round_wmo_half_up_value(final)
             for hour in hours:
+                cum_grid = round_wmo_half_up_value(cumulative[hour])
                 residual = (
-                    final - cumulative[hour]
+                    final_grid - cum_grid
                     if metric == "high"
-                    else cumulative[hour] - final
+                    else cum_grid - final_grid
                 )
                 records.append(
                     {
@@ -268,7 +381,7 @@ def build_records(world_db: str, forecast_db: str) -> tuple[list[dict], dict]:
                         "unit": city_unit,
                     }
                 )
-    return records, unit
+    return records, unit, source_used
 
 
 def build_artifact(
@@ -293,7 +406,8 @@ def build_artifact(
         if anchor is None:
             continue
         k = int(round(anchor - record["h"]))
-        j = min(J_MAX, max(0, int(round(record["D"]))))
+        # record["D"] is already gridded to an integer (build_records); clamp only.
+        j = min(J_MAX, max(0, int(record["D"])))
         pooled[f"{metric}|{k}"][j] += 1
         city_cells[f"{metric}|{city}|{k}"][j] += 1
         center = nwp[metric].get((city, record["date"]))
@@ -349,7 +463,7 @@ def main() -> int:
     fit_date = args.fit_date or datetime.now(timezone.utc).date().isoformat()
     date.fromisoformat(fit_date)
 
-    records, unit = build_records(args.world_db, args.forecast_db)
+    records, unit, _source_used = build_records(args.world_db, args.forecast_db)
     nwp = _nwp_centers(args.forecast_db)
     artifact = build_artifact(records, unit=unit, nwp=nwp, fit_date=fit_date)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

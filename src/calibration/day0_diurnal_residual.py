@@ -53,6 +53,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.contracts.settlement_semantics import round_wmo_half_up_value
+
 _LOG = logging.getLogger("zeus.day0_diurnal_residual")
 
 ARTIFACT_FILENAME = "day0_diurnal_residual.json"
@@ -229,7 +231,11 @@ class DiurnalResidualNowcast:
         if result is None:
             return None
         pmf, basis = result
-        anchor = round(running_extreme)
+        # WMO half-up (fitter's grid law -- src/contracts/settlement_semantics.py), not
+        # Python's banker's round(): they disagree at a running extreme ending in .5
+        # (real for an ogimet native-tenths ledger), which would silently misalign the
+        # served anchor against the histogram cell the fitter counted it into.
+        anchor = int(round_wmo_half_up_value(running_extreme))
         if metric == "high":
             # final = anchor + j  =>  bin_low <= anchor + j <= bin_high
             j_low = None if bin_low is None else bin_low - anchor
