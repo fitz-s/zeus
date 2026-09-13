@@ -1594,6 +1594,150 @@ def _write_pending_exit_projection_regression_db(
         trade_conn.close()
 
 
+def _write_pending_exit_dust_hold_terminal_marker_db(sd: Path, *, now: datetime) -> None:
+    """A confirmed dust hold that received the audited terminal marker
+    (src.execution.exit_lifecycle._dual_write_dust_hold_terminal_marker_if_available)
+    instead of being released back into active/day0_window monitoring. Phase
+    stays pending_exit throughout, so the projection-regression predicate's
+    own base filter (phase IN ('active','day0_window')) must never match it."""
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE IF NOT EXISTS venue_commands ("
+            "command_id TEXT, position_id TEXT, intent_kind TEXT, state TEXT, "
+            "created_at TEXT, q_version TEXT)"
+        )
+        trade_conn.execute(
+            "INSERT INTO venue_commands VALUES "
+            "('cmd-entry-only', 'pos-dust-terminal', 'ENTRY', 'FILLED', ?, 'q-id-1')",
+            ((now - timedelta(minutes=10)).isoformat(),),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                city TEXT,
+                target_date TEXT,
+                bin_label TEXT,
+                direction TEXT,
+                exit_reason TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id,
+                phase,
+                order_status,
+                shares,
+                chain_shares,
+                city,
+                target_date,
+                bin_label,
+                direction,
+                exit_reason
+            ) VALUES (
+                'pos-dust-terminal',
+                'pending_exit',
+                'backoff_exhausted',
+                2.0,
+                2.0,
+                'Amsterdam',
+                '2026-07-09',
+                'Will the highest temperature in Amsterdam be 20C on July 9?',
+                'buy_no',
+                'SELL_REVERSAL [DUST: executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5]'
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_events (
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                phase_before TEXT,
+                phase_after TEXT,
+                venue_status TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        events = [
+            (
+                10,
+                "EXIT_INTENT",
+                now - timedelta(minutes=6),
+                "day0_window",
+                "pending_exit",
+                "exit_intent",
+                {"exit_reason": "SELL_REVERSAL"},
+            ),
+            (
+                11,
+                "EXIT_ORDER_REJECTED",
+                now - timedelta(minutes=5, seconds=55),
+                "day0_window",
+                "pending_exit",
+                "backoff_exhausted",
+                {
+                    "error": "executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
+                    "exit_reason": "SELL_REVERSAL [DUST]",
+                    "status": "backoff_exhausted",
+                },
+            ),
+            (
+                12,
+                "MONITOR_REFRESHED",
+                now - timedelta(minutes=5, seconds=50),
+                "pending_exit",
+                "pending_exit",
+                "backoff_exhausted",
+                {
+                    "semantic_event": "DUST_MIN_ORDER_SIZE_UNSELLABLE_TERMINAL",
+                    "dust_hold_reason": "DUST_MIN_ORDER_SIZE_UNSELLABLE",
+                    "dust_hold_error": "executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
+                    "exit_order_submitted": False,
+                    "exit_failure": False,
+                },
+            ),
+        ]
+        for seq, event_type, occurred_at, before, after, status, payload in events:
+            trade_conn.execute(
+                """
+                INSERT INTO position_events (
+                    position_id,
+                    sequence_no,
+                    event_type,
+                    occurred_at,
+                    phase_before,
+                    phase_after,
+                    venue_status,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "pos-dust-terminal",
+                    seq,
+                    event_type,
+                    occurred_at.isoformat(),
+                    before,
+                    after,
+                    status,
+                    json.dumps(payload),
+                ),
+            )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
 def _write_pending_exit_runtime_gate_block_db(sd: Path, *, now: datetime) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -3466,6 +3610,52 @@ def test_pending_exit_projection_regression_yields_degraded(
     assert sample["post_exit_held_event_count"] == 2
     assert "below min_order_size" in sample["latest_exit_error"]
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_dust_hold_terminal_marker_is_not_a_projection_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed dust hold that received the audited terminal marker (stays
+    phase=pending_exit forever, never re-enters active/day0_window) must not
+    trip PENDING_EXIT_PROJECTION_REGRESSION, unlike a position that silently
+    fell back into held monitoring (test_pending_exit_projection_regression_
+    yields_degraded above)."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_dust_hold_terminal_marker_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is True
+    assert surface["issue"] is None
+    assert surface.get("pending_exit_projection_regression_count", 0) == 0
+    assert "pending_exit_release_loop" not in result["failing_surfaces"]
 
 
 def test_pending_exit_projection_regression_evaluates_without_attested_daemon(

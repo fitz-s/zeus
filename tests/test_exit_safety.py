@@ -11749,6 +11749,188 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     )
 
 
+def test_market_closed_hold_gives_confirmed_dust_hold_terminal_marker_not_release(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-market-closed-dust",
+    )
+    position = Position(
+        trade_id="pos-market-closed-dust",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Amsterdam",
+        cluster="Amsterdam",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=1.28,
+        shares=2.0,
+        chain_shares=2.0,
+        cost_basis_usd=1.28,
+        entered_at="2026-07-08T10:00:00+00:00",
+        state="pending_exit",
+        pre_exit_state="active",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REVERSAL [DUST: executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5]",
+        last_exit_error="executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
+        exit_retry_count=3,
+        env="live",
+    )
+
+    assert (
+        exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+            error="market_closed_non_accepting_orders",
+            conn=conn,
+        )
+        is True
+    )
+
+    # Runtime object is untouched: still genuinely pending_exit/backoff_exhausted,
+    # not silently released into active/day0_window monitoring.
+    assert position.state == "pending_exit"
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current)["phase"] == "pending_exit"
+    assert dict(current)["order_status"] == "backoff_exhausted"
+
+    events = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no
+        """,
+        (position.trade_id,),
+    ).fetchall()
+    assert len(events) == 1
+    marker = events[0]
+    assert marker["event_type"] == "MONITOR_REFRESHED"
+    assert marker["phase_before"] == "pending_exit"
+    assert marker["phase_after"] == "pending_exit"
+    payload = json.loads(marker["payload_json"])
+    assert payload["semantic_event"] == "DUST_MIN_ORDER_SIZE_UNSELLABLE_TERMINAL"
+    assert payload["dust_hold_reason"] == "DUST_MIN_ORDER_SIZE_UNSELLABLE"
+
+    # Second cycle: idempotent, no duplicate marker, still no release.
+    assert (
+        exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+            error="market_closed_non_accepting_orders",
+            conn=conn,
+        )
+        is True
+    )
+    assert position.state == "pending_exit"
+    marker_count = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND json_extract(payload_json, '$.semantic_event')
+               = 'DUST_MIN_ORDER_SIZE_UNSELLABLE_TERMINAL'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0]
+    assert marker_count == 1
+
+
+def test_market_closed_hold_still_releases_non_dust_backoff_exhausted(conn):
+    """A backoff_exhausted position that is NOT dust (fresh shares meet the
+    venue's current min_order_size) keeps the pre-existing market-closed
+    release behavior unchanged."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-market-closed-non-dust",
+    )
+    position = Position(
+        trade_id="pos-market-closed-non-dust",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Amsterdam",
+        cluster="Amsterdam",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=6.4,
+        state="pending_exit",
+        pre_exit_state="active",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REJECTED_REPEATED",
+        last_exit_error="venue_rejected",
+        exit_retry_count=3,
+        env="live",
+    )
+
+    assert (
+        exit_lifecycle.mark_market_closed_hold_to_settlement(
+            position,
+            reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+            error="market_closed_non_accepting_orders",
+            conn=conn,
+        )
+        is True
+    )
+
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["phase_after"] == "day0_window"
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+
+
 def test_after_settlement_stale_market_price_marks_closed_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position

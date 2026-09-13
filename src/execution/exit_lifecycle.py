@@ -4104,7 +4104,28 @@ def mark_market_closed_hold_to_settlement(
     EXIT_ORDER_REJECTED event: no sell was submitted, no venue order failed,
     and the position must keep flowing through held-position redecision and
     settlement harvesting.
+
+    A confirmed non-executable dust hold (backoff_exhausted purely because
+    the held shares are below the venue's current min_order_size) is not a
+    market-closed hold-to-settlement candidate: releasing it into
+    active/day0_window here would erase the one signal
+    (exit_state=backoff_exhausted) that keeps redecision and later monitor
+    passes from re-attempting an impossible sell, with no audited event
+    naming why it left pending_exit. Give it its own terminal marker instead
+    and leave state/exit_state/order_status untouched so it stays exactly as
+    settle-eligible as it was the cycle before.
     """
+
+    if _runtime_state_value(position) == "pending_exit" and _is_non_executable_dust_hold(
+        position,
+        conn=conn,
+    ):
+        return _dual_write_dust_hold_terminal_marker_if_available(
+            conn,
+            position,
+            reason="DUST_MIN_ORDER_SIZE_UNSELLABLE",
+            error=str(getattr(position, "last_exit_error", "") or error),
+        )
 
     position_before = copy.deepcopy(vars(position))
 
@@ -4451,6 +4472,106 @@ def _dual_write_market_closed_hold_if_available(
             "market closed hold projection failed for %s: %s",
             trade_id,
             exc,
+        )
+        return False
+
+
+# Payload marker for the one-time audited terminal event a confirmed
+# non-executable dust hold receives in place of a market-closed release.
+# Distinct from "MARKET_CLOSED_HOLD_TO_SETTLEMENT" (_dual_write_market_
+# closed_hold_if_available above): that semantic implies the position was
+# RELEASED to active/day0_window redecision, which a dust hold must never be
+# (there is no lot small enough for the venue to accept).
+_DUST_HOLD_TERMINAL_SEMANTIC_EVENT = "DUST_MIN_ORDER_SIZE_UNSELLABLE_TERMINAL"
+
+
+def _has_dust_hold_terminal_marker(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> bool:
+    """Return true when this position already carries the dust terminal marker."""
+
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND json_extract(payload_json, '$.semantic_event') = ?
+             LIMIT 1
+            """,
+            (position_id, _DUST_HOLD_TERMINAL_SEMANTIC_EVENT),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _dual_write_dust_hold_terminal_marker_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+) -> bool:
+    """Persist a one-time audited terminal marker for a confirmed dust hold.
+
+    Self-folds phase pending_exit -> pending_exit (no transition) and leaves
+    state/exit_state/order_status untouched, so the position remains exactly
+    as settle-eligible as before this call. Idempotent: a position that
+    already carries the marker is a no-op success.
+    """
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    if _has_dust_hold_terminal_marker(conn, trade_id):
+        return True
+
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+
+    try:
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        events, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after=LifecyclePhase.PENDING_EXIT.value,
+            source_module="src.execution.exit_lifecycle",
+            decision_unavailable_reason=reason,
+            decision_unavailable_trigger=reason,
+        )
+        event = dict(events[0])
+        payload = json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "semantic_event": _DUST_HOLD_TERMINAL_SEMANTIC_EVENT,
+                "dust_hold_reason": reason,
+                "dust_hold_error": error,
+                "exit_order_submitted": False,
+                "exit_failure": False,
+            }
+        )
+        event["event_id"] = f"{trade_id}:dust_hold_terminal:{sequence_no}"
+        event["caused_by"] = "dust_hold_terminal_marker"
+        event["idempotency_key"] = event["event_id"]
+        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+        append_many_and_project(conn, [event], projection)
+        return True
+    except sqlite3.IntegrityError as exc:
+        # A concurrent writer already recorded the marker for this position.
+        if "position_events.idempotency_key" in str(exc):
+            return True
+        logger.warning(
+            "dust hold terminal marker write failed for %s: %s", trade_id, exc,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - audit-only; monitor retries next cycle.
+        logger.warning(
+            "dust hold terminal marker write failed for %s: %s", trade_id, exc,
         )
         return False
 
