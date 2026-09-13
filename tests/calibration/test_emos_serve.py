@@ -541,3 +541,62 @@ class TestEmosMetricGating:
         assert served == "not_high_metric", (
             f"served must be 'not_high_metric' for unknown metric, got '{served}'"
         )
+
+
+class TestLoadEmosTableMtimeHotReload:
+    """load_emos_table mirrors load_sigma_floor_table's mtime-keyed hot-reload
+    (X-AU-floor-refitter): a scheduled refit must be picked up by a long-lived daemon
+    without a restart, an unchanged file must stay a cache hit, and a malformed rewrite
+    must not blank an already-cached good table."""
+
+    def test_same_mtime_is_cached_advanced_mtime_reloads_malformed_keeps_previous(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import importlib
+        import json
+        import logging
+        import os
+        import time
+
+        from src.calibration import emos as emos_mod
+
+        importlib.reload(emos_mod)
+        p = tmp_path / "emos_calibration.json"
+        p.write_text(
+            json.dumps({"cells": {"X|DJF": {"params": [0, 1, 0, 0, 0], "n": 5, "served": "emos"}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(emos_mod, "_EMOS_TABLE_PATH", p, raising=False)
+        monkeypatch.setattr(emos_mod, "_emos_table_cache", None, raising=False)
+
+        first = emos_mod.load_emos_table()
+        assert first["cells"]["X|DJF"]["n"] == 5
+
+        # Same mtime, rewritten content -> cache hit (must not observe the new content).
+        stat_before = p.stat()
+        p.write_text(json.dumps({"cells": {}}), encoding="utf-8")
+        os.utime(p, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+        assert emos_mod.load_emos_table() is first
+
+        # Advanced mtime, valid content -> reload.
+        time.sleep(0.01)
+        p.write_text(
+            json.dumps({"cells": {"X|DJF": {"params": [0, 1, 0, 0, 0], "n": 9, "served": "emos"}}}),
+            encoding="utf-8",
+        )
+        os.utime(p, None)
+        second = emos_mod.load_emos_table()
+        assert second["cells"]["X|DJF"]["n"] == 9
+
+        # Advanced mtime again, malformed content -> keep the last good table, log once.
+        time.sleep(0.01)
+        p.write_text("{not-json-at-all", encoding="utf-8")
+        os.utime(p, None)
+        with caplog.at_level(logging.WARNING, logger=emos_mod.logger.name):
+            third = emos_mod.load_emos_table()
+        assert third["cells"]["X|DJF"]["n"] == 9, "a malformed rewrite must not blank the good table"
+        assert any(
+            "keeping previous" in r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+        )

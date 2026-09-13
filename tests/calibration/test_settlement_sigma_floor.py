@@ -133,6 +133,105 @@ def test_settlement_sigma_floor_cached_loads_once(monkeypatch, tmp_path):
     assert second == pytest.approx(0.8 * 3.0), "loader must cache; second call must not re-read disk"
 
 
+# ----------------------------------------------------------------------------
+# MTIME HOT-RELOAD (X-AU-floor-refitter) — a daily refit job rewrites the artifact via
+#   atomic os.replace; a long-lived daemon must pick up the new table WITHOUT a restart
+#   once the mtime advances, and must NOT pick up a same-mtime no-op re-check, and must
+#   NOT blank an already-good table if the rewrite is malformed.
+# ----------------------------------------------------------------------------
+def test_settlement_sigma_floor_same_mtime_is_cached(monkeypatch, tmp_path):
+    importlib.reload(emos_mod)
+    floor_json = {
+        "_meta": {"k_default": 0.8},
+        "cells": {"C|JJA|high": {"sigma_floor_c": 3.0, "n": 15, "window": "w"}},
+    }
+    p = tmp_path / "settlement_sigma_floor.json"
+    p.write_text(json.dumps(floor_json), encoding="utf-8")
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", p, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    first_table = emos_mod.load_sigma_floor_table()
+    # Rewrite the file's CONTENT without touching mtime — the cache must still be a hit
+    # (proves the reload is keyed on mtime, not "did the process ever see this path before").
+    stat_before = p.stat()
+    p.write_text(json.dumps({"_meta": {"k_default": 0.1}, "cells": {}}), encoding="utf-8")
+    import os as _os
+
+    _os.utime(p, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    second_table = emos_mod.load_sigma_floor_table()
+    assert second_table is first_table, "unchanged mtime must be a cache hit, not a re-read"
+    assert second_table["_meta"]["k_default"] == 0.8
+
+
+def test_settlement_sigma_floor_advanced_mtime_valid_file_reloads(monkeypatch, tmp_path):
+    importlib.reload(emos_mod)
+    p = tmp_path / "settlement_sigma_floor.json"
+    p.write_text(
+        json.dumps({"_meta": {"k_default": 0.8}, "cells": {"C|JJA|high": {"sigma_floor_c": 3.0}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", p, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    first = emos_mod.settlement_sigma_floor("C", "JJA", "high")
+    assert first == pytest.approx(0.8 * 3.0)
+
+    # Advance the mtime with genuinely new content (a daily refit's atomic replace).
+    import os as _os
+    import time as _time
+
+    _time.sleep(0.01)
+    p.write_text(
+        json.dumps({"_meta": {"k_default": 0.8}, "cells": {"C|JJA|high": {"sigma_floor_c": 5.0}}}),
+        encoding="utf-8",
+    )
+    _os.utime(p, None)  # bump to current time, guaranteed to differ from the first write
+
+    second = emos_mod.settlement_sigma_floor("C", "JJA", "high")
+    assert second == pytest.approx(0.8 * 5.0), "an advanced mtime must trigger a fresh read"
+
+
+def test_settlement_sigma_floor_advanced_mtime_malformed_file_keeps_previous(
+    monkeypatch, tmp_path, caplog
+):
+    import logging
+    import os as _os
+    import time as _time
+
+    importlib.reload(emos_mod)
+    p = tmp_path / "settlement_sigma_floor.json"
+    good = {"_meta": {"k_default": 0.8}, "cells": {"C|JJA|high": {"sigma_floor_c": 3.0}}}
+    p.write_text(json.dumps(good), encoding="utf-8")
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", p, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    first = emos_mod.settlement_sigma_floor("C", "JJA", "high")
+    assert first == pytest.approx(0.8 * 3.0)
+
+    _time.sleep(0.01)
+    p.write_text("{not-json-at-all", encoding="utf-8")
+    _os.utime(p, None)
+
+    with caplog.at_level(logging.WARNING, logger=emos_mod.logger.name):
+        second = emos_mod.settlement_sigma_floor("C", "JJA", "high")
+    assert second == pytest.approx(0.8 * 3.0), (
+        "a malformed rewrite must NOT blank an already-serving table"
+    )
+    warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("keeping previous" in r.getMessage() for r in warned), (
+        "a malformed rewrite over a good table must log a warning naming the fallback"
+    )
+    # a further call at the SAME (still-malformed) mtime must not re-attempt the parse
+    # or log again — clear the log and call once more.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=emos_mod.logger.name):
+        third = emos_mod.settlement_sigma_floor("C", "JJA", "high")
+    assert third == pytest.approx(0.8 * 3.0)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records), (
+        "a repeated call at the same malformed mtime must be a cache hit, not re-logged"
+    )
+
+
 def test_settlement_sigma_floor_required_missing_artifact_raises(monkeypatch, tmp_path):
     importlib.reload(emos_mod)
     missing = tmp_path / "missing-settlement_sigma_floor.json"

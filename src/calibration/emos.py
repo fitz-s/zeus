@@ -54,6 +54,7 @@ _STATE_DIR = _state_path("")  # canonical runtime state dir (parent of the artif
 _EMOS_TABLE_PATH = _state_path("emos_calibration.json")
 
 _emos_table_cache: dict | None = None
+_emos_table_mtime_ns: int | None = None
 _emos_table_lock = threading.Lock()
 
 # EMPIRICAL settlement σ-floor (q=1.000 investigation 2026-06-05; iron rule 5: overconfidence = ruin).
@@ -62,6 +63,7 @@ _emos_table_lock = threading.Lock()
 # precomputed offline by scripts/fit_settlement_sigma_floor.py into this table.
 _SIGMA_FLOOR_PATH = _state_path("settlement_sigma_floor.json")
 _sigma_floor_cache: dict | None = None
+_sigma_floor_mtime_ns: int | None = None
 _sigma_floor_lock = threading.Lock()
 
 # EMOS μ-OFFSET correction (airport-settlement-honest center, D4 emos_mu_bias_probe.md + law 8). The
@@ -74,7 +76,16 @@ _sigma_floor_lock = threading.Lock()
 # absent/unactivated → None → today's behavior (fail-closed). One-signed-honest: it never cools a warm cell.
 _MU_OFFSET_PATH = _state_path("emos_mu_offset.json")
 _mu_offset_cache: dict | None = None
+_mu_offset_mtime_ns: int | None = None
 _mu_offset_lock = threading.Lock()
+
+
+def _stat_mtime_ns(path) -> int | None:
+    """``path``'s mtime in nanoseconds, or None if it cannot be stat'd (absent/permission)."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 class SettlementSigmaFloorError(RuntimeError):
@@ -88,50 +99,81 @@ class EmosMuOffsetError(RuntimeError):
 def load_emos_table() -> dict:
     """Return the cached EMOS calibration table dict.
 
-    The table is loaded once per process from state/emos_calibration.json.
+    Re-read only when state/emos_calibration.json's mtime advances (hot-reload, mirrors
+    day0_diurnal_residual.py's mtime-keyed cache) — a scheduled refit is picked up by a
+    long-lived daemon without a restart, while an unchanged file stays a cache hit.
     Structure: {"_meta": {...}, "cells": {"City|SEASON": {"params":[a,b,c,d,e], "n":int, "served":"emos"|"raw"}}}.
-    Returns an empty dict if the file is missing or malformed (fail-closed: callers get None from emos_predictive).
+    Returns an empty dict if the file is missing or malformed on first load (fail-closed: callers
+    get None from emos_predictive). A malformed file on a LATER mtime change does NOT replace an
+    already-cached good table — the previous table keeps serving and one warning is logged.
     """
-    global _emos_table_cache
-    if _emos_table_cache is not None:
+    global _emos_table_cache, _emos_table_mtime_ns
+    mtime_ns = _stat_mtime_ns(_EMOS_TABLE_PATH)
+    if _emos_table_cache is not None and mtime_ns == _emos_table_mtime_ns:
         return _emos_table_cache
     with _emos_table_lock:
-        if _emos_table_cache is not None:
+        if _emos_table_cache is not None and mtime_ns == _emos_table_mtime_ns:
             return _emos_table_cache
+        previous = _emos_table_cache
         try:
             raw = _EMOS_TABLE_PATH.read_text(encoding="utf-8")
             data = json.loads(raw)
             if not isinstance(data, dict):
-                logger.warning("emos_calibration.json is not a dict — treating as empty")
-                data = {}
+                raise ValueError("emos_calibration.json is not a dict")
             _emos_table_cache = data
         except FileNotFoundError:
-            logger.debug("state/emos_calibration.json not found; EMOS serving disabled")
-            _emos_table_cache = {}
+            if previous is not None:
+                logger.warning(
+                    "emos_calibration.json disappeared at mtime change; keeping previous table"
+                )
+            else:
+                logger.debug("state/emos_calibration.json not found; EMOS serving disabled")
+                _emos_table_cache = {}
         except Exception as exc:
-            logger.warning("Failed to load emos_calibration.json: %s", exc)
-            _emos_table_cache = {}
+            if previous is not None:
+                logger.warning(
+                    "Failed to reload emos_calibration.json (%s) — keeping previous table", exc
+                )
+            else:
+                logger.warning("Failed to load emos_calibration.json: %s", exc)
+                _emos_table_cache = {}
+        _emos_table_mtime_ns = mtime_ns
     return _emos_table_cache
 
 
 def load_sigma_floor_table(*, required: bool = False) -> dict:
     """Return the cached EMPIRICAL settlement σ-floor table dict.
 
-    Loaded once per process from state/settlement_sigma_floor.json (cached + thread-safe,
-    mirroring load_emos_table). Structure:
+    Re-read only when state/settlement_sigma_floor.json's mtime advances (hot-reload, cached +
+    thread-safe, mirroring load_emos_table / day0_diurnal_residual.py) — the daily refit job
+    (ingest_main's ``_settlement_sigma_floor_refit_tick``) is picked up by a long-lived daemon
+    without a restart. Structure:
         {"_meta": {"created":..., "method":..., "k_default": float},
          "cells": {"City|SEASON|metric": {"sigma_floor_c": float, "n": int, "window": str}}}
     All values °C. Legacy callers use ``required=False`` and get an empty dict if the file is
-    missing or malformed (fail-soft: callers get None from settlement_sigma_floor and keep their
-    model σ — no floor, no crash). EDLI flag-on callers use ``required=True``: missing or malformed
+    missing or malformed on first load (fail-soft: callers get None from settlement_sigma_floor
+    and keep their model σ — no floor, no crash). A malformed file on a LATER mtime change does
+    NOT replace an already-cached good table — the previous table keeps serving and one warning
+    is logged (the refit tick's own promotion gate should prevent this, but the loader does not
+    trust that gate alone). EDLI flag-on callers use ``required=True``: missing or malformed
     artifacts raise SettlementSigmaFloorError so the live candidate cannot silently bypass the floor.
     """
-    global _sigma_floor_cache
-    if _sigma_floor_cache is not None and (not required or _sigma_floor_cache):
+    global _sigma_floor_cache, _sigma_floor_mtime_ns
+    mtime_ns = _stat_mtime_ns(_SIGMA_FLOOR_PATH)
+    if (
+        _sigma_floor_cache is not None
+        and (not required or _sigma_floor_cache)
+        and mtime_ns == _sigma_floor_mtime_ns
+    ):
         return _sigma_floor_cache
     with _sigma_floor_lock:
-        if _sigma_floor_cache is not None and (not required or _sigma_floor_cache):
+        if (
+            _sigma_floor_cache is not None
+            and (not required or _sigma_floor_cache)
+            and mtime_ns == _sigma_floor_mtime_ns
+        ):
             return _sigma_floor_cache
+        previous = _sigma_floor_cache
         try:
             raw = _SIGMA_FLOOR_PATH.read_text(encoding="utf-8")
             data = json.loads(raw)
@@ -140,26 +182,34 @@ def load_sigma_floor_table(*, required: bool = False) -> dict:
                     raise SettlementSigmaFloorError(
                         "SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:not_dict"
                     )
-                logger.warning("settlement_sigma_floor.json is not a dict — treating as empty")
-                data = {}
+                raise ValueError("settlement_sigma_floor.json is not a dict")
             _sigma_floor_cache = data
+            _sigma_floor_mtime_ns = mtime_ns
         except FileNotFoundError:
             if required:
                 raise SettlementSigmaFloorError(
                     f"SETTLEMENT_SIGMA_FLOOR_MISSING_ARTIFACT:{_SIGMA_FLOOR_PATH}"
                 )
-            # FAIL-LOUD (ITEM 3, 2026-06-07): an ABSENT floor file silently returning {}
-            # makes the q_lcb settlement-σ floor INERT (0 cells -> max(model_σ, floor) never
-            # widens). The legacy (required=False) path must NOT crash, but it MUST warn loud
-            # so an operator sees the floor is disabled — not a quiet debug that hides the
-            # provenance gap. (Memory: the floor only worked when repointed at the live state
-            # dir's 232-cell table; a missing file at runtime is an operator-visible event.)
-            logger.warning(
-                "settlement_sigma_floor.json not found at %s; settlement σ-floor is DISABLED "
-                "(q_lcb floor inert, 0 cells). Runtime widening will rely on model σ only.",
-                _SIGMA_FLOOR_PATH,
-            )
-            _sigma_floor_cache = {}
+            if previous is not None:
+                logger.warning(
+                    "settlement_sigma_floor.json disappeared at mtime change; keeping previous "
+                    "table (%d cells)",
+                    len(previous.get("cells", {})) if isinstance(previous, dict) else 0,
+                )
+            else:
+                # FAIL-LOUD (ITEM 3, 2026-06-07): an ABSENT floor file silently returning {}
+                # makes the q_lcb settlement-σ floor INERT (0 cells -> max(model_σ, floor) never
+                # widens). The legacy (required=False) path must NOT crash, but it MUST warn loud
+                # so an operator sees the floor is disabled — not a quiet debug that hides the
+                # provenance gap. (Memory: the floor only worked when repointed at the live state
+                # dir's 232-cell table; a missing file at runtime is an operator-visible event.)
+                logger.warning(
+                    "settlement_sigma_floor.json not found at %s; settlement σ-floor is DISABLED "
+                    "(q_lcb floor inert, 0 cells). Runtime widening will rely on model σ only.",
+                    _SIGMA_FLOOR_PATH,
+                )
+                _sigma_floor_cache = {}
+            _sigma_floor_mtime_ns = mtime_ns
         except SettlementSigmaFloorError:
             raise
         except Exception as exc:  # noqa: BLE001 — fail-soft unless the EDLI floor flag requires it
@@ -167,8 +217,21 @@ def load_sigma_floor_table(*, required: bool = False) -> dict:
                 raise SettlementSigmaFloorError(
                     f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
                 ) from exc
-            logger.warning("Failed to load settlement_sigma_floor.json: %s", exc)
-            _sigma_floor_cache = {}
+            if previous is not None:
+                # HOT-RELOAD SAFETY: a malformed rewrite must not blank out an already-serving
+                # table. Keep the previous table and mark this mtime seen so subsequent calls
+                # short-circuit on the cache hit instead of re-parsing the same bad file (and
+                # re-logging) every call until the next successful atomic replace.
+                logger.warning(
+                    "Failed to reload settlement_sigma_floor.json (%s) — keeping previous "
+                    "table (%d cells)",
+                    exc,
+                    len(previous.get("cells", {})) if isinstance(previous, dict) else 0,
+                )
+            else:
+                logger.warning("Failed to load settlement_sigma_floor.json: %s", exc)
+                _sigma_floor_cache = {}
+            _sigma_floor_mtime_ns = mtime_ns
     return _sigma_floor_cache
 
 
@@ -254,43 +317,62 @@ def settlement_sigma_floor(
 def load_mu_offset_table(*, required: bool = False) -> dict:
     """Return the cached EMOS μ-offset correction table dict.
 
-    Loaded once per process from state/emos_mu_offset.json (cached + thread-safe, mirroring
-    load_sigma_floor_table). Structure:
+    Re-read only when state/emos_mu_offset.json's mtime advances (hot-reload, cached +
+    thread-safe, mirroring load_sigma_floor_table). Structure:
         {"_meta": {"created":..., "method":..., "authority": "emos_mu_offset_v1_residual"},
          "cells": {"City|SEASON|metric": {"offset_c": float, "activated": bool, "n": int,
                    "mean_residual_c": float, "oos": {...}}}}
     All values °C. Legacy callers use ``required=False`` → empty dict if the file is missing/malformed
-    (fail-soft: emos_mu_offset returns None, the EMOS μ* is served UNCORRECTED — today's behavior).
-    EDLI flag-on callers may use ``required=True``: a missing/malformed artifact raises EmosMuOffsetError
-    so a candidate that should be corrected cannot silently serve the cold center.
+    on first load (fail-soft: emos_mu_offset returns None, the EMOS μ* is served UNCORRECTED — today's
+    behavior). A malformed file on a LATER mtime change does NOT replace an already-cached good table
+    — the previous table keeps serving and one warning is logged. EDLI flag-on callers may use
+    ``required=True``: a missing/malformed artifact raises EmosMuOffsetError so a candidate that
+    should be corrected cannot silently serve the cold center.
     """
-    global _mu_offset_cache
-    if _mu_offset_cache is not None and (not required or _mu_offset_cache):
+    global _mu_offset_cache, _mu_offset_mtime_ns
+    mtime_ns = _stat_mtime_ns(_MU_OFFSET_PATH)
+    if (
+        _mu_offset_cache is not None
+        and (not required or _mu_offset_cache)
+        and mtime_ns == _mu_offset_mtime_ns
+    ):
         return _mu_offset_cache
     with _mu_offset_lock:
-        if _mu_offset_cache is not None and (not required or _mu_offset_cache):
+        if (
+            _mu_offset_cache is not None
+            and (not required or _mu_offset_cache)
+            and mtime_ns == _mu_offset_mtime_ns
+        ):
             return _mu_offset_cache
+        previous = _mu_offset_cache
         try:
             raw = _MU_OFFSET_PATH.read_text(encoding="utf-8")
             data = json.loads(raw)
             if not isinstance(data, dict):
                 if required:
                     raise EmosMuOffsetError("EMOS_MU_OFFSET_MALFORMED_ARTIFACT:not_dict")
-                logger.warning("emos_mu_offset.json is not a dict — treating as empty")
-                data = {}
+                raise ValueError("emos_mu_offset.json is not a dict")
             _mu_offset_cache = data
+            _mu_offset_mtime_ns = mtime_ns
         except FileNotFoundError:
             if required:
                 raise EmosMuOffsetError(f"EMOS_MU_OFFSET_MISSING_ARTIFACT:{_MU_OFFSET_PATH}")
-            # FAIL-SOFT but VISIBLE: an absent table means NO cell is corrected (the EMOS μ* serves
-            # uncorrected = today's behavior). That is the intended fail-closed default, so this is a
-            # debug, not a warning (unlike the σ-floor, whose absence silently disables a SAFETY widen).
-            logger.debug(
-                "emos_mu_offset.json not found at %s; EMOS μ-offset correction DISABLED "
-                "(every cell serves the uncorrected EMOS center).",
-                _MU_OFFSET_PATH,
-            )
-            _mu_offset_cache = {}
+            if previous is not None:
+                logger.warning(
+                    "emos_mu_offset.json disappeared at mtime change; keeping previous table"
+                )
+            else:
+                # FAIL-SOFT but VISIBLE: an absent table means NO cell is corrected (the EMOS μ*
+                # serves uncorrected = today's behavior). That is the intended fail-closed default,
+                # so this is a debug, not a warning (unlike the σ-floor, whose absence silently
+                # disables a SAFETY widen).
+                logger.debug(
+                    "emos_mu_offset.json not found at %s; EMOS μ-offset correction DISABLED "
+                    "(every cell serves the uncorrected EMOS center).",
+                    _MU_OFFSET_PATH,
+                )
+                _mu_offset_cache = {}
+            _mu_offset_mtime_ns = mtime_ns
         except EmosMuOffsetError:
             raise
         except Exception as exc:  # noqa: BLE001 — fail-soft unless required
@@ -298,8 +380,14 @@ def load_mu_offset_table(*, required: bool = False) -> dict:
                 raise EmosMuOffsetError(
                     f"EMOS_MU_OFFSET_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
                 ) from exc
-            logger.warning("Failed to load emos_mu_offset.json: %s", exc)
-            _mu_offset_cache = {}
+            if previous is not None:
+                logger.warning(
+                    "Failed to reload emos_mu_offset.json (%s) — keeping previous table", exc
+                )
+            else:
+                logger.warning("Failed to load emos_mu_offset.json: %s", exc)
+                _mu_offset_cache = {}
+            _mu_offset_mtime_ns = mtime_ns
     return _mu_offset_cache
 
 

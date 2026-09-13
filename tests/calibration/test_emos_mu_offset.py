@@ -180,6 +180,51 @@ def test_accessor_cached_loads_once(monkeypatch, tmp_path):
     assert emos_mod.emos_mu_offset("Tokyo", "MAM", "high") == pytest.approx(_TOKYO_OFFSET_C)
 
 
+def test_accessor_advanced_mtime_reloads_and_malformed_keeps_previous(monkeypatch, tmp_path, caplog):
+    """Mtime hot-reload mirrors load_sigma_floor_table (X-AU-floor-refitter): an advanced
+    mtime with a valid file reloads; an advanced mtime with a malformed file keeps the
+    previously-cached good table and logs one warning rather than going cold-silent."""
+    import logging
+    import os as _os
+    import time as _time
+
+    importlib.reload(emos_mod)
+    p = tmp_path / "emos_mu_offset.json"
+    p.write_text(json.dumps(_offset_table(activated=True)), encoding="utf-8")
+    monkeypatch.setattr(emos_mod, "_MU_OFFSET_PATH", p, raising=False)
+    monkeypatch.setattr(emos_mod, "_mu_offset_cache", None, raising=False)
+
+    first = emos_mod.emos_mu_offset("Tokyo", "MAM", "high")
+    assert first == pytest.approx(_TOKYO_OFFSET_C)
+
+    # Same mtime, different content -> must stay cached.
+    stat_before = p.stat()
+    p.write_text(json.dumps(_offset_table(activated=False)), encoding="utf-8")
+    _os.utime(p, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    assert emos_mod.emos_mu_offset("Tokyo", "MAM", "high") == pytest.approx(_TOKYO_OFFSET_C)
+
+    # Advanced mtime, valid content -> reloads.
+    _time.sleep(0.01)
+    new_table = _offset_table(activated=True)
+    new_table["cells"]["Tokyo|MAM|high"]["offset_c"] = -2.5
+    p.write_text(json.dumps(new_table), encoding="utf-8")
+    _os.utime(p, None)
+    assert emos_mod.emos_mu_offset("Tokyo", "MAM", "high") == pytest.approx(-2.5)
+
+    # Advanced mtime again, malformed content -> keeps the last GOOD table, logs once.
+    _time.sleep(0.01)
+    p.write_text("{not-json-at-all", encoding="utf-8")
+    _os.utime(p, None)
+    with caplog.at_level(logging.WARNING, logger=emos_mod.logger.name):
+        still = emos_mod.emos_mu_offset("Tokyo", "MAM", "high")
+    assert still == pytest.approx(-2.5), "a malformed rewrite must not blank the last good table"
+    assert any(
+        "keeping previous" in r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    )
+
+
 # ---------------------------------------------------------------------------
 # (C) CONSUMER math + byte-identity when no cell is activated.
 # ---------------------------------------------------------------------------
