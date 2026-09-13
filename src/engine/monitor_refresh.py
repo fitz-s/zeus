@@ -2098,10 +2098,18 @@ def _perform_single_family_belief_reseed_failsoft(
             report = dict(report)
             report["repair_lane"] = "cycle_advance"
             report["input_revision_status"] = input_revision_status
-        if day0_payload and isinstance(report, dict) and report.get("status") == "CYCLE_ADVANCE_NOT_NEEDED":
-            # The freshness check just passed for this identity: the gap is drained,
-            # so its first-seen record is cleared. A later genuine gap (this identity
-            # going stale again, or a new one) starts a fresh detection window.
+        if (
+            day0_payload
+            and isinstance(report, dict)
+            and report.get("status") == "CYCLE_ADVANCE_NOT_NEEDED"
+            and report.get("day0_posterior_matched") is True
+        ):
+            # CYCLE_ADVANCE_NOT_NEEDED also fires for "still queued" and "owner
+            # actively working it" -- neither means the gap is drained. Only a
+            # posterior that actually matched this identity (day0_posterior_matched)
+            # proves that, so only that case clears the first-seen record. Clearing
+            # on the umbrella status alone would let a queue backlog recreate a
+            # throttled version of the original defect (R-AG review, 2026-09-13).
             _clear_day0_reseed_gap(city=city, target_date=target_date, metric=metric)
         logger.info(
             "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s "

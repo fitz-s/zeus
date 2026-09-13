@@ -2590,6 +2590,21 @@ def enqueue_single_family_cycle_advance_reseed(
                         report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
                         report["consumed_cycle"] = consumed_cycle_iso
                         report["target_cycle"] = target_cycle_iso
+                        # ALREADY_ENQUEUED covers three distinct reasons (still-queued seed
+                        # file, owner-request ACTIVE, or a posterior that actually matched this
+                        # identity) -- only the last one means the gap is genuinely drained. A
+                        # caller tracking repair state (e.g. the monitor's per-identity
+                        # first-seen ledger) must gate on this, not on the umbrella status.
+                        report["day0_posterior_matched"] = _latest_posterior_matches_day0_conditioning(
+                            conn,
+                            city=city,
+                            target_date=target_date,
+                            metric=metric,
+                            identity=day0_identity,
+                            target_cycle_iso=target_cycle_iso,
+                            as_of=now,
+                            minimum_computed_at=minimum_posterior_computed_at,
+                        )
                         return report
                     staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
                         seed_path=seed_path,

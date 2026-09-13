@@ -4065,6 +4065,117 @@ def test_day0_reseed_does_not_wait_for_deterministic_cycle_ahead_of_ens(
     assert calls["manifest_cycles"] == [consumed.isoformat()]
 
 
+def test_day0_report_marks_posterior_matched_only_when_gap_actually_drained(
+    tmp_path, monkeypatch
+) -> None:
+    """R-AG review of d749a8fdb (2026-09-13): `_enqueue_decision`'s ALREADY_ENQUEUED (mapped to
+    report status CYCLE_ADVANCE_NOT_NEEDED) fires both for "still queued, unprocessed" and for
+    "a posterior actually matched this identity" -- only the latter means the Day0 gap is
+    drained. The monitor's per-identity first-seen ledger (monitor_refresh.py) must clear only
+    on the latter, or a queue backlog recreates a throttled version of the original
+    self-defeating-freshness defect. This drives the REAL `enqueue_single_family_cycle_advance_reseed`
+    / `_enqueue_decision` / `_latest_posterior_matches_day0_conditioning` path against a real
+    sqlite DB -- no mock of the decision itself.
+    """
+    db_path = _prepare_forecast_db(tmp_path)
+    consumed = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    deterministic_ahead = datetime(2026, 7, 19, 6, tzinfo=UTC)
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-07-19T05:05:00+00:00",
+    )
+    manifests = (
+        SimpleNamespace(source_cycle_time=deterministic_ahead.isoformat()),
+        SimpleNamespace(source_cycle_time=consumed.isoformat()),
+    )
+    monkeypatch.setattr(
+        cycle_advance, "_family_manifests_from_db", lambda *args, **kwargs: manifests
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (deterministic_ahead, ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: deterministic_ahead,
+    )
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: consumed,
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    payload = _day0_payload("2026-07-19T06:00:00+00:00")
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    cutoff = datetime(2026, 7, 19, 5, 30, tzinfo=UTC)
+
+    report_1 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 6, 1, tzinfo=UTC),
+        held_position=True,
+        minimum_posterior_computed_at=cutoff,
+        **payload,
+    )
+    assert report_1["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+    assert report_1["target_cycle"] == consumed.isoformat()
+    row = _fetch_enqueue_row(db_path)
+    seed_file = Path(row["seed_file"])
+    assert seed_file.exists()
+
+    # CASE 1 (still queued): the seed the first call built is still sitting unconsumed.
+    # ALREADY_ENQUEUED fires, but no posterior has matched this identity -- NOT drained.
+    report_2 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 6, 2, tzinfo=UTC),
+        held_position=True,
+        minimum_posterior_computed_at=cutoff,
+        **payload,
+    )
+    assert report_2["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
+    assert report_2["day0_posterior_matched"] is False
+
+    # The materializer drains the seed and commits a posterior matching this exact identity.
+    seed_file.unlink()
+    _insert_materialized_day0_posterior(
+        db_path,
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-07-19T06:03:00+00:00",
+        payload=payload,
+    )
+
+    # CASE 2 (posterior matched): no seed file, and a posterior now matches -- drained.
+    report_3 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 6, 4, tzinfo=UTC),
+        held_position=True,
+        minimum_posterior_computed_at=cutoff,
+        **payload,
+    )
+    assert report_3["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
+    assert report_3["day0_posterior_matched"] is True
+
+
 def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
     tmp_path, monkeypatch
 ) -> None:

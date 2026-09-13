@@ -827,11 +827,19 @@ def test_day0_reseed_new_identity_starts_fresh_window(monkeypatch, tmp_path):
     assert before2 <= second_cutoff <= after2
 
 
-def test_day0_reseed_success_clears_first_seen_record(monkeypatch, tmp_path):
-    """Once the freshness check passes (CYCLE_ADVANCE_NOT_NEEDED), the first-seen
-    record for that family is cleared, so a LATER genuine gap on the same identity
-    (e.g. the posterior it relied on later goes missing again) is detected fresh
-    rather than reusing a stale, long-past first-seen time forever."""
+def test_day0_reseed_clears_first_seen_only_when_posterior_actually_matched(
+    monkeypatch, tmp_path
+):
+    """R-AG review of d749a8fdb (2026-09-13): CYCLE_ADVANCE_NOT_NEEDED fires for "still
+    queued, unprocessed" and "owner ACTIVE, being worked" too -- not just "a posterior
+    actually matched this identity". Only the last one means the gap is drained. Clearing
+    the first-seen record on the bare status alone (as the first cut of this fix did) would
+    let a queue backlog reproduce a throttled version of the original self-defeating-
+    freshness defect: `enqueue_single_family_cycle_advance_reseed` now sets a dedicated
+    `day0_posterior_matched` field at the source (replacement_cycle_advance_trigger.py,
+    proven against a real DB in test_day0_extreme_updated_materialization_bridge.py::
+    test_day0_report_marks_posterior_matched_only_when_gap_actually_drained); this test
+    proves the monitor's clear trigger gates on THAT field, not the umbrella status."""
     import src.data.replacement_cycle_advance_trigger as cycle
 
     mr = _day0_reseed_test_setup(monkeypatch, tmp_path)
@@ -847,42 +855,56 @@ def test_day0_reseed_success_clears_first_seen_record(monkeypatch, tmp_path):
         mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: dict(day0_payload)
     )
 
-    statuses = iter(
+    responses = iter(
         [
-            "DAY0_OBSERVATION_ADVANCE_ENQUEUED",  # call 1: gap first detected
-            "CYCLE_ADVANCE_NOT_NEEDED",  # call 2: gap drained -> record cleared
-            "DAY0_OBSERVATION_ADVANCE_ENQUEUED",  # call 3: a fresh, later gap
+            {"status": "DAY0_OBSERVATION_ADVANCE_ENQUEUED", "enqueued": True},  # call 1
+            {
+                "status": "CYCLE_ADVANCE_NOT_NEEDED",  # call 2: still queued, unprocessed
+                "enqueued": False,
+                "day0_posterior_matched": False,
+            },
+            {
+                "status": "CYCLE_ADVANCE_NOT_NEEDED",  # call 3: owner ACTIVE, being worked
+                "enqueued": False,
+                "day0_posterior_matched": False,
+            },
+            {
+                "status": "CYCLE_ADVANCE_NOT_NEEDED",  # call 4: gap genuinely drained
+                "enqueued": False,
+                "day0_posterior_matched": True,
+            },
+            {"status": "DAY0_OBSERVATION_ADVANCE_ENQUEUED", "enqueued": True},  # call 5: fresh gap
         ]
     )
     calls: list[dict] = []
 
     def enqueue_cycle(**kwargs):
         calls.append(kwargs)
-        return {"status": next(statuses), "enqueued": True}
+        return next(responses)
 
     monkeypatch.setattr(
         cycle, "enqueue_single_family_cycle_advance_reseed", enqueue_cycle
     )
 
+    for _ in range(4):
+        mr._perform_single_family_belief_reseed_failsoft(
+            city="Beijing", target_date="2026-09-14", metric="high",
+        )
+    before5 = datetime.now(timezone.utc)
     mr._perform_single_family_belief_reseed_failsoft(
         city="Beijing", target_date="2026-09-14", metric="high",
     )
-    mr._perform_single_family_belief_reseed_failsoft(
-        city="Beijing", target_date="2026-09-14", metric="high",
-    )
-    before3 = datetime.now(timezone.utc)
-    mr._perform_single_family_belief_reseed_failsoft(
-        city="Beijing", target_date="2026-09-14", metric="high",
-    )
-    after3 = datetime.now(timezone.utc)
+    after5 = datetime.now(timezone.utc)
 
-    cutoff1 = calls[0]["minimum_posterior_computed_at"]
-    cutoff2 = calls[1]["minimum_posterior_computed_at"]
-    cutoff3 = calls[2]["minimum_posterior_computed_at"]
+    cutoffs = [c["minimum_posterior_computed_at"] for c in calls]
 
-    assert cutoff2 == cutoff1
-    assert cutoff3 != cutoff1
-    assert before3 <= cutoff3 <= after3
+    # "still queued" (call 2) and "owner ACTIVE" (call 3) must NOT clear the record.
+    assert cutoffs[1] == cutoffs[0]
+    assert cutoffs[2] == cutoffs[0]
+    assert cutoffs[3] == cutoffs[0]
+    # call 4's genuine posterior match clears it, so call 5's (new) gap starts fresh.
+    assert cutoffs[4] != cutoffs[0]
+    assert before5 <= cutoffs[4] <= after5
 
 
 def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
