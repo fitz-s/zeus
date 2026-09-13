@@ -14058,7 +14058,8 @@ def _global_sell_probability_receipt(
 
 
 def _revalidate_global_sell_calibration(
-    trade_conn, world_conn, *, actuation, position,
+    trade_conn, world_conn, forecast_conn, *, actuation, position,
+    current_raw_revision: str | None, deadline_monotonic: float | None = None,
 ):
     """Reproduce the selected held q from its entry policy before SELL."""
 
@@ -14066,7 +14067,9 @@ def _revalidate_global_sell_calibration(
     correction = getattr(decision, "payoff_q_correction", None)
     if correction is None:
         return
-    from src.calibration.market_anchored_live_fit import load_held_entry_calibration
+    from src.calibration.market_anchored_live_fit import (
+        CanonicalMarketAnchoredFitProvider, load_held_entry_calibration,
+    )
     from src.solve.solver import family_payoff_point_q
     candidate = decision.candidate
     raw_q = family_payoff_point_q(
@@ -14080,6 +14083,16 @@ def _revalidate_global_sell_calibration(
         token_id=candidate.token_id,
         side=candidate.side,
         world_conn=world_conn,
+    )
+    provider = None
+    if current_raw_revision == binding.fit_scope.raw_probability_revision:
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (world_conn, trade_conn, forecast_conn),
+            city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
+        )
+    binding = binding.at_decision(
+        provider, decision_at=actuation.decision_at_utc, current_raw_revision=current_raw_revision,
+        deadline_monotonic=deadline_monotonic,
     )
     reproduced = binding.corrected_probability(
         family_key=candidate.family_key,
@@ -14338,6 +14351,13 @@ def _submit_current_global_sell(
         )
     now = decision_time.astimezone(UTC)
     try:
+        timeout = max(
+            1.0, float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+        )
+        fit_budget = timeout
+        if final_authority_deadline is not None:
+            fit_budget = min(fit_budget, max(0.0, (final_authority_deadline - datetime.now(UTC)).total_seconds()))
+        fit_deadline = _time.monotonic() + fit_budget
         current_prepared, current_day0_payload = (
             _current_global_actuation_prepared_family(
                 event,
@@ -14392,8 +14412,9 @@ def _submit_current_global_sell(
             raise ValueError(wealth_block)
         portfolio, position = _current_global_sell_position(trade_conn, candidate)
         _revalidate_global_sell_calibration(
-            trade_conn, global_claim_conn,
-            actuation=global_actuation, position=position,
+            trade_conn, global_claim_conn, forecast_conn,
+            actuation=global_actuation, position=position, deadline_monotonic=fit_deadline,
+            current_raw_revision=_prepared_global_probability_semantics_revision(current_prepared, forecast_conn),
         )
     except Exception as exc:  # noqa: BLE001 - any current authority loss vetoes SELL
         return _global_sell_receipt(
@@ -14407,10 +14428,6 @@ def _submit_current_global_sell(
         from src.data.polymarket_client import PolymarketClient
         from src.data.polymarket_request_governor import RequestPriority
 
-        timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
-        )
         with PolymarketClient(
             public_http_timeout=timeout,
             public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
@@ -15165,9 +15182,12 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
-    if reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
-        # The selected q is stale, so neither this SELL nor any runner-up can
-        # inherit the old global objective. The batch runtime evicts the stale
+    if reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED") or reason == (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED"
+    ):
+        # A changed q or calibration artifact invalidates the old objective
+        # for this SELL and every runner-up. The batch runtime evicts the stale
         # family cache before this classification and rebuilds one complete
         # current q/book/wealth auction without venue I/O.
         return "PROBABILITY_SUPERSEDED"

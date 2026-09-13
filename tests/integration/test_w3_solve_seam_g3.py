@@ -34005,13 +34005,18 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     ids=("fresh-buy-submits", "second-drift-fails-closed"),
 )
 @pytest.mark.parametrize(
-    "supersession_status",
-    ("PROBABILITY_SUPERSEDED", "MARKET_AUTHORITY_SUPERSEDED"),
-    ids=("probability", "market-authority"),
+    "supersession_reason",
+    (
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_limit_or_cashflow_changed",
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED",
+    ),
+    ids=("probability", "market-authority", "calibration-artifact"),
 )
 def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
-    monkeypatch, tmp_path, second_probability_drift, supersession_status
+    monkeypatch, tmp_path, second_probability_drift, supersession_reason
 ):
+    supersession_status = era._global_preflight_block_status(supersession_reason)
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     sell_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
     buy_event = _global_scope_event(city="Beta", source_run_id="run-buy")
@@ -34172,25 +34177,13 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
         if candidate is stale_sell:
             return global_batch_runtime.GlobalWinnerPreflight(
                 status=supersession_status,
-                reason=(
-                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
-                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
-                    if supersession_status == "PROBABILITY_SUPERSEDED"
-                    else "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
-                    "curve_economics:fields=fee"
-                ),
+                reason=supersession_reason,
             )
         assert candidate is current_buy
         if second_probability_drift:
             return global_batch_runtime.GlobalWinnerPreflight(
                 status=supersession_status,
-                reason=(
-                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
-                    "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
-                    if supersession_status == "PROBABILITY_SUPERSEDED"
-                    else "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
-                    "curve_economics:fields=fee"
-                ),
+                reason=supersession_reason,
             )
         return global_batch_runtime.GlobalWinnerPreflight(
             status="STABLE", binding_token="current-buy-binding"
@@ -42107,14 +42100,19 @@ def test_global_sell_revalidates_sealed_entry_policy_on_current_raw_q(monkeypatc
     def load(conn, **kwargs):
         assert kwargs['position_id'] == actuation.decision.candidate.position_id
         assert kwargs['token_id'] == actuation.decision.candidate.token_id
-        return SimpleNamespace(corrected_probability=apply)
+        binding = SimpleNamespace(corrected_probability=apply, fit_scope=SimpleNamespace(raw_probability_revision="entry-revision"))
+        def at_decision(provider, **kwargs):
+            assert kwargs == dict(decision_at=actuation.decision_at_utc, current_raw_revision="entry-revision", deadline_monotonic=123.0)
+            return binding
+        binding.at_decision = at_decision
+        return binding
     monkeypatch.setattr(live_fit, 'load_held_entry_calibration', load, raising=False)
     position = SimpleNamespace(city='Alpha', target_date='2026-07-14')
     if changed_policy:
         with pytest.raises(ValueError, match='GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED'):
-            era._revalidate_global_sell_calibration(None, None, actuation=actuation, position=position)
+            era._revalidate_global_sell_calibration(None, None, None, actuation=actuation, position=position, current_raw_revision="entry-revision", deadline_monotonic=123.0)
     else:
-        era._revalidate_global_sell_calibration(None, None, actuation=actuation, position=position)
+        era._revalidate_global_sell_calibration(None, None, None, actuation=actuation, position=position, current_raw_revision="entry-revision", deadline_monotonic=123.0)
     assert calls[0]['raw_q'] == correction.raw_q
     assert calls[0]['p0'] == correction.p0
     assert calls[0]['decision_at'] == actuation.decision_at_utc

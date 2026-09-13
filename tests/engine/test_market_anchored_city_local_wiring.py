@@ -1116,7 +1116,7 @@ def test_entry_warm_does_not_bind_scope_or_grant_fit_authority(monkeypatch, warm
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
 @pytest.mark.parametrize('sell_mode', ['TAKER_LIMIT', 'MAKER_REST'])
-def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, sell_mode):
+def test_held_sell_uses_current_fit_under_entry_policy(monkeypatch, side, sell_mode):
     from src.calibration import market_anchored_live_fit as live_fit
     from src.contracts.payoff_q_correction import PayoffQCorrection
 
@@ -1124,7 +1124,7 @@ def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, se
     policy = live_fit.CanonicalMarketAnchoredFitProvider(
         lambda: (None, None, None), city_timezones={'Tokyo': 'Asia/Tokyo'},
     ).calibration_policy
-    artifact = _artifact(snapshot=(('Tokyo', 'Asia/Tokyo'),))
+    artifact = replace(_artifact(snapshot=(('Tokyo', 'Asia/Tokyo'),)), param_hash='current-held-fit')
     calls = []
 
     def apply(**kwargs):
@@ -1146,7 +1146,7 @@ def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, se
 
     binding = SimpleNamespace(
         fit_scope=entry_scope, calibration_policy=policy, artifact=artifact,
-        corrected_probability=apply,
+        corrected_probability=apply, adaptive_authority=True, decision_certificate_hash="entry-cert",
     )
     trade, world = object(), object()
     loaded = []
@@ -1156,9 +1156,15 @@ def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, se
         return binding
 
     monkeypatch.setattr(live_fit, 'load_held_entry_calibration', load, raising=False)
-    def unavailable_fit(*args, **kwargs):
-        raise ValueError('current refit is not held-entry policy')
-    monkeypatch.setattr(live_fit, 'CanonicalMarketAnchoredFitProvider', unavailable_fit)
+    fit_provider = SimpleNamespace(calibration_policy=policy)
+    refreshed = []
+    def at_decision(provider, **kwargs):
+        assert provider is fit_provider
+        refreshed.append(kwargs)
+        return binding
+    binding.at_decision = at_decision
+    monkeypatch.setattr(live_fit, 'CanonicalMarketAnchoredFitProvider', lambda *_, **__: fit_provider)
+    monkeypatch.setattr("src.engine.event_reactor_adapter._prepared_global_probability_semantics_revision", lambda *_: "entry-revision")
     audit = {}
     resolver = _entry_resolver(
         world, trade_conn=trade,
@@ -1180,6 +1186,8 @@ def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, se
         decision_at=now, side=side,
     )[0])
     assert calls[0]['decision_at'] == now
+    assert refreshed == [dict(decision_at=now, current_raw_revision="entry-revision", deadline_monotonic=None)]
+    assert correction.param_hash == 'current-held-fit'
     assert loaded == [(trade, {
         'position_id': 'held-position', 'token_id': 'held-token',
         'side': side, 'world_conn': world,
@@ -1187,6 +1195,7 @@ def test_held_sell_reuses_entry_policy_without_current_fit(monkeypatch, side, se
     recorded = next(iter(audit['consulted_scopes'].values()))
     assert recorded['scope'] == entry_scope.as_payload()
     assert recorded['policy'] == policy.as_payload()
+    assert recorded['param_hash'] == 'current-held-fit'
 
 
 def test_held_sell_missing_entry_policy_cannot_fall_back_to_raw(monkeypatch):

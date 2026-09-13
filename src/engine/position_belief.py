@@ -172,6 +172,7 @@ class ReplacementBelief:
     latest_raw_cycle_time: str | None = None
     raw_cycle_lag_hours: float | None = None
     raw_input_lag_reason: str | None = None
+    probability_semantics_revision: str | None = None
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
@@ -1139,6 +1140,7 @@ def load_replacement_belief(
         bin_key=bin_key,
         direction=direction,
         probability_functional=POSTERIOR_PREDICTIVE_MEAN,
+        probability_semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
         source_cycle_time=(
             source_cycle_time.isoformat() if source_cycle_time is not None else None
         ),

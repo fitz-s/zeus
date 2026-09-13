@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from src.config import STATE_DIR, cities_by_name, get_mode, settings
+from src.config import STATE_DIR, cities_by_name, get_mode, runtime_cities_by_name, settings
 from src.control import cutover_guard
 from src.control.control_plane import is_entries_paused, is_strategy_enabled
 # 2026-05-04 (live-block antibody — structural fix #4): operator snapshot for
@@ -606,6 +606,7 @@ def _execute_monitoring_phase(
     )
     overall_deadline = provider_setup_started + monitor_budget
     from src.calibration.market_anchored_live_fit import (
+        CanonicalMarketAnchoredFitProvider,
         HeldEntryCalibrationProvider,
         UnavailableHeldEntryCalibrationProvider,
         active_provider_scope,
@@ -620,9 +621,21 @@ def _execute_monitoring_phase(
         # commit so SQLite cannot overrun the held-position decision deadline.
         conn.execute("PRAGMA wal_autocheckpoint = 0")
         summary["held_monitor_wal_autocheckpoint"] = "disabled"
+    fit_provider = None
+    try:
+        fit_provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (conn, conn, conn),
+            city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
+            world_schema="world", forecast_schema="forecasts",
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown regimes retain entry behavior
+        logging.getLogger(__name__).warning("held current fit provider unavailable: %s", type(exc).__name__)
     provider = UnavailableHeldEntryCalibrationProvider()
     try:
-        provider = HeldEntryCalibrationProvider(conn, world_schema_alias="world")
+        provider = HeldEntryCalibrationProvider(
+            conn, world_schema_alias="world", fit_provider=fit_provider,
+            deadline_monotonic=overall_deadline,
+        )
     except Exception as exc:  # noqa: BLE001 - statistical exit evidence fails closed
         logging.getLogger(__name__).warning(
             "held entry calibration reader unavailable: %s",

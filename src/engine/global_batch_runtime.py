@@ -6417,9 +6417,8 @@ def _market_anchored_correction_resolver(
             target_context = target_context_by_family.get(str(candidate.family_key))
             if target_context is None:
                 raise PayoffQCorrectionUnavailable("TARGET_CONTEXT_UNAVAILABLE")
-            # The SELL execution mode does not change the population or policy
-            # which admitted this holding. Reapply its immutable entry fit to
-            # the current probability and executable price, without refitting.
+            # SELL inherits the entry policy and scope, including its refit
+            # rule; the original fitted parameters are immutable provenance.
             binding = load_held_entry_calibration(
                 trade_conn,
                 position_id=candidate.position_id,
@@ -6427,6 +6426,22 @@ def _market_anchored_correction_resolver(
                 side=candidate.side,
                 world_conn=world_conn,
             )
+            from src.engine.event_reactor_adapter import _prepared_global_probability_semantics_revision
+
+            current_raw_revision = _prepared_global_probability_semantics_revision(
+                prepared_by_family.get(str(candidate.family_key)), forecast_conn,
+            )
+            binding = binding.at_decision(
+                provider, decision_at=decision_at_utc, current_raw_revision=current_raw_revision,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if market_anchored_fit_artifact_audit is not None:
+                market_anchored_fit_artifact_audit.setdefault("held_bindings", {})[candidate.position_id] = {
+                    "entry_certificate_hash": binding.decision_certificate_hash,
+                    "current_raw_revision": current_raw_revision,
+                    "adaptive_authority": binding.adaptive_authority,
+                    "param_hash": binding.artifact.param_hash,
+                }
             city, target_date = target_context
             correction = binding.corrected_probability(
                 family_key=candidate.family_key,

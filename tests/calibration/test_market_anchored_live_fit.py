@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused or audited: 2026-09-11
+# Last reused or audited: 2026-09-13
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring, fit provider.
 """Tests for src/calibration/market_anchored_live_fit.py.
@@ -3685,3 +3685,192 @@ def test_held_audit_delta_reconstructs_only_authenticated_parent(monkeypatch):
     }
     monkeypatch.setattr(live_fit, "_receipt_summary", lambda _conn, *, decision_log_id, **_kwargs: summaries[decision_log_id])
     assert live_fit._load_held_audit_context(None, decision_log_id=3, expected_mode="global_single_order_auction_delta", expected_receipt_hash="child") == current
+
+
+def _current_held_artifact(entry, *, cutoff=NOW, beta=0.5, scope_hash=None):
+    manifest = entry.training_manifest
+    manifest = CanonicalTrainingManifest.build(
+        scope_hash=scope_hash or manifest.scope_hash, corpus_revision=manifest.corpus_revision,
+        training_cutoff=cutoff.isoformat(), row_count=manifest.row_count,
+        event_count=manifest.event_count, weight_sum=manifest.weight_sum,
+        max_fill_available_at=manifest.max_fill_available_at,
+        max_label_available_at=manifest.max_label_available_at, input_hash=manifest.input_hash,
+    )
+    artifact = replace(entry, beta=beta, training_cutoff=cutoff.isoformat(), training_manifest=manifest)
+    return replace(artifact, param_hash=_param_hash(
+        alpha=artifact.alpha, beta=artifact.beta, lambda_=artifact.lambda_, clip_d=artifact.clip_d,
+        p_clip=artifact.p_clip, lead_buckets=artifact.lead_buckets,
+        training_cutoff=artifact.training_cutoff, lead_calendar_revision=artifact.lead_calendar_revision,
+        city_timezone_snapshot=artifact.city_timezone_snapshot,
+    ))
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+def test_held_policy_refits_without_rewriting_entry_and_responds_to_falling_q(monkeypatch, side):
+    trade, world, entry, token, side, entry_correction = _held_entry_reader_fixture(monkeypatch, side=side)
+    try:
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id='position-a', token_id=token, side=side, world_conn=world,
+        )
+        # A beta=0 entry fit ignores raw-q declines. The same adaptive policy
+        # can learn beta>0 without changing entry attribution or risk limits.
+        frozen = replace(binding, artifact=_current_held_artifact(entry, beta=0.0))
+        current = _current_held_artifact(entry, beta=0.5)
+        calls = []
+        def get_artifact(**kwargs):
+            calls.append(kwargs)
+            return current
+        provider = SimpleNamespace(calibration_policy=binding.calibration_policy, artifact=get_artifact)
+        refreshed = frozen.at_decision(provider, decision_at=NOW, current_raw_revision=binding.fit_scope.raw_probability_revision, deadline_monotonic=123.0)
+        kwargs = dict(family_key=binding.family_key, bin_id=binding.bin_id, token_id=token,
+                      side=side, p0=0.30, city='Warsaw', target_date=date(2026, 8, 28), decision_at=NOW)
+        assert frozen.corrected_probability(raw_q=.9, **kwargs).corrected_q == pytest.approx(
+            frozen.corrected_probability(raw_q=.1, **kwargs).corrected_q)
+        assert refreshed.corrected_probability(raw_q=.1, **kwargs).corrected_q < .30
+        assert refreshed.corrected_probability(raw_q=.9, **kwargs).corrected_q > .30
+        assert refreshed.decision_certificate_hash == binding.decision_certificate_hash
+        assert refreshed.calibration_policy is binding.calibration_policy
+        assert refreshed.fit_scope is binding.fit_scope
+        assert binding.artifact.param_hash == entry_correction.param_hash
+        assert refreshed.artifact is current
+        assert calls == [dict(scope=binding.fit_scope, now=NOW, minimum_cutoff=NOW, deadline_monotonic=123.0)]
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize('invalid', ['policy', 'missing', 'future', 'expired', 'before_entry', 'scope'])
+def test_held_policy_rejects_unavailable_or_noncausal_current_fit(monkeypatch, invalid):
+    trade, world, entry, token, side, _ = _held_entry_reader_fixture(monkeypatch)
+    try:
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id='position-a', token_id=token, side=side, world_conn=world,
+        )
+        policy = binding.calibration_policy
+        cutoff = {'future': NOW + timedelta(seconds=1), 'expired': NOW - timedelta(hours=6),
+                  'before_entry': datetime(2026, 8, 24, 12, tzinfo=timezone.utc)}.get(invalid, NOW)
+        artifact = _current_held_artifact(entry, cutoff=cutoff, scope_hash='f' * 64 if invalid == 'scope' else None)
+        if invalid == 'policy':
+            policy = replace(policy, lambda_=policy.lambda_ + 1)
+        provider = SimpleNamespace(calibration_policy=policy, artifact=lambda **_: None if invalid == 'missing' else artifact)
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable, match='CURRENT_'):
+            binding.at_decision(provider, decision_at=NOW, current_raw_revision=binding.fit_scope.raw_probability_revision)
+        assert binding.artifact is not artifact
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_canonical_attached_handles_share_fit_and_refresh_older_than_entry_cache(monkeypatch, tmp_path):
+    world, trade, _, forecast = _canonical_corpus_fixture(return_forecast=True, forecast_lineage=True)
+    handles = []
+    attached = None
+    try:
+        forecast.commit()
+        for source, name in zip((world, trade, forecast), ('world', 'trade', 'forecast'), strict=True):
+            conn = sqlite3.connect(tmp_path / (name + '.db'))
+            conn.row_factory = sqlite3.Row
+            source.backup(conn)
+            handles.append(conn)
+        attached = sqlite3.connect(tmp_path / 'trade.db')
+        attached.execute('ATTACH DATABASE ? AS world', (str(tmp_path / 'world.db'),))
+        attached.execute('ATTACH DATABASE ? AS forecasts', (str(tmp_path / 'forecast.db'),))
+        cache, corpus_cache = MarketAnchoredArtifactCache(), live_fit.CanonicalCorpusCache()
+        common = dict(city_timezones=_TEST_CITY_TIMEZONES, min_train_rows=1, cache=cache, corpus_cache=corpus_cache)
+        direct = CanonicalMarketAnchoredFitProvider(lambda: tuple(handles), **common)
+        monitor = CanonicalMarketAnchoredFitProvider(lambda: (attached, attached, attached),
+                    world_schema='world', forecast_schema='forecasts', **common)
+        original_load = live_fit.load_canonical_fit_corpus
+        calls = []
+        def load(*args, **kwargs):
+            calls.append(kwargs)
+            return original_load(*args, **kwargs)
+        monkeypatch.setattr(live_fit, 'load_canonical_fit_corpus', load)
+        monkeypatch.setattr(sqlite3, 'connect', lambda *_, **__: pytest.fail('must borrow DB handles'))
+        first = direct.artifact(scope=_canonical_scope(), now=NOW)
+        assert first is not None
+        assert monitor.artifact(scope=_canonical_scope(), now=NOW + timedelta(minutes=1)) is first
+        assert len(calls) == 1
+        # A position admitted by another process with a newer fit must not wait
+        # six hours for this process's older but otherwise fresh cache to drain.
+        newer_cut = NOW + timedelta(minutes=2)
+        refreshed = monitor.artifact(scope=_canonical_scope(), now=newer_cut, minimum_cutoff=newer_cut)
+        assert refreshed is not None and refreshed.training_cutoff == newer_cut.isoformat()
+        assert len(calls) == 2 and calls[-1]['world_schema'] == 'world'
+        assert calls[-1]['forecast_schema'] == 'forecasts'
+        assert direct.artifact(scope=_canonical_scope(), now=newer_cut) is refreshed
+        assert monitor.artifact(scope=_canonical_scope(), now=newer_cut, minimum_cutoff=newer_cut + timedelta(seconds=1)) is None
+        assert monitor.artifact(scope=_canonical_scope(), now=newer_cut, deadline_monotonic=time.monotonic()-1) is None
+        assert len(calls) == 2
+    finally:
+        for conn in (*handles, world, trade, forecast, attached):
+            if conn is not None:
+                conn.close()
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('available', [True, False])
+@pytest.mark.parametrize('day0', [False, True])
+def test_monitor_uses_same_decision_clock_for_current_fit_and_correction(monkeypatch, side, available, day0):
+    from src.state import portfolio as portfolio_module
+    from tests.test_exit_market_anchored_q import _held_position, _exit_context
+
+    trade, world, entry, token, side, correction = _held_entry_reader_fixture(monkeypatch, side=side)
+    try:
+        current = _current_held_artifact(entry)
+        calls = []
+        def artifact(**kwargs):
+            calls.append(kwargs)
+            return current if available else None
+        fit_provider = SimpleNamespace(calibration_policy=correction.calibration_policy, artifact=artifact)
+        provider = live_fit.HeldEntryCalibrationProvider(
+            trade, world_conn=world, fit_provider=fit_provider, deadline_monotonic=123.0,
+        )
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW
+        monkeypatch.setattr(portfolio_module, 'datetime', Clock)
+        position = _held_position('buy_yes' if side == 'YES' else 'buy_no', target_date='2026-08-28')
+        position.trade_id = 'position-a'
+        context = _exit_context(fresh_prob=.1, current_market_price=.3, best_bid=.3)
+        context = replace(context, probability_receipt={'probability_semantics_revision': correction.fit_scope.raw_probability_revision})
+        if day0:
+            from src.events.day0_authority import bind_day0_probability_semantics
+            context = replace(context, day0_active=True, probability_receipt={
+                'probability_semantics_revision': correction.fit_scope.raw_probability_revision,
+                'q_version': bind_day0_probability_semantics('current-day0-q'),
+            })
+        with live_fit.active_provider_scope(provider):
+            q, evidence_ok, source = position._exit_q_mean_and_source(context)
+        if day0:
+            assert calls == []
+        else:
+            assert calls[0]['now'] == NOW and calls[0]['deadline_monotonic'] == 123.0
+        if available or day0:
+            expected = corrected_probability(entry if day0 else current, q_raw=.1, p0=.3, city='Warsaw',
+                target_date=date(2026, 8, 28), decision_at=NOW, side=side)[0]
+            assert float(q) == pytest.approx(expected)
+            assert evidence_ok and source == 'market_anchored'
+        else:
+            assert not evidence_ok and source == 'entry_calibration_unavailable'
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize('revision', [None, '', 'day0_hourly_ens_source_clock_carrier_v15'])
+def test_unidentified_or_changed_raw_revision_keeps_entry_parameters_without_adaptive_authority(monkeypatch, revision):
+    trade, world, entry, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id='position-a', token_id=token, side=side, world_conn=world,
+        )
+        provider = SimpleNamespace(calibration_policy=binding.calibration_policy,
+            artifact=lambda **_: pytest.fail('a same-entry-scope refit cannot prove cross-revision transport'))
+        result = binding.at_decision(provider, decision_at=NOW, current_raw_revision=revision)
+        assert result is binding and result.adaptive_authority is False
+        assert result.artifact.param_hash == correction.param_hash
+    finally:
+        trade.close()
+        world.close()

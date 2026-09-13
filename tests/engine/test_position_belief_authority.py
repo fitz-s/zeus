@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-13; last_reused=2026-09-13
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -665,6 +665,7 @@ class TestLoadReplacementBelief:
         assert belief.q_yes_ucb == pytest.approx(0.31)
         assert belief.held_side_prob == pytest.approx(1.0 - 0.242)
         assert belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
+        assert belief.probability_semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
         assert belief.held_side_lcb == pytest.approx(1.0 - 0.31)
         assert belief.held_side_ucb == pytest.approx(1.0 - 0.18)
         assert belief.posterior_id == "p1"
@@ -1466,6 +1467,7 @@ class TestMonitorPrimaryAuthority:
             q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T10:00:00+00:00", age_hours=2.0,
             fresh=True, bin_key=BIN, direction="buy_no",
+            probability_semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
         )
         monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: belief)
         legacy_called = []
@@ -1491,6 +1493,7 @@ class TestMonitorPrimaryAuthority:
         )
         receipt = refresh_pos._monitor_probability_receipt
         assert receipt["posterior_id"] == "p9"
+        assert receipt["probability_semantics_revision"] == CURRENT_EVIDENCE_SEMANTICS_REVISION
         assert receipt["computed_at"] == "2026-06-12T10:00:00+00:00"
         assert receipt["held_side_probability"] == pytest.approx(0.758)
         assert len(receipt["evidence_content_hash"]) == 64

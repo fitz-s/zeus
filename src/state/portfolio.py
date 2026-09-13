@@ -943,18 +943,12 @@ class Position:
     def _exit_q_mean_and_source(
         self, exit_context: ExitContext
     ) -> tuple[Decimal, bool, str]:
-        """Held-side q for the exit stop using the immutable ENTRY artifact.
+        """Refresh the ENTRY fit only within its authenticated raw revision.
 
-        A live monitor may only correct current raw q/p0 with the exact
-        calibration artifact sealed by this position's ENTRY certificate. A
-        missing or malformed binding makes statistical probability evidence
-        unavailable for this position; it cannot silently substitute the
-        legacy attribution fit or the raw point. Deterministic Day0 facts and
-        RED are evaluated by their independent laws after this method returns.
-
-        A missing provider remains the offline/test compatibility path. The
-        live cycle always installs the entry-bound reader over its borrowed
-        trade/world connection.
+        Cross-revision transport retains the entry artifact. Missing entry
+        identity or a required same-revision fit makes evidence unavailable. Deterministic Day0 and RED retain their own action laws.
+        A missing provider is the offline/test compatibility path; the live
+        cycle installs a provider over its existing canonical connections.
         """
         q_raw, evidence_ok = self._held_side_point_with_confidence(exit_context)
         if not evidence_ok:
@@ -981,6 +975,14 @@ class Position:
         except (TypeError, ValueError):
             return q_raw, False, "entry_calibration_unavailable"
 
+        receipt = exit_context.probability_receipt
+        receipt = receipt if isinstance(receipt, Mapping) else {}
+        from src.events.day0_authority import day0_probability_semantics_revision
+
+        current_raw_revision = day0_probability_semantics_revision(receipt.get("q_version"))
+        if current_raw_revision is None and not exit_context.day0_active:
+            current_raw_revision = receipt.get("probability_semantics_revision")
+
         now_utc = datetime.now(timezone.utc)
         try:
             side = "YES" if self.direction.value == "buy_yes" else "NO"
@@ -989,6 +991,8 @@ class Position:
                 position_id=self.trade_id,
                 token_id=token_id,
                 side=side,
+                decision_at=now_utc,
+                current_raw_revision=current_raw_revision,
             )
             applied = binding.corrected_probability(
                 family_key=binding.family_key,

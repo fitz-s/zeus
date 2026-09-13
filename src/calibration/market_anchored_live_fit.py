@@ -258,6 +258,7 @@ class CanonicalCorpusCache:
         ttl: timedelta,
         load_current: Callable[[], CanonicalFitCorpus | None],
         deadline_monotonic: float | None = None,
+        minimum_cutoff: datetime | None = None,
     ) -> tuple[CanonicalFitCorpus | None, datetime | None]:
         """Reuse only a corpus causally no newer than the requested cutoff."""
 
@@ -277,7 +278,9 @@ class CanonicalCorpusCache:
             if cached is not None:
                 corpus, corpus_cutoff = cached
                 age = requested_cutoff - corpus_cutoff
-                if timedelta(0) <= age < ttl:
+                if timedelta(0) <= age < ttl and (
+                    minimum_cutoff is None or corpus_cutoff >= minimum_cutoff
+                ):
                     self._entries.move_to_end(key)
                     return corpus, corpus_cutoff
             corpus = load_current()
@@ -2292,6 +2295,9 @@ class CanonicalMarketAnchoredFitProvider:
         ttl: timedelta = DEFAULT_TTL,
         cache: MarketAnchoredArtifactCache | None = None,
         corpus_cache: CanonicalCorpusCache | None = None,
+        world_schema: str = "main",
+        trade_schema: str = "main",
+        forecast_schema: str = "main",
     ) -> None:
         if not callable(connects):
             raise TypeError("canonical fit provider requires a connects callable")
@@ -2304,6 +2310,11 @@ class CanonicalMarketAnchoredFitProvider:
             raise ValueError("canonical fit provider min_train_rows is invalid")
         if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
             raise ValueError("canonical fit provider ttl is invalid")
+        if (world_schema not in {"main", "world"}
+                or trade_schema not in {"main", "trades"}
+                or forecast_schema not in {"main", "forecasts"}):
+            raise ValueError("canonical fit provider schema is invalid")
+        self._schemas = (world_schema, trade_schema, forecast_schema)
         self._connects = connects
         self._city_timezone_snapshot = snapshot
         self._lambda = float(lambda_)
@@ -2339,7 +2350,7 @@ class CanonicalMarketAnchoredFitProvider:
     ) -> ArtifactCacheKey:
         return (
             "canonical_market_anchored_fit_v1", identities,
-            ("main", "main", "main"), CANONICAL_CORPUS_REVISION,
+            CANONICAL_CORPUS_REVISION,
             "probability_only_no_cash_proofs",
             scope.as_payload()["scope_hash"], self._city_timezone_snapshot,
             self._calibration_policy.as_payload()["policy_hash"],
@@ -2363,7 +2374,8 @@ class CanonicalMarketAnchoredFitProvider:
                 for conn in dict.fromkeys(handles):
                     stack.enter_context(_sqlite_fit_deadline(conn, deadline_monotonic))
                 identities = tuple(
-                    _borrowed_db_identity(conn, schema_alias="main") for conn in handles
+                    _borrowed_db_identity(conn, schema_alias=schema)
+                    for conn, schema in zip(handles, self._schemas, strict=True)
                 )
         except Exception:  # noqa: BLE001 - closed borrowed handles cannot authorize a fit
             return None
@@ -2371,7 +2383,7 @@ class CanonicalMarketAnchoredFitProvider:
         corpus_key = None
         if len(physical_identities) == len(handles):
             corpus_key = (
-                physical_identities, ("main", "main", "main"),
+                physical_identities,
                 CANONICAL_CORPUS_REVISION, "probability_only_no_cash_proofs",
                 self._city_timezone_snapshot, self._ttl.total_seconds(),
             )
@@ -2379,6 +2391,7 @@ class CanonicalMarketAnchoredFitProvider:
 
     def _prepared_corpus(
         self, *, now: datetime, deadline_monotonic: float | None,
+        minimum_cutoff: datetime | None = None,
     ) -> tuple[
         tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
         tuple[tuple[str, int, int], ...],
@@ -2386,11 +2399,18 @@ class CanonicalMarketAnchoredFitProvider:
         CanonicalFitCorpus,
     ] | None:
         if (
-            not isinstance(now, datetime) or now.tzinfo is None
+            (minimum_cutoff is not None and (
+                not isinstance(minimum_cutoff, datetime)
+                or minimum_cutoff.tzinfo is None
+                or minimum_cutoff.utcoffset() is None
+            ))
+            or not isinstance(now, datetime) or now.tzinfo is None
             or now.utcoffset() is None or self._expired(deadline_monotonic)
         ):
             return None
         cutoff = now.astimezone(timezone.utc)
+        if minimum_cutoff is not None and minimum_cutoff > cutoff:
+            return None
         prepared = self._borrowed_corpus_handles(
             deadline_monotonic=deadline_monotonic,
         )
@@ -2399,7 +2419,7 @@ class CanonicalMarketAnchoredFitProvider:
         handles, physical_identities, corpus_key = prepared
         corpus = self._corpus(
             handles, cutoff=cutoff, corpus_key=corpus_key,
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=deadline_monotonic, minimum_cutoff=minimum_cutoff,
         )
         if corpus is None or self._expired(deadline_monotonic):
             return None
@@ -2420,6 +2440,7 @@ class CanonicalMarketAnchoredFitProvider:
     def artifact(
         self, *, scope: CalibrationFitScope, now: datetime,
         deadline_monotonic: float | None = None,
+        minimum_cutoff: datetime | None = None,
     ) -> ResidualCalibratorArtifact | None:
         """Return a canonical scoped fit or None; never select legacy rows."""
         if (
@@ -2429,7 +2450,7 @@ class CanonicalMarketAnchoredFitProvider:
         ):
             return None
         prepared = self._prepared_corpus(
-            now=now, deadline_monotonic=deadline_monotonic,
+            now=now, deadline_monotonic=deadline_monotonic, minimum_cutoff=minimum_cutoff,
         )
         if prepared is None:
             return None
@@ -2454,6 +2475,7 @@ class CanonicalMarketAnchoredFitProvider:
         self, handles: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
         *, cutoff: datetime, corpus_key: tuple[object, ...] | None,
         deadline_monotonic: float | None,
+        minimum_cutoff: datetime | None = None,
     ) -> CanonicalFitCorpus | None:
         def load_current() -> CanonicalFitCorpus | None:
             if self._expired(deadline_monotonic):
@@ -2467,6 +2489,8 @@ class CanonicalMarketAnchoredFitProvider:
                         city_timezone_snapshot=self._city_timezone_snapshot,
                         forecast_conn=handles[2], deadline_monotonic=deadline_monotonic,
                         include_cash_proofs=False,
+                        world_schema=self._schemas[0], trade_schema=self._schemas[1],
+                        forecast_schema=self._schemas[2],
                     )
                 if self._expired(deadline_monotonic):
                     return None
@@ -2479,6 +2503,7 @@ class CanonicalMarketAnchoredFitProvider:
         return self._corpus_cache.get_or_load(
             corpus_key, requested_cutoff=cutoff, ttl=self._ttl,
             load_current=load_current, deadline_monotonic=deadline_monotonic,
+            minimum_cutoff=minimum_cutoff,
         )[0]
 
     def _fit_scope(
@@ -2886,7 +2911,7 @@ def _artifact_from_held_audit(payload: object) -> ResidualCalibratorArtifact:
 
 @dataclass(frozen=True)
 class HeldEntryCalibrationBinding:
-    """Entry-sealed calibration that may correct a held token's fresh q only."""
+    """Entry identity and calibration policy with one causally selected fit."""
 
     artifact: ResidualCalibratorArtifact
     fit_scope: CalibrationFitScope
@@ -2898,6 +2923,41 @@ class HeldEntryCalibrationBinding:
     bin_id: str
     token_id: str
     side: str
+    adaptive_authority: bool = False
+
+    def at_decision(
+        self, provider: CanonicalMarketAnchoredFitProvider | None, *,
+        decision_at: datetime, current_raw_revision: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> HeldEntryCalibrationBinding:
+        """Advance fitted parameters under the ENTRY policy's own refit rule."""
+
+        if current_raw_revision != self.fit_scope.raw_probability_revision:
+            # No new cross-revision transport is identified by a refit. Keep
+            # the authenticated entry behavior until that transport is proved.
+            return self
+        if provider is None or provider.calibration_policy != self.calibration_policy:
+            raise _held_correction_unavailable("CURRENT_POLICY_MISMATCH")
+        entry_cutoff = _parse_ts(self.artifact.training_cutoff)
+        if (entry_cutoff is None or not isinstance(decision_at, datetime)
+                or decision_at.tzinfo is None or decision_at.utcoffset() is None):
+            raise _held_correction_unavailable("CURRENT_FIT_CLOCK_INVALID")
+        artifact = provider.artifact(
+            scope=self.fit_scope, now=decision_at,
+            deadline_monotonic=deadline_monotonic, minimum_cutoff=entry_cutoff,
+        )
+        cutoff = _parse_ts(artifact.training_cutoff) if artifact is not None else None
+        manifest = artifact.training_manifest if artifact is not None else None
+        if (cutoff is None or cutoff < entry_cutoff
+                or not 0 <= (decision_at - cutoff).total_seconds() < self.calibration_policy.refit_seconds
+                or manifest is None
+                or manifest.scope_hash != self.fit_scope.as_payload()["scope_hash"]
+                or manifest.corpus_revision != CANONICAL_CORPUS_REVISION):
+            # SCOPE: this holding's statistical action. DRAIN: the next decision
+            # refreshes the same causal corpus (including older cache eviction).
+            # RESET: a current artifact with the exact entry policy and scope.
+            raise _held_correction_unavailable("CURRENT_FIT_UNAVAILABLE")
+        return replace(self, artifact=artifact, adaptive_authority=True)
 
     def corrected_probability(
         self,
@@ -2912,7 +2972,7 @@ class HeldEntryCalibrationBinding:
         target_date: date,
         decision_at: datetime,
     ) -> PayoffQCorrection:
-        """Apply the frozen ENTRY artifact to current source-clock q and p0."""
+        """Apply the selected policy artifact to current source-clock q and p0."""
 
         if (
             family_key != self.family_key
@@ -3212,7 +3272,7 @@ def load_held_entry_calibration(
 
 
 class HeldEntryCalibrationProvider:
-    """Monitor-scoped reader over already-open trade/world handles."""
+    """Monitor-scoped entry policy and current fit over borrowed handles."""
 
     def __init__(
         self,
@@ -3220,21 +3280,30 @@ class HeldEntryCalibrationProvider:
         *,
         world_conn: sqlite3.Connection | None = None,
         world_schema_alias: str = "world",
+        fit_provider: CanonicalMarketAnchoredFitProvider | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
         self._trade_conn = trade_conn
         self._world_conn = world_conn
         self._world_schema_alias = world_schema_alias
+        self._fit_provider = fit_provider
+        self._deadline_monotonic = deadline_monotonic
 
     def load(
-        self, *, position_id: str, token_id: str, side: str,
+        self, *, position_id: str, token_id: str, side: str, decision_at: datetime,
+        current_raw_revision: str | None,
     ) -> HeldEntryCalibrationBinding:
-        return load_held_entry_calibration(
+        binding = load_held_entry_calibration(
             self._trade_conn,
             position_id=position_id,
             token_id=token_id,
             side=side,
             world_conn=self._world_conn,
             world_schema_alias=self._world_schema_alias,
+        )
+        return binding.at_decision(
+            self._fit_provider, decision_at=decision_at, current_raw_revision=current_raw_revision,
+            deadline_monotonic=self._deadline_monotonic,
         )
 
 
