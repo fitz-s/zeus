@@ -13790,6 +13790,17 @@ def _global_sell_execution_economics_drift(
         if breached
     )
     if not breaches:
+        if getattr(current_candidate, "execution_mode", None) == "TAKER_LIMIT":
+            from src.solve.solver import global_sell_fak_prefix_certificate
+
+            try:
+                global_sell_fak_prefix_certificate(
+                    decision, current_candidate=current_candidate,
+                )
+            except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
+                # SCOPE: this selected SELL. DRAIN: re-auction fresh q/book/fees.
+                # RESET: its submitted floor proves positive fill economics.
+                return f"rounding_safe_fill:{type(exc).__name__}:{exc}"
         return None
     return (
         f"{','.join(breaches)}:shares={shares}:"

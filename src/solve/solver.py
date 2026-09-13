@@ -6258,7 +6258,7 @@ def _global_sell_fill_prefix_extended_objective(
     """Score one SELL fill prefix on the exact zero-atom log objective."""
 
     candidate = decision.candidate
-    terminal = decision.terminal_wealth
+    terminal = decision.terminal_wealth or decision.expected_terminal_wealth
     shares = Decimal(filled_shares)
     proceeds = Decimal(net_proceeds_usd)
     if (
@@ -6275,15 +6275,22 @@ def _global_sell_fill_prefix_extended_objective(
     win_baseline = terminal.wealth_after_win_usd - terminal.win_payoff_usd
     loss_after = loss_baseline - shares + proceeds
     win_after = win_baseline + proceeds
+    expected_basis = isinstance(terminal, ExpectedTerminalWealthCertificate)
+    loss_probability = (
+        terminal.held_probability_mean if expected_basis else terminal.loss_probability_ucb
+    )
+    win_probability = (
+        terminal.favorable_sell_probability_mean if expected_basis else terminal.win_probability_lcb
+    )
     ruin_reduction, robust_du = _binary_extended_log_delta(
-        loss_probability=terminal.loss_probability_ucb,
-        win_probability=terminal.win_probability_lcb,
+        loss_probability=loss_probability,
+        win_probability=win_probability,
         loss_baseline=loss_baseline,
         win_baseline=win_baseline,
         loss_after=loss_after,
         win_after=win_after,
     )
-    robust_ev = terminal.win_probability_lcb * float(shares) - float(
+    robust_ev = win_probability * float(shares) - float(
         shares - proceeds
     )
     return ruin_reduction, robust_du, robust_ev
@@ -6458,6 +6465,59 @@ def global_buy_fak_prefix_certificate(
     return certificate
 
 
+def _global_sell_rounding_safe_proceeds(
+    candidate: GlobalSingleOrderSellCandidate,
+    shares: Decimal,
+) -> Decimal:
+    """Bound every taker fragment at the actual submitted SELL floor.
+
+    Rounded five-decimal fees are at most twice the unrounded fee.  For
+    rate <= .5, p - 2*rate*p*(1-p) increases with p, so the submitted floor
+    bounds proceeds without guessing the number of counterparties.
+    """
+    curve = candidate.economic_sell_curve
+    rate = Decimal(curve.fee_model.fee_rate)
+    if (
+        candidate.execution_mode != "TAKER_LIMIT"
+        or not rate.is_finite()
+        or not 0 <= rate <= Decimal(".5")
+    ):
+        raise ValueError("SELL rounding-safe fee authority unavailable")
+    _, _, deepest = curve.proceeds_for_shares(shares)
+    limit = _live_sell_limit_price(
+        candidate.executable_sell_curve.levels[0].price,
+        deepest,
+        candidate.executable_sell_curve.min_tick,
+    )
+    if limit is None:
+        raise ValueError("SELL rounding-safe limit unavailable")
+    return shares * (limit - 2 * rate * limit * (1 - limit))
+
+
+def global_sell_fak_prefix_certificate(
+    decision: GlobalSingleOrderDecision,
+    *,
+    current_candidate: GlobalSingleOrderSellCandidate | None = None,
+) -> dict[str, object]:
+    """Re-prove positive SELL economics with fragment-safe fees at JIT."""
+    candidate = current_candidate or decision.candidate
+    if not isinstance(candidate, GlobalSingleOrderSellCandidate):
+        raise ValueError("SELL rounding-safe candidate unavailable")
+    proceeds = _global_sell_rounding_safe_proceeds(candidate, decision.shares)
+    ruin, delta_log, ev = _global_sell_fill_prefix_extended_objective(
+        decision, filled_shares=decision.shares, net_proceeds_usd=proceeds,
+    )
+    if not (ev > 0 and (ruin > 0 or (ruin == 0 and delta_log > 0))):
+        raise ValueError("SELL rounding-safe fill economics non-positive")
+    return {
+        "semantics": "sell_submitted_floor_twice_unrounded_fee_v1",
+        "proceeds_lower_bound_usd": str(proceeds),
+        "ruin_probability_reduction": ruin,
+        "delta_log_wealth_lower_bound": delta_log,
+        "ev_lower_bound_usd": ev,
+    }
+
+
 def _score_global_single_order_sell(
     candidate: GlobalSingleOrderSellCandidate,
     *,
@@ -6511,6 +6571,44 @@ def _score_global_single_order_sell(
     # maximum invents correlation and can turn a positive-EV exit negative.
     loss_baseline = Decimal(endowment.win_wealth_floor_usd)
     win_baseline = Decimal(endowment.loss_wealth_floor_usd)
+
+    rounding_safe_unavailable = False
+    if candidate.execution_mode == "TAKER_LIMIT":
+        def safe_prefix(shares: Decimal) -> bool:
+            try:
+                proceeds = _global_sell_rounding_safe_proceeds(candidate, shares)
+                ruin, growth = _binary_extended_log_delta(
+                    loss_probability=1.0 - robust_q,
+                    win_probability=robust_q,
+                    loss_baseline=loss_baseline,
+                    win_baseline=win_baseline,
+                    loss_after=loss_baseline - shares + proceeds,
+                    win_after=win_baseline + proceeds,
+                )
+                ev = proceeds - Decimal(str(1.0 - robust_q)) * shares
+                return ev > 0 and (ruin > 0 or (ruin == 0 and growth > 0))
+            except (ArithmeticError, ValueError):
+                return False
+
+        # At a fixed floor log growth is concave and zero at no fill; lower
+        # sizes also have no worse floors. Thus safe positive sizes form a
+        # prefix. Bound that prefix on the venue grid before optimizing, so a
+        # failed large size cannot hide a smaller profitable reduction.
+        if not safe_prefix(min_shares):
+            # SCOPE: this SELL. DRAIN: reprice next cut with fresh q/book/fee.
+            # RESET: a legal lot has positive rounded-fee prefix economics.
+            # Still materialize the ordinary HOLD/SELL counterfactual below;
+            # known unfavorable economics is not missing held-position truth.
+            rounding_safe_unavailable = True
+        elif not safe_prefix(max_shares):
+            lo, hi = int(min_shares / quantum), int(max_shares / quantum)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if safe_prefix(Decimal(mid) * quantum):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            max_shares = Decimal(lo) * quantum
 
     # Net proceeds are piecewise linear.  On each bid level the log objective
     # is concave, so its only possible maximum is a level boundary or the one
@@ -6728,6 +6826,11 @@ def _score_global_single_order_sell(
         remaining -= take
         if remaining <= Decimal("1e-9"):
             break
+    if rounding_safe_unavailable:
+        return replace(
+            scored,
+            rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROUNDING_SAFE_SELL"},
+        )
     return scored
 
 

@@ -41279,3 +41279,128 @@ def test_calibrated_sell_reauctions_when_better_bid_changes_probability_anchor()
     ) == 'calibration_price_anchor'
     with pytest.raises(ValueError, match='GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED'):
         GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=jit)
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("held_q,admitted", [(0.0476242, False), (0.04, True)])
+def test_sell_rounded_fee_cannot_turn_positive_gate_into_loss(side, held_q, admitted):
+    from src.solve.solver import (
+        CandidatePortfolioEndowment, _score_global_single_order_sell_expected,
+    )
+
+    template = _adapter_sell_actuation(SimpleNamespace(event_id="sell-fee"))
+    token = f"{side.lower()}-token"
+    curve = replace(
+        template.decision.candidate.executable_sell_curve,
+        token_id=token, side=side,
+        levels=(BidBookLevel(price=Decimal(".05"), size=Decimal("5")),),
+        fee_model=FeeModel(fee_rate=Decimal(".05")),
+    )
+    candidate = replace(
+        template.decision.candidate, side=side, token_id=token,
+        held_shares=Decimal("5"), executable_sell_curve=curve,
+        proposal_sell_curve=curve,
+        execution_curve_identity=executable_curve_identity(curve),
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    if not admitted:
+        # Independently reproduce the actual 5dp rounding sign reversal.
+        raw_fee = Decimal("5") * Decimal(".05") * Decimal(".05") * Decimal(".95")
+        from decimal import ROUND_HALF_UP
+        rounded_fee = raw_fee.quantize(Decimal(".00001"), rounding=ROUND_HALF_UP)
+        expected_payout = Decimal(str(held_q)) * 5
+        assert Decimal(".25") - raw_fee - expected_payout == Decimal(".0000040")
+        assert Decimal(".25") - rounded_fee - expected_payout == Decimal("-.0000010")
+    score = _score_global_single_order_sell_expected(
+        candidate, held_probability_mean=held_q, sample_count=2, band_alpha=.05,
+        endowment=CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=Decimal("1000000"),
+            win_wealth_floor_usd=Decimal("1000005"),
+            current_token_shares=Decimal("5"), ledger_snapshot_id="ledger-1",
+        ),
+    )
+    assert (score.candidate is not None and not score.rejection_reasons) is admitted
+    if admitted:
+        from src.solve.solver import global_sell_fak_prefix_certificate
+        proof = global_sell_fak_prefix_certificate(score)
+        assert proof["ev_lower_bound_usd"] > 0
+        assert score.expected_terminal_wealth is not None
+        assert score.cash_proceeds_usd == Decimal(".238125")
+        assert Decimal(proof["proceeds_lower_bound_usd"]) < score.cash_proceeds_usd
+        assert era._global_sell_execution_economics_drift(
+            decision=score, current_candidate=candidate,
+        ) is None
+
+
+def test_sell_rounding_safe_size_keeps_best_smaller_legal_reduction():
+    from src.solve.solver import CandidatePortfolioEndowment, _score_global_single_order_sell_expected
+
+    template = _adapter_sell_actuation(SimpleNamespace(event_id="sell-fee-size"))
+    curve = replace(
+        template.decision.candidate.executable_sell_curve,
+        levels=(BidBookLevel(price=Decimal(".60"), size=Decimal("50")),),
+        fee_model=FeeModel(fee_rate=Decimal(".20")),
+    )
+    candidate = replace(
+        template.decision.candidate, held_shares=Decimal("50"),
+        proposal_sell_curve=curve,
+        executable_sell_curve=curve, execution_curve_identity=executable_curve_identity(curve),
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    score = _score_global_single_order_sell_expected(
+        candidate, held_probability_mean=.5, sample_count=2, band_alpha=.05,
+        endowment=CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=Decimal("100"), win_wealth_floor_usd=Decimal("100"),
+            current_token_shares=Decimal("50"), ledger_snapshot_id="ledger-1",
+        ),
+    )
+    # Exhaust every legal size independently; retain the original expected
+    # objective, subject to the worst-fragment fee constraint.
+    feasible = []
+    for cents in range(1, 5001):
+        shares = cents / 100
+        conservative = .5 * math.log((100 - .496 * shares) / 100) + .5 * math.log((100 + .504 * shares) / 100)
+        raw = .5 * math.log((100 - .448 * shares) / 100) + .5 * math.log((100 + .552 * shares) / 100)
+        if conservative > 0:
+            feasible.append((raw, Decimal(cents) / 100))
+    optimum = max(feasible)[1]
+    assert score.candidate is not None and not score.rejection_reasons
+    assert score.shares == optimum
+    assert Decimal("0.01") < score.shares < Decimal("5")
+
+
+@pytest.mark.parametrize("held_q,zero_cash", [(0.0476242, False), (0.02, True)])
+def test_sell_fee_guard_is_reproved_at_jit_and_preserves_zero_atom_exit(monkeypatch, held_q, zero_cash):
+    import src.solve.solver as solver
+
+    template = _adapter_sell_actuation(SimpleNamespace(event_id="sell-fee-jit"))
+    curve = replace(
+        template.decision.candidate.executable_sell_curve,
+        levels=(BidBookLevel(price=Decimal(".05"), size=Decimal("5")),),
+        fee_model=FeeModel(fee_rate=Decimal(".05")),
+    )
+    candidate = replace(
+        template.decision.candidate, held_shares=Decimal("5"),
+        executable_sell_curve=curve, proposal_sell_curve=curve,
+        execution_curve_identity=executable_curve_identity(curve),
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    cash = Decimal("0") if zero_cash else Decimal("1000000")
+    with monkeypatch.context() as m:
+        if not zero_cash:
+            # Simulate a selected legacy decision that used unrounded fees.
+            m.setattr(solver, "_global_sell_rounding_safe_proceeds", lambda c, s: c.economic_sell_curve.proceeds_for_shares(s)[0])
+        score = solver._score_global_single_order_sell_expected(
+            candidate, held_probability_mean=held_q, sample_count=2, band_alpha=.05,
+            endowment=solver.CandidatePortfolioEndowment(
+                loss_wealth_floor_usd=cash, win_wealth_floor_usd=cash + 5,
+                current_token_shares=Decimal("5"), ledger_snapshot_id="ledger-1",
+            ),
+        )
+    assert score.candidate is not None and not score.rejection_reasons
+    drift = era._global_sell_execution_economics_drift(decision=score, current_candidate=candidate)
+    if zero_cash:
+        assert score.expected_terminal_wealth.ruin_probability_reduction > 0
+        assert drift is None
+    else:
+        assert drift.startswith("rounding_safe_fill:")
