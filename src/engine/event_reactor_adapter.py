@@ -395,6 +395,12 @@ class _GlobalBookEpochCacheEntry:
     metadata_by_key: tuple[
         tuple[tuple[str, str], Mapping[str, object]], ...
     ] = ()
+    # "full": this entry's family set is believed to represent everything the
+    # cache has had a chance to capture. "reduce_only": this entry was seeded
+    # (or last recorded) by a capture that was itself narrowed to held tokens
+    # only, so the absence of every other family is a cold-start fact, not a
+    # topology change -- see _probe_global_book_cache_entry.
+    scope: str = "full"
 
 
 _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
@@ -3526,6 +3532,28 @@ def _probe_global_book_cache_entry(
             if actionable_covered():
                 return entry, "hit_subset"
             return None, "actionable_topology_expanded"
+        if entry.scope == "reduce_only" and set(entry.topology).issubset(
+            set(topology)
+        ):
+            # A reduce-only capture never proved the rest of the universe
+            # absent -- it just never looked. Every row the entry does have
+            # is unchanged in the current request, so this is the cache
+            # catching up to families it never held, not a family that
+            # appeared/rolled/disappeared. Name it distinctly so the delta
+            # win is measurable and so callers do not read this as a live
+            # topology mutation.
+            expected = hashlib.sha256(
+                repr(entry.topology).encode("utf-8")
+            ).hexdigest()[:12]
+            current = hashlib.sha256(
+                repr(topology).encode("utf-8")
+            ).hexdigest()[:12]
+            return (
+                None,
+                "reduce_only_seed_expanded:"
+                f"cached={len(entry.topology)}:{expected}:"
+                f"current={len(topology)}:{current}",
+            )
         cached_stable = tuple(
             row for row in entry.topology if row[0] not in mutable
         )
@@ -3643,7 +3671,21 @@ def _store_global_book_epoch(
     metadata_by_key: Mapping[
         tuple[str, str], Mapping[str, object]
     ] | None = None,
+    scope: str | None = None,
 ) -> str:
+    """Replace the global book epoch cache entry.
+
+    `scope` names what this store's family set is known to represent:
+    "full" for a capture that covered every family this cut requested,
+    "reduce_only" for one narrowed to held tokens only. Callers that are
+    merely refreshing a subset of an already-cached universe (family-delta
+    and token-projection refreshes) pass no `scope` and this inherits
+    whatever the current entry already recorded, so a delta over a
+    reduce-only seed stays flagged reduce-only rather than silently
+    becoming a full replace. Only a caller that knows its own capture
+    scope (the full-capture path) should pass `scope` explicitly.
+    """
+
     global _GLOBAL_BOOK_EPOCH_CACHE
 
     if checked_at.tzinfo is None:
@@ -3666,6 +3708,13 @@ def _store_global_book_epoch(
     except (TypeError, ValueError) as exc:
         return f"current_identity_invalid:{type(exc).__name__}"
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        if scope is None:
+            prior = _GLOBAL_BOOK_EPOCH_CACHE
+            scope = (
+                prior.scope
+                if prior is not None and prior.namespace == namespace
+                else "full"
+            )
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
@@ -3682,6 +3731,7 @@ def _store_global_book_epoch(
                     if metadata.get("_global_current_gamma") is True
                 )
             ),
+            scope=scope,
         )
     return "stored"
 
@@ -3695,13 +3745,22 @@ def _extend_global_book_epoch_cache(
     metadata_by_key: Mapping[
         tuple[str, str], Mapping[str, object]
     ] | None = None,
+    scope: str = "full",
 ) -> tuple[
     dict[str, object],
     object,
     dict[tuple[str, str], Mapping[str, object]],
     str,
 ]:
-    """Retain other fresh families when a narrow producer wake replaces its scope."""
+    """Retain other fresh families when a narrow producer wake replaces its scope.
+
+    `scope` names what `bound_probabilities` itself covers: "full" if this
+    capture requested everything the cut needed, "reduce_only" if it was
+    narrowed to held tokens only. The merged entry's scope stays
+    "reduce_only" (never silently upgrades to "full") unless this call's own
+    capture is "full" -- a reduce-only capture merging into a reduce-only
+    seed must not be mistaken for proof the wider universe was seen.
+    """
 
     global _GLOBAL_BOOK_EPOCH_CACHE
 
@@ -3775,6 +3834,7 @@ def _extend_global_book_epoch_cache(
                 current_metadata,
                 "merged_topology_unavailable",
             )
+        merged_scope = "full" if scope == "full" else entry.scope
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
@@ -3782,6 +3842,7 @@ def _extend_global_book_epoch_cache(
             bound_probabilities=tuple(sorted(merged_probabilities.items())),
             epoch=merged_epoch,
             metadata_by_key=tuple(sorted(merged_metadata.items())),
+            scope=merged_scope,
         )
         return merged_probabilities, merged_epoch, merged_metadata, "extended"
 
@@ -10552,16 +10613,25 @@ def event_bound_live_adapter_from_trade_conn(
                 reusable_topology_entry is None
                 and cached_before_bind is None
                 and superset_bound_probabilities is None
-                and cache_before_reason.startswith("topology_changed")
+                and (
+                    cache_before_reason.startswith("topology_changed")
+                    or cache_before_reason.startswith(
+                        "reduce_only_seed_expanded"
+                    )
+                )
             ):
                 # A family that appeared, disappeared, or rolled moves the
                 # universe-wide topology signature, so the epoch probe reports
                 # topology_changed and today's code rebinds EVERY family through
-                # current Gamma. The families that did not themselves change
-                # still have unchanged token identity and unchanged lifecycle
-                # facts, so they are a valid per-family token source; only the
-                # changed families must reach Gamma. Per-family validation below
-                # rejects anything whose own shape or tokens moved.
+                # current Gamma. reduce_only_seed_expanded is the same shape
+                # for a different reason: the cache never held the missing
+                # families at all (a reduce-only capture seeded it narrow),
+                # not that any family's shape moved. Either way, the families
+                # that did not themselves change still have unchanged token
+                # identity and unchanged lifecycle facts, so they are a valid
+                # per-family token source; only the changed/missing families
+                # must reach Gamma. Per-family validation below rejects
+                # anything whose own shape or tokens moved.
                 reusable_topology_entry = _work_sql(
                     "book_token_identity_cache_probe",
                     _global_book_token_identity_cache_entry,
@@ -11332,6 +11402,16 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if _urgent_book_preemption("after_full_capture"):
                 return probabilities, None
+            # This capture's own scope, independent of what it merges with:
+            # a reduce-only cut narrows bound_probabilities to held tokens
+            # only (:11032-11050 upstream), so it must never be the sole
+            # seed of the cache's family set when there is nothing to merge
+            # into (cold cache). Flagging it lets the next full-scope cut's
+            # probe recognize the resulting absence of every other family as
+            # a cold-start fact, not a topology change.
+            book_epoch_capture_scope = (
+                "reduce_only" if reduce_only_book_tokens is not None else "full"
+            )
             (
                 cache_probabilities,
                 cache_epoch,
@@ -11345,6 +11425,7 @@ def event_bound_live_adapter_from_trade_conn(
                     epoch,
                     checked_at=datetime.now(UTC),
                     metadata_by_key=book_metadata_by_key,
+                    scope=book_epoch_capture_scope,
                 ),
             )
             cache_store_status = (
@@ -11358,6 +11439,7 @@ def event_bound_live_adapter_from_trade_conn(
                         cache_epoch,
                         checked_at=datetime.now(UTC),
                         metadata_by_key=cache_metadata,
+                        scope=book_epoch_capture_scope,
                     ),
                 )
             )
@@ -11379,6 +11461,15 @@ def event_bound_live_adapter_from_trade_conn(
                     "families=%d assets=%d",
                     len(bound_probabilities),
                     len(getattr(epoch, "assets", ())),
+                )
+            else:
+                logging.getLogger(__name__).info(
+                    "global book epoch cache stored without extending: "
+                    "reason=%s scope=%s captured_families=%d cached_families=%d",
+                    cache_extend_status,
+                    book_epoch_capture_scope,
+                    len(bound_probabilities),
+                    len(cache_probabilities),
                 )
             return _publish_book_epoch(
                 bound_probabilities,

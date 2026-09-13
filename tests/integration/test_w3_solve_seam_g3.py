@@ -15661,6 +15661,181 @@ def test_global_book_epoch_cache_extends_across_disjoint_wake_scopes(
     conn.close()
 
 
+def _book_epoch_probability(family):
+    return SimpleNamespace(
+        family_key=family,
+        bindings=(
+            SimpleNamespace(
+                bin_id=f"bin-{family}",
+                condition_id=f"condition-{family}",
+                yes_token_id=f"yes-{family}",
+                no_token_id=f"no-{family}",
+            ),
+        ),
+    )
+
+
+def _book_epoch_for_families(families, captured_at, marker):
+    states = tuple(
+        (
+            family,
+            f"bin-{family}",
+            f"condition-{family}",
+            side,
+            f"{side.lower()}-{family}",
+            "EXECUTABLE",
+            f"hash-{marker}-{family}-{side}",
+            f"event-{family}",
+            f"market-{family}",
+        )
+        for family in families
+        for side in ("YES", "NO")
+    )
+    return CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=captured_at,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=captured_at,
+        ),
+    )
+
+
+def test_global_book_epoch_cache_reduce_only_seed_expands_without_topology_change(
+    monkeypatch,
+):
+    """Cold cache + a reduce-only (held-token) capture must not become the
+    sole seed of the cache's family set: the next full-scope cut should read
+    the resulting absence of the other families as a cold-start fact
+    (`reduce_only_seed_expanded`), not a live `topology_changed` mutation,
+    and should retain the reduce-only families rather than treat them as
+    changed. See event_reactor_adapter.py:_extend_global_book_epoch_cache."""
+
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    all_families = ["family-a", "family-b", "family-c", "family-d", "family-e"]
+    held_families = ["family-a", "family-b"]
+
+    held_probabilities = {
+        family: _book_epoch_probability(family) for family in held_families
+    }
+    held_epoch = _book_epoch_for_families(held_families, at, "seed")
+
+    # The first post-boot cut is reduce-only: cache is empty, so this store
+    # is the caller's fallback path -- it must be flagged scope="reduce_only"
+    # rather than defaulting to "full", or it silently becomes the entire
+    # known universe.
+    assert (
+        era._store_global_book_epoch(
+            conn,
+            held_probabilities,
+            held_epoch,
+            checked_at=at,
+            scope="reduce_only",
+        )
+        == "stored"
+    )
+    assert era._GLOBAL_BOOK_EPOCH_CACHE.scope == "reduce_only"
+
+    full_probabilities = {
+        family: _book_epoch_probability(family) for family in all_families
+    }
+    later = at + _dt.timedelta(seconds=1)
+
+    missed_entry, missed_reason = era._probe_global_book_epoch_cache(
+        conn,
+        full_probabilities,
+        checked_at=later,
+        allowed=True,
+    )
+    assert missed_entry is None
+    # Not "topology_changed": the held families themselves are unchanged,
+    # the cache just never captured the rest yet.
+    assert missed_reason.startswith("reduce_only_seed_expanded:")
+    assert not missed_reason.startswith("topology_changed")
+
+    full_epoch = _book_epoch_for_families(all_families, later, "full")
+    probabilities, merged, _, status = era._extend_global_book_epoch_cache(
+        conn,
+        full_probabilities,
+        full_epoch,
+        checked_at=later,
+        scope="full",
+    )
+    assert status == "extended"
+    assert set(probabilities) == set(all_families)
+    assert {row[0] for row in merged.asset_states} == set(all_families)
+    # A genuinely full capture upgrades a reduce-only seed to "full".
+    assert era._GLOBAL_BOOK_EPOCH_CACHE.scope == "full"
+    conn.close()
+
+
+def test_global_book_epoch_cache_reduce_only_extends_broad_entry_without_narrowing(
+    monkeypatch,
+):
+    """Once a broad (full-scope) entry exists, a subsequent reduce-only
+    capture of a subset of its families must extend (retain the rest,
+    refresh the held subset), never replace the cache down to just the
+    held families -- confirming the pre-existing merge behaviour and
+    pinning it against regression."""
+
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    all_families = ["family-a", "family-b", "family-c", "family-d", "family-e"]
+    held_families = ["family-a", "family-b"]
+
+    full_probabilities = {
+        family: _book_epoch_probability(family) for family in all_families
+    }
+    full_epoch = _book_epoch_for_families(all_families, at, "broad")
+    assert (
+        era._store_global_book_epoch(
+            conn,
+            full_probabilities,
+            full_epoch,
+            checked_at=at,
+            scope="full",
+        )
+        == "stored"
+    )
+
+    later = at + _dt.timedelta(seconds=1)
+    held_probabilities = {
+        family: _book_epoch_probability(family) for family in held_families
+    }
+    held_epoch = _book_epoch_for_families(held_families, later, "reduce")
+    probabilities, merged, _, status = era._extend_global_book_epoch_cache(
+        conn,
+        held_probabilities,
+        held_epoch,
+        checked_at=later,
+        scope="reduce_only",
+    )
+    assert status == "extended"
+    # All five families survive the reduce-only cut, not just the two held.
+    assert set(probabilities) == set(all_families)
+    assert {row[0] for row in merged.asset_states} == set(all_families)
+    # A reduce-only capture merging into a full cache must not demote it.
+    assert era._GLOBAL_BOOK_EPOCH_CACHE.scope == "full"
+
+    # The next probe for the full family set is a clean hit, not a miss.
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        full_probabilities,
+        checked_at=later,
+        allowed=True,
+    )
+    assert cached is merged
+    assert reason == "hit"
+    conn.close()
+
+
 def test_global_book_epoch_delta_preserves_earliest_expiry():
     at = _dt.datetime.now(_dt.timezone.utc)
 
