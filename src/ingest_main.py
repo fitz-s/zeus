@@ -4277,6 +4277,66 @@ def _artifact_refit_tick():
 
 
 # ---------------------------------------------------------------------------
+# Daily Day0 diurnal-residual refit
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_day0_diurnal_residual_refit")
+def _day0_diurnal_residual_refit_tick():
+    """Daily refit of state/day0_diurnal_residual.json (Day0 diurnal-residual nowcast).
+
+    The loader (src/calibration/day0_diurnal_residual.py ``load_day0_diurnal_residual_
+    nowcast``) gates the artifact on ``MAX_ARTIFACT_AGE_DAYS = 14``: once ``fit_date``
+    ages past that, the nowcast silently returns None and the Day0 veto gate 9
+    (src/engine/day0_admission.py) goes inert with no error. The only producer was a
+    manual script (scripts/fit_day0_diurnal_residual.py) nobody was scheduled to rerun
+    -- the live artifact (fit_date 2026-09-04) was headed for silent staleness on
+    2026-09-18. This job removes that "someone remembers to rerun the fitter"
+    dependency the same way ``_realized_fee_evidence_refit_cycle``
+    (src/ingest/post_trade_capital_daemon.py) did for fee_reconciliation.json.
+
+    Runs the fitter in a bounded child process (44s wall / ~2.3M rows over both DBs
+    mode=ro; unlike the weekly artifacts above this one is heavy enough, and this
+    daemon long-lived enough, to want an explicit kill boundary) with the live DB and
+    output paths resolved from ``src.config.STATE_DIR`` and passed explicitly -- the
+    script's own repo-relative defaults are keyed off its own file location, which is
+    only guaranteed to match the live repo when nothing overrides cwd/checkout, so this
+    call pins the SAME paths every other ingest_main writer/reader uses instead of
+    relying on that default resolving correctly.
+
+    Fails LOUD (raises) on a non-zero exit or timeout so ``_scheduler_job`` records a
+    FAILED entry in scheduler_jobs_health.json -- unlike the weekly fail-soft refit
+    above, a silent failure here is exactly the staleness bomb this job exists to
+    defuse. The fitter's own write is tmp+``os.replace`` (atomic), so a failed or
+    killed run never corrupts the prior artifact; the stale-but-valid artifact keeps
+    serving until the next successful tick.
+    """
+    import subprocess
+
+    from src.config import STATE_DIR
+
+    venv_python = _etl_subprocess_python()
+    script_path = Path(__file__).parent.parent / "scripts" / "fit_day0_diurnal_residual.py"
+    world_db = STATE_DIR / "zeus-world.db"
+    forecast_db = STATE_DIR / "zeus-forecasts.db"
+    out_path = STATE_DIR / "day0_diurnal_residual.json"
+    r = subprocess.run(
+        [
+            venv_python, str(script_path),
+            "--world-db", str(world_db),
+            "--forecast-db", str(forecast_db),
+            "--out", str(out_path),
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"fit_day0_diurnal_residual.py exit={r.returncode}: "
+            f"{(r.stderr or '').strip()[-1000:]}"
+        )
+    logger.info("[DAY0_DIURNAL_RESIDUAL_REFIT] %s", (r.stdout or "").strip()[-300:])
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -4392,6 +4452,17 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True)),
         (_drift_detector_tick, "cron", dict(hour=6, minute=0, id="ingest_drift_detector",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        # Daily 06:30 UTC (30 min after the hour=6 calibration window used by
+        # ingest_etl_recalibrate/ingest_drift_detector above, itself after the
+        # hour=4 ingest_k2_hole_scanner backfill of yesterday's observation gaps --
+        # the whole prior UTC day's hourly ledger is settled by 06:30). Also fires
+        # immediately at boot (next_run_time=now): the artifact's staleness bomb
+        # (see _day0_diurnal_residual_refit_tick docstring) should not wait a day to
+        # close after a restart, mirroring the sibling realized-fee refit
+        # (src/ingest/post_trade_capital_daemon.py:_realized_fee_evidence_refit_cycle).
+        (_day0_diurnal_residual_refit_tick, "cron", dict(hour=6, minute=30,
+            id="ingest_day0_diurnal_residual_refit", max_instances=1, coalesce=True,
+            misfire_grace_time=3600, next_run_time=now)),
         (_ingest_status_rollup_tick, "interval", dict(minutes=5, id="ingest_status_rollup",
             max_instances=1, coalesce=True, executor="fast")),
         (_write_ingest_heartbeat, "interval", dict(seconds=60, id="ingest_heartbeat",

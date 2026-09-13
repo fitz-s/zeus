@@ -775,3 +775,128 @@ class TestSingleLiveCalibrationJobs:
         assert not hasattr(im, "_calibration_auto_promote_tick")
         assert "ingest_calibration_auto_promote" not in job_ids
         assert "ingest_artifact_refit" in job_ids
+
+
+class TestDay0DiurnalResidualRefitScheduled:
+    """Antibody for the diurnal-residual artifact staleness bomb: the loader
+    (src/calibration/day0_diurnal_residual.py) silently returns None once
+    ``fit_date`` ages past MAX_ARTIFACT_AGE_DAYS=14, and the only producer was a
+    manual script nobody was scheduled to rerun. These pin the daily job's
+    registration, its explicit-path invocation, and its failure-recording contract."""
+
+    def test_job_registered_daily_after_the_hole_scanner_and_calibration_window(self) -> None:
+        """Registered once per UTC day at 06:30 (after ingest_k2_hole_scanner's 04:00
+        gap-fill and the 06:00 calibration window), and fires immediately at boot."""
+        import src.ingest_main as im
+
+        specs = [
+            (trigger, kwargs)
+            for func, trigger, kwargs in im._ingest_main_job_specs()
+            if func is im._day0_diurnal_residual_refit_tick
+        ]
+        assert len(specs) == 1
+        trigger, kwargs = specs[0]
+        assert trigger == "cron"
+        assert kwargs["hour"] == 6
+        assert kwargs["minute"] == 30
+        assert kwargs["id"] == "ingest_day0_diurnal_residual_refit"
+        assert kwargs["max_instances"] == 1
+        assert "next_run_time" in kwargs  # immediate at boot, mirrors the fee-refit sibling
+
+    def test_registered_in_the_build_registry(self) -> None:
+        """The registry boot assert (PR #329 A) requires every scheduled job_id to have
+        a matching SourceJobSpec; this pins that the new job is covered, not just added
+        to the hand-coded spec list."""
+        import src.ingest_main as im
+
+        job_ids = {str(kwargs["id"]) for _fn, _trigger, kwargs in im._ingest_main_job_specs()}
+        assert "ingest_day0_diurnal_residual_refit" in job_ids
+
+    def test_invokes_fitter_with_explicit_db_and_out_paths(self, tmp_path) -> None:
+        """The child process must receive explicit --world-db/--forecast-db/--out
+        pinned to src.config.STATE_DIR, not the fitter script's own repo-relative
+        defaults (a worktree's or otherwise-rooted state/ can silently be empty)."""
+        import src.ingest_main as im
+
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["timeout"] = kwargs.get("timeout")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._day0_diurnal_residual_refit_tick.__wrapped__()
+
+        cmd = captured["cmd"]
+        assert cmd[1].endswith("fit_day0_diurnal_residual.py")
+        assert cmd[cmd.index("--world-db") + 1] == str(tmp_path / "zeus-world.db")
+        assert cmd[cmd.index("--forecast-db") + 1] == str(tmp_path / "zeus-forecasts.db")
+        assert cmd[cmd.index("--out") + 1] == str(tmp_path / "day0_diurnal_residual.json")
+        assert captured["timeout"] == 600
+
+    def test_fitter_failure_raises_and_is_recorded_as_failed(self, tmp_path) -> None:
+        """A non-zero exit must propagate (unlike the fail-soft weekly artifact refit)
+        so ``_scheduler_job`` records a FAILED entry in scheduler_jobs_health.json --
+        this job exists specifically so a broken fitter is never silently invisible."""
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        def _fake_run(cmd, **kwargs):
+            return type(
+                "R", (), {"returncode": 1, "stdout": "", "stderr": "boom: bad ledger"}
+            )()
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            # The decorated job must NOT raise past the scheduler wrapper.
+            im._day0_diurnal_residual_refit_tick()
+
+        # _scheduler_job writes a started=True entry before the job body runs, then
+        # the terminal entry after -- assert on the terminal one.
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_day0_diurnal_residual_refit"
+        assert kwargs["failed"] is True
+        assert "boom: bad ledger" in kwargs["reason"]
+
+    def test_fitter_timeout_is_also_recorded_as_failed(self, tmp_path) -> None:
+        """A hung fitter must be killed by the timeout bound and recorded FAILED, not
+        left to block the scheduler thread indefinitely."""
+        import subprocess as sp
+
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        def _fake_run(cmd, **kwargs):
+            raise sp.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._day0_diurnal_residual_refit_tick()
+
+        assert health_calls[-1][1]["failed"] is True

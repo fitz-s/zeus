@@ -448,6 +448,19 @@ def build_artifact(
     }
 
 
+def _write_artifact_atomic(artifact: dict, out_path: str) -> None:
+    """Atomic write (tmp + replace) -- the daemon-scheduled refit (src/ingest_main.py
+    ``_day0_diurnal_residual_refit_tick``) can be killed mid-run (timeout, restart); a
+    half-written file must never replace the live artifact the loader reads
+    (src/calibration/day0_diurnal_residual.py). Mirrors scripts/reconcile_realized_fees.py
+    ``_write_artifact``, the sibling daily-refit artifact's write."""
+    tmp_path = f"{out_path}.tmp"
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(artifact, handle, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp_path, out_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--world-db", default=DEFAULT_WORLD_DB)
@@ -466,9 +479,7 @@ def main() -> int:
     records, unit, _source_used = build_records(args.world_db, args.forecast_db)
     nwp = _nwp_centers(args.forecast_db)
     artifact = build_artifact(records, unit=unit, nwp=nwp, fit_date=fit_date)
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as handle:
-        json.dump(artifact, handle, separators=(",", ":"), sort_keys=True)
+    _write_artifact_atomic(artifact, args.out)
     counts = artifact["record_counts"]
     print(
         f"wrote {args.out} fit_date={fit_date} "

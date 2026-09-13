@@ -242,6 +242,14 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "ens member dependence); fitter subprocesses are read-only over "
                         "zeus-forecasts.db and write only state/<name>/ artifact + ACTIVE.json; "
                         "consumers hot-reload on pointer mtime"),
+    SourceJobSpec("ingest_day0_diurnal_residual_refit", "ingest_main", "derived", "default", False,
+                  callable_ref="_day0_diurnal_residual_refit_tick", file_only=True,
+                  notes="daily 06:30 UTC (+ immediate at boot) refit of "
+                        "state/day0_diurnal_residual.json; the fitter subprocess is read-only "
+                        "over zeus-world.db + zeus-forecasts.db (explicit STATE_DIR paths) and "
+                        "writes only that one artifact (atomic tmp+replace); defuses the "
+                        "loader's MAX_ARTIFACT_AGE_DAYS=14 staleness gate that otherwise goes "
+                        "silently inert with no scheduled producer"),
 )
 
 _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (

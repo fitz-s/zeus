@@ -8,12 +8,18 @@ Day0 diurnal-residual fitter (``scripts/fit_day0_diurnal_residual.py``)."""
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+from unittest.mock import patch
+
+import pytest
 
 from scripts.fit_day0_diurnal_residual import (
     MIN_HOURS_ALT,
     MIN_HOURS_WU,
     _hourly_days,
+    _write_artifact_atomic,
     build_records,
 )
 
@@ -218,3 +224,40 @@ def test_ogimet_tenths_cumulative_grids_against_the_served_anchor(tmp_path) -> N
     ]
     assert len(last_hour) == 1
     assert last_hour[0]["D"] == 0
+
+
+def test_write_artifact_atomic_leaves_prior_artifact_untouched_on_mid_write_failure(
+    tmp_path,
+) -> None:
+    """The daemon-scheduled refit (src/ingest_main.py
+    ``_day0_diurnal_residual_refit_tick``) can be killed mid-run; a half-written file
+    must never replace the live artifact the loader reads
+    (src/calibration/day0_diurnal_residual.py). Simulate a crash mid-``json.dump`` and
+    assert the prior artifact's bytes are unchanged: the write went to a ``.tmp``
+    sibling and ``os.replace`` (the only thing that can touch the live path) never
+    ran because the exception fired first."""
+
+    out_path = tmp_path / "day0_diurnal_residual.json"
+    prior_bytes = b'{"fit_date": "2026-09-04", "schema": "day0_diurnal_residual"}'
+    out_path.write_bytes(prior_bytes)
+
+    with patch("scripts.fit_day0_diurnal_residual.json.dump", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            _write_artifact_atomic({"fit_date": "2026-09-11"}, str(out_path))
+
+    assert out_path.read_bytes() == prior_bytes
+
+
+def test_write_artifact_atomic_replaces_prior_artifact_on_success(tmp_path) -> None:
+    """A clean write DOES replace the prior artifact, and leaves no ``.tmp`` residue."""
+
+    out_path = tmp_path / "day0_diurnal_residual.json"
+    out_path.write_bytes(b'{"fit_date": "2026-09-04"}')
+
+    _write_artifact_atomic({"fit_date": "2026-09-11", "schema": "day0_diurnal_residual"}, str(out_path))
+
+    assert json.loads(out_path.read_text()) == {
+        "fit_date": "2026-09-11",
+        "schema": "day0_diurnal_residual",
+    }
+    assert not os.path.exists(f"{out_path}.tmp")
