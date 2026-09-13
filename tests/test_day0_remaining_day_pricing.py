@@ -943,6 +943,297 @@ def test_day0_v1_member_builder_carries_plain_exception_cause_on_payload(
     assert payload.get("_edli_day0_q_block_cause") == "RuntimeError:boom"
 
 
+def test_entry_payload_mismatch_requests_exactly_one_reseed_for_current_cycle(
+    monkeypatch,
+):
+    """T-successor.md: nothing previously requested rematerialization when an
+    ENTRY family's bundle diverged for real (capture_equivalence.ok is False,
+    reason PAYLOAD_MISMATCH). The mismatch is the signal that inputs moved;
+    this must fire exactly one reseed request for THIS family/cycle."""
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        _actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(changed_payload=True)
+
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ("icon_d2",),
+    )
+    monkeypatch.setattr(
+        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_enqueue(**kwargs):
+        calls.append(kwargs)
+        return {"status": "SAME_CYCLE_RECOMPUTE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(
+        "src.data.replacement_cycle_advance_trigger.enqueue_single_family_cycle_advance_reseed",
+        _fake_enqueue,
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production._replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "forecast_db": "/tmp/does-not-matter.db",
+            "seed_dir": "/tmp/seeds",
+            "raw_manifest_dir": "/tmp/raw",
+        },
+    )
+
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+    decision_time = datetime(2026, 6, 10, 11, 0, tzinfo=UTC)
+    members = era._day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=decision_time,
+        forecast_conn=conn,
+        entry_authority=True,
+    )
+    assert members is None
+    assert len(calls) == 1, "exactly one reseed request for the real divergence"
+    call = calls[0]
+    assert call["city"] == "Paris"
+    assert call["target_date"] == "2026-06-10"
+    assert call["metric"] == "high"
+    assert call["held_position"] is True
+    assert call["minimum_posterior_computed_at"] == decision_time
+    assert call["computed_at"] == decision_time
+    conn.close()
+
+
+def test_held_side_payload_mismatch_never_requests_a_reseed(monkeypatch):
+    """T-successor.md §(d): held/exit positions already fall through to a
+    same-cycle direct-current rebuild for every ordinary mismatch tick — that
+    path must stay exactly as it was, and must never enqueue a reseed (only
+    the ENTRY side, which has no such fallback, does)."""
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        _actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(changed_payload=True)
+
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ("icon_d2",),
+    )
+    monkeypatch.setattr(
+        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
+    )
+
+    def _fail_if_called(**_kwargs):
+        pytest.fail("held-side mismatch must never enqueue a reseed")
+
+    monkeypatch.setattr(
+        "src.data.replacement_cycle_advance_trigger.enqueue_single_family_cycle_advance_reseed",
+        _fail_if_called,
+    )
+
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+        "_edli_day0_redecision_authority_scope": (
+            "held_exposure_current_bundle_day0_only_v1"
+        ),
+    }
+    era._day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        forecast_conn=conn,
+        entry_authority=False,
+    )
+    # The existing held fallback must still have fired (unchanged behavior):
+    # the mismatch is caught and demoted to a direct-current rebuild, not
+    # left blocking the position.
+    assert payload.get("_edli_day0_direct_current_redecision_authority") is True
+    assert (
+        payload.get("_edli_day0_redecision_authority_scope")
+        == "held_exposure_current_day0_only_v1"
+    )
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH",
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CONTEXT_MISMATCH",
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SCOPE_INVALID",
+        "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_NOT_ATTEMPTED",
+    ],
+)
+def test_payload_mismatch_reseed_helper_skips_non_content_divergence_reasons(
+    monkeypatch, reason
+):
+    """Only a REAL content divergence (capture_equivalence.ok is False,
+    reason DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH) means "inputs
+    moved". SEMANTIC_META_MISMATCH and scope/context/not-attempted reasons
+    are not that signal and must never enqueue a reseed."""
+    import src.engine.event_reactor_adapter as era
+
+    def _fail_if_called(**_kwargs):
+        pytest.fail(f"must not enqueue for capture_equivalence reason {reason}")
+
+    monkeypatch.setattr(
+        "src.data.replacement_cycle_advance_trigger.enqueue_single_family_cycle_advance_reseed",
+        _fail_if_called,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle_validation": {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH",
+            "capture_equivalence": {"ok": False, "reason": reason},
+        }
+    }
+    era._request_day0_payload_mismatch_rematerialization(
+        payload=payload,
+        family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+    )
+
+
+def test_payload_mismatch_reseed_helper_skips_equivalent_capture(monkeypatch):
+    """A capture_equivalence.ok is True verdict (index-shifted recapture,
+    content identical) is not a real divergence either — no reseed."""
+    import src.engine.event_reactor_adapter as era
+
+    def _fail_if_called(**_kwargs):
+        pytest.fail("must not enqueue when capture_equivalence.ok is True")
+
+    monkeypatch.setattr(
+        "src.data.replacement_cycle_advance_trigger.enqueue_single_family_cycle_advance_reseed",
+        _fail_if_called,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle_validation": {
+            "reason": None,
+            "capture_equivalence": {
+                "ok": True,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENT",
+            },
+        }
+    }
+    era._request_day0_payload_mismatch_rematerialization(
+        payload=payload,
+        family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+    )
+
+
+def test_payload_mismatch_reseed_request_is_fail_soft_on_lane_error(monkeypatch):
+    """The reseed request must never raise into the caller's own
+    DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH propagation."""
+    import src.engine.event_reactor_adapter as era
+
+    def _boom(**_kwargs):
+        raise RuntimeError("lane exploded")
+
+    monkeypatch.setattr(
+        "src.data.replacement_cycle_advance_trigger.enqueue_single_family_cycle_advance_reseed",
+        _boom,
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production._replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "forecast_db": "/tmp/does-not-matter.db",
+            "seed_dir": "/tmp/seeds",
+            "raw_manifest_dir": "/tmp/raw",
+        },
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle_validation": {
+            "reason": "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH",
+            "capture_equivalence": {
+                "ok": False,
+                "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH",
+            },
+        }
+    }
+    era._request_day0_payload_mismatch_rematerialization(
+        payload=payload,
+        family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+    )
+
+
+def test_validate_day0_causal_bundle_successor_passes_once_bundles_match(
+    monkeypatch,
+):
+    """T-successor.md §(e): once a materializer write lands a bundle whose
+    content matches the current capture (the successor), the same validator
+    must stop raising — this is the state the reseed request is racing
+    toward, not a new mechanism it introduces."""
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        _expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture()
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_bundle_reader.day0_causal_bundle_successor_materialized",
+        lambda *_a, **_kw: True,
+    )
+    payload = {
+        "_edli_day0_causal_evidence_bundle": actual,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+    bundle = era._validate_day0_causal_bundle_successor(
+        conn=conn,
+        payload=payload,
+        family=SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high"),
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        vector_witness=current_witness,
+        vectors=current_vectors,
+    )
+    assert bundle == actual
+    assert payload["_edli_day0_causal_evidence_bundle_validation"]["reason"] is None
+    conn.close()
+
+
 def test_day0_v1_capture_equivalence_requires_original_successor_visibility(
     monkeypatch,
 ):

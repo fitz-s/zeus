@@ -47626,6 +47626,103 @@ def _build_direct_current_day0_causal_bundle(
     return bundle
 
 
+_DAY0_PAYLOAD_MISMATCH_CAPTURE_REASON = "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"
+
+
+def _request_day0_payload_mismatch_rematerialization(
+    *,
+    payload: Mapping[str, object],
+    family: object,
+    decision_time: datetime,
+) -> None:
+    """Request rematerialization for an ENTRY family whose bundle diverged for real.
+
+    None of the three existing materializer triggers (the ~40-minute scheduled
+    cadence, the OM9-anchor `scope_needs_cycle_advance`, or the observed-extreme
+    seed) are keyed to this bundle's own models, so a short-cadence member
+    (e.g. ukmo_global_deterministic_10km / icon_d2 / ncep_nbm_conus) rolling its
+    provider cycle otherwise leaves the family waiting on an unrelated event.
+    The mismatch itself is the signal that inputs moved; this requests the
+    family's rematerialization through the SAME single-family reseed path the
+    held-position belief reseed uses (``enqueue_single_family_cycle_advance_reseed``
+    with ``minimum_posterior_computed_at`` pinned to this decision), so a fresh
+    materializer write is required rather than one merely new enough to satisfy
+    an unrelated repair. That path requires ``held_position=True`` to accept a
+    ``minimum_posterior_computed_at`` bound at all; passing it here does not
+    change ENTRY authority anywhere else, only how this one reseed request is
+    prioritized in the materialization queue.
+
+    Fires only for a real content divergence
+    (``capture_equivalence.reason == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"``,
+    ``ok is False``) — never for ``SEMANTIC_META_MISMATCH``, scope/context/clock
+    errors, or the INPUT_INVALID case, none of which mean "inputs moved".
+    Idempotent via the same ``cycle_advance_enqueues`` UNIQUE(scope, target_cycle)
+    marker every other reseed caller relies on: a second call while the first
+    request is still queued, its owner is active, or a covering posterior has
+    already landed all resolve to ALREADY_ENQUEUED / CYCLE_ADVANCE_NOT_NEEDED,
+    never a second seed. Fail-soft throughout: never raises, never blocks the
+    caller's own DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH from propagating.
+    """
+
+    receipt = payload.get("_edli_day0_causal_evidence_bundle_validation")
+    if not isinstance(receipt, Mapping):
+        return
+    capture_equivalence = receipt.get("capture_equivalence")
+    if not isinstance(capture_equivalence, Mapping):
+        return
+    if (
+        capture_equivalence.get("ok") is not False
+        or capture_equivalence.get("reason") != _DAY0_PAYLOAD_MISMATCH_CAPTURE_REASON
+    ):
+        return
+    log = logging.getLogger(__name__)
+    try:
+        from pathlib import Path as _Path
+
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_single_family_cycle_advance_reseed,
+        )
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+        forecast_db = cfg.get("forecast_db")
+        seed_dir = cfg.get("seed_dir")
+        raw_manifest_dir = cfg.get("raw_manifest_dir")
+        if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+            log.info(
+                "day0 ENTRY payload-mismatch reseed skipped (lane not configured): "
+                "%s/%s/%s",
+                family.city, family.target_date, family.metric,
+            )
+            return
+        report = enqueue_single_family_cycle_advance_reseed(
+            forecast_db=_Path(str(forecast_db)),
+            seed_dir=_Path(str(seed_dir)),
+            raw_manifest_dir=_Path(str(raw_manifest_dir)),
+            city=str(family.city),
+            target_date=str(family.target_date),
+            metric=str(family.metric),
+            computed_at=decision_time,
+            held_position=True,
+            minimum_posterior_computed_at=decision_time,
+        )
+        log.info(
+            "day0 ENTRY payload-mismatch rematerialization requested "
+            "city=%s target_date=%s metric=%s status=%s enqueued=%s",
+            family.city, family.target_date, family.metric,
+            report.get("status") if isinstance(report, Mapping) else None,
+            report.get("enqueued") if isinstance(report, Mapping) else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — reseed request must never block ENTRY
+        log.warning(
+            "day0 ENTRY payload-mismatch rematerialization request FAILED "
+            "(fail-soft) city=%s target_date=%s metric=%s exc=%s",
+            family.city, family.target_date, family.metric, exc,
+        )
+
+
 def _day0_remaining_day_members(
     *,
     payload: dict[str, object],
@@ -47788,6 +47885,21 @@ def _day0_remaining_day_members(
                     payload.get("_edli_day0_redecision_authority_scope")
                     == "held_exposure_current_bundle_day0_only_v1"
                 )
+                if entry_authority and str(exc) == "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH":
+                    # The mismatch is the signal that a family member's inputs
+                    # moved (a short-cadence model rolled its provider cycle).
+                    # Held/exit positions already fall through to a
+                    # direct-current rebuild below; ENTRY has no such fallback
+                    # and must wait on a successor, so request one now instead
+                    # of leaving the family to the unrelated ~40-minute
+                    # scheduled cadence / OM9-anchor cycle-advance / new-extreme
+                    # triggers. Still raises: the family stays ineligible this
+                    # decision regardless of what the request returns.
+                    _request_day0_payload_mismatch_rematerialization(
+                        payload=payload,
+                        family=family,
+                        decision_time=decision_time,
+                    )
                 if (
                     entry_authority
                     or not held_bundle_scope

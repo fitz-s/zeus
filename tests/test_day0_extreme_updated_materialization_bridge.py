@@ -516,6 +516,85 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
     assert row_after["seed_file"] == first_seed_file
 
 
+def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
+    tmp_path, monkeypatch
+) -> None:
+    """T-successor.md: an ENTRY family's genuine PAYLOAD_MISMATCH must request
+    exactly one rematerialization for its current cycle through the SAME
+    single-family reseed path the held-position belief reseed uses
+    (held_position=True + minimum_posterior_computed_at forces a same-cycle
+    recompute even though the OM9 anchor hasn't rolled). A second request for
+    the same family before the successor lands must dedup via the existing
+    ``cycle_advance_enqueues`` UNIQUE(scope, target_cycle) marker — no second
+    seed, matching every other reseed caller's idempotency."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    # A stale posterior already exists at the current family cycle (the state
+    # a real PAYLOAD_MISMATCH implies: the last materializer write predates
+    # this decision, so it doesn't yet reflect the short-cadence roll).
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, posterior_method
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            cycle_advance.SOURCE_ID, "test_product", "v1", "Shanghai",
+            "2026-07-19", "high", cycle.isoformat(),
+            "2026-07-19T00:05:00+00:00", "2026-07-19T00:10:00+00:00",
+            "{}", "test",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle", lambda *a, **k: (cycle, ()))
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+
+    decision_time = datetime(2026, 7, 19, 0, 20, tzinfo=UTC)
+    report_1 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=cfg["forecast_db"],
+        seed_dir=cfg["seed_dir"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=decision_time,
+        held_position=True,
+        minimum_posterior_computed_at=decision_time,
+    )
+    assert report_1["status"] == "SAME_CYCLE_RECOMPUTE_ENQUEUED"
+    assert report_1["enqueued"] is True
+    assert calls["count"] == 1, "exactly one seed built for the genuine divergence"
+
+    # A second request for the SAME family before the successor lands (still
+    # queued) must not build a second seed.
+    report_2 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=cfg["forecast_db"],
+        seed_dir=cfg["seed_dir"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=decision_time,
+        held_position=True,
+        minimum_posterior_computed_at=decision_time,
+    )
+    assert report_2["status"] == "SAME_CYCLE_RECOMPUTE_PENDING"
+    assert not report_2.get("enqueued")
+    assert calls["count"] == 1, "repeat request while queued must not build a second seed"
+
+
 def test_day0_ingest_process_only_publishes_seed_for_bounded_forecast_owner(
     tmp_path,
 ) -> None:
