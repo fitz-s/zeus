@@ -6542,6 +6542,20 @@ def _compute_posterior_payload(
                 }
                 q = q_global
                 q_shape = "day0_remaining_shared_carrier_v1"
+                # 2026-09-13: the shared Day0 carrier derives its width from instrument sigma +
+                # path error (_day0_noaa_carrier_future_members / _day0_noaa_preliminary_carrier),
+                # never from the settlement-residual floor artifact — the lookup above ran
+                # (it is now unconditional) but this branch never threads settlement_sigma_floor_c
+                # into a builder call, so a floor value stamped True here would describe a q it
+                # never shaped. Reset to the SAME neutral state _capped_global/
+                # _uniform_applied_global already declare for this carrier (comment above,
+                # "its global-normal-only provenance is therefore the neutral state") so
+                # settlement_sigma_floor_applied never lies about what built this q.
+                settlement_sigma_floor_applied = False
+                settlement_sigma_floor_c = None
+                floor_unavailable_reason = (
+                    "SETTLEMENT_SIGMA_FLOOR_NOT_APPLICABLE:day0_shared_carrier"
+                )
             if set(q_global) != set(q):
                 raise ValueError(
                     f"fused-q bin keys != soft-anchor q keys ({sorted(q_global)[:3]}... vs "
