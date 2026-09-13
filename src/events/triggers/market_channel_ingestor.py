@@ -1434,10 +1434,11 @@ def active_weather_token_metadata_from_snapshots(
             priority_token_ids=priority,
             now=now or datetime.now(timezone.utc),
         )
-    # Always aliased "snapshot." (even in the no-projection fallback): the
-    # end_bound aggregate joined in below exposes its own condition_id, so an
-    # unqualified base-table reference would be ambiguous once that join is
-    # present regardless of which FROM shape is active.
+    # Always aliased "snapshot." (even in the no-projection fallback, which
+    # below gets an explicit alias to match): market_end_bound_expr below is a
+    # correlated subquery against the SAME bare table name, so an unqualified
+    # outer reference would resolve to the subquery's own local scope instead
+    # of correlating outward — it must stay qualified either way.
     prefix = "snapshot."
     predicates = []
     if "active" in columns:
@@ -1475,26 +1476,28 @@ def active_weather_token_metadata_from_snapshots(
     # JIT pre-submit) cannot observe it and writes NULL. Reading the CURRENTLY
     # latest row's own market_end_at made a condition immortal in the universe
     # once such a row became latest, with no future write ever able to correct
-    # it. end_bound aggregates MAX(market_end_at) across the condition's full
-    # snapshot history (non-NULL wins) so an end date recorded by any past row
-    # is never lost, regardless of which builder wrote the current latest row.
-    market_end_join = ""
+    # it. market_end_bound_expr is a scalar correlated subquery — MAX(market_end_at)
+    # for THIS row's own condition_id, non-NULL wins — so an end date recorded by
+    # any past row is never lost, regardless of which builder wrote the current
+    # latest row. Correlated (not a joined GROUP-BY-condition_id aggregate over the
+    # whole table): each evaluation is condition_id-indexed
+    # (idx_snapshots_condition_captured), bounded to however many rows this branch's
+    # own source already visits — never an independent full-table pass of its own,
+    # even in the rare use_latest_projection=True + missing-column fallback shape
+    # where the outer query itself stays O(current markets).
+    market_end_bound_expr = None
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        market_end_join = """
-        LEFT JOIN (
-            SELECT condition_id, MAX(market_end_at) AS market_end_at
-              FROM executable_market_snapshots
-             WHERE market_end_at IS NOT NULL
-             GROUP BY condition_id
-        ) AS end_bound ON end_bound.condition_id = %scondition_id
-        """ % prefix
+        market_end_bound_expr = f"""(
+            SELECT MAX(market_end_at) FROM executable_market_snapshots
+             WHERE condition_id = {prefix}condition_id AND market_end_at IS NOT NULL
+        )"""
         predicates.append(
-            f"(end_bound.market_end_at IS NULL OR end_bound.market_end_at > '{now_iso}')"
+            f"({market_end_bound_expr} IS NULL OR {market_end_bound_expr} > '{now_iso}')"
         )
     market_end_expr = (
-        "end_bound.market_end_at AS market_end_at"
-        if "market_end_at" in columns
+        f"{market_end_bound_expr} AS market_end_at"
+        if market_end_bound_expr is not None
         else "NULL AS market_end_at"
     )
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
@@ -1506,10 +1509,9 @@ def active_weather_token_metadata_from_snapshots(
         FROM {latest_table} AS latest
         JOIN executable_market_snapshots AS snapshot
           ON snapshot.snapshot_id = latest.snapshot_id
-        {market_end_join}
         """
         if use_latest_projection
-        else f"FROM executable_market_snapshots AS snapshot {market_end_join}"
+        else "FROM executable_market_snapshots AS snapshot"
     )
     order_expr = (
         f"{prefix}captured_at DESC, {prefix}rowid DESC"

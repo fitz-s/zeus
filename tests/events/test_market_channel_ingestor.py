@@ -5491,6 +5491,86 @@ def test_bounded_projection_excludes_condition_whose_latest_row_lost_a_known_pas
     assert "no-deadlatest" not in md
 
 
+def test_market_end_bound_is_condition_indexed_not_a_full_table_scan():
+    """Dormant-landmine fast-follow (2026-09-13, R-F): when the latest projection
+    exists but is missing a column ``_bounded_latest_snapshot_rows`` needs (here,
+    ``captured_at``), ``use_latest_projection`` stays True and the query falls to
+    the no-projection CTE branch while still joining the (small) latest
+    projection. That branch's market_end_at bound must be a per-row CORRELATED
+    subquery (indexed on condition_id), never an unrestricted
+    ``GROUP BY condition_id`` aggregate over the whole append-only table --
+    otherwise a future projection-schema drift silently turns every ingest
+    cycle into a full scan of a table with no upper bound on row count."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            market_end_at TEXT
+        );
+        CREATE INDEX idx_snapshots_condition_captured
+          ON executable_market_snapshots (condition_id, captured_at DESC);
+        -- Deliberately missing captured_at: disqualifies _bounded_latest_snapshot_rows
+        -- while condition_id/snapshot_id keep use_latest_projection True.
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            active INTEGER,
+            closed INTEGER,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('s1','c1','x-weather','y1','n1','0.01','5',0,1,0,"
+        "'2026-06-04T11:00:00+00:00','2026-06-05T12:00:00+00:00')"
+    )
+    conn.execute("INSERT INTO executable_market_snapshot_latest VALUES ('c1','y1','s1','x-weather','y1','n1',1,0)")
+    conn.execute("INSERT INTO executable_market_snapshot_latest VALUES ('c1','n1','s1','x-weather','y1','n1',1,0)")
+
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    md = active_weather_token_metadata_from_snapshots(
+        conn, now=datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
+    )
+    conn.set_trace_callback(None)
+
+    assert set(md) == {"y1", "n1"}
+    universe_statements = [s for s in traced if "WITH latest AS" in s]
+    assert universe_statements, "expected the no-projection CTE branch to run"
+    for statement in universe_statements:
+        assert "GROUP BY condition_id" not in statement, (
+            "market_end_at bound reverted to an unrestricted aggregate over the "
+            "whole table instead of a per-row correlated lookup"
+        )
+        plan = conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+        details = [row[3] for row in plan]
+        assert not any(detail == "SCAN executable_market_snapshots" for detail in details), (
+            f"market_end_at bound query plan does a full unindexed table scan: {details}"
+        )
+        assert any(
+            "SEARCH executable_market_snapshots USING INDEX idx_snapshots_condition_captured"
+            in detail
+            for detail in details
+        ), f"expected an indexed condition_id search for the market_end_at bound: {details}"
+
+
 def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
     """A running market-channel thread must not keep yesterday's token universe forever."""
 
