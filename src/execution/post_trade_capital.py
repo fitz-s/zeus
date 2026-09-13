@@ -419,6 +419,14 @@ class _PusdOnlyCollateralAdapter:
         return str(getattr(self._adapter, "funder_address", "") or "")
 
 
+# R-S (2026-09-13): fixed buffer the wrapper deadline carries above the venue
+# socket-timeout floor, covering PolymarketClient construction + v2 adapter
+# resolution -- overhead that runs BEFORE the socket timeout's own clock
+# starts (see _post_trade_collateral_deadline_seconds). Not itself tunable by
+# env var: the socket floor already is, and the deadline derives from it.
+_COLLATERAL_DEADLINE_MARGIN_SECONDS = 3.0
+
+
 def _post_trade_collateral_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
     if raw in (None, ""):
@@ -438,25 +446,43 @@ def _post_trade_collateral_timeout_seconds() -> float:
 
 
 def _post_trade_collateral_deadline_seconds() -> float:
+    # R-S (2026-09-13, fix-first on T-collateral's own follow-up): the wrapper
+    # deadline must carry a real margin ABOVE the venue socket-timeout floor it
+    # wraps, not equal it. run_with_timeout(_read, seconds=deadline) starts its
+    # clock at submit() time -- strictly BEFORE _read() constructs
+    # PolymarketClient and resolves the v2 adapter, i.e. before the socket
+    # timeout's own clock even starts. A read that legitimately runs close to
+    # its own socket timeout (T-collateral: live reads observed "near 15s"
+    # against a 20s floor; construction overhead grows under exactly the same
+    # daemon-wide scheduler pressure that caused the original incident) can
+    # then lose the race to the wrapper BEFORE _read()'s own try/except gets a
+    # chance to catch the socket timeout and return cleanly. Losing that race
+    # turns a soft outcome (ledger.refresh() still persists a fresh DEGRADED
+    # snapshot -- freshness is preserved even on a failed read) into a hard
+    # TimeoutError with NO snapshot write at all, reintroducing the exact
+    # staleness (CURRENT_WEALTH_COLLATERAL_EXPIRED) this fix exists to
+    # prevent. Deriving the default from the socket-timeout floor (one
+    # expression, no second literal) keeps the two from drifting apart if the
+    # socket floor is ever retuned independently.
+    default = (
+        _post_trade_collateral_timeout_seconds()
+        + _COLLATERAL_DEADLINE_MARGIN_SECONDS
+    )
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS")
     if raw in (None, ""):
-        # T-collateral (2026-09-12): the 25.0s default left only a 3s margin
-        # inside the 30s scheduler cadence before the next tick was due; when
-        # sibling children (chain_sync_read 77s, capital_evidence 77s) saturate
-        # the BlockingScheduler's executor, that margin is consumed by
-        # scheduling latency alone and max_instances=1 then suppresses every
-        # subsequent attempt for minutes. 20.0s matches the venue-call read
-        # floor (_post_trade_collateral_timeout_seconds) already bounding the
-        # only network I/O in this cycle, widening the margin to 8s.
-        return 20.0
+        return default
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 20.0", raw)
-        return 20.0
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using %.1f", raw, default
+        )
+        return default
     if value <= 0:
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 20.0", raw)
-        return 20.0
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using %.1f", raw, default
+        )
+        return default
     return value
 
 

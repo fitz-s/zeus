@@ -618,8 +618,10 @@ def _write_post_trade_capital_heartbeat() -> None:
 # daemon's pid, freezing chain_sync_read/capital_evidence/payout_observer/collateral for
 # minutes). The collateral write path now also disables its own autocheckpoint
 # (disable_wal_autocheckpoint=True in post_trade_capital.py); this job is the backstop that
-# actually reclaims the freed frames -- on a short interval owned by this process, so a
-# release is picked up within seconds instead of waiting on the order daemon's cadence.
+# actually reclaims the freed frames -- on a 60s interval owned by this process (R-S,
+# 2026-09-13: PASSIVE checkpoints are cheap and the goal is bounded WAL, not sub-minute
+# latency, so this need not compete on the daemon's shortest cadence), so a release is
+# picked up within about a minute instead of waiting on the order daemon's own 90s cadence.
 _TRADES_WAL_CHECKPOINT_BACKLOG_ALERT_BYTES = 512 * 1024 * 1024  # mirrors src/main.py
 
 
@@ -775,12 +777,17 @@ def main() -> None:
         next_run_time=datetime.now(timezone.utc),
     )
     # Trades-DB WAL checkpoint backstop, dedicated to this process (T-collateral,
-    # 2026-09-12). 20s: shorter than the collateral job's 30s cadence and matched to its
-    # (now 20s) deadline, so a pinned-reader release is drained by this job within seconds
-    # rather than being left for whichever business connection commits next.
+    # 2026-09-12; cadence widened 20s -> 60s per R-S review, 2026-09-13). PASSIVE
+    # checkpoints are cheap and this job's goal is BOUNDED WAL, not sub-minute
+    # checkpoint latency -- a pinned-reader release still gets drained within a
+    # minute either way. 20s made this the shortest-cadence job in a daemon whose
+    # own scheduler-executor saturation (from the 77s/242s sibling children) was
+    # itself part of the T-collateral incident; running an 11th job every 20s added
+    # avoidable pressure on that same default ThreadPoolExecutor for no latency
+    # benefit this backstop actually needs.
     _scheduler.add_job(
         _scheduler_job("trades_wal_checkpoint")(_trades_wal_checkpoint_cycle),
-        "interval", seconds=20, id="trades_wal_checkpoint",
+        "interval", seconds=60, id="trades_wal_checkpoint",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),
     )

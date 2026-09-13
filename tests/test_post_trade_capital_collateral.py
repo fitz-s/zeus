@@ -455,3 +455,77 @@ def test_post_trade_collateral_refresh_head_upsert_failure_does_not_break_cycle(
     finally:
         conn.close()
     assert row[0] == 1
+
+
+def test_post_trade_collateral_near_floor_read_yields_degraded_snapshot_not_wrapper_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    """R-S (2026-09-13): a venue read that legitimately runs almost the full socket-timeout
+    duration before erroring must still be caught INSIDE _read()'s own try/except and
+    persisted as a fresh DEGRADED snapshot -- not lost to run_with_timeout's own wrapper
+    TimeoutError (which would leave NO snapshot written at all, reintroducing the exact
+    staleness -- CURRENT_WEALTH_COLLATERAL_EXPIRED -- this daemon exists to prevent).
+
+    Uses the real production defaults (20.0s socket timeout, 23.0s wrapper deadline -- a
+    3.0s margin, not the pre-fix 20.0s==20.0s equal budgets) and a genuine ~19.9s blocking
+    call rather than a scaled-down surrogate: the race this guards is timing-sensitive, and
+    scaling both sides down proportionally would not exercise the same absolute margin.
+    """
+    from src.execution import post_trade_capital
+
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
+    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 20.0
+    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 23.0
+
+    db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
+
+    class _Adapter:
+        funder_address = "0xFUNDER"
+
+        def get_collateral_payload(self):
+            # Simulate a venue call whose own socket timeout is about to fire (T-collateral:
+            # live reads observed "near 15s" against a 20s floor; this is deliberately
+            # closer to the floor to exercise the fixed margin). Must complete, and be
+            # caught by _read()'s own try/except, well inside the 23.0s wrapper deadline.
+            time.sleep(19.9)
+            raise TimeoutError("simulated near-floor venue socket timeout")
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def _ensure_v2_adapter(self):
+            return _Adapter()
+
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+
+    start = time.monotonic()
+    with pytest.raises(post_trade_capital.CollateralSnapshotDegraded):
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+    elapsed = time.monotonic() - start
+    assert elapsed < 23.0, (
+        f"took {elapsed:.2f}s -- the wrapper deadline fired before _read()'s own "
+        "try/except could catch the socket-level error and return cleanly"
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT authority_tier FROM collateral_ledger_snapshots"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "a DEGRADED snapshot must still be persisted -- freshness preserved"
+    assert row[0] == "DEGRADED"

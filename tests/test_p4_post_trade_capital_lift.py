@@ -1468,48 +1468,68 @@ def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):
 
 # ===========================================================================
 # T-collateral (2026-09-12): bounded WAL checkpoint + refresh margin.
+# R-S (2026-09-13): FIX-FIRST follow-up -- the first cut of the deadline change made the
+# wrapper deadline EQUAL the venue socket-timeout floor (both 20.0s). run_with_timeout's
+# clock starts before _read() constructs PolymarketClient/resolves the adapter, i.e. before
+# the socket timeout's own clock starts, so a read taking close to its own socket timeout
+# could lose the race to the wrapper BEFORE _read()'s try/except ever caught it -- turning a
+# soft DEGRADED-snapshot outcome into a hard TimeoutError with NO snapshot write at all.
+# Fixed by deriving the deadline as socket-timeout-floor + a 3.0s fixed margin (one
+# expression, no second literal, so the two cannot drift apart).
 #
 # CURRENT_WEALTH_COLLATERAL_EXPIRED blocked every entry cut for ~9 minutes because the
 # collateral child kept missing its 30s cadence. Root cause: this daemon's own connections
 # carried SQLite's default per-connection autocheckpoint, so an unlucky commit right after a
 # pinned external reader released paid for draining the ENTIRE un-checkpointed WAL backlog
 # (9.9GB observed live) synchronously, freezing every sibling child. Fix: (1) the collateral
-# write path disables its own autocheckpoint and a dedicated short-interval PASSIVE
-# checkpoint job in THIS process reclaims the freed frames instead; (2) the child deadline
-# drops from 25.0s to 20.0s (matching the venue-call read floor) to widen the margin inside
-# the 30s cadence from 3s to 8s.
+# write path disables its own autocheckpoint and a dedicated 60s-interval PASSIVE checkpoint
+# job in THIS process reclaims the freed frames instead; (2) the child deadline is 23.0s
+# (20.0s venue floor + 3.0s margin), widening the reap-before-next-tick margin inside the
+# 30s cadence from the original 3s (at the old 25.0s deadline) to 5s (deadline + the
+# unchanged 2.0s exit grace = 25.0s outer kill timeout).
 # ===========================================================================
 
 
-def test_collateral_child_deadline_matches_venue_read_floor(monkeypatch):
-    """The default collateral deadline must equal the venue-call timeout floor (20.0s).
-
-    T-collateral: the prior 25.0s default left only a 3s margin before the next 30s tick
-    was due; when sibling children saturate the scheduler's executor, that margin is
-    consumed by scheduling latency alone, not by collateral's own work.
+def test_collateral_child_deadline_carries_margin_above_venue_read_floor(monkeypatch):
+    """The default collateral deadline must be STRICTLY GREATER than the venue-call
+    timeout floor it wraps -- R-S: equal budgets let the wrapper race the socket's own
+    timeout and win before _read()'s try/except can catch it and return cleanly.
     """
     from src.execution import post_trade_capital
 
     monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
-    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 20.0
-    assert (
-        post_trade_capital._post_trade_collateral_deadline_seconds()
-        == post_trade_capital._post_trade_collateral_timeout_seconds()
-    )
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
+    deadline = post_trade_capital._post_trade_collateral_deadline_seconds()
+    timeout = post_trade_capital._post_trade_collateral_timeout_seconds()
+    assert deadline == 23.0
+    assert timeout == 20.0
+    assert deadline == timeout + post_trade_capital._COLLATERAL_DEADLINE_MARGIN_SECONDS
+    assert deadline > timeout, "wrapper deadline must not equal the socket timeout it wraps"
 
     monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", "invalid")
-    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 20.0
+    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 23.0
 
 
-def test_collateral_child_isolated_timeout_uses_the_20s_deadline(monkeypatch):
-    """The killable-child wrapper's subprocess timeout must track the (now 20s) deadline.
+def test_collateral_child_deadline_tracks_a_retuned_socket_floor(monkeypatch):
+    """The deadline is DERIVED from the socket floor, not an independent literal --
+    retuning the socket timeout must move the default deadline with it."""
+    from src.execution import post_trade_capital
 
-    Total kill timeout = deadline + the unchanged 2.0s exit grace = 22.0s, leaving an 8s
-    margin inside the 30s cadence (was 3s at the old 25.0s deadline).
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
+    monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", "30")
+    assert post_trade_capital._post_trade_collateral_deadline_seconds() == 33.0
+
+
+def test_collateral_child_isolated_timeout_uses_the_23s_deadline(monkeypatch):
+    """The killable-child wrapper's subprocess timeout must track the 23.0s deadline.
+
+    Total kill timeout = deadline (23.0s) + the unchanged 2.0s exit grace = 25.0s,
+    leaving a 5s margin inside the 30s cadence (was 3s at the original 25.0s deadline).
     """
     from src.ingest import post_trade_capital_daemon as daemon
 
     monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
     captured: dict[str, float] = {}
 
     def _run(*args, **kwargs):
@@ -1518,7 +1538,7 @@ def test_collateral_child_isolated_timeout_uses_the_20s_deadline(monkeypatch):
 
     monkeypatch.setattr(daemon.subprocess, "run", _run)
     daemon._collateral_snapshot_refresh_isolated()
-    assert captured["timeout"] == pytest.approx(22.0)
+    assert captured["timeout"] == pytest.approx(25.0)
 
 
 def test_collateral_ledger_and_wallet_head_writes_disable_wal_autocheckpoint(monkeypatch):
@@ -1584,15 +1604,17 @@ def test_collateral_ledger_and_wallet_head_writes_disable_wal_autocheckpoint(mon
 
 
 def test_daemon_registers_trades_wal_checkpoint_job():
-    """post_trade_capital_daemon must register its own short-interval PASSIVE checkpoint
-    job, wrapped in the same fail-soft _scheduler_job() decorator as every sibling job."""
+    """post_trade_capital_daemon must register its own PASSIVE checkpoint job (60s --
+    R-S: PASSIVE checkpoints are cheap and the goal is bounded WAL, not sub-minute
+    latency, so it must not compete on the daemon's shortest cadence), wrapped in the
+    same fail-soft _scheduler_job() decorator as every sibling job."""
     call = _add_job_call(_P4_DAEMON, "trades_wal_checkpoint")
     assert call is not None, (
         "post_trade_capital_daemon must register a 'trades_wal_checkpoint' job"
     )
     keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
     assert isinstance(keywords.get("seconds"), ast.Constant)
-    assert keywords["seconds"].value == 20
+    assert keywords["seconds"].value == 60
     assert isinstance(keywords.get("max_instances"), ast.Constant)
     assert keywords["max_instances"].value == 1
     assert isinstance(keywords.get("coalesce"), ast.Constant)
