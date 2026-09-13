@@ -1402,34 +1402,84 @@ def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
         lane="priority",
         seed_limit=0,
     )
-    request_made_progress = any(
-        int(request_report.get(field) or 0) > 0
-        for field in (
-            "processed_count",
-            "failed_count",
-            "committed_posterior_count",
-            "reactor_wake_published_count",
-        )
+    from src.data.replacement_forecast_live_materialization_queue import (
+        REPLACEMENT_MATERIALIZATION_CLAIM_WINDOW_EXHAUSTED_STATUSES,
     )
-    zero_progress_retry = (
-        request_report.get("status") == "PROCESSED"
-        and request_report.get("processed_count") == 0
-        and request_report.get("failed_count") == 0
-    )
+
     if (
-        request_report.get("status") != "NO_REQUESTS"
-        and not zero_progress_retry
-    ) or request_made_progress:
+        request_report.get("status")
+        in REPLACEMENT_MATERIALIZATION_CLAIM_WINDOW_EXHAUSTED_STATUSES
+    ):
+        # The request pass spent this tick's claim window on lock/deadline
+        # contention rather than reaching a real queue decision. A seed
+        # tranche here would only add its own claim/lock round-trip on top of
+        # that contention, so leave the seed pass for the next tick.
         return request_report
-    # Prepared requests are the exact handoff into q. Only bridge another
-    # bounded seed tranche when that handoff has no actionable work; otherwise
-    # a widened city universe can make seed planning consume the claim deadline
-    # on every tick and starve both held and first-posterior requests.
-    return _replacement_forecast_materialize_lane(
+    # The request pass reached a real decision this tick (NO_REQUESTS,
+    # PROCESSED, or FAILED all mean the claim was actually inspected) with
+    # claim capacity left over, so drain a bounded seed tranche on the SAME
+    # tick instead of waiting for a future tick with no pending request.
+    # During a republish burst nearly every tick finds a pending request, so
+    # gating the seed pass on "the request pass made no progress" starves
+    # newly-eligible seeds a full tick at a time (T-rebind trace, 2026-09-13).
+    seed_report = _replacement_forecast_materialize_lane(
         cfg,
         lane="priority",
         seed_limit=3,
     )
+    return _merge_priority_lane_reports(request_report, seed_report)
+
+
+_PRIORITY_LANE_STATUS_RANK = {"FAILED": 3, "PROCESSED": 2, "NO_REQUESTS": 1}
+
+
+def _merge_priority_lane_reports(
+    request_report: dict[str, object], seed_report: dict[str, object]
+) -> dict[str, object]:
+    """Combine one tick's request-pass and same-tick seed-pass reports.
+
+    Both passes now run on the same tick whenever the request pass reaches a
+    real decision (see ``_replacement_forecast_priority_materialize_job``), so
+    scheduler-health and log consumers of this job's return value must see
+    both passes' counts, not just the first call's.
+    """
+    merged = dict(seed_report)
+    for field in (
+        "processed_count",
+        "failed_count",
+        "skipped_count",
+        "seed_processed_count",
+        "seed_failed_count",
+        "committed_posterior_count",
+        "reactor_wake_published_count",
+    ):
+        merged[field] = int(request_report.get(field) or 0) + int(
+            seed_report.get(field) or 0
+        )
+    for field in (
+        "processed_files",
+        "failed_files",
+        "seed_processed_files",
+        "seed_failed_files",
+    ):
+        merged[field] = tuple(request_report.get(field) or ()) + tuple(
+            seed_report.get(field) or ()
+        )
+    merged["reason_codes"] = tuple(
+        dict.fromkeys(
+            (
+                *tuple(request_report.get("reason_codes") or ()),
+                *tuple(seed_report.get("reason_codes") or ()),
+            )
+        )
+    )
+    req_status = str(request_report.get("status") or "")
+    seed_status = str(seed_report.get("status") or "")
+    merged["status"] = max(
+        (seed_status, req_status),
+        key=lambda status: _PRIORITY_LANE_STATUS_RANK.get(status, 0),
+    )
+    return merged
 
 
 def _replacement_forecast_station_revision_fast_lane(

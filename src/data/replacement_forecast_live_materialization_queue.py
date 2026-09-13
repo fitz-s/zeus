@@ -93,6 +93,19 @@ _CLAIM_STALE_RECOVERY_DEFERRED_REASON = (
 _CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_UNKNOWN_INFLIGHT_SCOPE"
 )
+# Top-level ReplacementForecastLiveMaterializationQueueReport.status values that
+# mean this call's claim window was spent on lock/deadline contention rather
+# than an actual queue decision: "DEFERRED" covers every claim-read-deadline,
+# stale-recovery, revalidation, and same-identity/unknown-inflight defer path
+# above (all share status="DEFERRED" with a distinguishing reason code);
+# "LOCKED" covers REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED. Every other
+# status ("NO_REQUESTS", "PROCESSED", "FAILED") means a real decision was
+# reached this tick, even if that decision did no work. Callers that chain a
+# second lane call on the same tick (see the priority materialize job) should
+# skip the second call only when the first landed in this set.
+REPLACEMENT_MATERIALIZATION_CLAIM_WINDOW_EXHAUSTED_STATUSES = frozenset(
+    {"DEFERRED", "LOCKED"}
+)
 
 
 class _ClaimReadDeadlineExceeded(RuntimeError):

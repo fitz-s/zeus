@@ -2928,9 +2928,11 @@ def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_
     assert "priority boom" in str(health[-1][2])
 
 
-def test_priority_job_processes_existing_request_before_seed_bridge(
+def test_priority_job_processes_existing_request_then_bridges_seeds_same_tick(
     monkeypatch, tmp_path
 ) -> None:
+    """Request pass runs first, but a PROCESSED (claim window not spent)
+    outcome no longer starves the same-tick seed pass (2026-09-13 fix)."""
     from src.ingest import forecast_live_daemon
     from src.data import replacement_forecast_production
 
@@ -2954,8 +2956,12 @@ def test_priority_job_processes_existing_request_before_seed_bridge(
 
     receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
 
-    assert calls == [0]
-    assert receipt == {"status": "PROCESSED", "seed_limit": 0}
+    # Request-first ordering is preserved (seed_limit=0 called before 3), but
+    # the seed pass also runs on this tick since the request pass did not
+    # exhaust its claim window.
+    assert calls == [0, 3]
+    assert receipt["status"] == "PROCESSED"
+    assert receipt["seed_limit"] == 3
 
 
 def test_priority_job_bridges_own_clock_seed_before_existing_request(
@@ -3039,9 +3045,12 @@ def test_priority_job_falls_through_when_station_seed_awaits_ensemble(
     receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
     # Request-first, exactly like a tick without station seeds: the deferred
     # seed keeps this branch active for hours, and a seed-first tranche would
-    # never reach the prepared requests.
-    assert calls == [("priority", 0)]
-    assert receipt == {"status": "PROCESSED", "processed_count": 1}
+    # never reach the prepared requests. The request pass still reaches a
+    # real PROCESSED decision with its claim window unspent, so the seed pass
+    # also runs on this same tick (2026-09-13 fix) and its count is merged in.
+    assert calls == [("priority", 0), ("priority", 3)]
+    assert receipt["status"] == "PROCESSED"
+    assert receipt["processed_count"] == 2
 
 
 def test_station_revision_fast_path_avoids_broad_queue_priority_reads(
@@ -3436,7 +3445,8 @@ def test_priority_job_bridges_seeds_after_request_lane_is_empty(
     receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
 
     assert calls == [0, 3]
-    assert receipt == {"status": "PROCESSED", "seed_limit": 3}
+    assert receipt["status"] == "PROCESSED"
+    assert receipt["seed_limit"] == 3
 
 
 def test_priority_job_bridges_seeds_after_zero_progress_request_retry(
@@ -3476,7 +3486,93 @@ def test_priority_job_bridges_seeds_after_zero_progress_request_retry(
     receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
 
     assert calls == [0, 3]
-    assert receipt == {"status": "PROCESSED", "seed_limit": 3}
+    assert receipt["status"] == "PROCESSED"
+    assert receipt["seed_limit"] == 3
+
+
+def test_priority_job_runs_seed_pass_same_tick_when_request_pass_makes_progress(
+    monkeypatch, tmp_path
+) -> None:
+    """Real request-pass progress with an unspent claim window still lets the
+    seed pass run on the same tick, and the merged receipt sums both passes'
+    counts (2026-09-13 fix for the request-burst starvation trace)."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    calls: list[int] = []
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        calls.append(seed_limit)
+        assert lane == "priority"
+        if seed_limit == 0:
+            return {"status": "PROCESSED", "processed_count": 3, "failed_count": 0}
+        return {"status": "PROCESSED", "seed_processed_count": 2, "processed_count": 0}
+
+    monkeypatch.setattr(
+        forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane
+    )
+
+    receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert calls == [0, 3]
+    assert receipt["status"] == "PROCESSED"
+    assert receipt["processed_count"] == 3
+    assert receipt["seed_processed_count"] == 2
+
+
+def _assert_priority_job_skips_seed_pass_for_status(
+    monkeypatch, tmp_path, claim_exhausted_status: str
+) -> None:
+    """Shared body: a claim-deadline or lock-contention status means no real
+    decision was reached this tick, so the seed pass must not add its own
+    claim/lock round-trip on top of that contention."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    calls: list[int] = []
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        calls.append(seed_limit)
+        assert lane == "priority"
+        return {
+            "status": claim_exhausted_status,
+            "reason_codes": ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED"],
+        }
+
+    monkeypatch.setattr(
+        forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane
+    )
+
+    receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert calls == [0]
+    assert receipt["status"] == claim_exhausted_status
+
+
+def test_priority_job_skips_seed_pass_when_request_pass_claim_read_deadline_hit(
+    monkeypatch, tmp_path
+) -> None:
+    _assert_priority_job_skips_seed_pass_for_status(monkeypatch, tmp_path, "DEFERRED")
+
+
+def test_priority_job_skips_seed_pass_when_request_pass_queue_locked(
+    monkeypatch, tmp_path
+) -> None:
+    _assert_priority_job_skips_seed_pass_for_status(monkeypatch, tmp_path, "LOCKED")
 
 
 def test_priority_request_tranche_reserves_global_q_slot(tmp_path) -> None:
