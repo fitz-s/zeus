@@ -2428,11 +2428,18 @@ def test_monitor_primary_reserve_covers_every_admitted_degraded_tranche():
     """Auxiliary work cannot spend the time promised to admitted positions."""
     from src.engine import cycle_runtime
 
+    # _held_position_monitor_reservation_count is a *different* caller's
+    # one-third-of-the-book degraded-coverage target (used only for the
+    # separate "bounded_coverage" tranche selection below) -- unchanged.
     assert cycle_runtime._held_position_monitor_reservation_count(13) == 5
+    # Admission is now bounded by what this claim can fund (capacity) and by
+    # the book itself, not by the stale one-third-of-the-book target: a 13
+    # position book at a 75s budget can fund 7 complete reads (floor(37.5/5)),
+    # and the book has enough positions to use all of them.
     assert cycle_runtime._held_position_monitor_primary_reservation(
         13,
         75.0,
-    ) == (5, pytest.approx(25.0))
+    ) == (7, pytest.approx(35.0))
     assert cycle_runtime._held_position_monitor_primary_reservation(
         2,
         6.0,
@@ -2441,6 +2448,100 @@ def test_monitor_primary_reserve_covers_every_admitted_degraded_tranche():
         100,
         75.0,
     ) == (7, pytest.approx(35.0))
+
+
+def test_monitor_primary_reserve_no_longer_capped_by_stale_coverage_cycle_target():
+    """Admission tracks the claim's actual read capacity, not a fixed 1/3-of-book target.
+
+    Before this fix, ``desired = ceil(position_count / 3)`` (sized when the
+    periodic full-book claim was ~75s) was taken as a MIN alongside
+    ``capacity`` (the claim's real read budget). For any book with enough
+    positions to fill ``capacity``, this additional cap only ever throttled
+    admission below what the claim could actually fund -- it never expanded
+    coverage, and it stopped reflecting anything about the current claim once
+    the periodic claim was independently bounded to 29s
+    (``_held_position_monitor_claim_budget_seconds``, src/main.py). This test
+    reproduces the throttle at a generous 75s budget, where it is easiest to
+    isolate from ``capacity`` itself: a 13-position book could previously
+    fund only 5 reads (one third of 13) even though its 75s claim can afford
+    7. FAILS on the parent commit (34b9fe237); passes after dropping the
+    stale target.
+    """
+    from src.engine import cycle_runtime
+
+    admitted, reserved_seconds = cycle_runtime._held_position_monitor_primary_reservation(
+        13,
+        75.0,
+    )
+    # capacity = floor(max(5, 75/2) / 5) = floor(37.5 / 5) = 7
+    assert admitted == 7
+    assert reserved_seconds == pytest.approx(35.0)
+
+
+def test_monitor_primary_reserve_never_exceeds_a_tiny_book():
+    """A small book is never asked to fund more reads than it has positions.
+
+    The old ``desired`` floor (``_HELD_POSITION_MONITOR_RESERVATION_MIN = 2``)
+    was unconditional: at a 29s periodic claim (capacity=2), a 1-position book
+    was admitted for 2 reads -- one more than exists. FAILS on the parent
+    commit; passes once admission is bounded by ``position_count``.
+    """
+    from src.engine import cycle_runtime
+
+    admitted, reserved_seconds = cycle_runtime._held_position_monitor_primary_reservation(
+        1,
+        29.0,
+    )
+    assert admitted == 1
+    assert reserved_seconds == pytest.approx(5.0)
+
+    # An empty book reserves nothing -- no positions exist to read, so no
+    # primary-belief budget should be carved out of the claim for them.
+    admitted_empty, reserved_empty = cycle_runtime._held_position_monitor_primary_reservation(
+        0,
+        29.0,
+    )
+    assert admitted_empty == 0
+    assert reserved_empty == pytest.approx(0.0)
+
+
+def test_monitor_primary_reserve_never_exceeds_its_own_claim_budget():
+    """The safety property 20ba5aca6 established: total admitted primary-belief
+    read time can never exceed the claim's own budget, regardless of book
+    size. Pre-existing and unaffected by removing the stale one-third-of-the-
+    book target -- passes on both the parent commit and this fix.
+    """
+    from src.engine import cycle_runtime
+
+    for budget in (0.0, 1.0, 4.9, 5.0, 15.88, 29.0, 30.0, 75.0, 200.0):
+        for position_count in (0, 1, 2, 13, 80, 500):
+            admitted, reserved_seconds = (
+                cycle_runtime._held_position_monitor_primary_reservation(
+                    position_count,
+                    budget,
+                )
+            )
+            assert reserved_seconds <= budget + 1e-9
+            assert reserved_seconds == pytest.approx(admitted * 5.0)
+
+
+def test_monitor_primary_reserve_never_exceeds_the_book_across_budgets():
+    """New invariant this fix adds: admission never exceeds position_count,
+    for any budget -- not just the 29s periodic-claim case in the tiny-book
+    test above. FAILS on the parent commit for any budget/position_count pair
+    where the old ``desired`` floor (>=2) exceeded the book.
+    """
+    from src.engine import cycle_runtime
+
+    for budget in (5.0, 6.0, 15.88, 29.0, 30.0, 75.0, 200.0):
+        for position_count in (0, 1, 2, 13, 80, 500):
+            admitted, _reserved_seconds = (
+                cycle_runtime._held_position_monitor_primary_reservation(
+                    position_count,
+                    budget,
+                )
+            )
+            assert admitted <= max(0, position_count)
 
 
 def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(
@@ -22335,7 +22436,11 @@ def test_replacement_hwm_prefetch_has_independent_wall_deadline(monkeypatch):
 
     assert observed == [(pytest.approx(2.5), pytest.approx(2.5))]
     assert summary["held_monitor_hwm_prefetch_budget_seconds"] == pytest.approx(2.5)
-    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(10.0)
+    # One held position can fund (and needs) only one primary-belief read;
+    # admission is now bounded by the book, not by the RESERVATION_MIN=2
+    # floor that used to reserve a second read's worth of budget for a
+    # position that does not exist.
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(5.0)
 
 
 def test_replacement_hwm_prefetch_threads_deadline_through_connection(monkeypatch):
@@ -23009,9 +23114,13 @@ def test_local_orderbook_prefetch_cap_preserves_network_and_primary_refresh(
         held_position_monitor_budget_seconds=29.0,
     )
 
+    # One held position admits one primary-belief read (5s), not the
+    # RESERVATION_MIN=2 floor's worth (10s), leaving a wider 24s auxiliary
+    # tranche for the network batch than the book actually needs primary
+    # time withheld from it.
     assert prefetch_calls == [
         (True, pytest.approx(1.0)),
-        (False, pytest.approx(19.0)),
+        (False, pytest.approx(24.0)),
     ]
     assert evaluations == [position.trade_id]
     assert summary["held_monitor_primary_belief_read_started"] == 1

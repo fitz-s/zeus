@@ -169,16 +169,27 @@ def _held_position_monitor_primary_reservation(
     position_count: int,
     monitor_budget_seconds: float,
 ) -> tuple[int, float]:
-    """Reserve one belief-read tranche per admitted degraded-coverage slot.
+    """Reserve one belief-read tranche per position this claim can actually fund.
 
-    The reservation scheduler admits roughly one third of the held book when a
-    full pass is deadline-degraded.  Reserving only one five-second read let a
-    coherent HWM read plus optional order-book batch consume the whole claim
-    before any admitted position reached canonical redecision.  Keep half the
-    claim available for prerequisites/auxiliary work and reserve at least one
-    complete read.  If the configured claim cannot fund one third of a very
-    large book, reduce this pass's admission count instead of pretending that
-    several positions share one read deadline.
+    Reserving only one five-second read let a coherent HWM read plus optional
+    order-book batch consume the whole claim before any admitted position
+    reached canonical redecision.  Keep half the claim available for
+    prerequisites/auxiliary work and reserve at least one complete read.
+
+    Admission used to be additionally capped at roughly one third of the held
+    book (``position_count / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES``),
+    on the assumption that three of these passes would cover a full book. That
+    assumption was sized against a claim close to the 75s default; once the
+    periodic full-book claim was independently bounded well below that (see
+    ``_held_position_monitor_claim_budget_seconds`` in ``src/main.py``), the
+    one-third target stopped being reachable for any realistically sized book
+    and was never the binding constraint again -- ``capacity`` (this claim's
+    actual read budget) already was, every time. Carrying the stale target
+    forward did nothing but let a small book request more reads than exist
+    (``desired`` has a floor of 2 regardless of ``position_count``), so this
+    pass now floors admission at the book size instead of a coverage-cycle
+    guess. What this claim can fund is derived fresh from its own budget every
+    call; there is nothing else to re-derive.
     """
 
     from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
@@ -191,12 +202,11 @@ def _held_position_monitor_primary_reservation(
         # the next recurring pass recomputes capacity from its own claim.
         # RESET: a claim at least as large as one complete read.
         return 0, 0.0
-    desired = _held_position_monitor_reservation_count(position_count)
     capacity = max(
         1,
         math.floor(max(single_read, budget / 2.0) / single_read),
     )
-    admitted = min(desired, capacity)
+    admitted = min(capacity, max(0, int(position_count)))
     return admitted, single_read * admitted
 
 
