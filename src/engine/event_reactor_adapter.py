@@ -8131,6 +8131,20 @@ def event_bound_live_adapter_from_trade_conn(
                 failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
             elif _is_global_probability_family_unavailable(exc):
                 failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
+            # T-day0inelig.md §6 D1: DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE is a
+            # catch-all over several distinct real exceptions (dominant one: a
+            # causal-bundle capture-equivalence mismatch, not actually missing
+            # members). The wrapped reason string above stays exactly as before
+            # (byte-identical, still the shared enum value in its tail); the
+            # real cause travels on a separate field, carried on the exception
+            # object itself since it may cross frames whose own local `payload`
+            # is not this one.
+            _block_cause = (
+                getattr(exc, "_edli_day0_q_block_cause", None)
+                if isinstance(exc, ValueError)
+                and str(exc) == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                else None
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -8140,6 +8154,9 @@ def event_bound_live_adapter_from_trade_conn(
                     f"{failure_type}:{exc}"
                 ),
                 proof_accepted=False,
+                block_cause=(
+                    str(_block_cause) if _block_cause is not None else None
+                ),
             )
         return _prepared_global_event_receipt(event, prepared)
 
@@ -9343,6 +9360,15 @@ def event_bound_live_adapter_from_trade_conn(
                     failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
                 elif _is_global_probability_family_unavailable(exc):
                     failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
+                # T-day0inelig.md §6 D1: mirrors the ENTRY-lane prepare
+                # failure above — same catch-all reason, same separate cause
+                # field, reason string untouched.
+                _held_block_cause = (
+                    getattr(exc, "_edli_day0_q_block_cause", None)
+                    if isinstance(exc, ValueError)
+                    and str(exc) == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                    else None
+                )
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,
@@ -9352,6 +9378,11 @@ def event_bound_live_adapter_from_trade_conn(
                         f"{failure_type}:{exc}"
                     ),
                     proof_accepted=False,
+                    block_cause=(
+                        str(_held_block_cause)
+                        if _held_block_cause is not None
+                        else None
+                    ),
                 )
             if is_forecast_lane or held_is_day0:
                 _store_global_probability_family_cache(
@@ -18985,6 +19016,17 @@ def _build_event_bound_no_submit_receipt_core(
             "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
             "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
         }:
+            # T-day0inelig.md §6 D1: the plain variant is a catch-all over
+            # several distinct real exceptions (dominant one: a causal-bundle
+            # capture-equivalence mismatch, not actually missing members).
+            # Carry the real cause on a separate field; `reason` above stays
+            # the byte-identical shared-enum value.
+            _block_cause = (
+                getattr(exc, "_edli_day0_q_block_cause", None)
+                or payload.get("_edli_day0_q_block_cause")
+                if missing_reason == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                else None
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -18996,6 +19038,9 @@ def _build_event_bound_no_submit_receipt_core(
                 family_id=family.family_id,
                 source_status="MATCH",
                 family_complete=True,
+                block_cause=(
+                    str(_block_cause) if _block_cause is not None else None
+                ),
             )
         return EventSubmissionReceipt(
             False,
@@ -44063,7 +44108,18 @@ def _market_analysis_from_event_snapshot(
             if _day0_rd_members is None:
                 payload["_edli_day0_q_mode"] = "remaining_day_unavailable"
                 payload["_edli_day0_q_block_reason"] = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
-                raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+                _day0_block_error = ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+                # T-day0inelig.md §6 D1: carry the real cause ON the exception
+                # object (not just on this frame's payload) so it survives a
+                # bare `raise` re-throw through callers whose own local
+                # `payload` is a different dict (e.g. the global-auction
+                # builder). The enum message above stays byte-identical.
+                setattr(
+                    _day0_block_error,
+                    "_edli_day0_q_block_cause",
+                    payload.get("_edli_day0_q_block_cause"),
+                )
+                raise _day0_block_error
         if _day0_rd_members is not None:
             raw_remaining = payload.get(
                 "_edli_day0_unclamped_remaining_extrema_native"
@@ -48010,6 +48066,16 @@ def _day0_remaining_day_members(
         import logging as _logging
 
         detail = ""
+        # T-day0inelig.md §4b/§6 D1: the reason string collapsed at the caller
+        # (DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE) is a catch-all over ≥3 real
+        # exceptions here (19,217/19,834 of one rotation are the causal-bundle
+        # mismatch, not a members-missing condition). The enum value at the
+        # caller must stay byte-identical (shared-enum-invariant-audit-all-
+        # producers: exact-equality membership in
+        # _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS /
+        # _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS elsewhere in this
+        # module), so the real cause travels on a SEPARATE payload key instead.
+        cause = f"{type(exc).__name__}:{str(exc)[:200]}"
         receipt = getattr(exc, "day0_causal_bundle_validation_receipt", None)
         if isinstance(receipt, dict):
             diverged = [
@@ -48038,11 +48104,29 @@ def _day0_remaining_day_members(
                     capture_status,
                 )
             )
+            capture_reason = (
+                str(capture_equivalence.get("reason") or "")
+                if isinstance(capture_equivalence, dict)
+                else ""
+            )
+            if capture_reason:
+                _equiv_prefix = "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_"
+                short_status = (
+                    capture_reason[len(_equiv_prefix):]
+                    if capture_reason.startswith(_equiv_prefix)
+                    else capture_reason
+                )
+                # str(exc) here is the ValueError's own enum-like message
+                # (e.g. DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH) — more useful
+                # than the generic ValueError type name as the cause's head.
+                cause = f"{str(exc)[:200]}:{short_status}"
+
+        payload["_edli_day0_q_block_cause"] = cause
 
         _logging.getLogger("zeus.day0_remaining_day").warning(
-            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s%s",
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s%s cause=%s",
             getattr(family, "city", "?"), getattr(family, "target_date", "?"),
-            type(exc).__name__, exc, detail,
+            type(exc).__name__, exc, detail, cause,
         )
         return None
 

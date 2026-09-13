@@ -729,6 +729,102 @@ def test_day0_v1_mismatch_skips_impossible_successor_probe_and_logs_diverged_fie
     assert f"capture_equivalence={capture_reason}" in caplog.text
 
 
+def test_day0_v1_member_builder_carries_causal_bundle_cause_on_payload(monkeypatch):
+    """T-day0inelig.md §6 D1: DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE collapses
+    every real cause behind the member builder's bare `except Exception` into
+    one word. The dominant real cause (measured: 19,217/19,834 on one log
+    rotation) is a causal-bundle capture-equivalence mismatch, not actually
+    missing members. The seam must attach that real cause to
+    payload['_edli_day0_q_block_cause'] WITHOUT touching the enum reason
+    string a caller may separately record (several frozensets test that value
+    by exact-equality membership elsewhere in this module)."""
+    import src.engine.event_reactor_adapter as era
+
+    (
+        conn,
+        expected,
+        _actual,
+        _current_witness,
+        _current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(changed_run=True)
+
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ("icon_d2",),
+    )
+    monkeypatch.setattr(
+        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
+    )
+
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+    payload = {
+        "_edli_day0_causal_evidence_bundle": expected,
+        "metric": "high",
+        "settlement_unit": "C",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-06-10T08:00:00+00:00",
+        "rounded_value": 18.0,
+        "high_so_far": 18.0,
+        "_edli_day0_remaining_window_start_utc": remaining_window_start.isoformat(),
+    }
+
+    members = era._day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        forecast_conn=conn,
+        entry_authority=True,
+    )
+    assert members is None
+    cause = payload.get("_edli_day0_q_block_cause")
+    assert cause is not None
+    assert cause.startswith("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH:")
+    # The short suffix is the capture_equivalence reason with the shared
+    # DAY0_CAUSAL_CAPTURE_EQUIVALENCE_ prefix stripped (one of the three
+    # outcomes the capture-equivalence proof can return for this fixture
+    # shape, mirrored from
+    # test_day0_v1_capture_equivalence_rejects_payload_or_issue_change),
+    # never the bare ValueError type name — the ValueError's own enum-like
+    # message is more informative than "ValueError".
+    assert not cause.startswith("ValueError:")
+    assert cause.rsplit(":", 1)[-1] in {
+        "PAYLOAD_MISMATCH",
+        "SEMANTIC_META_MISMATCH",
+        "PROVIDER_BINDING_INVALID",
+    }
+
+
+def test_day0_v1_member_builder_carries_plain_exception_cause_on_payload(
+    monkeypatch,
+):
+    """A non-causal-bundle exception (e.g. a lookup failure) must still land
+    on payload['_edli_day0_q_block_cause'] as "<ExceptionType>:<message>",
+    per T-day0inelig.md §6 D1's fallback format."""
+    import src.engine.event_reactor_adapter as era
+
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+    payload = {"metric": "high", "rounded_value": 18.0}
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(era, "runtime_cities_by_name", _boom)
+
+    members = era._day0_remaining_day_members(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        forecast_conn=sqlite3.connect(":memory:"),
+        entry_authority=True,
+    )
+    assert members is None
+    assert payload.get("_edli_day0_q_block_cause") == "RuntimeError:boom"
+
+
 def test_day0_v1_capture_equivalence_requires_original_successor_visibility(
     monkeypatch,
 ):
@@ -8053,6 +8149,94 @@ class TestRemainingDayMembers:
             )
         assert payload["_edli_day0_q_mode"] == "remaining_day_unavailable"
         assert payload["_edli_day0_q_block_reason"] == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+
+    def test_live_remaining_day_unavailable_cause_survives_the_raise(self, monkeypatch):
+        """T-day0inelig.md §6 D1: the caller's enum reason must stay
+        byte-identical (several frozensets test it by exact-equality
+        membership elsewhere in this module), while the real cause the member
+        builder already wrote to payload travels through the raise both on
+        the payload AND on the exception object itself — the latter is what
+        lets a cross-frame catch site (whose own local `payload` is a
+        different dict, e.g. the global-auction builder) recover it."""
+        import src.engine.event_reactor_adapter as era
+
+        bins = [Bin(25, 25, "C", "25°C"), Bin(26, None, "C", "26°C or higher")]
+        candidates = [
+            SimpleNamespace(
+                condition_id=f"cond-{i}",
+                bin=b,
+                yes_token_id=f"yes-{i}",
+                no_token_id=f"no-{i}",
+            )
+            for i, b in enumerate(bins)
+        ]
+        family = SimpleNamespace(
+            city="Paris",
+            metric="high",
+            target_date="2026-06-10",
+            event_type="DAY0_EXTREME_UPDATED",
+            bins=bins,
+            candidates=candidates,
+            yes_token_ids=[f"yes-{i}" for i in range(len(bins))],
+            no_token_ids=[f"no-{i}" for i in range(len(bins))],
+            family_id="day0-test-fam",
+        )
+        native_costs = {
+            (f"cond-{i}", side): (
+                None,
+                EP(price, "ask", fee_deducted=True, currency="probability_units"),
+                price,
+                None,
+                None,
+            )
+            for i in range(len(bins))
+            for side, price in (("buy_yes", 0.25), ("buy_no", 0.75))
+        }
+        payload = {"metric": "high", "rounded_value": 25.0}
+        snapshot = {
+            "settlement_unit": "C",
+            "temperature_metric": "high",
+            "members_json": "[24.0, 25.0, 26.0, 27.0]",
+            "members_precision": 1.0,
+            "source_id": "test",
+            "issue_time": "2026-06-10T00:00:00+00:00",
+            "dataset_id": "test_v1",
+            "data_version": "test_v1",
+        }
+        expected_cause = "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH:SEMANTIC_META_MISMATCH"
+
+        def _stub_members(**kw):
+            # Mirrors exactly what the real member builder's except block
+            # does before returning None: stash the real cause on the SAME
+            # payload dict the caller holds.
+            kw["payload"]["_edli_day0_q_block_cause"] = expected_cause
+            return None
+
+        monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+        monkeypatch.setattr(era, "_day0_remaining_day_members", _stub_members)
+
+        with pytest.raises(
+            ValueError, match="^DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE$"
+        ) as excinfo:
+            era._market_analysis_from_event_snapshot(
+                calibration_conn=sqlite3.connect(":memory:"),
+                snapshot=snapshot,
+                family=family,
+                native_costs=native_costs,
+                payload=payload,
+                decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            )
+        # The shared enum value stays byte-identical.
+        assert payload["_edli_day0_q_block_reason"] == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+        assert str(excinfo.value) == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+        # The cause is recoverable from the payload...
+        assert payload["_edli_day0_q_block_cause"] == expected_cause
+        # ...and from the exception object itself, for callers whose local
+        # `payload` differs from this frame's.
+        assert (
+            getattr(excinfo.value, "_edli_day0_q_block_cause", None)
+            == expected_cause
+        )
 
     def test_live_remaining_day_bootstrap_lcb_unavailable_blocks_static_fallback(self, monkeypatch):
         """A live Day0 q_lcb must not degrade to the static sampler.

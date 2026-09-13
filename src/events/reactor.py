@@ -818,6 +818,15 @@ class EventSubmissionReceipt:
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
     # tolerate its absence (only NEW writes carry/enforce it).
     submit_lane: str | None = None
+    # T-day0inelig.md §4b/§6 D1: the real exception behind a catch-all
+    # ineligibility reason (currently only DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE
+    # / _AVAILABLE:ENTRY_SOURCE_CLOCK), e.g. "ValueError:..." or
+    # "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH:SEMANTIC_META_MISMATCH". Deliberately
+    # NOT folded into `reason` — that value is a shared enum tested by
+    # exact-equality membership elsewhere (shared-enum-invariant-audit-all-
+    # producers) and must stay byte-identical. None on every other receipt;
+    # omit-when-None in receipt_json keeps existing hashes stable.
+    block_cause: str | None = None
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
             object.__setattr__(self, "proof_accepted", bool(self.submitted))

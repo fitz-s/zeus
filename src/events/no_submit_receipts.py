@@ -267,6 +267,11 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("min_expected_profit_usd", None)
     if payload.get("min_submit_edge_density") is None:
         payload.pop("min_submit_edge_density", None)
+    # block_cause (T-day0inelig.md §6 D1): omit when None so every existing
+    # receipt keeps byte-identical receipt_json/receipt_hash. Present only on
+    # the catch-all ineligibility receipts that carry a real underlying cause.
+    if payload.get("block_cause") is None:
+        payload.pop("block_cause", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

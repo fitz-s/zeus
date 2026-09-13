@@ -3536,6 +3536,14 @@ def _store_global_auction_receipt(
     full_scope_identity: str,
     full_scope_family_keys: Sequence[str],
     probability_ineligible_by_family: Mapping[str, str],
+    # T-day0inelig.md §6 D1: sibling of probability_ineligible_by_family, same
+    # key shape (family_key -> string), carrying the real cause behind a
+    # catch-all ineligibility reason without perturbing the reason value
+    # itself (several frozensets test that value by exact-equality membership;
+    # shared-enum-invariant-audit-all-producers). Sparse: only families whose
+    # ineligibility reason resolved a real cause appear here. None/omitted is
+    # legacy-shape-compatible (empty map == the old receipt shape).
+    probability_ineligible_cause_by_family: Mapping[str, str] | None = None,
     buy_disabled_reason_by_family: Mapping[str, str] | None = None,
     book_epoch_identity: str,
     book_asset_count: int | None,
@@ -3579,6 +3587,13 @@ def _store_global_auction_receipt(
         sorted(
             (str(key), str(reason))
             for key, reason in probability_ineligible_by_family.items()
+        )
+    )
+    ineligible_cause = dict(
+        sorted(
+            (str(key), str(cause))
+            for key, cause in (probability_ineligible_cause_by_family or {}).items()
+            if str(cause).strip()
         )
     )
     buy_disabled_reasons = dict(
@@ -3976,6 +3991,7 @@ def _store_global_auction_receipt(
         "eligible_probability_family_count": len(probability_keys),
         "probability_ineligible_family_count": len(ineligible),
         "probability_ineligible_by_family": ineligible,
+        "probability_ineligible_cause_by_family": ineligible_cause,
         "buy_disabled_family_count": len(buy_disabled_reasons),
         "buy_disabled_reason_by_family": buy_disabled_reasons,
         "scope_family_coverage_complete": scope_coverage_complete,
@@ -8171,6 +8187,12 @@ def process_current_global_batch(
             )
             for city, target_date, metric in missing_held_families
         }
+        # T-day0inelig.md §6 D1: sibling of ineligible_by_family, keyed the same
+        # way. Carries the real cause behind a catch-all reason (currently only
+        # populated for DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE) without touching
+        # the reason string itself, which several frozensets test by exact
+        # equality (shared-enum-invariant-audit-all-producers).
+        ineligible_cause_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
         for family_key, scope_event in decision_scope.events_by_family:
             if cancelled(f"prepare_family:{family_key}"):
@@ -8258,6 +8280,11 @@ def process_current_global_batch(
                 ):
                     reason = str(failure_receipt.reason)
                     ineligible_by_family[family_key] = reason
+                    block_cause = str(
+                        getattr(failure_receipt, "block_cause", "") or ""
+                    )
+                    if block_cause:
+                        ineligible_cause_by_family[family_key] = block_cause
                     if family_key in claimed_by_family:
                         ineligible_by_event[owner.event_id] = reason
                     continue
@@ -9064,6 +9091,7 @@ def process_current_global_batch(
                     )
                 ),
                 probability_ineligible_by_family=ineligible_by_family,
+                probability_ineligible_cause_by_family=ineligible_cause_by_family,
                 buy_disabled_reason_by_family={
                     family_key: reason
                     for family_key, reason in held_only_buy_disabled_reasons.items()

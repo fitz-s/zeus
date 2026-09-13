@@ -9814,6 +9814,93 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     conn.close()
 
 
+def test_global_auction_receipt_carries_ineligible_cause_sibling_map(tmp_path, monkeypatch):
+    """T-day0inelig.md §6 D1: probability_ineligible_cause_by_family is a
+    sibling of probability_ineligible_by_family, same key shape (family_key
+    -> string), landing in the SAME persisted summary blob (no new column)
+    without perturbing the existing reason map. Sparse: a family absent from
+    the cause map means no real cause was recovered for it."""
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import PreparedGlobalAuctionResult
+    from src.solve.solver import GlobalSingleOrderDecision
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setattr(global_batch_runtime, "_GLOBAL_AUCTION_PAYLOAD_REFS", {})
+    conn = get_connection(tmp_path / "ineligible-cause-sibling.db")
+    init_schema(conn)
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    wealth_witness = _global_auction_receipt_wealth_witness()
+    # The shared helper does not populate every v22 GLOBAL_AUCTION_RECEIPT
+    # capital field (pre-existing gap, unrelated to this change — reproduces
+    # on parent HEAD via test_holding_coverage_receipt_compresses_and_
+    # references_exact_payload above). Fill in what this receipt's schema-22
+    # integrity check requires so this test exercises ONLY the new sibling
+    # map, not that pre-existing gap.
+    wealth_witness.position_set_hash = "position-set-current"
+    wealth_witness.collateral_authority = "collateral-current"
+    wealth_witness.wealth_floor_usd = "100"
+    wealth_witness.wealth_ceiling_usd = "100"
+    wealth_witness.spendable_cash_usd = "100"
+    wealth_witness.reservations_usd = "0"
+    selected = PreparedGlobalAuctionResult(
+        decision=GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="GLOBAL_FEASIBLE_SET_INCOMPLETE",
+            candidate_input_count=0,
+        ),
+        winner_event_id=None,
+    )
+    receipt_id = global_batch_runtime._store_global_auction_receipt(
+        conn,
+        selected=selected,
+        selection_epoch_identity="epoch-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=(),
+        full_scope_identity="scope-current",
+        full_scope_family_keys=("family-members-unavailable", "family-book-unavailable"),
+        probability_ineligible_by_family={
+            "family-members-unavailable": "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+            "family-book-unavailable": "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE",
+        },
+        probability_ineligible_cause_by_family={
+            "family-members-unavailable": (
+                "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH:SEMANTIC_META_MISMATCH"
+            ),
+            # A blank cause must not survive into the persisted sparse map.
+            "family-book-unavailable": "",
+        },
+        book_epoch_identity="book-unavailable-current",
+        book_asset_count=None,
+        book_asset_states=(),
+        wealth_witness=wealth_witness,
+        fractional_kelly_multiplier=Decimal("0.25"),
+    )
+    conn.commit()
+    summary = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id=?",
+            (receipt_id,),
+        ).fetchone()[0]
+    )["summary"]
+    # The reason map is untouched by the new sibling field.
+    assert summary["probability_ineligible_by_family"] == {
+        "family-members-unavailable": "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        "family-book-unavailable": "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE",
+    }
+    assert summary["probability_ineligible_cause_by_family"] == {
+        "family-members-unavailable": (
+            "DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH:SEMANTIC_META_MISMATCH"
+        ),
+    }
+    conn.close()
+
+
 @pytest.mark.parametrize("book_present", (False, True), ids=("no_book", "book"))
 def test_receipt_rejects_uniform_coverage_deadline_beyond_authoritative_book(
     tmp_path,
