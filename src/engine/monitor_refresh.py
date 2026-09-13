@@ -1863,6 +1863,60 @@ def _clear_belief_debt(*, city: str, target_date: str, metric: str, pos: "Positi
     _belief_debt_attempts.pop(key, None)
 
 
+# Day0 same-identity reseed idempotency (self-defeating-freshness fix, 2026-09-13).
+# `_perform_single_family_belief_reseed_failsoft`'s Day0 branch requires a posterior
+# committed AFTER `minimum_posterior_computed_at` before it will treat the gap as
+# drained. Recomputing that bound to wall-clock `now()` on every call means no
+# already-existing posterior -- including one this same repair lane committed a
+# second earlier -- can ever satisfy it, so an UNCHANGED Day0 observation identity
+# gets re-enqueued every monitor cycle (Beijing 2026-09-13: 42 redundant enqueues
+# in 17 minutes for one unchanged extreme value, see T_beijing_belief trace). Pin
+# the bound to when THIS gap (this exact conditioning identity, per family) was
+# FIRST detected instead: a rollover to a new identity starts a fresh window
+# (different key), and a resolved gap clears its entry so a later genuine gap on
+# the same identity is detected fresh rather than reusing a stale first-seen time.
+_day0_reseed_gap_first_seen_at: dict[str, tuple[str, str]] = {}
+
+
+def _day0_reseed_minimum_posterior_computed_at(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    day0_payload: dict[str, object],
+    repair_started_at: datetime,
+) -> datetime:
+    """First-detection time of the current Day0 conditioning identity's gap.
+
+    Returns ``repair_started_at`` itself on first detection (same as the old
+    behavior for that one call) and the stored first-seen time on every
+    subsequent call for the SAME identity, so an already-committed posterior can
+    satisfy the freshness check instead of being permanently too old to count.
+    """
+    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+        _day0_conditioning_identity,
+    )
+
+    identity = _day0_conditioning_identity(
+        source=day0_payload.get("day0_observed_extreme_source"),
+        observation_time=day0_payload.get("day0_observed_extreme_observation_time"),
+        observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+        unit=day0_payload.get("day0_observed_extreme_unit"),
+    ) or str(day0_payload.get("day0_observation_state") or "")
+    family_key = f"{city}|{target_date}|{metric}"
+    prior = _day0_reseed_gap_first_seen_at.get(family_key)
+    if prior is not None and prior[0] == identity:
+        return datetime.fromisoformat(prior[1])
+    first_seen_iso = repair_started_at.isoformat()
+    _day0_reseed_gap_first_seen_at[family_key] = (identity, first_seen_iso)
+    return repair_started_at
+
+
+def _clear_day0_reseed_gap(*, city: str, target_date: str, metric: str) -> None:
+    """A drained Day0 gap clears its first-seen record (mirrors `_clear_belief_debt`)."""
+    _day0_reseed_gap_first_seen_at.pop(f"{city}|{target_date}|{metric}", None)
+
+
 def _track_belief_staleness(pos: Position) -> None:
     key = str(getattr(pos, "trade_id", "") or id(pos))
     if getattr(pos, "last_monitor_prob_is_fresh", False):
@@ -2015,9 +2069,16 @@ def _perform_single_family_belief_reseed_failsoft(
         repair_started_at = datetime.now(timezone.utc)
         # Day0 hourly vectors can advance without changing the observation identity or
         # carrier cycle. Once current-q construction rejects the old vector witness,
-        # only a posterior built after this repair began can prove the gap drained.
+        # only a posterior built after the gap was FIRST detected (not "now" recomputed
+        # on every call -- see _day0_reseed_gap_first_seen_at) can prove the gap drained.
         minimum_posterior_computed_at = (
-            repair_started_at
+            _day0_reseed_minimum_posterior_computed_at(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                day0_payload=day0_payload,
+                repair_started_at=repair_started_at,
+            )
             if day0_payload
             else repair_started_at
             - timedelta(hours=monitor_belief_max_age_hours())
@@ -2037,6 +2098,11 @@ def _perform_single_family_belief_reseed_failsoft(
             report = dict(report)
             report["repair_lane"] = "cycle_advance"
             report["input_revision_status"] = input_revision_status
+        if day0_payload and isinstance(report, dict) and report.get("status") == "CYCLE_ADVANCE_NOT_NEEDED":
+            # The freshness check just passed for this identity: the gap is drained,
+            # so its first-seen record is cleared. A later genuine gap (this identity
+            # going stale again, or a new one) starts a fresh detection window.
+            _clear_day0_reseed_gap(city=city, target_date=target_date, metric=metric)
         logger.info(
             "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s "
             "enqueued=%s repair_lane=%s day0_observed_extreme=%s",

@@ -678,6 +678,213 @@ def test_day0_reseed_requires_posterior_newer_than_current_inputs(
     assert captured["day0_observed_extreme_c"] == 27.0
 
 
+def _day0_reseed_test_setup(monkeypatch, tmp_path):
+    """Shared scaffolding for the Day0 same-identity idempotency tests below."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        fusion,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+            "already_enqueued": 0,
+        },
+    )
+    # Isolate the module-level first-seen ledger from other tests in this session.
+    # (guarded: absent entirely on the pre-fix parent, which these tests must
+    # still be able to run against to prove the regression they pin.)
+    if hasattr(mr, "_day0_reseed_gap_first_seen_at"):
+        monkeypatch.setattr(mr, "_day0_reseed_gap_first_seen_at", {})
+    return mr
+
+
+def test_day0_reseed_second_call_recognizes_own_prior_success(monkeypatch, tmp_path):
+    """FIX (T_beijing_belief, 2026-09-13): a posterior committed after the FIRST
+    call's repair began must satisfy the SECOND call's freshness check for the
+    SAME Day0 conditioning identity. Before the fix, `minimum_posterior_computed_at`
+    was recomputed to wall-clock `now()` on every call, so a posterior committed a
+    moment after call 1 began could never satisfy call 2's check -- causing 42
+    redundant re-enqueues for one unchanged Beijing extreme value in 17 minutes.
+    This test FAILS on parent commit 43a3b7894 (see commit body for proof)."""
+    import src.data.replacement_cycle_advance_trigger as cycle
+
+    mr = _day0_reseed_test_setup(monkeypatch, tmp_path)
+
+    day0_payload = {
+        "day0_observed_extreme_c": 17.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-09-13T17:00:00+00:00",
+        "day0_observed_extreme_sample_count": 4,
+        "day0_observed_extreme_unit": "C",
+    }
+    monkeypatch.setattr(
+        mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: dict(day0_payload)
+    )
+
+    calls: list[dict] = []
+    posterior_committed_at: list[datetime] = []
+
+    def enqueue_cycle(**kwargs):
+        calls.append(kwargs)
+        min_computed = kwargs["minimum_posterior_computed_at"]
+        if posterior_committed_at and min_computed <= posterior_committed_at[0]:
+            return {"status": "CYCLE_ADVANCE_NOT_NEEDED", "enqueued": False}
+        return {"status": "DAY0_OBSERVATION_ADVANCE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(
+        cycle, "enqueue_single_family_cycle_advance_reseed", enqueue_cycle
+    )
+
+    first = mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    assert first["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+
+    # The repair "completes": a live posterior commits just after call 1 began.
+    posterior_committed_at.append(
+        calls[0]["minimum_posterior_computed_at"] + timedelta(milliseconds=1)
+    )
+
+    second = mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["minimum_posterior_computed_at"] == calls[0]["minimum_posterior_computed_at"], (
+        "the second call must reuse the first call's first-detection cutoff, "
+        "not recompute to now()"
+    )
+    assert second["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
+
+
+def test_day0_reseed_new_identity_starts_fresh_window(monkeypatch, tmp_path):
+    """A rollover to a NEW Day0 observation identity (the extreme advances) must
+    start a fresh first-seen window -- it must not inherit the prior identity's
+    (now-irrelevant) detection time."""
+    import src.data.replacement_cycle_advance_trigger as cycle
+
+    mr = _day0_reseed_test_setup(monkeypatch, tmp_path)
+
+    payload_box = {
+        "payload": {
+            "day0_observed_extreme_c": 17.0,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-09-13T17:00:00+00:00",
+            "day0_observed_extreme_sample_count": 4,
+            "day0_observed_extreme_unit": "C",
+        }
+    }
+    monkeypatch.setattr(
+        mr,
+        "_day0_observed_extreme_reseed_payload",
+        lambda **_kw: dict(payload_box["payload"]),
+    )
+
+    calls: list[dict] = []
+
+    def enqueue_cycle(**kwargs):
+        calls.append(kwargs)
+        return {"status": "DAY0_OBSERVATION_ADVANCE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(
+        cycle, "enqueue_single_family_cycle_advance_reseed", enqueue_cycle
+    )
+
+    mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    first_cutoff = calls[0]["minimum_posterior_computed_at"]
+
+    # A new hourly METAR advances the observed extreme -> a NEW conditioning identity.
+    payload_box["payload"] = {
+        **payload_box["payload"],
+        "day0_observed_extreme_c": 20.0,
+        "day0_observed_extreme_observation_time": "2026-09-13T18:00:00+00:00",
+    }
+    before2 = datetime.now(timezone.utc)
+    mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    after2 = datetime.now(timezone.utc)
+    second_cutoff = calls[1]["minimum_posterior_computed_at"]
+
+    assert second_cutoff != first_cutoff
+    assert before2 <= second_cutoff <= after2
+
+
+def test_day0_reseed_success_clears_first_seen_record(monkeypatch, tmp_path):
+    """Once the freshness check passes (CYCLE_ADVANCE_NOT_NEEDED), the first-seen
+    record for that family is cleared, so a LATER genuine gap on the same identity
+    (e.g. the posterior it relied on later goes missing again) is detected fresh
+    rather than reusing a stale, long-past first-seen time forever."""
+    import src.data.replacement_cycle_advance_trigger as cycle
+
+    mr = _day0_reseed_test_setup(monkeypatch, tmp_path)
+
+    day0_payload = {
+        "day0_observed_extreme_c": 17.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-09-13T17:00:00+00:00",
+        "day0_observed_extreme_sample_count": 4,
+        "day0_observed_extreme_unit": "C",
+    }
+    monkeypatch.setattr(
+        mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: dict(day0_payload)
+    )
+
+    statuses = iter(
+        [
+            "DAY0_OBSERVATION_ADVANCE_ENQUEUED",  # call 1: gap first detected
+            "CYCLE_ADVANCE_NOT_NEEDED",  # call 2: gap drained -> record cleared
+            "DAY0_OBSERVATION_ADVANCE_ENQUEUED",  # call 3: a fresh, later gap
+        ]
+    )
+    calls: list[dict] = []
+
+    def enqueue_cycle(**kwargs):
+        calls.append(kwargs)
+        return {"status": next(statuses), "enqueued": True}
+
+    monkeypatch.setattr(
+        cycle, "enqueue_single_family_cycle_advance_reseed", enqueue_cycle
+    )
+
+    mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    before3 = datetime.now(timezone.utc)
+    mr._perform_single_family_belief_reseed_failsoft(
+        city="Beijing", target_date="2026-09-14", metric="high",
+    )
+    after3 = datetime.now(timezone.utc)
+
+    cutoff1 = calls[0]["minimum_posterior_computed_at"]
+    cutoff2 = calls[1]["minimum_posterior_computed_at"]
+    cutoff3 = calls[2]["minimum_posterior_computed_at"]
+
+    assert cutoff2 == cutoff1
+    assert cutoff3 != cutoff1
+    assert before3 <= cutoff3 <= after3
+
+
 def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
     monkeypatch,
     tmp_path,
