@@ -6536,6 +6536,46 @@ def _next_claim_carrier(
     )
 
 
+def _final_wealth_redecision_identity(
+    receipt: EventSubmissionReceipt,
+    *,
+    expected_identity: str,
+    venue_delta: int,
+) -> str | None:
+    """Name one changed-capital retry without reusing a submit capability.
+
+    SCOPE: a selected endowment superseded before any venue call. DRAIN: the
+    existing next-claim queue rebuilds the full auction. RESET: a stable wealth
+    cut submits or ends economically; the same transition deduplicates.
+    """
+    if (
+        venue_delta != 0
+        or receipt.submitted is not False
+        or receipt.side_effect_status != "NO_SUBMIT"
+        or receipt.venue_call_started is not False
+        or receipt.venue_ack_received is not False
+    ):
+        return None
+    reason = str(receipt.reason or "")
+    sell_prefix = "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+    if reason.startswith(sell_prefix):
+        reason = reason[len(sell_prefix):]
+    parts = reason.split(":")
+    if len(parts) != 3 or parts[0] != "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED":
+        return None
+    if not parts[1].startswith("expected=") or not parts[2].startswith("current="):
+        return None
+    expected, current = parts[1][9:], parts[2][8:]
+    if (
+        expected != expected_identity
+        or current == expected
+        or any(len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+               for value in (expected, current))
+    ):
+        return None
+    return f"wealth_redecision:{expected}:{current}"
+
+
 def _global_claim_carrier_is_spent(
     trade_conn: object,
     event_id: str,
@@ -10013,6 +10053,23 @@ def process_current_global_batch(
             )
             else None
         )
+        wealth_redecision_identity = _final_wealth_redecision_identity(
+            winner_receipt,
+            expected_identity=str(
+                getattr(selected.actuation, "wealth_economic_identity", "") or ""
+            ),
+            venue_delta=venue_delta,
+        )
+        if (
+            wealth_redecision_identity is not None
+            and not held_completion_expired(current_time())
+        ):
+            deferred_claim_event = _next_claim_carrier(
+                continuation_scope_event,
+                targeted_at=final_actuation_at,
+                economic_identity=wealth_redecision_identity,
+                payload=payload_reader(continuation_scope_event),
+            )
         receipts = dict(prepared_loser_receipts)
         receipts[winner_id] = winner_receipt
         return GlobalBatchSubmitResult(

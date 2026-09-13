@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-11
+# Last reused/audited: 2026-09-13
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -30788,11 +30788,33 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(
     selection.close()
 
 
-@pytest.mark.parametrize("submitted", (True, False))
+@pytest.mark.parametrize("outcome", (
+    "submitted", "blocked", "wealth_changed", "wealth_unchanged",
+    "wealth_unbound", "wealth_malformed", "wealth_unknown",
+    "wealth_call_started", "wealth_ack_received", "wealth_sell",
+    "wealth_duplicate_segment", "wealth_unknown_wrapper", "wealth_deadline",
+    "wealth_venue_count",
+))
 def test_global_batch_actuates_exactly_one_claimed_global_winner(
-    monkeypatch, caplog, submitted,
+    monkeypatch, caplog, outcome,
 ):
+    submitted = outcome == "submitted"
+    old_wealth, new_wealth = "a" * 64, "b" * 64
+    reason = "FINAL_NO_SUBMIT_TEST"
+    if outcome.startswith("wealth_"):
+        expected = "c" * 64 if outcome == "wealth_unbound" else old_wealth
+        current = old_wealth if outcome == "wealth_unchanged" else new_wealth
+        if outcome == "wealth_malformed":
+            current = "not-a-wealth-identity"
+        reason = f"GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:expected={expected}:current={current}"
+        if outcome in {"wealth_sell", "wealth_deadline"}:
+            reason = "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:" + reason
+        elif outcome == "wealth_duplicate_segment":
+            reason += f":current={current}"
+        elif outcome == "wealth_unknown_wrapper":
+            reason = "UNKNOWN:" + reason
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    now = [decision_at]
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     duplicate = _global_scope_event(city="Alpha", source_run_id="run-duplicate")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
@@ -30803,7 +30825,9 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(
             posterior_identity_hash="run-a",
         )
     )
-    actuation = SimpleNamespace(actuation_identity="actuation-a")
+    actuation = SimpleNamespace(
+        actuation_identity="actuation-a", wealth_economic_identity=old_wealth,
+    )
     selected = SimpleNamespace(
         decision=SimpleNamespace(
             candidate=SimpleNamespace(family_key=scope.family_keys[0]),
@@ -30841,15 +30865,20 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(
     def actuate(winner, chosen, _at):
         assert winner.event_id == event.event_id
         assert chosen is actuation
-        if submitted:
+        if outcome == "wealth_deadline":
+            now[0] = decision_at + _dt.timedelta(seconds=1)
+        if submitted or outcome == "wealth_venue_count":
             calls["venue"] += 1
         return EventSubmissionReceipt(
             submitted,
             winner.event_id,
             winner.causal_snapshot_id,
-            reason=None if submitted else "FINAL_NO_SUBMIT_TEST",
+            reason=None if submitted else reason,
             proof_accepted=False,
-            side_effect_status="SUBMITTED" if submitted else "NO_SUBMIT",
+            side_effect_status=("SUBMITTED" if submitted else
+                                "UNKNOWN" if outcome == "wealth_unknown" else "NO_SUBMIT"),
+            venue_call_started=outcome == "wealth_call_started",
+            venue_ack_received=outcome == "wealth_ack_received",
         )
 
     result = global_batch_runtime.process_current_global_batch(
@@ -30869,13 +30898,22 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
-        current_time_provider=lambda: decision_at,
+        current_time_provider=lambda: now[0],
+        held_sell_reauction_requests=(
+            (SimpleNamespace(
+                schema_version=4,
+                completion_deadline_at=(decision_at + _dt.timedelta(seconds=1)).isoformat(),
+                position_id="held-alpha", held_token_id="token-alpha",
+                family=("Alpha", "2026-07-11", "high"),
+                request_identity="deadline-request",
+            ),) if outcome == "wealth_deadline" else ()
+        ),
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert calls["venue"] == int(submitted)
+    assert calls["venue"] == int(submitted or outcome == "wealth_venue_count")
     assert calls["fractional_kelly_multiplier"] == Decimal("0.03125")
-    assert result.venue_submit_count == int(submitted)
+    assert result.venue_submit_count == calls["venue"]
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is submitted
     assert result.receipts[event.event_id].proof_accepted is False
@@ -30886,7 +30924,34 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(
     if not submitted:
         assert continuation is None
         assert "global winner actuation produced no venue order" in caplog.text
-        assert "reason=FINAL_NO_SUBMIT_TEST" in caplog.text
+        assert f"reason={reason}" in caplog.text
+        successor = result.next_claim_event
+        if outcome in {"wealth_changed", "wealth_sell"}:
+            assert successor is not None
+            assert successor.event_id not in result.receipts
+            assert successor.payload_json == event.payload_json
+            assert successor.available_at == event.available_at
+            assert successor.expires_at == event.expires_at
+            assert successor.source == (
+                f"global_auction_winner_target:{event.event_id}:"
+                f"wealth_redecision:{old_wealth}:{new_wealth}"
+            )
+            retry = global_batch_runtime._next_claim_carrier(
+                event, targeted_at=decision_at + _dt.timedelta(seconds=5),
+                economic_identity=f"wealth_redecision:{old_wealth}:{new_wealth}",
+                payload=json.loads(event.payload_json),
+            )
+            assert retry.event_id == successor.event_id
+            from src.events.event_store import EventStore
+            from src.state.db import init_schema
+            with sqlite3.connect(":memory:") as conn:
+                init_schema(conn)
+                store = EventStore(conn)
+                assert store.insert_or_ignore(successor)
+                assert not store.insert_or_ignore(retry)
+
+        else:
+            assert successor is None
         return
     assert continuation is not None
     assert continuation.event_id not in result.receipts
