@@ -1447,6 +1447,32 @@ def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None
     return dict(entry.bound_probabilities)
 
 
+def _global_book_token_identity_cache_entry(
+    trade_conn: sqlite3.Connection,
+) -> _GlobalBookEpochCacheEntry | None:
+    """Return the cached entry usable as a per-family token-identity source.
+
+    `_probe_global_book_cache_entry` answers a different question: may this
+    cached *epoch* (its books and actionable coverage) serve the current cut.
+    A family whose own bin/condition shape is unchanged still has unchanged
+    token identity even when a sibling family appeared, disappeared, or rolled
+    and moved the universe-wide topology signature, so that probe's verdict is
+    too coarse to decide per-family token reuse. Namespace equality is the only
+    precondition here; `_reuse_global_book_token_bindings` then validates each
+    family's shape and token identity individually and raises rather than graft
+    a stale token.
+    """
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None:
+        return None
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if entry is None or entry.namespace != namespace:
+        return None
+    return entry
+
+
 def _reuse_global_book_token_bindings(
     probabilities: Mapping[str, object],
     cached_probabilities: Mapping[str, object],
@@ -10468,6 +10494,24 @@ def event_bound_live_adapter_from_trade_conn(
                         "reason=%s",
                         topology_cache_reason,
                     )
+            if (
+                reusable_topology_entry is None
+                and cached_before_bind is None
+                and superset_bound_probabilities is None
+                and cache_before_reason.startswith("topology_changed")
+            ):
+                # A family that appeared, disappeared, or rolled moves the
+                # universe-wide topology signature, so the epoch probe reports
+                # topology_changed and today's code rebinds EVERY family through
+                # current Gamma. The families that did not themselves change
+                # still have unchanged token identity and unchanged lifecycle
+                # facts, so they are a valid per-family token source; only the
+                # changed families must reach Gamma. Per-family validation below
+                # rejects anything whose own shape or tokens moved.
+                reusable_topology_entry = _work_sql(
+                    "book_token_identity_cache_probe",
+                    _global_book_token_identity_cache_entry,
+                )
             eligible_refresh_family_keys = (
                 None
                 if effective_book_refresh_family_keys is None
@@ -10692,25 +10736,85 @@ def event_bound_live_adapter_from_trade_conn(
                 bind_slice = {}
                 topology_bindings_reused = True
             elif reusable_topology_entry is not None:
+                cached_topology_probabilities = dict(
+                    reusable_topology_entry.bound_probabilities
+                )
                 try:
-                    rebound_probabilities = _reuse_global_book_token_bindings(
-                        probabilities,
-                        dict(reusable_topology_entry.bound_probabilities),
+                    # The epoch cache routinely holds MORE families than this
+                    # round-robin batch, so comparing the raw cache against the
+                    # batch always failed the family-set check and rebound the
+                    # entire universe through current Gamma. Scope the cache to
+                    # the batch's own families first: a batch family absent from
+                    # the cache still raises (KeyError) and a changed bin or
+                    # condition shape still raises
+                    # GLOBAL_BOOK_CACHED_PROBABILITY_TOPOLOGY_CHANGED, so no
+                    # stale token is ever grafted -- only the scope of the
+                    # comparison narrows.
+                    rebound_probabilities = (
+                        _reuse_global_book_token_bindings_for_batch(
+                            probabilities,
+                            cached_topology_probabilities,
+                        )
                     )
                 except (KeyError, TypeError, ValueError) as exc:
-                    logging.getLogger(__name__).info(
-                        "expired global book topology token reuse rejected; "
-                        "rebinding full universe: reason=%s",
-                        exc,
-                    )
-                    rebound_probabilities = {}
+                    # A family that appeared, rolled, or lost its cached token
+                    # identity invalidates ITSELF, never its siblings: the
+                    # fields the auction reads from Gamma (token ids, end date,
+                    # active/closed/accepting_orders, fee schedule, tick/min
+                    # size) are per-market and cannot change for a family whose
+                    # own bin/condition shape is unchanged since the last
+                    # successful bind. Rebind only the families that failed
+                    # reuse and keep the rest, so one churning family costs one
+                    # family's Gamma conditions instead of the whole universe.
+                    # Reuse is still per-family all-or-nothing: the same
+                    # exceptions reject a family here as reject the batch above.
+                    delta_slice: dict[str, object] = {}
+                    for family_key, witness in probabilities.items():
+                        cached_witness = cached_topology_probabilities.get(
+                            family_key
+                        )
+                        if cached_witness is None:
+                            delta_slice[family_key] = witness
+                            continue
+                        try:
+                            rebound_probabilities.update(
+                                _reuse_global_book_token_bindings(
+                                    {family_key: witness},
+                                    {family_key: cached_witness},
+                                )
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            delta_slice[family_key] = witness
+                    if len(delta_slice) == len(probabilities):
+                        logging.getLogger(__name__).info(
+                            "expired global book topology token reuse rejected; "
+                            "rebinding full universe: reason=%s "
+                            "families_batch=%d families_cached=%d",
+                            exc,
+                            len(probabilities),
+                            len(cached_topology_probabilities),
+                        )
+                        rebound_probabilities = {}
+                    else:
+                        bind_slice = delta_slice
+                        logging.getLogger(__name__).info(
+                            "expired global book topology reused for unchanged "
+                            "families; rebinding the family delta: reason=%s "
+                            "families_delta=%d families_retained=%d "
+                            "families_cached=%d",
+                            exc,
+                            len(delta_slice),
+                            len(rebound_probabilities),
+                            len(cached_topology_probabilities),
+                        )
                 else:
                     bind_slice = {}
                     topology_bindings_reused = True
                     logging.getLogger(__name__).info(
                         "global book topology reused after price expiry: "
-                        "families=%d",
+                        "families=%d families_cached=%d",
                         len(rebound_probabilities),
+                        len(cached_topology_probabilities),
                     )
             if topology_bindings_reused and prefetch_slice is not None:
                 prefetch_slice = {
@@ -10787,6 +10891,33 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if prefetch_slice is not None
                 else None
+            )
+            # One line per cut stating how much of the universe this cut rebinds
+            # through current Gamma, so the delta win (or its loss) is measurable
+            # in the live log without another code change.
+            logging.getLogger(__name__).info(
+                "global book gamma rebind scope: miss_reason=%s families_total=%d "
+                "families_delta=%d conditions_fetched=%d families_retained=%d "
+                "elapsed_s=%.3f",
+                cache_before_reason,
+                len(probabilities),
+                len(bind_slice),
+                len(
+                    {
+                        condition_id
+                        for witness in bind_slice.values()
+                        for binding in tuple(
+                            getattr(witness, "bindings", ()) or ()
+                        )
+                        if (
+                            condition_id := str(
+                                getattr(binding, "condition_id", "") or ""
+                            ).strip()
+                        )
+                    }
+                ),
+                len(rebound_probabilities) + len(retained_bound_probabilities),
+                _time.monotonic() - _book_started,
             )
             if _urgent_book_preemption("before_network"):
                 return probabilities, None

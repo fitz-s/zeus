@@ -16442,6 +16442,398 @@ def test_global_book_token_reuse_for_batch_missing_family_raises_keyerror():
         era._reuse_global_book_token_bindings_for_batch(batch, cached_universe)
 
 
+@contextmanager
+def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities):
+    """Drive the real book-epoch provider through an expired-price cache miss.
+
+    The cached epoch is stored with a 1s max_age and then advanced past it, so
+    `_probe_global_book_epoch_cache` returns `expired` and the provider reaches
+    the expired-topology reuse seam with `reusable_topology_entry` set.  The
+    yielded record reports every condition_id current Gamma was asked for, so a
+    test can assert the exact Gamma fetch scope instead of a family count.
+    """
+
+    import src.data.polymarket_client as polymarket_client
+    from src.events.candidate_binding import weather_family_id
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    class Clock(_dt.datetime):
+        current = _dt.datetime.now(_dt.timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            value = cls.current
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(era, "datetime", Clock)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: (
+            captured.update(kwargs),
+            SimpleNamespace(events=tuple(events)),
+        )[1],
+    )
+
+    def family(city):
+        return weather_family_id(
+            city=city,
+            target_date="2026-07-11",
+            metric="high",
+        )
+
+    def probability(family_key, marker):
+        return SimpleNamespace(
+            family_key=family_key,
+            witness_identity=f"q-{family_key}-{marker}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family_key}",
+                    condition_id=f"condition-{family_key}",
+                    yes_token_id=f"yes-{family_key}",
+                    no_token_id=f"no-{family_key}",
+                ),
+            ),
+        )
+
+    def epoch(probabilities, marker, *, max_age):
+        states = tuple(
+            (
+                family_key,
+                binding.bin_id,
+                binding.condition_id,
+                side,
+                token_id,
+                "EXECUTABLE",
+                f"book-{marker}-{token_id}",
+                f"event-{family_key}",
+                f"market-{family_key}",
+                "False",
+            )
+            for family_key, witness in probabilities.items()
+            for binding in witness.bindings
+            for side, token_id in (
+                ("YES", binding.yes_token_id),
+                ("NO", binding.no_token_id),
+            )
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=Clock.current,
+            max_age=max_age,
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=Clock.current,
+            ),
+        )
+
+    # Gamma fetches are recorded per production stage.  ``prebook`` is the
+    # pre-book token bind whose shared Gamma deadline fails the whole cut and is
+    # the stage this seam narrows; ``capture`` is the later
+    # ``_refresh_capture_metadata`` pass, which an expired epoch forces for
+    # every family in the cut regardless of this seam.
+    record = SimpleNamespace(
+        prebook_batches=[],
+        capture_batches=[],
+        metadata_by_family={},
+        gamma_fails=False,
+    )
+    prebook_binds = {"current_metadata", "current_metadata_fallback"}
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        condition_ids = tuple(
+            binding.condition_id
+            for witness in probability_witnesses.values()
+            for binding in witness.bindings
+        )
+        if metadata_sink is not None:
+            # Mirror the production contract: current Gamma is the only
+            # authority that may stamp ``_global_current_gamma``.
+            mode = next(
+                (
+                    frame.frame.f_locals["mode"]
+                    for frame in inspect.stack()
+                    if frame.function == "_bind"
+                    and "mode" in frame.frame.f_locals
+                ),
+                "",
+            )
+            sink = (
+                record.prebook_batches
+                if mode in prebook_binds
+                else record.capture_batches
+            )
+            sink.append(condition_ids)
+            if record.gamma_fails:
+                raise ValueError(
+                    "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"
+                )
+            for family_key, witness in probability_witnesses.items():
+                for binding in witness.bindings:
+                    for token_id in (
+                        binding.yes_token_id,
+                        binding.no_token_id,
+                    ):
+                        row = {
+                            "condition_id": binding.condition_id,
+                            "selected_outcome_token_id": token_id,
+                            "_global_current_gamma": True,
+                            "enable_orderbook": True,
+                            "active": True,
+                            "closed": False,
+                            "accepting_orders": True,
+                        }
+                        metadata_sink[(binding.condition_id, token_id)] = row
+                        record.metadata_by_family.setdefault(
+                            family_key, {}
+                        )[(binding.condition_id, token_id)] = dict(row)
+        return dict(probability_witnesses)
+
+    def fake_capture(_trade_conn, *, probability_witnesses, **_):
+        return epoch(
+            probability_witnesses,
+            "recaptured",
+            max_age=_dt.timedelta(seconds=180),
+        )
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(
+        universe,
+        "bind_current_global_probability_tokens",
+        fake_bind,
+    )
+    monkeypatch.setattr(
+        universe,
+        "capture_current_global_book_epoch",
+        fake_capture,
+    )
+    monkeypatch.setattr(
+        universe,
+        "fetch_current_global_books",
+        lambda tokens, **_: {str(token): {} for token in tokens},
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakeClient)
+    monkeypatch.setattr(
+        era,
+        "_projected_global_book_hint",
+        lambda *_args, **_kwargs: None,
+    )
+
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    adapter.process_global_batch(
+        (_global_scope_event(city="Dallas", source_run_id="run-dallas"),),
+        Clock.current,
+    )
+
+    cached_probabilities = {
+        family(city): probability(family(city), "cached")
+        for city in cached_cities
+    }
+    assert (
+        era._store_global_book_epoch(
+            trade,
+            cached_probabilities,
+            epoch(
+                cached_probabilities,
+                "base",
+                max_age=_dt.timedelta(seconds=1),
+            ),
+            checked_at=Clock.current,
+        )
+        == "stored"
+    )
+    # Advance past the cached epoch's max_age: the cache probe now reports
+    # ``expired`` and the provider reaches the expired-topology reuse seam.
+    Clock.current += _dt.timedelta(seconds=2)
+
+    record.batch = {
+        family(city): probability(family(city), "current")
+        for city in batch_cities
+    }
+    record.cached_families = frozenset(cached_probabilities)
+    record.family_of = family
+    record.condition_of = lambda city: f"condition-{family(city)}"
+    record.provider = captured["current_book_epoch_provider"]
+    record.clock = Clock
+    try:
+        yield record
+    finally:
+        trade.close()
+        forecast.close()
+        topology.close()
+        world.close()
+
+
+def test_expired_topology_reuse_fetches_gamma_only_for_the_new_family(
+    monkeypatch,
+):
+    """A new family costs one family's Gamma conditions, not the universe."""
+
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami", "Phoenix"),
+        batch_cities=("Dallas", "Miami", "Phoenix", "Austin"),
+    ) as h:
+        bound, epoch = h.provider(h.batch, h.clock.current)
+
+        assert set(bound) == set(h.batch)
+        # The pre-book bind -- the stage bounded by the shared Gamma deadline --
+        # fetched exactly the appeared family's conditions.
+        assert h.prebook_batches == [(h.condition_of("Austin"),)]
+        # Retained families kept their cached token identity byte-identically
+        # and never reached current Gamma before the book I/O.
+        for city in ("Dallas", "Miami", "Phoenix"):
+            family_key = h.family_of(city)
+            binding = bound[family_key].bindings[0]
+            assert binding.yes_token_id == f"yes-{family_key}"
+            assert binding.no_token_id == f"no-{family_key}"
+            assert h.condition_of(city) not in h.prebook_batches[0]
+        assert {row[0] for row in epoch.asset_states} == set(h.batch)
+
+
+def test_expired_topology_reuse_drops_a_removed_family_without_fetching_it(
+    monkeypatch,
+):
+    """A disappeared family is never fetched and leaves the bound cut."""
+
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami", "Phoenix"),
+        batch_cities=("Dallas", "Miami"),
+    ) as h:
+        bound, epoch = h.provider(h.batch, h.clock.current)
+
+        assert set(bound) == set(h.batch)
+        # Every batch family reused its cached tokens, so the deadline-bounded
+        # pre-book bind issued no Gamma request at all.
+        assert h.prebook_batches == []
+        phoenix = h.family_of("Phoenix")
+        assert phoenix not in bound
+        assert phoenix not in {row[0] for row in epoch.asset_states}
+        # The dropped family is absent from every Gamma request in the cut.
+        assert all(
+            h.condition_of("Phoenix") not in batch
+            for batch in h.prebook_batches + h.capture_batches
+        )
+
+
+def test_real_topology_change_still_rebinds_the_full_universe(monkeypatch):
+    """A rolled condition invalidates itself, never its unchanged siblings."""
+
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami"),
+        batch_cities=("Dallas", "Miami"),
+    ) as h:
+        # Roll Dallas's condition underneath its family key. Dallas's own
+        # lifecycle facts are no longer provable from cache, so Dallas must be
+        # refetched -- but Miami's are unchanged and must not be.
+        dallas = h.family_of("Dallas")
+        rolled = h.batch[dallas]
+        h.batch[dallas] = SimpleNamespace(
+            family_key=dallas,
+            witness_identity=rolled.witness_identity,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=rolled.bindings[0].bin_id,
+                    condition_id=f"condition-{dallas}-rolled",
+                    yes_token_id=f"yes-{dallas}-rolled",
+                    no_token_id=f"no-{dallas}-rolled",
+                ),
+            ),
+        )
+
+        bound, _epoch = h.provider(h.batch, h.clock.current)
+
+        assert set(bound) == set(h.batch)
+        assert h.prebook_batches == [(f"condition-{dallas}-rolled",)]
+
+
+def test_every_family_changed_still_rebinds_the_full_universe(monkeypatch):
+    """When no family can reuse its cache, the full fetch is unchanged."""
+
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami"),
+        batch_cities=("Dallas", "Miami"),
+    ) as h:
+        # Roll BOTH families: nothing is reusable, so the pre-book bind must
+        # still fetch the whole batch exactly as it does today.
+        for city in ("Dallas", "Miami"):
+            family_key = h.family_of(city)
+            previous = h.batch[family_key]
+            h.batch[family_key] = SimpleNamespace(
+                family_key=family_key,
+                witness_identity=previous.witness_identity,
+                bindings=(
+                    SimpleNamespace(
+                        bin_id=previous.bindings[0].bin_id,
+                        condition_id=f"condition-{family_key}-rolled",
+                        yes_token_id=f"yes-{family_key}-rolled",
+                        no_token_id=f"no-{family_key}-rolled",
+                    ),
+                ),
+            )
+
+        bound, _epoch = h.provider(h.batch, h.clock.current)
+
+        assert set(bound) == set(h.batch)
+        assert len(h.prebook_batches) == 1
+        assert set(h.prebook_batches[0]) == {
+            f"condition-{h.family_of(city)}-rolled"
+            for city in ("Dallas", "Miami")
+        }
+
+
+def test_delta_gamma_fetch_failure_keeps_todays_fail_closed_reason(monkeypatch):
+    """A failed delta fetch fails closed with the unchanged reason."""
+
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami", "Phoenix"),
+        batch_cities=("Dallas", "Miami", "Phoenix", "Austin"),
+    ) as h:
+        h.gamma_fails = True
+
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED",
+        ):
+            h.provider(h.batch, h.clock.current)
+
+        # The delta batch is what failed: one family's conditions, not the
+        # whole universe, and the fail-closed reason is unchanged.
+        assert h.prebook_batches == [(h.condition_of("Austin"),)]
+
+
 def test_global_probability_authority_is_materialized_once_per_family(monkeypatch):
     calls = []
     authority_a = object()
