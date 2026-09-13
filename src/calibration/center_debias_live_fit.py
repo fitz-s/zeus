@@ -95,9 +95,19 @@ WINDOW_HOURS = 6
 # because that day's served belief was the day0 one and its residual does not
 # describe the pre-day0 center this shift corrects.
 #
-# ``substr(settled_at, 1, 19)`` compares the timestamp prefix instead of the
-# whole string so a 'Z' suffix and a '+00:00' suffix on the same UTC instant
-# order identically. Every settled_at in this table is stored UTC.
+# ``settled_at`` is NOT stored UTC: live rows carry real non-UTC offsets
+# (+08:00, +02:00, -07:00, -05:00, ...) and a handful use a space separator
+# instead of 'T'. A string-prefix compare treats a negative-offset row's
+# LOCAL wall clock as its instant, which can admit an outcome before it has
+# actually settled in UTC, and 'space' < 'T' lexicographically, so a
+# space-separated row can sort before a same-day cutoff it actually settles
+# after. ``julianday()`` parses both the offset and the space form, so the
+# comparison is on the real instant regardless of how it is written. A stray
+# two-digit offset with no colon (``+00`` rather than ``+00:00``) is the one
+# shape SQLite's parser rejects outright (returns NULL, which the WHERE
+# clause then drops as fail-closed exclusion rather than a leak); the
+# trailing-colon normalization below covers it so those rows are compared
+# like every other row instead of silently dropped.
 _RESIDUAL_SQL = """
 WITH candidates AS (
     SELECT city,
@@ -137,7 +147,12 @@ WHERE json_extract(p.provenance_json, '$.q_shape') = 'fused_normal_direct'
   AND s.settlement_value IS NOT NULL
   AND s.settlement_unit IN ('F', 'C')
   AND s.settled_at IS NOT NULL
-  AND substr(s.settled_at, 1, 19) < :cutoff_prefix
+  AND julianday(
+        CASE WHEN substr(s.settled_at, -3, 1) IN ('+', '-')
+             THEN s.settled_at || ':00'
+             ELSE s.settled_at
+        END
+      ) < julianday(:cutoff)
 """
 
 
@@ -256,7 +271,7 @@ def load_residual_rows(
 
     rows = conn.execute(
         _RESIDUAL_SQL,
-        {"metric": str(metric), "cutoff_prefix": str(training_cutoff)[:19]},
+        {"metric": str(metric), "cutoff": str(training_cutoff)},
     ).fetchall()
 
     residuals: list[tuple[str, float]] = []

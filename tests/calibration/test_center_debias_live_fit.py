@@ -284,6 +284,42 @@ def test_rows_settling_after_the_cutoff_never_train():
     assert load_residual_rows(conn, metric="high", training_cutoff=CUTOFF) == []
 
 
+def test_negative_offset_row_settling_after_cutoff_is_excluded():
+    """A -05:00 row must compare on its true UTC instant, not local wall time.
+
+    Local wall clock ``23:30:00`` reads as "before" the cutoff's ``00:00:00``
+    prefix, but the true UTC instant (``04:30:00Z`` the next day) is AFTER
+    the cutoff and must not train — the walk-forward law this module exists
+    to enforce.
+    """
+
+    posterior, settlement = _cell(
+        0, center_c=20.0, settled_c=20.75, settled_at="2026-09-03T23:30:00-05:00"
+    )
+    conn = _memory_db([posterior], [settlement])
+
+    assert load_residual_rows(conn, metric="high", training_cutoff=CUTOFF) == []
+
+
+def test_positive_offset_row_settling_before_cutoff_is_included():
+    """A +08:00 row must compare on its true UTC instant, not local wall time.
+
+    Local wall clock ``07:00:00`` on the cutoff's own calendar day reads as
+    "after" the ``00:00:00`` prefix, but the true UTC instant
+    (``23:00:00Z`` the prior day) settled well before the cutoff and must
+    train.
+    """
+
+    posterior, settlement = _cell(
+        0, center_c=20.0, settled_c=20.75, settled_at="2026-09-04T07:00:00+08:00"
+    )
+    conn = _memory_db([posterior], [settlement])
+
+    rows = load_residual_rows(conn, metric="high", training_cutoff=CUTOFF)
+
+    assert rows == [("Shanghai", pytest.approx(0.75))]
+
+
 def test_unverified_settlements_never_train():
     conn = _db_with_residual(3, residual=0.75, authority="DISPUTED")
 

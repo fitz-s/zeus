@@ -70,9 +70,13 @@ def _mk_db(path: Path) -> None:
 
 def _insert_post(
     conn, *, city, target_date, metric, computed_at, source_cycle_time, mu, sig, current_evidence_shape=True,
-    day0_observed_extreme_c=None, day0_center_delta_c=None, config_hash=None,
+    day0_observed_extreme_c=None, day0_center_delta_c=None, config_hash=None, center_debias_c=None,
 ) -> None:
     bpf: dict = {"anchor_value_c": mu, "predictive_sigma_c": sig}
+    if center_debias_c is not None:
+        # P1-2: mirrors the served-center de-bias stamp _compute_posterior_payload writes
+        # beside anchor_value_c inside bayes_precision_fusion.
+        bpf["center_debias_c"] = center_debias_c
     if current_evidence_shape:
         bpf["current_evidence_shape"] = {"snapshot_id": 1}  # FIX 5: presence is the fence signal
     prov: dict = {"bayes_precision_fusion": bpf}
@@ -825,6 +829,35 @@ def test_build_frame_joins_day0_provenance_fields(fixture_db: Path) -> None:
     assert row["day0_center_delta_c"] == pytest.approx(0.4)
 
 
+def test_build_frame_joins_center_debias_c(fixture_db: Path) -> None:
+    """P1-2: the fitter's SELECT/build_frame must carry the served-center de-bias shift
+    stamped beside anchor_value_c, so the Day0-active scoring seam can apply it."""
+
+    conn = sqlite3.connect(str(fixture_db))
+    target_date = "2027-06-16"  # outside _build_fixture's date ranges -- no collision
+    _insert_sett(conn, city="Shanghai", target_date=target_date, metric="high", value=25.0, unit="C")
+    _insert_post(
+        conn, city="Shanghai", target_date=target_date, metric="high",
+        computed_at="2026-02-28T20:00:00+00:00", source_cycle_time="2026-02-28T20:00:00+00:00",
+        mu=24.0, sig=1.5, center_debias_c=0.35,
+    )
+    conn.commit()
+    conn.close()
+
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    row = d[(d["city"] == "Shanghai") & (d["target_date"] == target_date)].iloc[0]
+    assert row["center_debias_c"] == pytest.approx(0.35)
+
+
+def test_build_frame_row_with_no_center_debias_c_is_inert(fixture_db: Path) -> None:
+    """A row with no center_debias_c in provenance must join to exactly 0.0 -- never a
+    stray default that could shift a row the live path never corrected."""
+
+    d, _stats = fitter.prep(str(fixture_db), since="2020-01-01")
+    assert len(d) > 0
+    assert (d["center_debias_c"] == 0.0).all()
+
+
 def test_build_frame_non_day0_row_has_inert_day0_columns(fixture_db: Path) -> None:
     """A row with no day0_conditioning in provenance must join to day0_active=False,
     day0_observed_extreme_c=NaN, day0_center_delta_c=0.0 -- never a stray default that could make a
@@ -853,13 +886,16 @@ def test_censored_log_prob_day0_row_matches_served_settlement_log_probability() 
         "bin_lower_c": 24.5, "bin_upper_c": 25.5,
         "rounding_rule": "wmo_half_up",
         "day0_active": True, "day0_observed_extreme_c": 26.0, "day0_center_delta_c": 0.4,
+        # P1-2: non-zero and distinct from day0_center_delta_c, so a fix that drops or
+        # mis-orders either term (mu should be corrected BEFORE the Day0 delta) is caught.
+        "center_debias_c": 0.7,
     }])
     sigma = np.array([1.5 * 1.2])  # already-final sigma (sigma_base * trial k), as every caller passes it
     got = fitter._censored_log_prob(row, sigma)[0]
     expected = served_settlement_log_probability(
         anchor_value_c=24.0, predictive_sigma_c=1.5 * 1.2, k=1.0, metric="high",
         bin_low_c=24.5, bin_high_c=25.5, half_step=0.5, rounding_rule="wmo_half_up",
-        day0_observed_extreme_c=26.0, day0_center_delta_c=0.4,
+        day0_observed_extreme_c=26.0, day0_center_delta_c=0.4, center_debias_c=0.7,
     )
     assert got == expected
 
@@ -876,6 +912,7 @@ def test_censored_log_prob_day0_row_differs_from_plain_normal() -> None:
         "bin_lower_c": 24.5, "bin_upper_c": 25.5,
         "rounding_rule": "wmo_half_up",
         "day0_active": True, "day0_observed_extreme_c": 26.0, "day0_center_delta_c": 0.0,
+        "center_debias_c": 0.0,
     }])
     sigma = np.array([1.5])
     day0_log_p = fitter._censored_log_prob(row, sigma)[0]

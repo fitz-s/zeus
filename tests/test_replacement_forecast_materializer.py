@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import subprocess
 import sys
@@ -5536,6 +5537,50 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     assert low_provenance["center_debias_training_cutoff"] is None
     # A fail-open row must not churn the config identity of every untouched row.
     assert low_hash == baseline_hash
+
+
+def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1-2 fit/serve parity: the helper's ``mu`` must equal the served ``_mu_anchor``.
+
+    ``_mu_anchor`` is ``bayes_precision_fusion.anchor_value_c`` (raw) + ``center_debias_c``,
+    applied BEFORE the Day0 delta. ``served_settlement_log_probability`` reconstructs that
+    same sum from the two provenance fields it is fed. Reproducing the served "hot" bin
+    probability from provenance alone -- with no access to the live ``_mu_anchor`` variable --
+    is only possible if the helper's internal mu is that same value; a stale/uncorrected mu
+    would change the integrated probability for this bin (the fused center sits ~2.5 sigma
+    below the bin edge, where the Normal CDF is steep) and the assertion below would fail.
+    """
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    _fixed_center_debias(monkeypatch, shift_c=1.0)
+    q, provenance = _materialize_q(conn, _request())
+
+    bpf = provenance["bayes_precision_fusion"]
+    assert provenance["center_debias_c"] == pytest.approx(1.0)
+    # Inert calibration-layer knobs in this fixture -- k=1.0, w=0, no floor, no Day0 -- so the
+    # helper's excluded terms cannot be masking a mu mismatch.
+    assert provenance["sigma_scale_k_applied"] is None
+    assert provenance["uniform_mixture_w_applied"] is None
+    assert "day0_conditioning" not in provenance
+
+    log_p = materializer_mod.served_settlement_log_probability(
+        anchor_value_c=float(bpf["anchor_value_c"]),
+        center_debias_c=float(bpf["center_debias_c"]),
+        predictive_sigma_c=float(bpf["predictive_sigma_c"]),
+        k=1.0,
+        metric="high",
+        bin_low_c=31.0,
+        bin_high_c=None,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+        day0_observed_extreme_c=None,
+        day0_center_delta_c=0.0,
+    )
+
+    assert math.exp(log_p) == pytest.approx(q["hot"], rel=1e-9)
 
 
 def _coordinate_bound_frontier_conn() -> sqlite3.Connection:

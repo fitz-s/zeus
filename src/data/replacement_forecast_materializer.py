@@ -5761,17 +5761,24 @@ def served_settlement_log_probability(
     rounding_rule: str,
     day0_observed_extreme_c: float | None,
     day0_center_delta_c: float,
+    center_debias_c: float = 0.0,
 ) -> float:
     """log P(settlement lands in [bin_low_c, bin_high_c]) under the served kernel -- B1 (deep-review
     2026-07-28) fit/serve parity: the ONE function both the live serving path and
     ``scripts/fit_sigma_tau_calibration.py`` score through, so a fitted k means exactly what it is
     applied to.
 
-    Reproduces, verbatim, the two transforms ``_compute_posterior_payload`` applies before any bin
-    is integrated:
+    Reproduces, verbatim, the three transforms ``_compute_posterior_payload`` applies before any
+    bin is integrated:
+      - the served-center de-bias (2026-09-04, reversal_plan items 26-32): ``anchor_value_c`` is
+        the UNCORRECTED fused center (matching the provenance field of the same name), and
+        ``center_debias_c`` is added to it here -- the identical composition at ``_mu_anchor`` in
+        ``_compute_posterior_payload``, applied BEFORE the Day0 delta below (0.0 is the inert
+        default, byte-identical to no shift);
       - the T0-1 remaining-window Day0 center correction (HIGH: mu -= delta, LOW: mu += delta,
         applied only when ``day0_center_delta_c > 0.0`` -- see the identical branch around
-        ``_mu_anchor`` in ``_compute_posterior_payload``);
+        ``_mu_anchor`` in ``_compute_posterior_payload``, which composes on top of the de-biased
+        center);
       - the day0/normal dispatch ``_build_scaled_normal_uniform_q._bin_mass`` uses: when
         ``day0_observed_extreme_c`` is not None, integrate through ``_day0_conditioned_bin_probability``
         (the max/min absorbing-observed-extreme transform); otherwise through
@@ -5784,7 +5791,7 @@ def served_settlement_log_probability(
     """
     from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
 
-    mu = float(anchor_value_c)
+    mu = float(anchor_value_c) + float(center_debias_c)
     if day0_center_delta_c > 0.0:
         if metric == "high":
             mu -= float(day0_center_delta_c)

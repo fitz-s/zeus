@@ -221,6 +221,7 @@ _POST_QUERY = """
     SELECT city, target_date, temperature_metric, computed_at, source_cycle_time, posterior_config_hash,
            json_extract(provenance_json,'$.bayes_precision_fusion.anchor_value_c') AS mu,
            json_extract(provenance_json,'$.bayes_precision_fusion.predictive_sigma_c') AS sig,
+           json_extract(provenance_json,'$.bayes_precision_fusion.center_debias_c') AS center_debias_c,
            json_extract(provenance_json,'$.day0_conditioning.active') AS day0_active,
            json_extract(provenance_json,'$.day0_conditioning.observed_extreme_c') AS day0_observed_extreme_c,
            json_extract(provenance_json,'$.day0_remaining_center_delta_c') AS day0_center_delta_c
@@ -397,6 +398,11 @@ def build_frame(post: "pd.DataFrame", sett: "pd.DataFrame", city_meta: dict[str,
     df["day0_active"] = df["day0_active"].eq(1)
     df["day0_observed_extreme_c"] = pd.to_numeric(df["day0_observed_extreme_c"], errors="coerce")
     df["day0_center_delta_c"] = pd.to_numeric(df["day0_center_delta_c"], errors="coerce").fillna(0.0)
+    # Served-center de-bias (2026-09-04): stamped alongside anchor_value_c, applied to ``mu``
+    # AFTER fusion and BEFORE the Day0 delta above -- see served_settlement_log_probability,
+    # which is the ONE place this fitter reproduces that ordering (Day0-active rows only; the
+    # fast vectorized path's ``mu``/``l``/``u`` below stay on the pre-debias fused center).
+    df["center_debias_c"] = pd.to_numeric(df["center_debias_c"], errors="coerce").fillna(0.0)
 
     # FIX 5 (second half): the CURRENT-EVIDENCE serving population never materializes a posterior
     # after the local target day already ended -- fence training rows to the same population.
@@ -538,6 +544,7 @@ def _censored_log_prob(g: "pd.DataFrame", sigma: "np.ndarray") -> "np.ndarray":
                 rounding_rule=str(row["rounding_rule"]),
                 day0_observed_extreme_c=None if pd.isna(day0_obs) else float(day0_obs),
                 day0_center_delta_c=float(row["day0_center_delta_c"]),
+                center_debias_c=float(row["center_debias_c"]),
             )
     return log_p
 
