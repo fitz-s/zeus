@@ -23,6 +23,7 @@ from src.events.triggers.market_channel_ingestor import (
     MarketChannelOnlineService,
     MarketTokenMetadata,
     QuoteCache,
+    SETTLEMENT_DAY_GRACE,
     active_weather_token_metadata_from_snapshots,
     active_weather_token_metadata_for_tokens,
     active_weather_token_ids_from_snapshots,
@@ -5307,35 +5308,39 @@ def test_universe_excludes_settled_markets_by_market_end_at():
         "('snap-live','0xlive','chicago-weather','yes-live','no-live','0.01','5',0,1,0,"
         "'2026-06-04T11:00:00+00:00','2026-06-05T12:00:00+00:00')"
     )
-    # SETTLED: past-ending weather market with STALE active=1/closed=0 flags.
+    # SETTLED: ended well past SETTLEMENT_DAY_GRACE, STALE active=1/closed=0 flags.
     conn.execute(
         "INSERT INTO executable_market_snapshots VALUES "
         "('snap-dead','0xdead','dallas-weather','yes-dead','no-dead','0.01','5',0,1,0,"
-        "'2026-06-04T10:00:00+00:00','2026-06-04T11:30:00+00:00')"
+        "'2026-06-01T10:00:00+00:00','2026-06-01T12:00:00+00:00')"
     )
 
     md = active_weather_token_metadata_from_snapshots(conn, now=now)
 
     assert "yes-live" in md and "no-live" in md, "live (future-ending) market must be covered"
     assert md["yes-live"].market_end_at == "2026-06-05T12:00:00+00:00"
-    assert "yes-dead" not in md, "settled market (market_end_at<=now) leaked into channel universe"
+    assert "yes-dead" not in md, "settled market (past SETTLEMENT_DAY_GRACE) leaked into channel universe"
     assert "no-dead" not in md
 
 
 def test_universe_filter_agrees_with_canonical_market_open_predicate():
-    """STEP 5 relationship test: the bulk SQL `market_end_at > now` universe filter
-    gives the SAME keep/drop verdict as the ONE canonical POST_TRADING-boundary
-    authority ``market_phase.market_open_at_decision`` for every (market_end_at,
-    now) pair — so the universe filter and the phase axis cannot diverge on the
-    end-boundary. (NULL end-time is the coverage-safe exception, covered
-    separately; this pins the explicit-end-time agreement.)"""
+    """STEP 5 relationship test, re-anchored for SETTLEMENT_DAY_GRACE (2026-09-13):
+    the bulk SQL `market_end_at > now - SETTLEMENT_DAY_GRACE` universe filter gives
+    the SAME keep/drop verdict as the ONE canonical POST_TRADING-boundary authority
+    ``market_phase.market_open_at_decision`` evaluated at the SAME grace-shifted
+    instant — so the universe filter and the phase axis cannot diverge once the
+    grace window (which exists to cover the weather-venue noon-UTC market_end_at
+    convention, see T-day0end) is accounted for. (NULL end-time is the
+    coverage-safe exception, covered separately; this pins the explicit-end-time
+    agreement.)"""
     from src.strategy.market_phase import market_open_at_decision
 
     now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    grace_now = now - SETTLEMENT_DAY_GRACE
     cases = [
         ("yes-future", "2026-06-05T12:00:00+00:00"),  # open → kept
-        ("yes-boundary", "2026-06-04T12:00:00+00:00"),  # exactly now → POST_TRADING → dropped
-        ("yes-past", "2026-06-04T11:30:00+00:00"),  # closed → dropped
+        ("yes-boundary", grace_now.isoformat()),  # exactly now-GRACE → POST_TRADING → dropped
+        ("yes-past", "2026-06-01T00:00:00+00:00"),  # well past grace → dropped
     ]
     conn = sqlite3.connect(":memory:")
     _ems_table_with_end(conn)
@@ -5350,10 +5355,10 @@ def test_universe_filter_agrees_with_canonical_market_open_predicate():
     for tok, end_at in cases:
         from datetime import datetime as _dt
         end_utc = _dt.fromisoformat(end_at)
-        predicate_open = market_open_at_decision(polymarket_end_utc=end_utc, as_of_utc=now)
+        predicate_open = market_open_at_decision(polymarket_end_utc=end_utc, as_of_utc=grace_now)
         sql_kept = tok in md
         assert sql_kept == predicate_open, (
-            f"SQL universe filter and market_open_at_decision disagree for "
+            f"SQL universe filter and grace-shifted market_open_at_decision disagree for "
             f"end_at={end_at}: sql_kept={sql_kept} predicate_open={predicate_open}"
         )
 
@@ -5391,11 +5396,12 @@ def test_universe_excludes_condition_whose_latest_row_lost_a_known_past_end_at()
     conn = sqlite3.connect(":memory:")
     _ems_table_with_end(conn)
     now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
-    # Older row (scanner-authored): recorded the true, already-past end date.
+    # Older row (scanner-authored): recorded the true, already-past (well past
+    # SETTLEMENT_DAY_GRACE) end date.
     conn.execute(
         "INSERT INTO executable_market_snapshots VALUES "
         "('snap-old','0xdeadlatest','austin-weather','yes-deadlatest','no-deadlatest',"
-        "'0.01','5',0,1,0,'2026-06-04T09:00:00+00:00','2026-06-04T11:30:00+00:00')"
+        "'0.01','5',0,1,0,'2026-06-01T09:00:00+00:00','2026-06-01T12:00:00+00:00')"
     )
     # Newer row (substrate-observer/JIT-authored): lost the end date to NULL.
     conn.execute(
@@ -5452,14 +5458,15 @@ def test_bounded_projection_excludes_condition_whose_latest_row_lost_a_known_pas
         """
     )
     now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
-    # Older row (scanner-authored): recorded the true, already-past end date.
-    # Never entered the latest projection — a later capture replaced it there.
+    # Older row (scanner-authored): recorded the true, already-past (well past
+    # SETTLEMENT_DAY_GRACE) end date. Never entered the latest projection — a
+    # later capture replaced it there.
     conn.execute(
         "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "snap-old", "0xdeadlatest", "austin-weather",
             "yes-deadlatest", "no-deadlatest", "0.01", "5", 0, 1, 0,
-            "2026-06-04T09:00:00+00:00", "2026-06-04T11:30:00+00:00",
+            "2026-06-01T09:00:00+00:00", "2026-06-01T12:00:00+00:00",
         ),
     )
     # Newer row (substrate-observer/JIT-authored): lost the end date to NULL,
@@ -5966,3 +5973,144 @@ def test_disconnect_reconnect_idempotent_on_repeated_calls():
         "SELECT COUNT(*) FROM market_channel_connectivity_events"
     ).fetchone()[0]
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-13 — SETTLEMENT_DAY_GRACE (T-day0end / X-U-day0-endbound)
+# ---------------------------------------------------------------------------
+# dc874a9c8 + 8742eb0ae (tonight) changed the universe end-bound from
+# "trust only the current latest row's own market_end_at" (always NULL for an
+# actively-traded condition, so permanently coverage-safe) to
+# "MAX(market_end_at) over the condition's full snapshot history, non-NULL
+# wins". That fixed 439 stuck dead condition_ids, but exposed a second bug:
+# every sampled weather-market condition (7 Day0 + 3 FSR cities, all
+# timezones) stamps market_end_at = market_close_at = <target_date>T12:00:00Z
+# regardless of city timezone — a fixed venue convention, not a real
+# per-market close. Once any historical row recorded that noon-UTC value, the
+# aggregate resolves to it immediately, so a still-trading Day0 condition got
+# excluded from the price-channel universe the instant UTC clock passed noon
+# on its own target_date — for Americas cities (UTC-3..-8) that is
+# 04:00-09:00 local, hours before the daily high.
+#
+# Fix: compare market_end_at against (now - SETTLEMENT_DAY_GRACE) instead of
+# raw now, in both the hydrate path (_bounded_latest_snapshot_rows.hydrate)
+# and the projection/fallback path (active_weather_token_metadata_from_snapshots).
+# SETTLEMENT_DAY_GRACE = 36h: noon UTC + 36h = midnight UTC two days later,
+# past the latest UTC+14 local day-end and the typical settlement resolution
+# window.
+def test_settlement_day_grace_keeps_same_day_market_at_14z():
+    """(a) A same-day market whose end bound is today's noon UTC must stay in
+    the universe at now=14:00Z (2h past the noon-UTC stamp) -- this is the
+    Americas-afternoon window the Day0 fast lane depends on."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-day0','0xday0','nyc-weather','yes-day0','no-day0','0.01','5',0,1,0,"
+        "'2026-09-13T04:00:00+00:00','2026-09-13T12:00:00+00:00')"
+    )
+    now = datetime(2026, 9, 13, 14, 0, 0, tzinfo=timezone.utc)
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-day0" in md, "same-day market must stay in the universe past noon UTC"
+    assert "no-day0" in md
+
+
+def test_settlement_day_grace_keeps_same_day_market_at_23z():
+    """(a cont'd) Still kept late in the day (23:00Z, 11h past the noon-UTC
+    stamp) -- well within the 36h SETTLEMENT_DAY_GRACE window."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-day0','0xday0','nyc-weather','yes-day0','no-day0','0.01','5',0,1,0,"
+        "'2026-09-13T04:00:00+00:00','2026-09-13T12:00:00+00:00')"
+    )
+    now = datetime(2026, 9, 13, 23, 0, 0, tzinfo=timezone.utc)
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-day0" in md, "same-day market must stay in the universe at 23:00Z"
+    assert "no-day0" in md
+
+
+def test_settlement_day_grace_drops_market_37h_past_end_bound():
+    """(b) The same market is DROPPED once now is 37h past its end bound --
+    one hour beyond SETTLEMENT_DAY_GRACE (36h), i.e. 2026-09-15T01:00:00Z."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-day0','0xday0','nyc-weather','yes-day0','no-day0','0.01','5',0,1,0,"
+        "'2026-09-13T04:00:00+00:00','2026-09-13T12:00:00+00:00')"
+    )
+    end_at = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 15, 1, 0, 0, tzinfo=timezone.utc)
+    assert (now - end_at).total_seconds() / 3600 == 37, "fixture must be exactly 37h past end_at"
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-day0" not in md, "market must be excluded 37h past its end bound (past SETTLEMENT_DAY_GRACE)"
+    assert "no-day0" not in md
+
+
+def test_settlement_day_grace_still_drops_resolved_condition_days_in_the_past():
+    """(c) The tonight's-fix resolved-condition case still drops: an older row
+    for the condition recorded a truly stale (days-in-the-past) end date, and
+    the currently-latest row lost it to NULL. SETTLEMENT_DAY_GRACE (36h) does
+    not resurrect a condition that ended days ago -- only same-day markets
+    within the grace window are protected."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
+    # Older row (scanner-authored): recorded the true, days-in-the-past end date.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-old','0xresolved','austin-weather','yes-resolved','no-resolved',"
+        "'0.01','5',0,1,0,'2026-09-10T09:00:00+00:00','2026-09-10T12:00:00+00:00')"
+    )
+    # Newer row (substrate-observer/JIT-authored): lost the end date to NULL.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-new','0xresolved','austin-weather','yes-resolved','no-resolved',"
+        "'0.01','5',0,1,0,'2026-09-13T11:45:00+00:00',NULL)"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-resolved" not in md, (
+        "a condition resolved days ago must stay excluded even within a currently-"
+        "NULL latest row -- SETTLEMENT_DAY_GRACE only protects same-day markets"
+    )
+    assert "no-resolved" not in md
+
+
+def test_settlement_day_grace_all_null_history_still_kept():
+    """(d) A condition whose ENTIRE snapshot history has NULL market_end_at
+    (no builder has ever observed Gamma's end date) stays coverage-safe --
+    unaffected by SETTLEMENT_DAY_GRACE, same as the pre-existing NULL
+    invariant (test_universe_includes_market_with_null_end_at)."""
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-1','0xnullhist','miami-weather','yes-nullhist','no-nullhist',"
+        "'0.01','5',0,1,0,'2026-09-13T10:00:00+00:00',NULL)"
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-2','0xnullhist','miami-weather','yes-nullhist','no-nullhist',"
+        "'0.01','5',0,1,0,'2026-09-13T11:00:00+00:00',NULL)"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-nullhist" in md, "all-NULL history must stay coverage-safe regardless of grace"
+    assert "no-nullhist" in md

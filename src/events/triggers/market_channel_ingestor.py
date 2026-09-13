@@ -35,6 +35,21 @@ REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 128
 MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE = 4
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
+# Weather-market venue convention (confirmed 2026-09-13, T-day0end trace): every
+# sampled condition (7 Day0 + 3 FSR cities, all timezones) stamps
+# market_end_at = market_close_at = <target_date>T12:00:00Z, timezone-blind — it is
+# NOT a real per-market close time, just a fixed noon-UTC convention on the
+# settlement date itself. Comparing it against raw `now` therefore excludes a
+# still-trading Day0/SETTLEMENT_DAY market the instant UTC clock passes noon on its
+# own target_date -- for Americas cities (UTC-3..-8) that is 04:00-09:00 local, hours
+# before the daily high. SETTLEMENT_DAY_GRACE covers every city's local day end plus
+# resolution latency: noon UTC + 36h = midnight UTC two days later, which is past the
+# latest UTC+14 local midnight (noon UTC = 02:00 local next day there; +36h reaches
+# UTC+14's local midnight the day after that) and past the typical settlement
+# resolution window. Applied by subtracting it from `now` before either universe
+# end-bound predicate (hydrate path and the projection/fallback path) compares
+# against market_end_at, so both stay in lockstep off one constant.
+SETTLEMENT_DAY_GRACE = timedelta(hours=36)
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
@@ -1303,7 +1318,9 @@ def _bounded_latest_snapshot_rows(
 
     market_end_available = "market_end_at" in snapshot_columns
     end_now_iso = (
-        now.astimezone(timezone.utc).isoformat() if market_end_available else None
+        (now.astimezone(timezone.utc) - SETTLEMENT_DAY_GRACE).isoformat()
+        if market_end_available
+        else None
     )
 
     # Dead-token universe leak (2026-09-13): a market's end date never changes,
@@ -1487,7 +1504,10 @@ def active_weather_token_metadata_from_snapshots(
     # where the outer query itself stays O(current markets).
     market_end_bound_expr = None
     if "market_end_at" in columns:
-        now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        now_iso = (
+            (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            - SETTLEMENT_DAY_GRACE
+        ).isoformat()
         market_end_bound_expr = f"""(
             SELECT MAX(market_end_at) FROM executable_market_snapshots
              WHERE condition_id = {prefix}condition_id AND market_end_at IS NOT NULL
