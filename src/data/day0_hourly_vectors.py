@@ -3270,6 +3270,56 @@ def _persist_complete_ensemble_bundle(
     return persisted, complete
 
 
+def _day0_readback_bundle_is_current_or_newer(
+    selected: Iterable[Day0HourlyVector],
+    readback: Iterable[Day0HourlyVector],
+) -> bool:
+    """Accept an idempotent or concurrent newer write as this date's drain.
+
+    A zero-row INSERT can mean the exact selected rows already exist, but a
+    fresh row from an older provider cycle must not clear retry debt.  Request/
+    capture time is the local ordering; when both rows carry provider
+    provenance, the provider cycle must also be monotone.
+    """
+    selected_by_model = {str(vector.model): vector for vector in selected}
+    readback_by_model = {str(vector.model): vector for vector in readback}
+    if set(selected_by_model) != set(readback_by_model):
+        return False
+    for model, selected_vector in selected_by_model.items():
+        current_vector = readback_by_model[model]
+        try:
+            selected_capture = datetime.fromisoformat(
+                str(selected_vector.captured_at).replace("Z", "+00:00")
+            ).astimezone(UTC)
+            current_capture = datetime.fromisoformat(
+                str(current_vector.captured_at).replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if current_capture < selected_capture:
+            return False
+        try:
+            selected_meta = json.loads(str(selected_vector.source_run_meta_json or ""))
+            current_meta = json.loads(str(current_vector.source_run_meta_json or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            selected_meta = current_meta = {}
+        selected_run = selected_meta.get("provider_source_cycle_time_utc")
+        current_run = current_meta.get("provider_source_cycle_time_utc")
+        if selected_run and current_run:
+            try:
+                selected_cycle = datetime.fromisoformat(
+                    str(selected_run).replace("Z", "+00:00")
+                ).astimezone(UTC)
+                current_cycle = datetime.fromisoformat(
+                    str(current_run).replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except (AttributeError, TypeError, ValueError):
+                return False
+            if current_cycle < selected_cycle:
+                return False
+    return True
+
+
 def maybe_refresh_day0_hourly_vectors(
     cities: list[Any],
     *,
@@ -3761,6 +3811,7 @@ def maybe_refresh_day0_hourly_vectors(
                 continue
 
             strict_bundles: dict[str, tuple[datetime, list[Day0HourlyVector]]] = {}
+            incomplete_target_dates: list[str] = []
             for target_date in target_dates:
                 window_start = window_starts[target_date]
                 selected = select_ready_day0_hourly_vectors(
@@ -3774,76 +3825,146 @@ def maybe_refresh_day0_hourly_vectors(
                     require_complete_remaining_window=True,
                 )
                 if window_start is None or not selected:
-                    mark_incomplete(
-                        refresh_key=refresh_key,
-                        quota_lane=quota_lane,
-                        name=name,
-                        target_dates=retry_target_dates,
-                        expected_models=retry_expected_models,
-                        available_models=retry_available_models,
-                        missing_models=(retry_missing_models if ensemble_incomplete else ()),
-                        reason=(
-                            retry_reason
-                            if ensemble_incomplete
-                            else "DAY0_HOURLY_BUNDLE_REMAINING_WINDOW_INCOMPLETE"
-                        ),
-                    )
-                    strict_bundles.clear()
-                    break
+                    incomplete_target_dates.append(target_date)
+                    continue
                 strict_bundles[target_date] = (window_start, selected)
-            if not strict_bundles:
-                continue
 
             persisted = 0
-            for target_date in target_dates:
-                persisted += persist_day0_hourly_vectors(
-                    strict_bundles[target_date][1],
-                    target_date=target_date,
-                    request_hash=request_hash,
-                    lock_blocking=persist_lock_blocking,
-                )
+            persist_failed_dates: list[str] = []
+            contended_target_dates: set[str] = set()
+            for target_date, (_window_start, selected) in strict_bundles.items():
+                try:
+                    date_written = persist_day0_hourly_vectors(
+                        selected,
+                        target_date=target_date,
+                        request_hash=request_hash,
+                        lock_blocking=persist_lock_blocking,
+                    )
+                    persisted += date_written
+                    if date_written != len(selected):
+                        persist_failed_dates.append(target_date)
+                        logger.warning(
+                            "DAY0_HOURLY_BUNDLE_PERSIST_INCOMPLETE city=%s "
+                            "target_date=%s selected=%d written=%d",
+                            name,
+                            target_date,
+                            len(selected),
+                            date_written,
+                        )
+                except Exception as exc:  # noqa: BLE001 - retain sibling date progress
+                    persist_failed_dates.append(target_date)
+                    if isinstance(exc, BlockingIOError):
+                        contended_target_dates.add(target_date)
+                    logger.warning(
+                        "DAY0_HOURLY_BUNDLE_PERSIST_FAILED city=%s target_date=%s "
+                        "exc=%s: %s",
+                        name,
+                        target_date,
+                        type(exc).__name__,
+                        exc,
+                    )
             post_persist_materialization_time = _day0_utc_now()
-            drained = all(
-                read_freshest_day0_hourly_vectors(
-                    city=name,
-                    target_date=target_date,
-                    now=post_persist_materialization_time,
-                    expected_models=expected_models,
-                    require_expected=True,
-                    max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-                    remaining_window_start=window_start,
-                    require_complete_remaining_window=True,
-                )
-                for target_date, (window_start, _selected) in strict_bundles.items()
-            )
-            if not drained:
-                mark_incomplete(
-                    refresh_key=refresh_key,
-                    quota_lane=quota_lane,
-                    name=name,
-                    target_dates=retry_target_dates,
-                    expected_models=retry_expected_models,
-                    available_models=retry_available_models,
-                    missing_models=(retry_missing_models if ensemble_incomplete else ()),
-                    reason=(
-                        retry_reason
-                        if ensemble_incomplete
-                        else "DAY0_HOURLY_BUNDLE_PERSIST_READBACK_INCOMPLETE"
-                    ),
-                )
-                continue
+            readback_failed_dates: list[str] = []
+            for target_date, (window_start, _selected) in strict_bundles.items():
+                try:
+                    readback = read_freshest_day0_hourly_vectors(
+                        city=name,
+                        target_date=target_date,
+                        now=post_persist_materialization_time,
+                        expected_models=expected_models,
+                        require_expected=True,
+                        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                        remaining_window_start=window_start,
+                        require_complete_remaining_window=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain sibling date progress
+                    readback = []
+                    logger.warning(
+                        "DAY0_HOURLY_BUNDLE_READBACK_FAILED city=%s target_date=%s "
+                        "exc=%s: %s",
+                        name,
+                        target_date,
+                        type(exc).__name__,
+                        exc,
+                    )
+                if not readback or (
+                    target_date in persist_failed_dates
+                    and not _day0_readback_bundle_is_current_or_newer(
+                        _selected, readback
+                    )
+                ):
+                    readback_failed_dates.append(target_date)
             written += persisted
-            if ensemble_incomplete:
+            pending_target_dates = tuple(
+                dict.fromkeys(
+                    (
+                        *incomplete_target_dates,
+                        *readback_failed_dates,
+                    )
+                )
+            )
+            if pending_target_dates or ensemble_incomplete:
+                if ensemble_incomplete:
+                    pending_retry_target_dates = tuple(
+                        dict.fromkeys((*ensemble_target_dates, *pending_target_dates))
+                    )
+                    pending_retry_expected_models = (
+                        day0_source_clock_ensemble_member_models()
+                        if not pending_target_dates
+                        else tuple(
+                            dict.fromkeys(
+                                (
+                                    *expected_models,
+                                    *day0_source_clock_ensemble_member_models(),
+                                )
+                            )
+                        )
+                    )
+                    pending_retry_available_models = (
+                        ensemble_available_models
+                        if not pending_target_dates
+                        else tuple(dict.fromkeys((*vector_models, *ensemble_available_models)))
+                    )
+                    pending_retry_missing_models = tuple(
+                        dict.fromkeys(
+                            (
+                                *ensemble_missing_models,
+                                *(missing_models if pending_target_dates else ()),
+                            )
+                        )
+                    )
+                    pending_retry_reason = retry_reason
+                else:
+                    pending_retry_target_dates = pending_target_dates
+                    pending_retry_expected_models = expected_models
+                    pending_retry_available_models = vector_models
+                    pending_retry_missing_models = ()
+                    pending_retry_reason = (
+                        "DAY0_HOURLY_BUNDLE_REMAINING_WINDOW_INCOMPLETE"
+                        if incomplete_target_dates
+                        else "DAY0_HOURLY_BUNDLE_PERSIST_READBACK_INCOMPLETE"
+                    )
                 mark_incomplete(
                     refresh_key=refresh_key,
                     quota_lane=quota_lane,
                     name=name,
-                    target_dates=retry_target_dates,
-                    expected_models=retry_expected_models,
-                    available_models=retry_available_models,
-                    missing_models=retry_missing_models,
-                    reason=retry_reason,
+                    target_dates=pending_retry_target_dates,
+                    expected_models=pending_retry_expected_models,
+                    available_models=pending_retry_available_models,
+                    missing_models=pending_retry_missing_models,
+                    reason=pending_retry_reason,
                 )
+                if (
+                    not incomplete_target_dates
+                    and not ensemble_incomplete
+                    and set(pending_target_dates).issubset(contended_target_dates)
+                ):
+                    # Local lock contention keeps debt immediately retryable;
+                    # it is not an incomplete-provider backoff condition.
+                    with _REFRESH_LOCK:
+                        _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
+                            time.monotonic()
+                        )
                 continue
             with _REFRESH_LOCK:
                 _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)

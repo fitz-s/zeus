@@ -1,6 +1,6 @@
 # Created: 2026-09-05
-# Last reused or audited: 2026-09-10
-# Lifecycle: created=2026-09-05; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Last reused or audited: 2026-09-12
+# Lifecycle: created=2026-09-05; last_reviewed=2026-09-12; last_reused=2026-09-12
 # Purpose: Regression tests for the round-3 quota root-cause fixes in
 #   src/data/day0_hourly_vectors.py: a monotone per-model provider-run HWM pin (Open-
 #   Meteo's meta.json is served from more than one replica; replicas have been observed
@@ -291,6 +291,252 @@ def _strict_ensemble_member_vector(
         fetch_finished_at=fetch_finished.isoformat(),
     )
     return replace(vector, source_run_meta_json=_json.dumps(meta))
+
+
+def _strict_deterministic_vectors(
+    city,
+    decision: datetime,
+    *,
+    today_hours: int = 24,
+    tomorrow_hours: int = 24,
+) -> list[Day0HourlyVector]:
+    """Build one complete two-date deterministic fetch with a short twin option."""
+    local_day = decision.astimezone(ZoneInfo(city.timezone)).date()
+    times = tuple(
+        f"{(local_day + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset, hours in ((0, today_hours), (1, tomorrow_hours))
+        for hour in range(hours)
+    )
+    meta = _json.dumps(
+        {
+            "fetch_started_at": (decision + timedelta(minutes=1)).isoformat(),
+            "fetch_finished_at": (decision + timedelta(minutes=2)).isoformat(),
+        }
+    )
+    return [
+        Day0HourlyVector(
+            model="icon_d2",
+            city=city.name,
+            target_date="",
+            timezone_name=city.timezone,
+            captured_at=decision.isoformat(),
+            times=times,
+            temps_c=tuple(20.0 for _ in times),
+            source_run_meta_json=meta,
+        )
+    ]
+
+
+def _configure_two_date_deterministic_refresh(
+    monkeypatch,
+    vectors,
+    *,
+    persist_fail_date: str | None = None,
+    persist_zero_date: str | None = None,
+    readback_vectors=None,
+):
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    persisted: list[str] = []
+    readback: set[str] = set()
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["icon_d2"])
+    monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: ())
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: False)
+    monkeypatch.setattr(day0, "fetch_day0_hourly_vectors", lambda *_args, **_kwargs: (vectors, "sha256:det"))
+    monkeypatch.setattr(
+        day0,
+        "_day0_utc_now",
+        lambda: decision + timedelta(minutes=3),
+    )
+
+    def persist(rows, *, target_date, **_kwargs):
+        persisted.append(target_date)
+        if target_date == persist_fail_date:
+            raise RuntimeError("injected persist failure")
+        if target_date == persist_zero_date:
+            return 0
+        return len(rows)
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+    monkeypatch.setattr(
+        day0,
+        "read_freshest_day0_hourly_vectors",
+        lambda **kwargs: (
+            list(vectors if readback_vectors is None else readback_vectors)
+            if kwargs["target_date"] in readback
+            else []
+        ),
+    )
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+    return city, decision, persisted, readback
+
+
+def test_per_date_refresh_publishes_today_when_tomorrow_is_short(monkeypatch):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision, tomorrow_hours=20)
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch, vectors
+    )
+    readback.add("2026-09-10")
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == ["2026-09-10"]
+    assert stats.vectors_written == 1
+    assert stats.unavailable_bundles[0].target_dates == ("2026-09-11",)
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+
+def test_per_date_refresh_publishes_tomorrow_when_today_is_invalid(monkeypatch):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision, today_hours=8)
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch, vectors
+    )
+    readback.add("2026-09-11")
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == ["2026-09-11"]
+    assert stats.vectors_written == 1
+    assert stats.unavailable_bundles[0].target_dates == ("2026-09-10",)
+
+
+def test_per_date_refresh_clears_retry_only_after_both_dates_read_back(monkeypatch):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision)
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch, vectors
+    )
+    readback.add("2026-09-10")
+
+    first = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+    assert first.vectors_written == 2
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+    assert persisted == ["2026-09-10", "2026-09-11"]
+
+    readback.add("2026-09-11")
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    second = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+    assert second.vectors_written == 2
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+    assert day0._INCOMPLETE_RETRY_STREAK == {}
+
+
+def test_per_date_refresh_keeps_sibling_after_persist_failure(monkeypatch):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision)
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch, vectors, persist_fail_date="2026-09-11"
+    )
+    readback.add("2026-09-10")
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == ["2026-09-10", "2026-09-11"]
+    assert stats.vectors_written == 1
+    assert stats.unavailable_bundles[0].target_dates == ("2026-09-11",)
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+
+def test_per_date_refresh_does_not_clear_debt_on_zero_write_with_fresh_old_bundle(
+    monkeypatch,
+):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision)
+    old_vectors = [
+        replace(vectors[0], captured_at=(decision - timedelta(hours=1)).isoformat())
+    ]
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch,
+        vectors,
+        persist_zero_date="2026-09-11",
+        readback_vectors=old_vectors,
+    )
+    readback.update(("2026-09-10", "2026-09-11"))
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == ["2026-09-10", "2026-09-11"]
+    assert stats.vectors_written == 1
+    assert stats.unavailable_bundles[0].target_dates == ("2026-09-11",)
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+
+def test_per_date_refresh_accepts_newer_concurrent_bundle_after_zero_write(monkeypatch):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision)
+    newer_vectors = [
+        replace(vectors[0], captured_at=(decision + timedelta(minutes=1)).isoformat())
+    ]
+    city, decision, persisted, readback = _configure_two_date_deterministic_refresh(
+        monkeypatch,
+        vectors,
+        persist_zero_date="2026-09-11",
+        readback_vectors=newer_vectors,
+    )
+    readback.update(("2026-09-10", "2026-09-11"))
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == ["2026-09-10", "2026-09-11"]
+    assert stats.vectors_written == 1
+    assert stats.unavailable_bundles == ()
+    assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+
+
+@pytest.mark.parametrize("invalid_kind", ("model", "clock"))
+def test_per_date_refresh_does_not_publish_invalid_model_or_clock(monkeypatch, invalid_kind):
+    city = SimpleNamespace(name="Tokyo", timezone="UTC", lat=35.68, lon=139.69)
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    vectors = _strict_deterministic_vectors(city, decision)
+    if invalid_kind == "model":
+        vectors = [replace(vectors[0], model="not_configured")]
+    else:
+        invalid_meta = _json.dumps(
+            {
+                "fetch_started_at": (decision + timedelta(minutes=4)).isoformat(),
+                "fetch_finished_at": (decision + timedelta(minutes=5)).isoformat(),
+            }
+        )
+        vectors = [replace(vectors[0], source_run_meta_json=invalid_meta)]
+    city, decision, persisted, _readback = _configure_two_date_deterministic_refresh(
+        monkeypatch, vectors
+    )
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0, return_stats=True
+    )
+
+    assert persisted == []
+    assert stats.vectors_written == 0
+    assert stats.unavailable_bundles[0].target_dates == ("2026-09-10", "2026-09-11")
 
 
 def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(

@@ -8526,7 +8526,8 @@ class TestRequestHashProvenance:
         )
 
         assert (n1, n2) == (0, 0)
-        assert attempts == {"fetch": 2, "persist": 2}
+        # Both independent dates are attempted again after contention.
+        assert attempts == {"fetch": 2, "persist": 4}
 
     def test_empty_fetch_result_is_throttled_to_prevent_retry_storm(self, monkeypatch):
         """Transport/shape soft-failures must not spend quota every scheduler pass."""
