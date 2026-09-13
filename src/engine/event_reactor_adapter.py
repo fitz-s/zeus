@@ -2558,6 +2558,7 @@ def _merge_global_book_epoch_delta(
     family_keys: frozenset[str],
     *,
     allow_topology_change: bool = False,
+    refreshed_probabilities: Mapping[str, object] | None = None,
 ) -> object:
     """Replace exact family books without extending untouched-family freshness."""
 
@@ -2600,6 +2601,49 @@ def _merge_global_book_epoch_delta(
     # _scope_global_book_epoch) has no delta to defer to, so family_keys
     # itself is the drop set in that case.
     drop_families = family_keys if delta_epoch is None else delta_families
+    # A family retained from base (delta covered every OTHER family in
+    # family_keys but not this one) may be exactly the family that earned
+    # allow_topology_change=True by having its bin/condition/token identity
+    # shift (hit_mutable_topology). Retaining a stale base row for such a
+    # family would serve a superseded token while refreshed_probabilities
+    # already reflects the new binding. Only retain it when its base row's
+    # topology still matches the current binding; otherwise raise so the
+    # caller falls through to its existing full-rebind path instead of
+    # silently serving a mismatched token.
+    if allow_topology_change and refreshed_probabilities is not None:
+        retained_only_families = set(family_keys) - drop_families
+        if retained_only_families:
+            signature = _global_book_topology_signature(refreshed_probabilities)
+            current_binding_by_family = {
+                row[0]: row[1:] for row in (signature or ())
+            }
+            base_sides_by_family: dict[str, dict[str, tuple[str, str, str]]] = {}
+            for row in base_states:
+                family = str(row[0])
+                if family in retained_only_families:
+                    base_sides_by_family.setdefault(family, {})[str(row[3])] = (
+                        str(row[1]),
+                        str(row[2]),
+                        str(row[4]),
+                    )
+            stale_families = set()
+            for family in retained_only_families:
+                sides = base_sides_by_family.get(family, {})
+                yes_side = sides.get("YES")
+                no_side = sides.get("NO")
+                if (
+                    not yes_side
+                    or not no_side
+                    or yes_side[:2] != no_side[:2]
+                    or (yes_side[0], yes_side[1], yes_side[2], no_side[2])
+                    != current_binding_by_family.get(family)
+                ):
+                    stale_families.add(family)
+            if stale_families:
+                raise ValueError(
+                    "GLOBAL_BOOK_DELTA_FAMILY_TOPOLOGY_STALE:"
+                    + ",".join(sorted(stale_families))
+                )
     states = tuple(
         row for row in base_states if str(row[0]) not in drop_families
     ) + delta_states
@@ -2671,6 +2715,7 @@ def _merge_global_book_epoch_cache_delta(
         delta_epoch,
         family_keys,
         allow_topology_change=allow_topology_change,
+        refreshed_probabilities=refreshed_probabilities,
     )
     current_identity = getattr(merged_epoch, "current_identity", None)
     if not callable(current_identity) or current_identity(checked_at) is None:

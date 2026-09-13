@@ -15334,6 +15334,165 @@ def test_global_book_epoch_delta_rejects_partial_coverage_without_topology_chang
     } == {row for row in full_delta.asset_states}
 
 
+def _book_epoch_two_sided(entries):
+    """entries: {family: (bin_id, condition_id, yes_token_id, no_token_id)}."""
+
+    at = _dt.datetime.now(_dt.timezone.utc)
+    states = tuple(
+        (
+            family,
+            bin_id,
+            condition_id,
+            side,
+            yes_token if side == "YES" else no_token,
+            "EXECUTABLE",
+            f"hash-{family}-{side}",
+            f"event-{family}",
+            f"market-{family}",
+        )
+        for family, (bin_id, condition_id, yes_token, no_token) in entries.items()
+        for side in ("YES", "NO")
+    )
+    return CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=at,
+        ),
+    )
+
+
+def _book_probability(family, bin_id, condition_id, yes_token_id, no_token_id):
+    return SimpleNamespace(
+        family_key=family,
+        bindings=(
+            SimpleNamespace(
+                bin_id=bin_id,
+                condition_id=condition_id,
+                yes_token_id=yes_token_id,
+                no_token_id=no_token_id,
+            ),
+        ),
+    )
+
+
+def test_global_book_epoch_delta_rejects_stale_retained_family_topology():
+    # "A" is base-only-covered (delta refreshed only "B") and its base
+    # bin/token identity ("-old") no longer matches the current probability
+    # binding ("-new") -- i.e. "A" is the family whose topology actually
+    # shifted, exactly what earns allow_topology_change=True in production
+    # via hit_mutable_topology. Retaining "A"'s base row here would serve a
+    # superseded token; the merge must refuse instead.
+    base = _book_epoch_two_sided(
+        {
+            "A": ("bin-A-old", "condition-A-old", "yes-A-old", "no-A-old"),
+            "B": ("bin-B", "condition-B", "yes-B", "no-B"),
+        }
+    )
+    delta = _book_epoch_two_sided(
+        {"B": ("bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed")}
+    )
+    refreshed_probabilities = {
+        "A": _book_probability(
+            "A", "bin-A-new", "condition-A-new", "yes-A-new", "no-A-new"
+        ),
+        "B": _book_probability(
+            "B", "bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed"
+        ),
+    }
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_DELTA_FAMILY_TOPOLOGY_STALE"):
+        era._merge_global_book_epoch_delta(
+            base,
+            delta,
+            frozenset({"A", "B"}),
+            allow_topology_change=True,
+            refreshed_probabilities=refreshed_probabilities,
+        )
+
+
+def test_global_book_epoch_delta_retains_family_when_topology_unchanged():
+    # "A" is base-only-covered but its base bin/token identity is IDENTICAL
+    # to the current probability binding -- it was merely eligible for
+    # refresh (in the mutable set), not actually moved. Retaining it is
+    # safe and required for the coverage fix to work at all.
+    base = _book_epoch_two_sided(
+        {
+            "A": ("bin-A", "condition-A", "yes-A", "no-A"),
+            "B": ("bin-B", "condition-B", "yes-B", "no-B"),
+        }
+    )
+    delta = _book_epoch_two_sided(
+        {"B": ("bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed")}
+    )
+    refreshed_probabilities = {
+        "A": _book_probability("A", "bin-A", "condition-A", "yes-A", "no-A"),
+        "B": _book_probability(
+            "B", "bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed"
+        ),
+    }
+
+    merged = era._merge_global_book_epoch_delta(
+        base,
+        delta,
+        frozenset({"A", "B"}),
+        allow_topology_change=True,
+        refreshed_probabilities=refreshed_probabilities,
+    )
+
+    assert {row[0] for row in merged.asset_states} == {"A", "B"}
+    assert {
+        row for row in merged.asset_states if row[0] == "A"
+    } == {row for row in base.asset_states if row[0] == "A"}
+    assert {
+        row for row in merged.asset_states if row[0] == "B"
+    } == {row for row in delta.asset_states if row[0] == "B"}
+
+
+def test_global_book_epoch_cache_delta_rejects_stale_family_binding():
+    # End-to-end through the production call shape: this ValueError is what
+    # the family-refresh-fallback caller (event_reactor_adapter.py, the
+    # try/except around _merge_global_book_epoch_cache_delta) catches to
+    # fall through to a full-universe rebind instead of serving "A" stale.
+    base = _book_epoch_two_sided(
+        {
+            "A": ("bin-A-old", "condition-A-old", "yes-A-old", "no-A-old"),
+            "B": ("bin-B", "condition-B", "yes-B", "no-B"),
+        }
+    )
+    delta = _book_epoch_two_sided(
+        {"B": ("bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed")}
+    )
+    cached_probabilities = {
+        "A": _book_probability(
+            "A", "bin-A-old", "condition-A-old", "yes-A-old", "no-A-old"
+        ),
+        "B": _book_probability("B", "bin-B", "condition-B", "yes-B", "no-B"),
+    }
+    refreshed_probabilities = {
+        "A": _book_probability(
+            "A", "bin-A-new", "condition-A-new", "yes-A-new", "no-A-new"
+        ),
+        "B": _book_probability(
+            "B", "bin-B", "condition-B", "yes-B-refreshed", "no-B-refreshed"
+        ),
+    }
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_DELTA_FAMILY_TOPOLOGY_STALE"):
+        era._merge_global_book_epoch_cache_delta(
+            base,
+            cached_probabilities,
+            refreshed_probabilities,
+            delta,
+            frozenset({"A", "B"}),
+            checked_at=_dt.datetime.now(_dt.timezone.utc),
+            allow_topology_change=True,
+        )
+
+
 def test_global_book_epoch_scope_projects_broad_cached_cut():
     at = _dt.datetime.now(_dt.timezone.utc)
     states = tuple(
