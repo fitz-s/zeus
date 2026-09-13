@@ -755,6 +755,239 @@ def test_default_client_factory_preserves_shared_sdk_transport(monkeypatch):
     assert helpers._http_client is original_transport
 
 
+def test_default_client_factory_forwards_network_timeout_seconds_to_a_dedicated_transport(
+    monkeypatch,
+):
+    """T-collateral2 (2026-09-13): ClobClient.__init__ takes no timeout of its
+    own -- every SDK HTTP call (get_balance_allowance, get_positions, ...)
+    routes through ClobClient._get/_post/_delete, which by default call the
+    process-global httpx.Client() in py_clob_client_v2.http_helpers.helpers.
+    A caller that configures network_timeout_seconds must get its OWN
+    dedicated transport (so the collateral child's CLOB fallback is actually
+    bounded by ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS) without touching
+    the shared one any other caller in the same process may be using.
+    """
+    _install_fake_py_clob_client_v2(monkeypatch)
+    import httpx
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    original_transport = helpers._http_client
+    original_timeout = helpers._http_client.timeout
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+        network_timeout_seconds=7.5,
+    )
+
+    client = adapter._sdk_client()
+
+    dedicated = getattr(client, "_zeus_dedicated_transport", None)
+    assert dedicated is not None, "expected a per-instance dedicated transport"
+    assert dedicated.timeout == httpx.Timeout(7.5)
+    assert dedicated is not helpers._http_client
+    # The shared global transport must be completely untouched: same object,
+    # same timeout, no matter what this caller configured for itself.
+    assert helpers._http_client is original_transport
+    assert helpers._http_client.timeout == original_timeout
+
+
+def test_default_client_factory_leaves_shared_transport_alone_when_unset(monkeypatch):
+    """Without an explicit network_timeout_seconds, no dedicated transport is
+    installed at all -- the client falls straight through to whatever the SDK
+    itself does by default (its shared process-global transport)."""
+    _install_fake_py_clob_client_v2(monkeypatch)
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    original_transport = helpers._http_client
+    original_timeout = helpers._http_client.timeout
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert getattr(client, "_zeus_dedicated_transport", None) is None
+    assert helpers._http_client is original_transport
+    assert helpers._http_client.timeout == original_timeout
+
+
+def test_default_client_factory_isolates_concurrent_adapters_with_different_timeouts(
+    monkeypatch,
+):
+    """Two adapters configured with different network_timeout_seconds in the
+    same process must each see their OWN timeout, and the shared global
+    transport must remain untouched throughout -- this is the exact
+    long-lived-process shape (the event reactor's several pre-submit
+    PolymarketClient constructions) an earlier version of this fix broke by
+    rebinding the shared client's .timeout on every construction, silently
+    narrowing/widening it for every OTHER caller sharing the process.
+    """
+    _install_fake_py_clob_client_v2(monkeypatch)
+    import httpx
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    original_transport = helpers._http_client
+    original_timeout = helpers._http_client.timeout
+
+    fast_adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder-fast",
+        signer_key="test-key-fast",
+        api_creds=SimpleNamespace(
+            api_key="fast-key", api_secret="fast-secret", api_passphrase="fast-pass"
+        ),
+        q1_egress_evidence_path=None,
+        network_timeout_seconds=1.5,
+    )
+    slow_adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder-slow",
+        signer_key="test-key-slow",
+        api_creds=SimpleNamespace(
+            api_key="slow-key", api_secret="slow-secret", api_passphrase="slow-pass"
+        ),
+        q1_egress_evidence_path=None,
+        network_timeout_seconds=30.0,
+    )
+
+    fast_client = fast_adapter._sdk_client()
+    slow_client = slow_adapter._sdk_client()
+
+    assert fast_client._zeus_dedicated_transport.timeout == httpx.Timeout(1.5)
+    assert slow_client._zeus_dedicated_transport.timeout == httpx.Timeout(30.0)
+    assert fast_client._zeus_dedicated_transport is not slow_client._zeus_dedicated_transport
+    # Constructing the SECOND (slow) adapter must not have moved the FIRST
+    # (fast) adapter's already-installed timeout, and neither touched the
+    # shared global the earlier, rejected design mutated in place.
+    assert fast_client._zeus_dedicated_transport.timeout == httpx.Timeout(1.5)
+    assert helpers._http_client is original_transport
+    assert helpers._http_client.timeout == original_timeout
+
+
+def test_adapter_close_releases_its_own_dedicated_transport_only(monkeypatch):
+    """PolymarketV2Adapter.close() must close ONLY its own dedicated
+    transport (installed when network_timeout_seconds was configured) and
+    must never touch the SDK's shared process-global one -- a per-instance
+    transport that a caller never closes leaks one httpx connection pool
+    per construction in a long-lived process (T-collateral2)."""
+    _install_fake_py_clob_client_v2(monkeypatch)
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    original_transport = helpers._http_client
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+        network_timeout_seconds=5.0,
+    )
+    client = adapter._sdk_client()
+    dedicated = client._zeus_dedicated_transport
+    assert dedicated.is_closed is False
+
+    adapter.close()
+
+    assert dedicated.is_closed is True
+    assert helpers._http_client is original_transport
+    assert helpers._http_client.is_closed is False
+
+
+def test_adapter_close_is_a_no_op_without_a_dedicated_transport(monkeypatch):
+    """No network_timeout_seconds configured -> no dedicated transport was
+    ever installed -> close() must not raise and must not touch the shared
+    global transport."""
+    _install_fake_py_clob_client_v2(monkeypatch)
+    from py_clob_client_v2.http_helpers import helpers
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+    )
+    adapter._sdk_client()
+
+    adapter.close()  # must not raise
+
+    assert helpers._http_client.is_closed is False
+
+    # Never constructed an SDK client at all.
+    other_adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        api_creds=SimpleNamespace(
+            api_key="provided-key",
+            api_secret="provided-secret",
+            api_passphrase="provided-passphrase",
+        ),
+        q1_egress_evidence_path=None,
+    )
+    other_adapter.close()  # must not raise
+
+
+def test_polymarket_client_close_cascades_to_v2_adapter_dedicated_transport():
+    """PolymarketClient.close()/__exit__ must release its v2 adapter's own
+    dedicated transport -- otherwise every short-lived
+    `with PolymarketClient(public_http_timeout=...) as clob:` block (the
+    live event reactor's pre-submit pattern) leaks one httpx connection pool
+    per construction."""
+    from src.data.polymarket_client import PolymarketClient
+
+    client = PolymarketClient(public_http_timeout=5.0)
+    closed = {"called": False}
+
+    class _FakeV2Adapter:
+        def close(self) -> None:
+            closed["called"] = True
+
+    client._v2_adapter = _FakeV2Adapter()
+
+    with client:
+        pass
+
+    assert closed["called"] is True
+
+
+def test_polymarket_client_close_tolerates_no_v2_adapter():
+    """close()/__exit__ must not raise when no v2 adapter was ever built
+    (lazy _ensure_v2_adapter never called this session)."""
+    from src.data.polymarket_client import PolymarketClient
+
+    with PolymarketClient(public_http_timeout=5.0):
+        pass  # must not raise
+
+
 def test_adapter_threads_configured_signature_type_to_client_factory(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 

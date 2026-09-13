@@ -193,6 +193,116 @@ def is_heartbeat_transport_error(exc: BaseException) -> bool:
     return False
 
 
+def _install_dedicated_clob_transport(client: Any, *, timeout_seconds: float) -> None:
+    """Bind one ``ClobClient`` instance to its own dedicated HTTP transport.
+
+    ``ClobClient._get``/``_post``/``_delete`` (``py_clob_client_v2/client.py``)
+    are plain instance methods that call the module-level ``get``/``post``/
+    ``delete`` free functions in ``http_helpers/helpers.py`` -- every one of
+    those routes through ONE process-global ``httpx.Client()`` shared by
+    every ``ClobClient`` instance the process ever constructs. The SDK
+    exposes no per-instance transport or timeout parameter at all
+    (``ClobClient.__init__`` takes neither; confirmed by reading
+    ``py_clob_client_v2/client.py``).
+
+    T-collateral2 code review (2026-09-13): an earlier version of this fix
+    rebound that SHARED client's ``.timeout`` to whatever the most recently
+    constructed caller configured. In the long-lived event-reactor process,
+    several pre-submit call sites construct a fresh, narrowly-timed
+    ``PolymarketClient`` per call; rebinding the shared global there would
+    silently narrow the timeout for every OTHER unrelated SDK call sharing
+    the same process afterward (order submission, JIT client refetch,
+    anything constructed without an explicit timeout) -- an
+    unknown-side-effect outcome on the money path. Overriding ``_get``/
+    ``_post``/``_delete`` on just THIS instance keeps the effect scoped to
+    this one client only: no shared-state mutation, nothing to restore,
+    no cross-caller race. The shared global transport is never touched by
+    this function and keeps serving every other ``ClobClient`` instance at
+    its own (SDK-default) timeout, exactly as before this fix existed.
+    """
+    import httpx
+    from py_clob_client_v2.http_helpers import helpers as _clob_http_helpers
+
+    dedicated_transport = httpx.Client(
+        http2=True, timeout=httpx.Timeout(float(timeout_seconds))
+    )
+
+    def _dedicated_request(
+        method: str, endpoint: str, headers=None, data=None, params=None
+    ) -> Any:
+        overloaded_headers = _clob_http_helpers._overload_headers(method, headers)
+        try:
+            if isinstance(data, str):
+                resp = dedicated_transport.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    content=data.encode("utf-8"),
+                    params=params,
+                )
+            else:
+                resp = dedicated_transport.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    json=data,
+                    params=params,
+                )
+            if resp.status_code != 200:
+                raise PolyApiException(resp)
+            try:
+                return resp.json()
+            except ValueError:
+                return resp.text
+        except PolyApiException:
+            raise
+        except httpx.RequestError as exc:
+            raise PolyApiException(
+                error_msg=f"Request exception: {type(exc).__name__}"
+            ) from exc
+
+    def _dedicated_get(endpoint, headers=None, params=None):
+        return _dedicated_request("GET", endpoint, headers=headers, params=params)
+
+    def _dedicated_post(endpoint, headers=None, data=None, params=None):
+        # Mirrors http_helpers.helpers.post()'s one-retry-on-transient-error
+        # semantics (client.retry_on_error), just bound to the dedicated
+        # transport instead of the shared module-global one.
+        try:
+            return _dedicated_request(
+                "POST", endpoint, headers=headers, data=data, params=params
+            )
+        except (PolyApiException, Exception) as exc:
+            status = getattr(exc, "status_code", None)
+            if client.retry_on_error and _clob_http_helpers._is_transient_error(
+                exc, status
+            ):
+                logger.info(
+                    "[py_clob_client_v2] dedicated transport: transient error, "
+                    "retrying once after 30 ms"
+                )
+                time.sleep(0.03)
+                return _dedicated_request(
+                    "POST", endpoint, headers=headers, data=data, params=params
+                )
+            raise
+
+    def _dedicated_delete(endpoint, headers=None, data=None, params=None):
+        return _dedicated_request(
+            "DELETE", endpoint, headers=headers, data=data, params=params
+        )
+
+    client._get = _dedicated_get
+    client._post = _dedicated_post
+    client._delete = _dedicated_delete
+    # Owned per-instance (unlike the shared module-global, which the SDK
+    # never closes either): the caller that constructed this client is
+    # responsible for its lifetime. Stashed as a plain attribute so
+    # PolymarketV2Adapter.close() (and tests) can reach it without needing
+    # the closure above.
+    client._zeus_dedicated_transport = dedicated_transport
+
+
 def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
     """Independent final SDK-boundary guard; no live order may bypass it."""
 
@@ -799,6 +909,17 @@ class PolymarketV2Adapter:
             funder=kwargs.get("funder_address"),
             use_server_time=True,
         )
+        # T-collateral2 (2026-09-13): ClobClient.__init__ accepts no timeout
+        # parameter at all -- give THIS instance its own dedicated transport
+        # rather than mutating the SDK's shared process-global httpx.Client
+        # (see _install_dedicated_clob_transport for why the shared client
+        # must never be touched). Installed before creds derivation below so
+        # that call also respects the configured timeout.
+        network_timeout_seconds = kwargs.get("network_timeout_seconds")
+        if network_timeout_seconds is not None and float(network_timeout_seconds) > 0:
+            _install_dedicated_clob_transport(
+                client, timeout_seconds=float(network_timeout_seconds)
+            )
         # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
         # creds bound to the active signer. Use runtime creds first: Keychain is
         # the operator-owned source of truth, env is a fallback for non-Keychain
@@ -853,6 +974,24 @@ class PolymarketV2Adapter:
                 network_timeout_seconds=self.network_timeout_seconds,
             )
         return self._client
+
+    def close(self) -> None:
+        """Release this adapter's own dedicated CLOB transport, if any.
+
+        T-collateral2 (2026-09-13): a caller that configures
+        network_timeout_seconds gets a per-instance httpx.Client
+        (_install_dedicated_clob_transport) instead of sharing the SDK's
+        process-global one -- unlike that shared client (which the SDK
+        itself never closes, by design, since it lives for the process),
+        this one is owned by this adapter and must be closed by whoever
+        constructed it. A no-op when no dedicated transport was installed
+        (network_timeout_seconds unset) or no SDK client was ever built.
+        """
+        transport = getattr(self._client, "_zeus_dedicated_transport", None)
+        if transport is not None:
+            close = getattr(transport, "close", None)
+            if callable(close):
+                close()
 
     def prepare_order_truth_reader(self) -> None:
         """Initialize authenticated order truth outside monitor deadlines."""

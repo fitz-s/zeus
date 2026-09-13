@@ -520,6 +520,18 @@ class PolymarketClient:
             if callable(close):
                 close()
         self._public_http_client = None
+        # T-collateral2 (2026-09-13): a caller that passes public_http_timeout=
+        # gets its v2 adapter's own dedicated CLOB transport (not the SDK's
+        # shared process-global one) -- unlike that shared transport, this one
+        # is owned by this PolymarketClient and must be released here, or a
+        # short-lived `with PolymarketClient(public_http_timeout=...) as clob:`
+        # (the live event reactor's pre-submit pattern) leaks one httpx
+        # connection pool per call.
+        v2_adapter = getattr(self, "_v2_adapter", None)
+        if v2_adapter is not None:
+            adapter_close = getattr(v2_adapter, "close", None)
+            if callable(adapter_close):
+                adapter_close()
 
     def __enter__(self) -> "PolymarketClient":
         return self
