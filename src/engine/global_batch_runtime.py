@@ -10022,6 +10022,7 @@ def process_current_global_batch(
                 else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
             )
         actuation_started = True
+        winner_receipt: EventSubmissionReceipt | None = None
         winner_receipt = (
             actuate_preflighted_winner.consume(
                 winner,
@@ -10134,6 +10135,24 @@ def process_current_global_batch(
             # starts. Preserve an explicit unknown-side-effect winner, stop the
             # multi-winner loop, and never requeue a deferred competitor until
             # command recovery resolves the first order.
+            #
+            # If actuate_winner/consume() already returned before this exception
+            # fired (the raise happened in downstream continuation/wealth-
+            # redecision bookkeeping, not in the actuator call itself),
+            # winner_receipt already carries the decision_proof_bundle that
+            # _submit_inner built from the pre-submit command certificates it
+            # persisted before the venue call. Carry that bundle forward instead
+            # of dropping it to None: the venue call already started, so the
+            # certificate must not depend on unrelated post-submit bookkeeping
+            # also succeeding. When actuate_winner/consume() itself is what
+            # raised, winner_receipt stays None and no bundle exists to carry —
+            # that is a genuine pre-actuation-return failure, and the resulting
+            # no-certificate/no-row behavior below is correct.
+            prior_bundle = (
+                winner_receipt.decision_proof_bundle
+                if winner_receipt is not None
+                else None
+            )
             unknown_receipt = EventSubmissionReceipt(
                 submitted=False,
                 event_id=winner.event_id,
@@ -10147,6 +10166,7 @@ def process_current_global_batch(
                 global_actuation=selected.actuation,
                 venue_call_started=True,
                 venue_ack_received=False,
+                decision_proof_bundle=prior_bundle,
             )
             receipts = dict(prepared_loser_receipts)
             receipts[winner.event_id] = unknown_receipt
