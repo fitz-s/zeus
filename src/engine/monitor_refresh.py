@@ -1241,10 +1241,10 @@ def _causal_market_velocity_1h(
 ) -> float | None:
     """Return held-side executable-bid drawdown from a causal reference.
 
-    Prefer the latest quote from one-to-two hours ago so established positions
-    retain a stable one-hour comparison.  A newly held token has no such row;
-    in that case use the causal trailing-hour high instead of converting absent
-    history to a false zero move.  The result is scale-free: ``0.10 -> 0.06``
+    Established tokens compare both the one-to-two-hour baseline and a recent
+    high supported by distinct source instants. An old low must not hide a
+    rapid collapse from that sustained high. New tokens retain the causal
+    trailing-hour high fallback. The result is scale-free: ``0.10 -> 0.06``
     and ``0.50 -> 0.30`` are the same ``-0.40`` market-path observation.
     """
     if conn is None or not observed_at:
@@ -1278,6 +1278,7 @@ def _causal_market_velocity_1h(
             """,
             (str(token_id), oldest_baseline, cutoff),
         ).fetchone()
+        has_old_reference = row is not None
         if row is None:
             row = conn.execute(
                 """
@@ -1307,6 +1308,44 @@ def _causal_market_velocity_1h(
             or now_price < 0.0
         ):
             return None
+        if has_old_reference:
+            # SCOPE: this token's protective market-path reference only.
+            # DRAIN: each causal quote/monitor recomputes the trailing window.
+            # RESET: recovery or expiry/loss of distinct high quotes removes
+            # this reference; the existing confirmation/gap law still applies.
+            # Deduplicate source instants before ranking bids, so repeated
+            # writes or one isolated high tick cannot establish a new high.
+            recent = conn.execute(
+                """
+                SELECT bid FROM (
+                    SELECT bid, ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(
+                            julianday(NULLIF(source_timestamp, '')),
+                            julianday(timestamp)
+                        ) ORDER BY id DESC
+                    ) AS source_rank
+                    FROM token_price_log
+                    WHERE token_id = ?
+                      AND COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) > julianday(?)
+                      AND COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) < julianday(?)
+                )
+                WHERE source_rank = 1 AND bid > 0.0 AND bid <= 1.0
+                ORDER BY bid DESC
+                LIMIT 1 OFFSET ?
+                """,
+                (
+                    str(token_id), cutoff, as_of.isoformat(),
+                    max(1, int(flash_crash_confirmations())) - 1,
+                ),
+            ).fetchone()
+            if recent is not None:
+                old_price = max(old_price, float(recent["bid"]))
         return (now_price / old_price) - 1.0
     except (TypeError, ValueError, sqlite3.Error):
         return None

@@ -1,5 +1,5 @@
 # Created: 2026-06-02
-# Last reused/audited: 2026-09-03 (held executable-bid carrier restoration)
+# Last reused/audited: 2026-09-13 (sustained recent bid collapse reference)
 # Authority basis: BUG#127 (守護 SEV1, GOAL#36 "a short price change is NOT edge reversal");
 #   src/state/portfolio.py flash_crash_should_fire + Position.evaluate_exit (single live site)
 # Purpose: Lock the evidence gate on FLASH_CRASH_PANIC so a bare market-price wiggle cannot
@@ -427,6 +427,91 @@ def test_causal_market_velocity_uses_recent_high_for_new_low_price_holding():
     )
 
     assert velocity == pytest.approx(-0.40)
+
+
+def _insert_collapse_quotes(conn, quotes):
+    conn.executemany(
+        """INSERT INTO token_price_log
+           (token_id, price, bid, source_timestamp, timestamp)
+           VALUES ('held', ?, ?, ?, ?)""",
+        [(bid, bid, instant, instant) for instant, bid in quotes],
+    )
+
+
+def test_recent_sustained_collapse_is_not_hidden_by_old_low_baseline():
+    conn = _price_log_connection()
+    _insert_collapse_quotes(conn, [
+        ("2026-09-13T23:59:00Z", 0.10),
+        ("2026-09-14T00:50:00Z", 0.80),
+        ("2026-09-14T00:51:00Z", 0.79),
+        ("2026-09-14T00:52:00Z", 0.78),
+        ("2026-09-14T00:59:00Z", 0.40),
+        ("2026-09-14T01:00:00Z", 0.38),
+    ])
+    velocity, confirmations = _causal_deep_market_catastrophe_evidence(
+        conn, token_id="held", current_bid=0.35,
+        observed_at="2026-09-14T01:01:00Z",
+    )
+    assert velocity == pytest.approx(0.35 / 0.79 - 1)
+    assert confirmations == flash_crash_confirmations()
+    pos = _held_position()
+    pos.flash_crash_count = confirmations
+    ctx = replace(
+        _exit_context(market_velocity_1h=velocity, fresh_prob=0.95),
+        current_market_price=0.35, best_bid=0.35, best_ask=0.36,
+    )
+    decision = pos.evaluate_exit(ctx)
+    assert decision.trigger == "FLASH_CRASH_PANIC"
+    assert decision.should_exit is True
+    assert 0.05 <= ctx.best_bid <= 0.95
+
+
+@pytest.mark.parametrize("high_quotes", [
+    [("2026-09-14T00:50:00Z", 0.80)],
+    [
+        ("2026-09-14T00:50:00Z", 0.80),
+        ("2026-09-14T00:50:00+00:00", 0.80),
+        ("2026-09-13T19:50:00-05:00", 0.80),
+    ],
+    [
+        ("2026-09-14T00:50:00Z", 0.80),
+        ("2026-09-14T00:51:00Z", 0.80),
+        ("2026-09-14T00:51:00Z", 0.10),
+    ],
+])
+def test_recent_reference_requires_distinct_supported_highs(high_quotes):
+    conn = _price_log_connection()
+    _insert_collapse_quotes(conn, [
+        ("2026-09-13T23:59:00Z", 0.10),
+        *high_quotes,
+        ("2026-09-14T01:00:00Z", 0.10),
+    ])
+    velocity, confirmations = _causal_deep_market_catastrophe_evidence(
+        conn, token_id="held", current_bid=0.08,
+        observed_at="2026-09-14T01:01:00Z",
+    )
+    assert velocity == pytest.approx(-0.20)
+    assert confirmations == 0
+
+
+def test_recent_high_cannot_retroactively_confirm_an_earlier_low():
+    conn = _price_log_connection()
+    _insert_collapse_quotes(conn, [
+        ("2026-09-13T23:59:00Z", 0.10),
+        ("2026-09-14T01:00:00Z", 0.38),
+        ("2026-09-14T01:00:30Z", 0.80),
+        ("2026-09-14T01:00:40Z", 0.79),
+    ])
+    assert _causal_market_velocity_1h(
+        conn, token_id="held", current_bid=0.38,
+        observed_at="2026-09-14T01:00:00Z",
+    ) == pytest.approx(2.80)
+    velocity, confirmations = _causal_deep_market_catastrophe_evidence(
+        conn, token_id="held", current_bid=0.35,
+        observed_at="2026-09-14T01:01:00Z",
+    )
+    assert velocity == pytest.approx(0.35 / 0.79 - 1)
+    assert confirmations == 1
 
 
 def test_causal_catastrophe_confirmation_refuses_quote_gap():
