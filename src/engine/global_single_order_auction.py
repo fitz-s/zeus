@@ -33,7 +33,6 @@ from src.solve.solver import (
     GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderDecision,
-    GlobalSingleOrderSellCandidate,
     PortfolioWealthWitness,
     global_candidates_from_native,
     global_sell_candidate_from_holding,
@@ -1480,22 +1479,6 @@ def select_prepared_global_auction(
             )
         return allocator_limit
 
-    def _candidate_payoff_q_lcb(
-        candidate: GlobalSingleOrderAnyCandidate,
-    ) -> float | None:
-        if isinstance(candidate, GlobalSingleOrderSellCandidate):
-            return None
-        if payoff_q_lcb_by_candidate is None:
-            return None
-        return payoff_q_lcb_by_candidate.get(
-            (
-                candidate.family_key,
-                candidate.bin_id,
-                candidate.side,
-                candidate.token_id,
-            )
-        )
-
     def _candidate_policy_rejection(
         candidate: GlobalSingleOrderAnyCandidate,
     ) -> str | None:
@@ -1555,7 +1538,6 @@ def select_prepared_global_auction(
         family_portfolio_endowment_resolver=(
             _family_endowment if book_epoch is not None else None
         ),
-        candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
         cancelled=cancelled,

@@ -7210,10 +7210,6 @@ def select_global_single_order(
         [str], FamilyPortfolioEndowment
     ]
     | None = None,
-    candidate_payoff_q_lcb_resolver: Callable[
-        [GlobalSingleOrderAnyCandidate], float | None
-    ]
-    | None = None,
     candidate_policy_rejection_resolver: Callable[
         [GlobalSingleOrderAnyCandidate], str | None
     ]
@@ -7956,19 +7952,6 @@ def select_global_single_order(
                 "PORTFOLIO_ENDOWMENT_UNAVAILABLE",
             )
         buy_endowments[candidate.candidate_id] = candidate_endowment
-        candidate_payoff_q_lcb = None
-        if candidate_payoff_q_lcb_resolver is not None:
-            try:
-                candidate_payoff_q_lcb = candidate_payoff_q_lcb_resolver(candidate)
-            except Exception:  # noqa: BLE001 - malformed bound invalidates this candidate
-                rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_UNAVAILABLE"
-                continue
-            if candidate_payoff_q_lcb is not None and (
-                not math.isfinite(candidate_payoff_q_lcb)
-                or not 0.0 <= candidate_payoff_q_lcb <= 1.0
-            ):
-                rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
-                continue
         payoff_probability_mean = family_payoff_point_q(
             probability_witness,
             bin_id=candidate.bin_id,

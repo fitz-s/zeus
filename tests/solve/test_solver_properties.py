@@ -1521,7 +1521,6 @@ def _global_select(
     candidate_capital_limit_resolver=None,
     candidate_portfolio_endowment_resolver=None,
     family_portfolio_endowment_resolver=None,
-    candidate_payoff_q_lcb_resolver=None,
     candidate_policy_rejection_resolver=None,
     payoff_q_correction_resolver=None,
     fractional_kelly_multiplier="1",
@@ -1590,7 +1589,6 @@ def _global_select(
             candidate_portfolio_endowment_resolver
         ),
         family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
-        candidate_payoff_q_lcb_resolver=candidate_payoff_q_lcb_resolver,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
         cancelled=cancelled,
@@ -6095,7 +6093,6 @@ def test_global_buy_uses_posterior_mean_when_lcb_is_below_market(side):
     decision = _global_select(
         (candidate,),
         cap="5",
-        candidate_payoff_q_lcb_resolver=lambda _candidate: 0.49,
     )
 
     assert decision.candidate is candidate
@@ -6124,7 +6121,6 @@ def test_global_buy_uses_mean_for_live_shape_with_negative_lcb_edge():
     decision = _global_select(
         (candidate,),
         cap="6.72",
-        candidate_payoff_q_lcb_resolver=lambda _candidate: 0.0647173,
     )
 
     assert decision.candidate is candidate
