@@ -6544,6 +6544,21 @@ CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
   authority_tier TEXT NOT NULL CHECK (authority_tier IN ('CHAIN','VENUE','DEGRADED')),
   raw_balance_payload_hash TEXT
 );
+-- "Latest snapshot at or before as_of" (evaluate_current_regime_capital_advantage
+-- ._current_total_portfolio_capital, exchange_reconcile, wallet_balance_head) had
+-- no index to serve WHERE captured_at<=? ORDER BY captured_at DESC,id DESC LIMIT 1
+-- and fell back to SCAN + TEMP B-TREE FOR ORDER BY: 9.05s of a 9.06s hop measured
+-- against the live 244,324-row table (~626 bytes of JSON payload columns per row).
+-- captured_at is NOT co-monotonic with id (854 rows out of order on the live
+-- table, one pair 600s apart) -- concurrent writers commit datetime.now(UTC)
+-- snapshots out of arrival order -- so a resumable id-frontier over this table
+-- would silently drop a low-id row whose captured_at lands after the prior
+-- run's as_of, unlike decision_log/position_events where the append key IS the
+-- ordering key. This is also a single-row point lookup, not an accumulating
+-- scan, so there is nothing to name or resume: the index alone makes it a
+-- SEARCH, correct for every row regardless of insertion order.
+CREATE INDEX IF NOT EXISTS idx_collateral_ledger_snapshots_captured_at
+  ON collateral_ledger_snapshots(captured_at, id);
 CREATE TABLE IF NOT EXISTS collateral_reservations (
   command_id TEXT PRIMARY KEY,
   reservation_type TEXT NOT NULL CHECK (reservation_type IN ('PUSD_BUY','CTF_SELL')),

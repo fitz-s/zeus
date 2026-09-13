@@ -1783,6 +1783,66 @@ def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
     assert "idx_execution_feasibility_latest_token_created" in latest_indexes
 
 
+def test_init_schema_trade_only_commits_collateral_ledger_snapshots_captured_at_index(
+    tmp_path,
+):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    conn.close()
+
+    reopened = sqlite3.connect(trade_db)
+    try:
+        indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('collateral_ledger_snapshots')"
+            ).fetchall()
+        }
+    finally:
+        reopened.close()
+
+    assert "idx_collateral_ledger_snapshots_captured_at" in indexes
+
+
+def test_latest_collateral_snapshot_query_uses_captured_at_index(tmp_path):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+
+    # Exact statement shape from
+    # evaluate_current_regime_capital_advantage._current_total_portfolio_capital.
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT id,pusd_balance_micro,reserved_pusd_for_buys_micro,captured_at,
+                   authority_tier
+            FROM collateral_ledger_snapshots
+            WHERE captured_at<=?
+            ORDER BY captured_at DESC,id DESC LIMIT 1
+            """,
+            ("2026-09-13T00:00:00+00:00",),
+        ).fetchall()
+    )
+    conn.close()
+
+    assert "idx_collateral_ledger_snapshots_captured_at" in plan
+    assert "SCAN collateral_ledger_snapshots" not in plan
+    assert "TEMP B-TREE" not in plan
+
+
 def test_init_schema_trade_only_commits_position_events_read_indexes(tmp_path):
     import sqlite3
 
