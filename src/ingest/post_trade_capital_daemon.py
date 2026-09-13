@@ -112,7 +112,7 @@ _CAPITAL_EVIDENCE_CHILD_CODE = (
     "from scripts.evaluate_current_regime_capital_advantage import "
     "evaluate, _atomic_write, _prior_proof_registry, "
     "_prior_realized_proof_samples, _prior_scan_floor, _prior_exit_quality, "
-    "_prior_order_capital_ledger; "
+    "_prior_order_capital_ledger, _prior_hold_settlement_quality; "
     "artifact_path = state_path('current_regime_capital_advantage.json'); "
     "artifact = evaluate("
     "world_path=state_path('zeus-world.db'), "
@@ -125,7 +125,9 @@ _CAPITAL_EVIDENCE_CHILD_CODE = (
     "scan_floor_decision_log_id=_prior_scan_floor(artifact_path), "
     "prior_exit_quality=_prior_exit_quality(artifact_path), "
     "prior_order_capital_ledger="
-    "_prior_order_capital_ledger(artifact_path)); "
+    "_prior_order_capital_ledger(artifact_path), "
+    "prior_hold_settlement_quality="
+    "_prior_hold_settlement_quality(artifact_path)); "
     "_atomic_write(artifact_path, artifact)"
 )
 _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0

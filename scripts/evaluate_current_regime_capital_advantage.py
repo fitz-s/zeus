@@ -2324,13 +2324,89 @@ def _globally_selected_exit_quality(
     }
 
 
+_HOLD_RECEIPT_ROW_PREDICATE = (
+    "timestamp>=? AND mode IN (?,?,?) "
+    "AND json_extract(artifact_json,'$.summary.schema_version')=22 "
+    "AND json_extract(artifact_json,'$.summary.global_selection_revision')=? "
+    "AND json_extract(artifact_json,'$.summary.holding_auction_coverage_zlib_b64') "
+    "IS NOT NULL"
+)
+"""The holding-receipt row test, shared verbatim by all three scan statements.
+
+Naming it once is what makes the resumed scan provably the same filter as the
+full walk: the named-id re-read, the extension walk and the full walk all
+substitute this identical text, so a row that stopped qualifying (retention
+deleted it, or ``as_of`` advanced past its ``timestamp``) drops out of a
+resumed run exactly as it drops out of a full one.
+"""
+
+
+def _verified_prior_hold_receipt_scan(
+    conn: sqlite3.Connection,
+    prior: Mapping[str, object] | None,
+) -> tuple[int, tuple[int, ...]] | None:
+    """Return the prior run's (scanned frontier id, candidate ids), or None.
+
+    The candidate list is the prior run's answer to "which decision_log rows in
+    the receipt tail carry a schema-22 holding coverage blob".  It is trusted
+    only when the row still sitting at the recorded frontier ``id`` carries the
+    recorded ``mode`` and ``timestamp``: ``decision_log`` is append-only under
+    ``id INTEGER PRIMARY KEY AUTOINCREMENT`` (the sole writer is
+    ``src/state/decision_chain.py``, which only ever ``INSERT``s and retention-
+    ``DELETE``s -- no statement in ``src/`` or ``scripts/`` rewrites
+    ``artifact_json``, ``mode`` or ``timestamp``), so a matching identity at the
+    frontier proves the ids at or below it still name the same rows.  No prior,
+    a malformed entry, a candidate above its own frontier, or a different
+    identity at the frontier means a full walk.
+    """
+
+    if not isinstance(prior, Mapping):
+        return None
+    frontier = prior.get("receipt_scan_frontier")
+    if not isinstance(frontier, Mapping):
+        return None
+    try:
+        frontier_id = int(frontier["max_decision_log_id"])
+        frontier_mode = str(frontier["frontier_mode"])
+        frontier_timestamp = str(frontier["frontier_timestamp"])
+        candidates = tuple(
+            int(value) for value in frontier["candidate_decision_log_ids"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if frontier_id <= 0 or not frontier_mode or not frontier_timestamp:
+        return None
+    if any(value <= 0 or value > frontier_id for value in candidates):
+        return None
+    row = conn.execute(
+        "SELECT mode,timestamp FROM decision_log WHERE id=?",
+        (frontier_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if str(row[0]) != frontier_mode or str(row[1]) != frontier_timestamp:
+        return None
+    return frontier_id, tuple(sorted(set(candidates)))
+
+
 def _held_to_binary_settlement_quality(
     conn: sqlite3.Connection,
     forecasts: sqlite3.Connection,
     *,
     as_of: datetime,
+    prior: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Grade schema-22 globally compared HOLD decisions at binary settlement."""
+    """Grade schema-22 globally compared HOLD decisions at binary settlement.
+
+    ``prior`` is this evaluator's own previous output.  It supplies only the
+    receipt scan's candidate row names (see
+    :func:`_verified_prior_hold_receipt_scan`); every coverage blob below is
+    re-read, re-hashed, re-integrity-checked and re-graded on every run.  The
+    scan exists because ``mode``, ``timestamp`` and ``id`` are the only indexed
+    terms: the three ``json_extract`` tests run per surviving row, and the
+    ~4,000 rows of the live receipt tail carry roughly 2.5 GB of
+    ``artifact_json`` between them to return under a hundred coverage rows.
+    """
 
     latest_by_position: dict[str, dict[str, object]] = {}
     rejection_counts: dict[str, int] = {}
@@ -2342,21 +2418,71 @@ def _held_to_binary_settlement_quality(
         0,
         max_decision_log_id - GLOBAL_HOLD_RECEIPT_SCAN_ROWS,
     )
-    rows = conn.execute(
-        "SELECT id,mode,artifact_json FROM decision_log "
-        "WHERE id>=? AND timestamp>=? "
-        "AND mode IN (?,?,?) "
-        "AND json_extract(artifact_json,'$.summary.schema_version')=22 "
-        "AND json_extract(artifact_json,'$.summary.global_selection_revision')=? "
-        "AND json_extract(artifact_json,'$.summary.holding_auction_coverage_zlib_b64') "
-        "IS NOT NULL ORDER BY id",
-        (
-            minimum_decision_log_id,
-            cutoff,
-            *GLOBAL_AUCTION_RECEIPT_MODES,
-            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
-        ),
-    ).fetchall()
+    frontier_row = conn.execute(
+        "SELECT mode,timestamp FROM decision_log WHERE id=?",
+        (max_decision_log_id,),
+    ).fetchone()
+    row_predicate_params = (
+        cutoff,
+        *GLOBAL_AUCTION_RECEIPT_MODES,
+        CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    )
+    prior_scan = _verified_prior_hold_receipt_scan(conn, prior)
+    # Both bounds of the shipped window are monotone non-decreasing in as_of:
+    # the id floor rises with MAX(id) and the timestamp cutoff rises with
+    # as_of, so a row can only ever leave this set, never re-enter it.  That is
+    # why naming the prior run's survivors is complete -- no unscanned row
+    # below the frontier can become eligible later -- and why re-applying the
+    # predicate to each named id is exact: a row that left drops out here.
+    # id<=frontier is free inside evaluate()'s read snapshot (MAX(id) and the
+    # scan see the same pages) and it keeps the recorded frontier honest.
+    if prior_scan is not None and prior_scan[0] <= max_decision_log_id:
+        prior_frontier, prior_candidates = prior_scan
+        placeholders = ",".join("?" * len(prior_candidates))
+        retained = (
+            conn.execute(
+                "SELECT id,mode,artifact_json FROM decision_log "
+                f"WHERE id IN ({placeholders}) AND id>=? AND id<=? "
+                f"AND {_HOLD_RECEIPT_ROW_PREDICATE} ORDER BY id",
+                (
+                    *prior_candidates,
+                    minimum_decision_log_id,
+                    max_decision_log_id,
+                    *row_predicate_params,
+                ),
+            ).fetchall()
+            if prior_candidates
+            else []
+        )
+        appended = conn.execute(
+            "SELECT id,mode,artifact_json FROM decision_log "
+            "WHERE id>? AND id<=? AND id>=? "
+            f"AND {_HOLD_RECEIPT_ROW_PREDICATE} ORDER BY id",
+            (
+                prior_frontier,
+                max_decision_log_id,
+                minimum_decision_log_id,
+                *row_predicate_params,
+            ),
+        ).fetchall()
+        rows = sorted([*retained, *appended], key=lambda row: int(row[0]))
+    else:
+        rows = conn.execute(
+            "SELECT id,mode,artifact_json FROM decision_log "
+            "WHERE id>=? AND id<=? "
+            f"AND {_HOLD_RECEIPT_ROW_PREDICATE} ORDER BY id",
+            (
+                minimum_decision_log_id,
+                max_decision_log_id,
+                *row_predicate_params,
+            ),
+        ).fetchall()
+    receipt_scan_frontier = {
+        "max_decision_log_id": max_decision_log_id,
+        "frontier_mode": str(frontier_row[0]) if frontier_row else "",
+        "frontier_timestamp": str(frontier_row[1]) if frontier_row else "",
+        "candidate_decision_log_ids": sorted(int(row[0]) for row in rows),
+    }
     for decision_log_id, mode, artifact_json in rows:
         try:
             artifact = json.loads(str(artifact_json or ""))
@@ -2515,6 +2641,7 @@ def _held_to_binary_settlement_quality(
         "awaiting_settlement_position_count": awaiting,
         "receipt_scan_row_limit": GLOBAL_HOLD_RECEIPT_SCAN_ROWS,
         "minimum_scanned_decision_log_id": minimum_decision_log_id,
+        "receipt_scan_frontier": receipt_scan_frontier,
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "curve": sorted(graded, key=lambda row: (row["settled_at"], row["position_id"])),
     }
@@ -2604,6 +2731,7 @@ def evaluate(
     scan_floor_decision_log_id: int = 0,
     prior_exit_quality: Mapping[str, object] | None = None,
     prior_order_capital_ledger: Mapping[str, object] | None = None,
+    prior_hold_settlement_quality: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     trades = _read_only(
         trades_path,
@@ -2688,6 +2816,7 @@ def evaluate(
             trades,
             forecasts,
             as_of=as_of,
+            prior=prior_hold_settlement_quality,
         )
         order_capital_ledger = _order_capital_ledger(
             trades,
@@ -2867,6 +2996,17 @@ def _prior_order_capital_ledger(path: Path) -> Mapping[str, object] | None:
     return prior if isinstance(prior, Mapping) else None
 
 
+def _prior_hold_settlement_quality(path: Path) -> Mapping[str, object] | None:
+    """Load the prior artifact's hold-settlement block; None means a full walk."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        prior = payload["globally_compared_hold_settlement_quality"]
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return prior if isinstance(prior, Mapping) else None
+
+
 def _prior_realized_proof_samples(path: Path) -> dict[int, Mapping[str, object]]:
     """Load prior samples for the compatible public artifact API.
 
@@ -2926,6 +3066,7 @@ def main() -> int:
     scan_floor_decision_log_id = _prior_scan_floor(args.artifact)
     prior_exit_quality = _prior_exit_quality(args.artifact)
     prior_order_capital_ledger = _prior_order_capital_ledger(args.artifact)
+    prior_hold_settlement_quality = _prior_hold_settlement_quality(args.artifact)
     try:
         artifact = evaluate(
             world_path=world,
@@ -2938,6 +3079,7 @@ def main() -> int:
             scan_floor_decision_log_id=scan_floor_decision_log_id,
             prior_exit_quality=prior_exit_quality,
             prior_order_capital_ledger=prior_order_capital_ledger,
+            prior_hold_settlement_quality=prior_hold_settlement_quality,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         artifact = {

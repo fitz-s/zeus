@@ -1746,6 +1746,302 @@ def test_globally_compared_hold_is_graded_at_verified_binary_settlement():
     assert evidence["curve"][0]["global_auction_decision_log_id"] == 1
 
 
+def _hold_receipt_scan_fixture():
+    """One graded HOLD plus noise rows the shipped scan must read past."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "mode TEXT,timestamp TEXT,artifact_json TEXT);"
+        "CREATE TABLE position_current (position_id TEXT,phase TEXT,city TEXT,"
+        "target_date TEXT,temperature_metric TEXT,condition_id TEXT,shares REAL,"
+        "settled_at TEXT);"
+        "CREATE TABLE position_events (position_id TEXT,event_type TEXT,occurred_at TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "position-hold", "settled", "Chicago", "2026-08-13", "high",
+            "condition-1", 5.0, "2026-08-14T00:00:02+00:00",
+        ),
+    )
+    # Rows whose artifact_json the shipped scan reads in full to reject.
+    conn.executemany(
+        "INSERT INTO decision_log (id,mode,timestamp,artifact_json) VALUES (?,?,?,?)",
+        [
+            (
+                identifier, "global_single_order_auction",
+                "2026-08-13T00:00:00+00:00",
+                json.dumps({"summary": {"schema_version": 21}}),
+            )
+            for identifier in range(1, 8)
+        ],
+    )
+    conn.execute(
+        "INSERT INTO decision_log (id,mode,timestamp,artifact_json) VALUES (?,?,?,?)",
+        (
+            8, "global_single_order_auction", "2026-08-13T00:00:00+00:00",
+            json.dumps({"summary": _hold_coverage_summary("position-hold")}),
+        ),
+    )
+    return conn
+
+
+def _hold_coverage_summary(position_id, *, decision_at="2026-08-13T00:00:00+00:00"):
+    coverage = [
+        {
+            "position_id": position_id,
+            "status": "EVALUATED",
+            "candidate_ids": ["sell-candidate"],
+            "decision_at_utc": decision_at,
+            "held_shares": "5",
+            "side": "YES",
+            "condition_id": "condition-1",
+        }
+    ]
+    raw_coverage = evaluator._canonical_json_bytes(coverage)
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    summary["holding_auction_coverage_zlib_b64"] = base64.b64encode(
+        zlib.compress(raw_coverage)
+    ).decode("ascii")
+    summary["holding_auction_coverage_sha256"] = evaluator.hashlib.sha256(
+        raw_coverage
+    ).hexdigest()
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+        summary
+    )
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    return summary
+
+
+def _hold_settlement_forecasts():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1, "Chicago", "2026-08-13", "high", 80, "F",
+            "2026-08-14T00:00:00+00:00", "2026-08-14T00:00:01+00:00",
+            "VERIFIED",
+        ),
+    )
+    return forecasts
+
+
+def test_hold_receipt_scan_frontier_round_trips_and_resumes():
+    conn = _hold_receipt_scan_fixture()
+    forecasts = _hold_settlement_forecasts()
+    as_of = datetime(2026, 8, 14, 1, tzinfo=timezone.utc)
+
+    first = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+    assert first["receipt_scan_frontier"] == {
+        "max_decision_log_id": 8,
+        "frontier_mode": "global_single_order_auction",
+        "frontier_timestamp": "2026-08-13T00:00:00+00:00",
+        "candidate_decision_log_ids": [8],
+    }
+    assert first["settlement_graded_hold_count"] == 1
+
+    # Resuming from the prior frontier reproduces the full walk byte for byte.
+    resumed = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=first
+    )
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(first)
+
+    # And resuming from a resumed artifact does not decay.
+    again = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=resumed
+    )
+    assert evaluator._canonical_json_bytes(
+        again
+    ) == evaluator._canonical_json_bytes(first)
+
+
+def test_hold_receipt_scan_picks_up_receipts_appended_past_the_frontier():
+    conn = _hold_receipt_scan_fixture()
+    forecasts = _hold_settlement_forecasts()
+    as_of = datetime(2026, 8, 14, 1, tzinfo=timezone.utc)
+    first = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+
+    # A later HOLD receipt on the same position, plus a noise row, land above
+    # the recorded frontier.  The later decision_at must win the position.
+    conn.execute(
+        "INSERT INTO decision_log (id,mode,timestamp,artifact_json) VALUES (?,?,?,?)",
+        (
+            9, "global_single_order_auction", "2026-08-13T00:00:00+00:00",
+            json.dumps({"summary": {"schema_version": 21}}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO decision_log (id,mode,timestamp,artifact_json) VALUES (?,?,?,?)",
+        (
+            10, "global_single_order_auction", "2026-08-13T12:00:00+00:00",
+            json.dumps(
+                {
+                    "summary": _hold_coverage_summary(
+                        "position-hold",
+                        decision_at="2026-08-13T12:00:00+00:00",
+                    )
+                }
+            ),
+        ),
+    )
+
+    resumed = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=first
+    )
+    walked = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+    assert resumed["receipt_scan_frontier"]["candidate_decision_log_ids"] == [8, 10]
+    assert resumed["curve"][0]["global_auction_decision_log_id"] == 10
+    assert resumed["curve"][0]["hold_decision_at"] == "2026-08-13T12:00:00+00:00"
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(walked)
+
+
+def test_hold_receipt_frontier_identity_mismatch_forces_a_full_walk():
+    conn = _hold_receipt_scan_fixture()
+    forecasts = _hold_settlement_forecasts()
+    as_of = datetime(2026, 8, 14, 1, tzinfo=timezone.utc)
+    first = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+
+    # Reuse is what the prior artifact says it is -- once the frontier verifies.
+    emptied = json.loads(json.dumps(first))
+    emptied["receipt_scan_frontier"]["candidate_decision_log_ids"] = []
+    reused = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=emptied
+    )
+    assert reused["settlement_graded_hold_count"] == 0
+    assert reused["status"] == "awaiting_exact_settled_hold_decisions"
+
+    # A frontier whose row no longer carries the recorded identity is not
+    # trusted: full walk, prior candidates ignored.
+    for field, value in (
+        ("frontier_mode", "other_mode"),
+        ("frontier_timestamp", "2026-08-01T00:00:00+00:00"),
+    ):
+        renamed = json.loads(json.dumps(emptied))
+        renamed["receipt_scan_frontier"][field] = value
+        walked = evaluator._held_to_binary_settlement_quality(
+            conn, forecasts, as_of=as_of, prior=renamed
+        )
+        assert evaluator._canonical_json_bytes(
+            walked
+        ) == evaluator._canonical_json_bytes(first)
+
+    # A candidate above its own frontier is malformed: full walk too.
+    impossible = json.loads(json.dumps(first))
+    impossible["receipt_scan_frontier"]["candidate_decision_log_ids"] = [999]
+    walked = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=impossible
+    )
+    assert evaluator._canonical_json_bytes(
+        walked
+    ) == evaluator._canonical_json_bytes(first)
+
+    # A missing or malformed frontier block is a full walk, never a guess.
+    for prior in ({}, {"receipt_scan_frontier": []}, None):
+        walked = evaluator._held_to_binary_settlement_quality(
+            conn, forecasts, as_of=as_of, prior=prior
+        )
+        assert evaluator._canonical_json_bytes(
+            walked
+        ) == evaluator._canonical_json_bytes(first)
+
+
+def test_hold_receipt_scan_regrades_a_rewritten_coverage_blob():
+    conn = _hold_receipt_scan_fixture()
+    forecasts = _hold_settlement_forecasts()
+    as_of = datetime(2026, 8, 14, 1, tzinfo=timezone.utc)
+    first = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+    assert first["curve"][0]["held_outcome"] == "YES"
+
+    # The scan names rows, never grades.  A rewritten coverage blob at a named
+    # id is re-read, re-hashed and re-graded: holding NO at the same settlement
+    # flips the binary payoff even on a resumed run.
+    flipped = _hold_coverage_summary("position-hold")
+    coverage = [
+        {
+            "position_id": "position-hold",
+            "status": "EVALUATED",
+            "candidate_ids": ["sell-candidate"],
+            "decision_at_utc": "2026-08-13T00:00:00+00:00",
+            "held_shares": "5",
+            "side": "NO",
+            "condition_id": "condition-1",
+        }
+    ]
+    raw = evaluator._canonical_json_bytes(coverage)
+    flipped["holding_auction_coverage_zlib_b64"] = base64.b64encode(
+        zlib.compress(raw)
+    ).decode("ascii")
+    flipped["holding_auction_coverage_sha256"] = evaluator.hashlib.sha256(
+        raw
+    ).hexdigest()
+    flipped["execution_binding_hash"] = global_auction_execution_binding_hash(
+        flipped
+    )
+    flipped["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        flipped
+    )
+    conn.execute(
+        "UPDATE decision_log SET artifact_json=? WHERE id=8",
+        (json.dumps({"summary": flipped}),),
+    )
+
+    resumed = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of, prior=first
+    )
+    walked = evaluator._held_to_binary_settlement_quality(
+        conn, forecasts, as_of=as_of
+    )
+    assert resumed["curve"][0]["held_outcome"] == "NO"
+    assert resumed["curve"][0]["result"] == "HELD_TO_ZERO"
+    assert evaluator._canonical_json_bytes(
+        resumed
+    ) == evaluator._canonical_json_bytes(walked)
+
+
+def test_prior_hold_settlement_quality_missing_or_invalid_means_full_walk(tmp_path):
+    assert evaluator._prior_hold_settlement_quality(tmp_path / "missing.json") is None
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(
+        json.dumps({"globally_compared_hold_settlement_quality": []}),
+        encoding="utf-8",
+    )
+    assert evaluator._prior_hold_settlement_quality(invalid) is None
+    artifact = tmp_path / "capital.json"
+    artifact.write_text(
+        json.dumps(
+            {"globally_compared_hold_settlement_quality": {"curve": []}}
+        ),
+        encoding="utf-8",
+    )
+    assert evaluator._prior_hold_settlement_quality(artifact) == {"curve": []}
+
+
 def test_only_complete_positive_exact_revision_evidence_passes():
     verdict, failures = evaluator._build_verdict(
         receipt={"ready": True},
