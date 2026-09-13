@@ -1524,10 +1524,23 @@ def _bind_selection_holdings(
     portfolio_state: object,
     wealth_witness: object,
     required_token_ids_by_family: Mapping[str, frozenset[str]] | None = None,
+    binding_failure_reason_by_family: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    """Bind every family holding to the same selection-time ledger generation."""
+    """Bind every family holding to the same selection-time ledger generation.
 
-    from src.engine.native_holdings import native_holdings_snapshot_from_positions
+    A family whose outcome space cannot be bound to native token identities
+    this cut (for example a not-yet-tokenized Day0 extreme bin) cannot be
+    evaluated. When ``binding_failure_reason_by_family`` is supplied, that
+    family is still returned with a vacuous holdings snapshot and its reason
+    is recorded there for the caller to fold into ``excluded_by_family``,
+    instead of this raising and aborting the whole selection attempt. Callers
+    that omit the dict keep the original fail-closed behavior.
+    """
+
+    from src.engine.native_holdings import (
+        NativeHoldingsSnapshot,
+        native_holdings_snapshot_from_positions,
+    )
 
     positions = tuple(getattr(portfolio_state, "positions", ()) or ())
     ledger_snapshot_id = str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
@@ -1556,19 +1569,30 @@ def _bind_selection_holdings(
         bindings = tuple(getattr(witness, "bindings", ()) or ())
         if not family_key or not bindings:
             raise ValueError("GLOBAL_HOLDINGS_PROBABILITY_BINDING_MISSING")
-        holdings = native_holdings_snapshot_from_positions(
-            family_key=family_key,
-            omega=SimpleNamespace(bins=bindings),
-            positions=positions,
-            ledger_snapshot_id=ledger_snapshot_id,
-            token_shares_by_id=token_shares_by_id,
-            pending_entry_endowments=pending_entry_endowments,
-            required_token_ids=(
-                required_token_ids_by_family.get(family_key)
-                if required_token_ids_by_family is not None
-                else None
-            ),
-        )
+        try:
+            holdings = native_holdings_snapshot_from_positions(
+                family_key=family_key,
+                omega=SimpleNamespace(bins=bindings),
+                positions=positions,
+                ledger_snapshot_id=ledger_snapshot_id,
+                token_shares_by_id=token_shares_by_id,
+                pending_entry_endowments=pending_entry_endowments,
+                required_token_ids=(
+                    required_token_ids_by_family.get(family_key)
+                    if required_token_ids_by_family is not None
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            if binding_failure_reason_by_family is None:
+                raise
+            binding_failure_reason_by_family[family_key] = (
+                f"GLOBAL_NATIVE_HOLDINGS_BINDING_FAILED:{exc}"
+            )
+            holdings = NativeHoldingsSnapshot(
+                family_key=family_key,
+                ledger_snapshot_id=ledger_snapshot_id,
+            )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound
 
@@ -8441,6 +8465,7 @@ def process_current_global_batch(
                         str(state[0]),
                         set(),
                     ).add(str(state[4]))
+                holdings_binding_failure_by_family: dict[str, str] = {}
                 prepared_for_selection = _bind_selection_holdings(
                     attempt_prepared,
                     portfolio_state=selection_state,
@@ -8449,7 +8474,42 @@ def process_current_global_batch(
                         family_key: frozenset(tokens)
                         for family_key, tokens in required_tokens_by_family.items()
                     },
+                    binding_failure_reason_by_family=(
+                        holdings_binding_failure_by_family
+                    ),
                 )
+                if holdings_binding_failure_by_family:
+                    # A family whose native token identities cannot be bound
+                    # this cut (e.g. an untokenized Day0 extreme bin) cannot
+                    # be evaluated -- exclude just that family through the
+                    # same typed mechanism as any other candidate-local
+                    # preflight rejection, rather than letting the exception
+                    # abort every other family's chance to trade this epoch.
+                    event_id_by_family_key = {
+                        str(
+                            getattr(
+                                getattr(candidate, "probability_witness", None),
+                                "family_key",
+                                "",
+                            )
+                            or ""
+                        ): event_id
+                        for event_id, candidate in attempt_prepared.items()
+                    }
+                    for family_key, reason in (
+                        holdings_binding_failure_by_family.items()
+                    ):
+                        _LOG.warning(
+                            "global batch native holdings binding failed, "
+                            "family excluded: family=%s event=%s reason=%s",
+                            family_key,
+                            event_id_by_family_key.get(family_key, ""),
+                            reason,
+                        )
+                    preflight_excluded_by_family = {
+                        **(preflight_excluded_by_family or {}),
+                        **holdings_binding_failure_by_family,
+                    }
                 prepared_for_selection, attempt_book_epoch = (
                     _bind_current_maker_fill_witnesses(
                         prepared_for_selection,

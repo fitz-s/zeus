@@ -119,8 +119,18 @@ def native_holdings_snapshot_from_positions(
         ):
             if required_tokens is not None and token_id not in required_tokens:
                 continue
-            if not token_id or token_id in token_bindings:
-                raise ValueError("current omega has missing or duplicate native token identity")
+            if not token_id:
+                raise ValueError(
+                    "current omega has missing native token identity: "
+                    f"condition_id={outcome.condition_id!r} side={side}"
+                )
+            if token_id in token_bindings:
+                prior_outcome, prior_side = token_bindings[token_id]
+                raise ValueError(
+                    "current omega has duplicate native token identity: "
+                    f"token_id={token_id!r} condition_id={outcome.condition_id!r} side={side} "
+                    f"duplicates condition_id={prior_outcome.condition_id!r} side={prior_side}"
+                )
             token_bindings[token_id] = (outcome, side)
     if required_tokens is not None and set(token_bindings) != set(required_tokens):
         raise ValueError(
