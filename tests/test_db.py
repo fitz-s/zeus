@@ -1843,6 +1843,78 @@ def test_latest_collateral_snapshot_query_uses_captured_at_index(tmp_path):
     assert "TEMP B-TREE" not in plan
 
 
+def test_latest_collateral_snapshot_query_is_correct_with_out_of_order_captured_at(
+    tmp_path,
+):
+    """The index must not change the answer when insertion order != captured_at order.
+
+    Concurrent writers to collateral_ledger_snapshots (the daemon's own 30s
+    refresh, exchange_reconcile, wallet_balance_head) each stamp
+    ``datetime.now(timezone.utc)`` independently and commit under lock
+    contention, so a lower ``id`` can carry a *later* ``captured_at`` than a
+    row inserted after it -- measured on the live table: 854 of 244,324 rows
+    out of order, one pair 600s apart. A frontier keyed on ``id`` would be
+    unsound here for exactly that reason; the index is not, because it is
+    built on ``captured_at`` itself and SQLite still considers every row.
+    This pins that: an out-of-order fixture must return the same answer as a
+    brute-force Python scan over every row, through the indexed query.
+    """
+
+    import random
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+
+    rng = random.Random(20260913)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    t = start
+    for i in range(2000):
+        t = t + timedelta(seconds=rng.uniform(20.0, 40.0))
+        captured_at = t
+        if rng.random() < 0.05:
+            # A low-id row whose captured_at lands well after its neighbors',
+            # mirroring the live table's up-to-600s reversals.
+            captured_at = t - timedelta(seconds=rng.uniform(30.0, 600.0))
+        rows.append((captured_at.isoformat(),))
+    conn.executemany(
+        "INSERT INTO collateral_ledger_snapshots "
+        "(pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,captured_at,authority_tier) "
+        "VALUES (0,0,0,'{}','{}',?,'CHAIN')",
+        rows,
+    )
+    conn.commit()
+
+    as_of = (start + timedelta(days=1)).isoformat()
+
+    # Brute-force reference: every row's (captured_at, id), Python-side max.
+    all_rows = conn.execute(
+        "SELECT id, captured_at FROM collateral_ledger_snapshots"
+    ).fetchall()
+    eligible = [r for r in all_rows if r["captured_at"] <= as_of]
+    expected = max(eligible, key=lambda r: (r["captured_at"], r["id"]))
+
+    actual = conn.execute(
+        "SELECT id,pusd_balance_micro,reserved_pusd_for_buys_micro,captured_at,"
+        "authority_tier FROM collateral_ledger_snapshots "
+        "WHERE captured_at<=? ORDER BY captured_at DESC,id DESC LIMIT 1",
+        (as_of,),
+    ).fetchone()
+    conn.close()
+
+    assert (actual["id"], actual["captured_at"]) == (
+        expected["id"],
+        expected["captured_at"],
+    )
+
+
 def test_init_schema_trade_only_commits_position_events_read_indexes(tmp_path):
     import sqlite3
 

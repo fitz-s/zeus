@@ -92,20 +92,91 @@ assumption the way a frontier would — and turns the same statement into a
 `SEARCH ... USING INDEX idx_collateral_ledger_snapshots_captured_at`, no
 `TEMP B-TREE`. Proved via `EXPLAIN QUERY PLAN` on a freshly-initialized schema
 (`tests/test_db.py::test_latest_collateral_snapshot_query_uses_captured_at_index`)
-and, on a 244,324-row synthetic fixture at the live table's blob size with the
-same 0.35% injected out-of-order rate, the indexed and unindexed query return
-the byte-identical row.
+and, on a 2,000-row fixture with a 5% injected out-of-order `captured_at` rate
+(mirroring the live table's 600 s reversals), the indexed query's answer
+matches a brute-force Python scan over every row
+(`tests/test_db.py::test_latest_collateral_snapshot_query_is_correct_with_out_of_order_captured_at`).
+
+### Index build cost — measured on a real-data copy, not asserted
+
+R-V review flagged that `captured_at` sits after the table's three JSON blob
+columns in row layout, the same risk shape as `96fb1a947` (`idx_decision_log_mode`
+on `decision_log`), which measured a **238 s** build for a `(mode, timestamp)`
+index specifically because `timestamp` follows `decision_log`'s 89-262 KB
+`artifact_json` and building it walked every row's overflow-page chain —
+`96fb1a947` deliberately indexed `mode` alone (a leading, non-overflowing
+column) to avoid that cost.
+
+Checked whether the same risk applies here. `collateral_ledger_snapshots`'
+three JSON columns average 626 bytes combined and max out at **11,356 bytes**
+per row on the live table; SQLite's per-page local-storage threshold at the
+live `page_size=4096` is roughly 4,061 bytes, so **10,519 of 244,324 rows
+(4.3%) do overflow** to external pages — a real but far smaller share than
+`decision_log`, where the mean row is 89-262 KB and effectively every row
+overflows.
+
+Measured directly rather than assumed: copied the **entire live table**
+(all columns, real data, including the 10,519 genuinely-overflowing rows) —
+not a same-shape synthetic fixture — into a fresh on-disk SQLite file via
+`ATTACH DATABASE 'file:state/zeus_trades.db?mode=ro' AS live` (read-only
+attach; no write to the live file) and `CREATE TABLE ... AS SELECT * FROM
+live.collateral_ledger_snapshots`, then built the exact same index on the
+copy in a fresh connection (no page-cache warmth carried over from the copy
+step):
+
+| step | wall time |
+| --- | --- |
+| copy 244,394 rows (all columns) off the live DB | 5.632 s |
+| `CREATE INDEX idx_collateral_ledger_snapshots_captured_at(captured_at, id)` | **0.166 s** |
+
+Three orders of magnitude below the 238 s precedent and well under the
+10 s threshold for keeping this in the idempotent `_TRADE_CLASS_DDL` bootstrap
+rather than moving it to a fenced, operator-run migration script (the
+`202607_drop_redundant_trade_indexes.py` pattern). This tracks the size
+difference between the two tables: `decision_log` averages hundreds of KB per
+row and is scanned in the millions; this table averages under a KB per row
+across 244k rows, so even its overflowing 4.3% cannot approach
+`decision_log`'s cost.
+
+Caveat: the copy is a freshly-written, compact file, not the live 199 GB
+file's actual fragmented physical layout, so this is a lower bound on true
+cold/live build cost the same way the sibling hop-timing docs' live numbers
+are lower bounds on cold-cache reads. Given the three-orders-of-magnitude
+margin, this does not change the DDL-vs-migration-script decision.
+
+Concurrent writers: `collateral_ledger_snapshots` is written by the daemon's
+own 30 s collateral refresh plus `exchange_reconcile`/`wallet_balance_head`.
+`scripts/deploy_live.py`'s `LIVE_TRADING_PREREQUISITE_LABELS` stops
+`post-trade-capital` and `riskguard-live` (writers to this DB) ahead of a
+live-trading restart, narrowing the window `init_schema_trade_only` runs in,
+though the exact statement-level interleaving inside `_cmd_restart_locked` was
+not traced end-to-end. Given the measured ~0.17 s build cost, any residual
+write-lock contention during a restart is bounded by that, not by an unbounded
+or minutes-scale hold — the concern the fencing precedent exists for.
 
 ### Not measured / not done in this change
 
 The DDL was **not** applied to the live `state/zeus_trades.db` — this task's
 DBs are read-only and `state/` is off limits. The index takes effect the next
 time a writer connection bootstraps against that file (idempotent
-`CREATE INDEX IF NOT EXISTS`, one-time cost proportional to the table's
-244,324 rows, not its 199 GB total size). No live before/after wall-clock pair
-for this hop exists yet; the 9.053 s "before" figure above is measured live,
-the "after" is a mechanism proof (index scan replaces table scan, byte-
-identical output) plus a synthetic-scale timing check, not a live re-measure.
+`CREATE INDEX IF NOT EXISTS`, now measured at ~0.17 s on a real-data copy of
+the table, not merely asserted). No live before/after wall-clock pair for the
+*read* hop exists yet; the 9.053 s "before" figure above is measured live, the
+"after" is a mechanism proof (index scan replaces table scan, byte-identical
+output including a committed out-of-order regression test —
+`tests/test_db.py::test_latest_collateral_snapshot_query_is_correct_with_out_of_order_captured_at`)
+plus the build-cost measurement above, not a live re-measure of the read
+query with the index actually in place.
+
+### `tests/test_ddl_copies_normalized_identical.py` — run, pre-existing failures confirmed
+
+This file's `TestCollateralDDLLockstep` asserts the world-copy and trade-copy
+DDL for `collateral_ledger_snapshots`/`collateral_reservations` stay in
+lockstep. Both fail identically on `4ec37eaf5` (HEAD before this change) and
+after it: `world_info == []` because `init_schema` never defines a world-side
+copy of either table at all. `architecture/db_table_ownership.yaml` confirms
+this is by design (`db: trade` only, no world ghost). Pre-existing, unrelated
+to this commit; not previously named in the commit's test report.
 
 ## The two `_realized_curve_with_deadline` hops — already fast, not touched
 
