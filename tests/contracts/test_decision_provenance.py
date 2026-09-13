@@ -204,6 +204,50 @@ def test_full_reason_is_never_truncated_at_storage():
     assert recovered["rejection"]["reason"] == huge
 
 
+def test_objective_by_candidate_survives_the_fallback_builder_for_mixed_family_rejections():
+    # The PRIMARY path (reactor.py merging into an already-attached
+    # receipt.envelope_json) never calls this builder at all -- but the
+    # FALLBACK path does (pre-receipt rejections, foreign receipt builders),
+    # and src/events/reactor.py._write_regret passes objective_by_candidate
+    # through to it for family/multi-candidate rejections. Without this
+    # passthrough, a family rejection hitting the fallback branch would
+    # silently drop the per-candidate objective map even though the reactor
+    # computed it.
+    objective_by_candidate = {
+        "candidate-buy-no-33c": "POSTERIOR_PREDICTIVE_MEAN",
+        "candidate-buy-no-34c": "ROBUST",
+    }
+    env = build_decision_provenance_envelope(
+        None, None, bundle=None, decision_time=DECISION,
+        rejection={
+            "stage": "TRADE_SCORE",
+            "reason": "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+            "objective": "MIXED_PER_CANDIDATE",
+            "objective_by_candidate": objective_by_candidate,
+        },
+    )
+    assert env["rejection"]["objective"] == "MIXED_PER_CANDIDATE"
+    assert env["rejection"]["objective_by_candidate"] == objective_by_candidate
+    # Round-trips through canonical JSON exactly as the DB column stores it.
+    recovered = json.loads(envelope_to_json(env))
+    assert recovered["rejection"]["objective_by_candidate"] == objective_by_candidate
+
+
+def test_objective_by_candidate_absent_when_not_given():
+    # No regression on the single-candidate/non-family path: omitting
+    # objective_by_candidate must not add the key at all.
+    env = build_decision_provenance_envelope(
+        None, None, bundle=None, decision_time=DECISION,
+        rejection={
+            "stage": "TRADE_SCORE",
+            "reason": "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            "objective": "POSTERIOR_PREDICTIVE_MEAN",
+        },
+    )
+    assert env["rejection"]["objective"] == "POSTERIOR_PREDICTIVE_MEAN"
+    assert "objective_by_candidate" not in env["rejection"]
+
+
 # --- relationship: a real reactor rejection carries the envelope on the regret row --------------
 
 

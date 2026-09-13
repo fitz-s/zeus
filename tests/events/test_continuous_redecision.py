@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 import inspect
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -1281,48 +1281,141 @@ def test_entry_screen_blocks_after_recent_full_economics_negative_until_price_im
     assert len(enqueued) == 1
 
 
-def test_entry_screen_bypasses_backoff_for_positive_mean_route_trade_score():
-    """Pin the live-behavior change from src/events/reactor.py's regret
-    trade_score fix (commit 70ba2e88a): a POSTERIOR_PREDICTIVE_MEAN regret row
-    now carries trade_score = edge_expected (payoff_q_point - cost) instead of
-    edge_lcb, so a mean route that was rejected downstream (e.g. by the
-    submit-boundary re-check) but had genuine positive expected edge now reads
-    trade_score > 0 here. _full_economics_reject_still_blocks treats any
-    positive trade_score as "the rejection did not prove non-value" and skips
-    the price/q_lcb-improvement backoff entirely -- re-entry is allowed on the
-    very next screen cycle even with NO price or belief improvement at all.
-    This is the intended semantics ("did the rejection have positive edge
-    under its own deciding objective") but is a materially wider bypass
-    population than before this fix, when almost every mean-route row carried
-    a non-positive edge_lcb and fell into the same backoff path exercised by
-    test_entry_screen_blocks_after_recent_full_economics_negative_until_price_improves
-    above.
+def _write_qkernel_regret_row_via_reactor(
+    conn: sqlite3.Connection,
+    *,
+    global_probability_functional: str,
+    edge_lcb: float,
+    edge_expected: float,
+    payoff_q_point: float = 0.779,
+    payoff_q_lcb: float = 0.748,
+    cost: float = 0.74962,
+    city: str,
+    target_date: str = "2026-06-01",
+    metric: str = "high",
+    bin_label: str = "b30",
+    direction: str = "buy_yes",
+) -> None:
+    """Write one no_trade_regret_events row through the REAL _write_regret
+    path so trade_score originates from _qkernel_regret_trade_score against an
+    actual qkernel_execution_economics certificate -- not a hand-picked
+    literal. A revert of that function's mean/robust branch selection must
+    break any test built on this helper's output, not just document the
+    unrelated consumer's own pre-existing gate logic.
     """
-    conn = _mem_world()
-    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
-    key = ("Wuhan|2026-06-01|high", "b30", "buy_yes")
-    rejection = {
-        key: cr.FullEconomicsReject(
-            execution_price=cr._all_in_cost(0.70),
-            q_lcb_5pct=0.90,
-            trade_score=0.03,  # edge_expected > 0 for a POSTERIOR_PREDICTIVE_MEAN route
-            created_at="2026-05-31T00:20:00+00:00",
-        )
-    }
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
-    # Same price as the prior rejection, no improvement at all -- the
-    # negative-trade_score sibling test blocks under this exact setup.
-    unchanged_price = {
-        key: cr.PriceQuote(price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"),
-    }
-    enqueued = cr.enqueue_live_redecisions(
-        conn,
-        decision_time="2026-05-31T00:30:00+00:00",
-        price_lookup=unchanged_price,
-        min_edge=0.01,
-        recent_full_economics_rejections=rejection,
+    store = EventStore(conn)
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"{city}|{target_date}|{metric}|{bin_label}|{direction}",
+        source="cycle-test",
+        observed_at="2026-05-31T00:00:00+00:00",
+        available_at="2026-05-31T00:00:00+00:00",
+        received_at="2026-05-31T00:00:01+00:00",
+        payload={"city": city, "target_date": target_date, "metric": metric},
+        priority=50,
     )
-    assert len(enqueued) == 1
+    store.insert_or_ignore(event)
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        family_id=f"{city}|{target_date}|{metric}",
+        bin_label=bin_label,
+        direction=direction,
+        executable_snapshot_id="exec-qkernel-regression",
+        qkernel_execution_economics={
+            "payoff_q_point": payoff_q_point,
+            "payoff_q_lcb": payoff_q_lcb,
+            "cost": cost,
+            "edge_lcb": edge_lcb,
+            "edge_expected": edge_expected,
+            "global_probability_functional": global_probability_functional,
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "TRADE_SCORE_NON_POSITIVE:qkernel_regression_test",
+        receipt=receipt,
+        decision_time=datetime(2026, 5, 31, 0, 20, tzinfo=timezone.utc),
+    )
+
+
+def test_full_economics_reject_from_real_write_path_distinguishes_mean_and_robust_route():
+    """Pin the live-behavior change from src/events/reactor.py's regret
+    trade_score fix (commit 70ba2e88a) THROUGH the actual write path -- not by
+    hand-feeding a literal trade_score into the unchanged consumer. A
+    POSTERIOR_PREDICTIVE_MEAN regret row is written with a real qkernel
+    certificate carrying edge_expected > 0 / edge_lcb <= 0; a
+    LOWER_CVAR_PARAMETER_DRAWS (robust) twin is written with the identical
+    cert shape but the opposite functional. Both rows are then read back
+    through the real cr.read_recent_full_economics_rejections reader (the same
+    one continuous_redecision uses in production) before being handed to
+    _full_economics_reject_still_blocks. Reverting
+    _qkernel_regret_trade_score's mean/robust branch selection makes the mean
+    route's trade_score go back to edge_lcb (<= 0) and this test fails.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    _write_qkernel_regret_row_via_reactor(
+        conn,
+        global_probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        edge_lcb=-0.00162,
+        edge_expected=0.02938,
+        city="Wuhan",
+        bin_label="mean-bin",
+    )
+    _write_qkernel_regret_row_via_reactor(
+        conn,
+        global_probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+        edge_lcb=-0.00162,
+        edge_expected=0.02938,
+        city="Beijing",
+        bin_label="robust-bin",
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+    mean_key = ("Wuhan", "2026-06-01", "high", "mean-bin", "buy_yes")
+    robust_key = ("Beijing", "2026-06-01", "high", "robust-bin", "buy_yes")
+    mean_rejection = rejections[mean_key]
+    robust_rejection = rejections[robust_key]
+
+    # Same cert on both routes except the functional -- confirms the reader
+    # actually persisted a different trade_score per functional, not a fixed
+    # test literal.
+    assert mean_rejection.trade_score == pytest.approx(0.02938)
+    assert robust_rejection.trade_score == pytest.approx(-0.00162)
+
+    # No price/belief improvement offered on either side -- trade_score sign
+    # alone decides the outcome.
+    assert cr._full_economics_reject_still_blocks(
+        mean_rejection,
+        current_execution_price=float(mean_rejection.execution_price),
+        current_q_lcb=float(mean_rejection.q_lcb_5pct),
+    ) is False
+    assert cr._full_economics_reject_still_blocks(
+        robust_rejection,
+        current_execution_price=float(robust_rejection.execution_price),
+        current_q_lcb=float(robust_rejection.q_lcb_5pct),
+    ) is True
 
 
 def test_entry_screen_backoff_compares_all_in_cost_basis():

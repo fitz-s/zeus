@@ -4492,7 +4492,11 @@ class OpportunityEventReactor:
         one envelope_json, so when given it overrides ``objective`` with the single agreed value if
         every candidate shares one objective, or the literal ``"MIXED_PER_CANDIDATE"`` when they
         disagree — a reader must join a row's own candidate identifier against this map, never trust
-        a bare ``rejection.objective`` on a family row when candidates disagree.
+        a bare ``rejection.objective`` on a family row when candidates disagree. There is no
+        ``candidate_id`` column on ``no_trade_regret_events``: a row's candidate id is only
+        recoverable by parsing it out of its own ``rejection_reason`` text (format
+        ``EVENT_BOUND_CANDIDATE_REJECTED:<reason>:candidate_id=<id>``), then looking that id up as
+        ``json_extract(envelope_json, '$.rejection.objective_by_candidate.' || <parsed_id>)``.
 
         FALLBACK path: receipts without an attached envelope (pre-receipt rejections, foreign
         receipt builders) get the minimal envelope built from what the reactor can reach.
