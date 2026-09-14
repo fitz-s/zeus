@@ -977,6 +977,86 @@ class TestDay0DiurnalResidualRefitScheduled:
 
         assert health_calls[-1][1]["failed"] is True
 
+    def test_skips_fitter_when_incumbent_already_fit_through_today(self, tmp_path) -> None:
+        """Boot catch-up (next_run_time=now) re-fires on EVERY mesh restart. The fitter is
+        walk-forward on fit_date (drops records dated >= fit_date), so a same-day rerun
+        trains on the identical record set and rewrites the same artifact after ~4 min over
+        ~2.3M rows during the boot window (observed live 2026-09-14 08:24Z). When the
+        incumbent's fit_date already equals today's UTC date the tick must skip the
+        subprocess and report SUCCESS (not FAILED) -- same law as the sigma-floor tick."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        out_path = tmp_path / "day0_diurnal_residual.json"
+        out_path.write_text(
+            _json.dumps({"fit_date": today, "schema_version": 1, "pooled": {}, "city": {}}),
+            encoding="utf-8",
+        )
+        before_text = out_path.read_text(encoding="utf-8")
+
+        run_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._day0_diurnal_residual_refit_tick()
+
+        assert run_calls == [], "the fitter subprocess must not be invoked on a same-day skip"
+        assert out_path.read_text(encoding="utf-8") == before_text, "incumbent must be untouched"
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_day0_diurnal_residual_refit"
+        assert kwargs["failed"] is False, "a skip is a healthy outcome, not a failure"
+
+    def test_runs_fitter_when_incumbent_is_from_a_prior_day(self, tmp_path) -> None:
+        """An incumbent fit through YESTERDAY (or any earlier date) must still trigger a
+        normal refit -- the guard is fit_date-equality-to-today only, never a broader
+        staleness check (the loader's 14-day gate stays the staleness authority)."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+
+        yesterday = (
+            _dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=1)
+        ).isoformat()
+        out_path = tmp_path / "day0_diurnal_residual.json"
+        out_path.write_text(
+            _json.dumps({"fit_date": yesterday, "schema_version": 1, "pooled": {}, "city": {}}),
+            encoding="utf-8",
+        )
+
+        run_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._day0_diurnal_residual_refit_tick.__wrapped__()
+
+        assert len(run_calls) == 1, "a prior-day incumbent must not be skipped"
+
 
 class TestSettlementSigmaFloorMergeGate:
     """Unit coverage for _settlement_sigma_floor_merge_gate — the promotion gate the daily

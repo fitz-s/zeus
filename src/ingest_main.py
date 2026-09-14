@@ -4355,6 +4355,28 @@ def _day0_diurnal_residual_refit_tick():
     world_db = STATE_DIR / "zeus-world.db"
     forecast_db = STATE_DIR / "zeus-forecasts.db"
     out_path = STATE_DIR / "day0_diurnal_residual.json"
+    fit_date = datetime.now(timezone.utc).date().isoformat()
+
+    # BOOT-CATCH-UP RE-FIRE GUARD (same law as _settlement_sigma_floor_refit_tick):
+    # next_run_time=now re-runs this tick on every mesh restart. The fitter is
+    # walk-forward on fit_date (it drops every record dated >= fit_date), so a
+    # same-day rerun trains on the identical record set and rewrites the same
+    # artifact after ~4 min over ~2.3M rows of both DBs -- during the boot window,
+    # when the host can least afford it. An incumbent whose fit_date already equals
+    # today's UTC date has nothing to gain before tomorrow; skip and report SUCCESS.
+    # A cron run always fires on a new fit_date, so the check is a no-op there.
+    if out_path.exists():
+        try:
+            incumbent_fit_date = json.loads(out_path.read_text(encoding="utf-8")).get("fit_date")
+        except Exception:
+            incumbent_fit_date = None
+        if incumbent_fit_date == fit_date:
+            logger.info(
+                "[DAY0_DIURNAL_RESIDUAL_REFIT] skipping -- incumbent already fit through %s",
+                fit_date,
+            )
+            return
+
     r = subprocess.run(
         [
             venv_python, str(script_path),
