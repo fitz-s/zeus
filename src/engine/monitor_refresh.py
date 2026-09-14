@@ -5619,6 +5619,27 @@ def _post_local_day_final_daily_verdict(
     return float(belief.held_side_prob), hard_pos, True
 
 
+# Settlement families _post_local_day_final_daily_verdict / evaluate_hard_fact_exit
+# can ever produce a verdict for: evaluate_hard_fact_exit only proceeds past its own
+# gate for "noaa" (explicitly excludes "wu_icao", and implicitly anything else);
+# _final_daily_observation_extreme's VERIFIED-daily-row branch only matches "hko"
+# (_final_daily_source_matches returns False unconditionally for every other
+# source_type — a NOAA/Ogimet daily value alone is not settlement finality), while
+# its hourly-coverage fallback (_final_complete_hourly_observation_extreme) is
+# "noaa"-only. A settlement family outside {"noaa", "hko"} (WU-settled: Auckland,
+# Jinan, Jakarta, Lagos, Taipei, and the cwa_station template) is never on this
+# lane at all and must fall through to its own statistical redecision lane
+# unchanged — this predicate must gate the post-local-day decline, never
+# connection presence (conn is never None live; that guard was inert in
+# production and mistakenly declined every non-eligible post-midnight position).
+_POST_LOCAL_DAY_HARD_FACT_ELIGIBLE_SOURCE_TYPES = frozenset({"noaa", "hko"})
+
+
+def _post_local_day_hard_fact_lane_applies(city) -> bool:
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    return source_type in _POST_LOCAL_DAY_HARD_FACT_ELIGIBLE_SOURCE_TYPES
+
+
 def _day0_absorbing_hard_fact_overlay(
     *,
     pos: Position,
@@ -5641,12 +5662,12 @@ def _day0_absorbing_hard_fact_overlay(
     # only exclude), then the same intraday monotonic-exclusion evidence this
     # overlay already used for same-day (evaluate_hard_fact_exit — can still
     # validly KILL a bin from partial evidence). Only when NEITHER produces
-    # anything AND a real connection was available to check (conn is not
-    # None — with no connection we cannot tell "unavailable" from "untested",
-    # so leave test doubles that pass conn=None on the pre-existing fallback
-    # path) does it decline by the named POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE
-    # reason instead of silently falling through into the degenerate
-    # remaining-window recompute.
+    # anything AND the position's settlement family is actually on this lane
+    # (_post_local_day_hard_fact_lane_applies) does it decline by the named
+    # POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE reason instead of silently
+    # falling through into the degenerate remaining-window recompute — a
+    # family never on this lane (WU-settled) must fall through unchanged,
+    # never decline here.
     is_after_target_day = _is_position_after_target_local_day(pos, city, target_d)
     if not (_is_position_target_local_day(pos, city, target_d) or is_after_target_day):
         return None
@@ -5654,7 +5675,7 @@ def _day0_absorbing_hard_fact_overlay(
     def _post_local_day_final_observation_unavailable() -> (
         tuple[float, Position, bool] | None
     ):
-        if not is_after_target_day or conn is None:
+        if not is_after_target_day or not _post_local_day_hard_fact_lane_applies(city):
             return None
         stale = _clone_for_probability_refresh(pos)
         setattr(stale, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)

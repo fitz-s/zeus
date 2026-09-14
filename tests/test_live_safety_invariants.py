@@ -2763,7 +2763,15 @@ def test_monitor_primary_belief_read_elapsed_seconds_recorded_on_position():
         monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
-    with patch.object(monitor_refresh, "recompute_native_probability", fake_recompute):
+    # This test measures the elapsed-time instrumentation around the belief
+    # read, not hard-fact routing — Chicago is a real, NOAA-settled city and
+    # target_date is (incidentally, for this fixture's own purposes) in the
+    # past, so _day0_absorbing_hard_fact_overlay is now a genuinely eligible
+    # first attempt; disable it so this test keeps exercising the
+    # recompute_native_probability path (and its sleep) it was written for.
+    with patch.object(
+        monitor_refresh, "_day0_absorbing_hard_fact_overlay", lambda **_kw: None
+    ), patch.object(monitor_refresh, "recompute_native_probability", fake_recompute):
         monitor_refresh.refresh_position(None, DummyClob(), pos)
 
     elapsed = getattr(
@@ -22567,6 +22575,57 @@ def test_incomplete_exit_observability_reason_names_exit_calibration():
         pos.applied_validations = [f"exit_q:{non_failure_source}"]
         reason = _incomplete_exit_observability_reason(decision, ctx, pos=pos)
         assert reason == "INCOMPLETE_EXIT_CONTEXT (missing=belief)"
+
+
+def test_exit_q_source_tag_scoped_per_cycle_not_stale():
+    """R-BL finding 2 (2026-09-14): evaluate_exit's applied-list filter
+    originally scoped only "exit_q:raw"/"exit_q:market_anchored" — a two-item
+    allowlist. Any OTHER exit_q:<source> tag (e.g.
+    exit_q:entry_calibration_unavailable) was never stripped, so it persisted
+    in applied_validations across cycles forever after one occurrence, and
+    _incomplete_exit_observability_reason's first-match scan would report a
+    stale failure source even in a cycle where calibration had recovered.
+    Every exit_q:<source> tag must be re-derived (stripped, then re-appended)
+    on every evaluate_exit call, regardless of its value."""
+    from unittest.mock import patch
+
+    from src.state.portfolio import ExitContext
+
+    pos = _make_position(trade_id="exit-q-scoping", entry_ci_width=0.02)
+    pos.applied_validations = []
+
+    ctx = ExitContext(
+        fresh_prob=0.30,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.55,
+        current_market_price_is_fresh=True,
+        best_bid=0.10,
+        current_ci=(0.25, 0.35),
+        hours_to_settlement=10.0,
+        position_state="active",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+
+    # Cycle N: the operator's market-anchored calibration branch fails closed.
+    with patch.object(
+        Position,
+        "_exit_q_mean_and_source",
+        return_value=(Decimal("0"), False, "entry_calibration_unavailable"),
+    ):
+        pos.evaluate_exit(ctx)
+    assert "exit_q:entry_calibration_unavailable" in pos.applied_validations
+    assert pos.applied_validations.count("exit_q:entry_calibration_unavailable") == 1
+
+    # Cycle N+1: calibration recovered. The stale failure tag must not survive.
+    with patch.object(
+        Position,
+        "_exit_q_mean_and_source",
+        return_value=(Decimal("0.30"), True, "raw"),
+    ):
+        pos.evaluate_exit(ctx)
+    assert "exit_q:raw" in pos.applied_validations
+    assert "exit_q:entry_calibration_unavailable" not in pos.applied_validations
 
 
 def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):

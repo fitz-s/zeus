@@ -149,8 +149,9 @@ _DECISION_SCOPED_VALIDATIONS: frozenset[str] = frozenset({
     "current_held_ci_invalid",
     "entry_held_ci_invalid",
     "predicted_bin_exit_law",
-    "exit_q:market_anchored",
-    "exit_q:raw",
+    # exit_q:<source> tags (all of them, not only "market_anchored"/"raw") are
+    # stripped by the startswith("exit_q:") check at their filter site instead
+    # of listed here — see evaluate_exit's applied-list comprehension.
     "sell_reversal",
     "hold",
     "evidence_unavailable_third_state",
@@ -1150,6 +1151,14 @@ class Position:
             validation
             for validation in self.applied_validations
             if validation not in _DECISION_SCOPED_VALIDATIONS
+            # Every exit_q:<source> tag is re-derived below (line ~1174) exactly
+            # once per call — not only the two "healthy" source values. Scoping
+            # only "exit_q:raw"/"exit_q:market_anchored" let a failure source
+            # (e.g. exit_q:entry_calibration_unavailable) persist across cycles
+            # once calibration recovered, and _incomplete_exit_observability_reason
+            # reads the FIRST exit_q: match — a stale failure tag ahead of this
+            # cycle's fresh one would misreport a recovered cycle as still failing.
+            and not validation.startswith("exit_q:")
         ]
 
         held_shares = Decimal(str(self.effective_shares))

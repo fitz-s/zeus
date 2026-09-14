@@ -4184,3 +4184,37 @@ def test_440a58af_shaped_position_complete_coverage_yields_determinate_exit_q(
     assert evidence_ok is True
     assert exit_q_source == "raw"
     assert float(q_raw) == pytest.approx(1.0)
+
+
+def test_wu_icao_post_local_day_falls_through_unchanged_with_real_conn(monkeypatch):
+    """R-BL finding 1 (2026-09-14): the post-local-day decline must gate on
+    settlement-family lane applicability, never on connection presence —
+    conn is never None live, so a conn-is-None guard is inert in production
+    and would wrongly decline for EVERY non-eligible post-midnight position
+    (5 live WU-settled cities: Auckland, Jinan, Jakarta, Lagos, Taipei, plus
+    the cwa_station template). A wu_icao-settled position past local
+    midnight, evaluated with a REAL connection, must return None — byte-
+    identical to base — so its own WU statistical redecision lane runs
+    unchanged; it must never receive POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE
+    or have its freshness flags revoked, since it was never on this
+    hard-fact/final-daily lane at all."""
+    import src.engine.monitor_refresh as mr
+
+    position = _post_day_hard_fact_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: True)
+
+    city = SimpleNamespace(
+        name="Auckland", timezone="Pacific/Auckland", settlement_source_type="wu_icao",
+    )
+    real_conn = sqlite3.connect(":memory:")
+    try:
+        result = mr._day0_absorbing_hard_fact_overlay(
+            pos=position, conn=real_conn, city=city, target_d="2026-06-12",
+        )
+    finally:
+        real_conn.close()
+
+    assert result is None
+    assert position.applied_validations == []
+    assert getattr(position, "last_monitor_prob_is_fresh", False) is False
