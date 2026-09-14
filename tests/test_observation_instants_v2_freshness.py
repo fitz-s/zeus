@@ -697,7 +697,7 @@ def test_catch_up_missing_instants_derives_ogimet_budget_from_deadline(monkeypat
         "London": "ogimet_metar_eglc",
         "Miami": "ogimet_metar_kmia",
         "NYC": "ogimet_metar_klga",
-        "Sao Paulo": "ogimet_metar_sbgl",
+        "Sao Paulo": "ogimet_metar_sbgr",
     }
     for i, city in enumerate(cities):
         # Oldest-first ordering: London's hole is oldest, Sao Paulo's newest.
@@ -714,7 +714,11 @@ def test_catch_up_missing_instants_derives_ogimet_budget_from_deadline(monkeypat
 
     monkeypatch.setattr(obs_tick, "_tick_ogimet_city", fake_ogimet_city)
 
-    frozen_now = datetime(2026, 9, 14, 4, 0, 0, tzinfo=timezone.utc)
+    # 2026-09-13's ordinal % 4 == 0, so the fairness rotation this drain
+    # applies whenever budget < population (see the dedicated rotation
+    # test below) is a no-op here -- this test isolates the budget
+    # arithmetic alone.
+    frozen_now = datetime(2026, 9, 13, 4, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(obs_tick, "datetime", SimpleNamespace(now=lambda tz=None: frozen_now))
     deadline = frozen_now + timedelta(seconds=65)
 
@@ -723,3 +727,208 @@ def test_catch_up_missing_instants_derives_ogimet_budget_from_deadline(monkeypat
     assert drained == ["London", "Miami", "NYC"]
     assert totals["ogimet_cities_touched"] == 3
     assert totals["ogimet_cities_deferred"] == 1
+
+
+def test_catch_up_missing_instants_zero_budget_drains_nothing_but_wu_still_runs(monkeypatch) -> None:
+    """Remaining time smaller than one Ogimet slot -> zero Ogimet cities
+    drained (every hole deferred to the next scan), but WU has no provider
+    rate limit and still drains fully in the same call."""
+    import scripts.obs_live_tick as obs_tick
+    from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="London", data_source="ogimet_metar_eglc", target_date="2026-09-13")
+    _seed_instants_missing(conn, city="Taipei", data_source="wu_icao_history", target_date="2026-09-13")
+
+    ogimet_calls: list[str] = []
+    wu_calls: list[str] = []
+    monkeypatch.setattr(
+        obs_tick, "_tick_ogimet_city",
+        lambda city_name, *_a, **_k: ogimet_calls.append(city_name)
+        or obs_tick.TickResult(city=city_name, tier="OGIMET_METAR"),
+    )
+    monkeypatch.setattr(
+        obs_tick, "_tick_wu_city",
+        lambda city_name, *_a, **_k: wu_calls.append(city_name)
+        or obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_written=24),
+    )
+
+    frozen_now = datetime(2026, 9, 13, 4, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(obs_tick, "datetime", SimpleNamespace(now=lambda tz=None: frozen_now))
+    deadline = frozen_now + timedelta(seconds=OGIMET_MIN_INTERVAL_SECONDS - 1)  # < one slot
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30, deadline=deadline)
+
+    assert ogimet_calls == []
+    assert wu_calls == ["Taipei"]
+    assert totals["ogimet_cities_touched"] == 0
+    assert totals["ogimet_cities_deferred"] == 1
+    assert totals["wu_cities_touched"] == 1
+
+
+def test_catch_up_missing_instants_rotates_only_when_budget_below_population(monkeypatch) -> None:
+    """When the budget cannot cover every pending Ogimet city, the drain
+    applies the same day-rotation-offset fairness formula
+    daily_obs_append.catch_up_missing already uses for this identical API,
+    so a chronic shortfall cannot let the same subset of cities always win.
+    A sufficient budget (tested above) stays pure oldest-first with no
+    rotation."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    cities = ["London", "Miami", "NYC", "Sao Paulo"]
+    sources = {
+        "London": "ogimet_metar_eglc", "Miami": "ogimet_metar_kmia",
+        "NYC": "ogimet_metar_klga", "Sao Paulo": "ogimet_metar_sbgr",
+    }
+    for i, city in enumerate(cities):
+        _seed_instants_missing(
+            conn, city=city, data_source=sources[city],
+            target_date=(date(2026, 9, 10) + timedelta(days=i)).isoformat(),
+        )
+
+    drained: list[str] = []
+    monkeypatch.setattr(
+        obs_tick, "_tick_ogimet_city",
+        lambda city_name, *_a, **_k: drained.append(city_name)
+        or obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=24),
+    )
+
+    # 2026-09-15's ordinal % 4 == 2 (see the offset table in the sibling
+    # budget test) -- oldest-first order is [London, Miami, NYC, Sao Paulo];
+    # rotating by 2 gives [NYC, Sao Paulo, London, Miami], and budget=3
+    # takes the first 3 of THAT: NYC, Sao Paulo, London -- not the pure
+    # oldest-first [London, Miami, NYC] a sufficient-budget run would pick.
+    frozen_now = datetime(2026, 9, 15, 4, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(obs_tick, "datetime", SimpleNamespace(now=lambda tz=None: frozen_now))
+    deadline = frozen_now + timedelta(seconds=65)  # budget=3 < population=4
+
+    obs_tick.catch_up_missing_instants(conn, days_back=30, deadline=deadline)
+
+    assert drained == ["NYC", "Sao Paulo", "London"]
+
+
+def test_catch_up_missing_instants_writes_through_db_path_not_a_bare_connection(monkeypatch, tmp_path) -> None:
+    """The drain must write via db_path (a Path), exactly like
+    run_live_tick's production call (ingest_k2_obs_tick passes
+    db_path=STATE_DIR/'zeus-world.db', i.e. this module's own
+    DEFAULT_DB_PATH) -- never a bare sqlite3.Connection from
+    get_world_connection. A bare connection makes _write_rows take its
+    direct-insert branch, skipping the db_writer_lock(db_path,
+    WriteClass.BULK) + BEGIN IMMEDIATE branch that fires only for a Path
+    -- the discipline the live tick relies on against its own concurrent
+    writes to this table."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="Taipei", data_source="wu_icao_history", target_date="2026-09-13")
+    _seed_instants_missing(conn, city="London", data_source="ogimet_metar_eglc", target_date="2026-09-13")
+
+    received: list = []
+    monkeypatch.setattr(
+        obs_tick, "_tick_wu_city",
+        lambda city_name, target, *_a, **_k: received.append(target)
+        or obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_written=1),
+    )
+    monkeypatch.setattr(
+        obs_tick, "_tick_ogimet_city",
+        lambda city_name, target, *_a, **_k: received.append(target)
+        or obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=1),
+    )
+
+    db_path = tmp_path / "zeus-world.db"
+    obs_tick.catch_up_missing_instants(conn, days_back=30, db_path=db_path)
+
+    assert len(received) == 2
+    for target in received:
+        assert target == db_path
+        assert isinstance(target, Path)
+        assert not isinstance(target, sqlite3.Connection)
+
+
+def test_catch_up_missing_instants_drained_row_matches_live_tick_stamping(monkeypatch, tmp_path) -> None:
+    """A row written by the drain must carry byte-identical
+    authority/source_role/training_allowed/causality_status stamping to a
+    row written by run_live_tick's own direct call for the same (city,
+    source, target_date). Both compute these deterministically from
+    source_role_assessment_for_city_source(city, source, date) inside
+    insert_rows, and both now write through the identical db_path-based
+    _write_rows branch (see the db_path routing test above), so the two
+    rows must match exactly."""
+    import sqlite3 as _sqlite3
+    from src.data.wu_hourly_client import HourlyObservation
+    from src.state.data_coverage import DataTable, record_missing
+    from src.state.db import init_schema
+    import scripts.obs_live_tick as obs_tick
+
+    # Taipei, not Chicago: Chicago's settlement_source_type is actually
+    # "noaa" (OGIMET_METAR tier) -- expected_source_for_city resolves the
+    # row's `source` from the city's real tier regardless of which tick
+    # function is called, so a WU-tier assertion needs a genuinely
+    # WU_ICAO-tier city. Taipei is confirmed WU_ICAO via tier_resolver.
+    obs_kwargs = dict(
+        city="Taipei",
+        target_date="2026-09-13",
+        local_hour=20.0,
+        local_timestamp="2026-09-13T20:00:00+08:00",
+        utc_timestamp="2026-09-13T12:00:00+00:00",
+        utc_offset_minutes=480,
+        dst_active=0,
+        is_ambiguous_local_hour=0,
+        is_missing_local_hour=0,
+        time_basis="utc_hour_bucket_extremum",
+        hour_max_temp=31.0,
+        hour_min_temp=29.0,
+        hour_max_raw_ts="2026-09-13T12:00:00+00:00",
+        hour_min_raw_ts="2026-09-13T12:00:00+00:00",
+        temp_unit="C",
+        station_id="RCSS",
+        observation_count=1,
+        latest_raw_ts="2026-09-13T12:53:00+00:00",
+        latest_temp=30.0,
+    )
+
+    def fake_fetch(**_kwargs):
+        return SimpleNamespace(failed=False, observations=[HourlyObservation(**obs_kwargs)])
+
+    monkeypatch.setattr(obs_tick, "fetch_wu_hourly", fake_fetch)
+    monkeypatch.setattr(
+        obs_tick, "proof_of_possession_available_at", lambda _t: "2026-09-14T04:00:00+00:00",
+    )
+
+    stamp_cols = ("authority", "source_role", "training_allowed", "causality_status")
+
+    def _stamped_row(db_path):
+        c = _sqlite3.connect(str(db_path))
+        row = c.execute(
+            f"SELECT {', '.join(stamp_cols)} FROM observation_instants "
+            "WHERE city='Taipei' AND source='wu_icao_history' AND target_date='2026-09-13'"
+        ).fetchone()
+        c.close()
+        return row
+
+    # (1) The live tick's own direct call -- run_live_tick's production path.
+    live_db = tmp_path / "live.db"
+    init_schema(_sqlite3.connect(str(live_db)))
+    obs_tick._tick_wu_city(
+        "Taipei", live_db, start_date=date(2026, 9, 13), end_date=date(2026, 9, 13), dry_run=False,
+    )
+    live_row = _stamped_row(live_db)
+    assert live_row is not None, "setup failure: live-tick direct call wrote no row"
+
+    # (2) The drain, through catch_up_missing_instants -- must reach the
+    # same _tick_wu_city call via db_path.
+    drain_db = tmp_path / "drain.db"
+    init_schema(_sqlite3.connect(str(drain_db)))
+    read_conn = _sqlite3.connect(":memory:")
+    read_conn.row_factory = _sqlite3.Row
+    init_schema(read_conn)
+    record_missing(
+        read_conn, data_table=DataTable.OBSERVATION_INSTANTS,
+        city="Taipei", data_source="wu_icao_history", target_date="2026-09-13",
+    )
+    obs_tick.catch_up_missing_instants(read_conn, days_back=30, db_path=drain_db)
+    drained_row = _stamped_row(drain_db)
+    assert drained_row is not None, "setup failure: drain wrote no row"
+
+    assert tuple(drained_row) == tuple(live_row)

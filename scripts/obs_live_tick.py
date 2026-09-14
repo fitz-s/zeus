@@ -774,6 +774,7 @@ def catch_up_missing_instants(
     *,
     days_back: int = 30,
     deadline: datetime | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
 ) -> dict:
     """Drain observation_instants MISSING/retry-ready-FAILED rows for the
     WU_ICAO / OGIMET_METAR live-tick sources.
@@ -786,6 +787,19 @@ def catch_up_missing_instants(
     on a city's once-daily Ogimet shard slot (``_ogimet_city_shard_for_hour``)
     -- had no repair path until that city's next scheduled slot 24h later.
 
+    ``conn`` is used ONLY to read data_coverage (``find_pending_fills``) --
+    never to write observation_instants. Writes go through ``db_path`` into
+    ``_tick_wu_city`` / ``_tick_ogimet_city`` exactly as ``run_live_tick``
+    calls them in production (``ingest_k2_obs_tick`` passes
+    ``db_path=STATE_DIR / "zeus-world.db"``, i.e. this module's own
+    ``DEFAULT_DB_PATH``, the default here) -- NOT a bare ``sqlite3.Connection``
+    from ``get_world_connection``. Passing a live connection would make
+    ``_write_rows`` take its direct-insert branch
+    (``isinstance(conn_or_path, sqlite3.Connection)``), skipping the
+    ``db_writer_lock(db_path, WriteClass.BULK)`` + ``BEGIN IMMEDIATE``
+    branch that fires only for a ``Path`` -- the same discipline the live
+    tick itself relies on against its own concurrent writes to this table.
+
     Routes by ``tier_for_city``, never by matching the coverage row's source
     string, so an HKO-tier (or any non-WU/Ogimet) row can never reach
     ``_tick_ogimet_city``. WU has no provider rate limit and drains every
@@ -794,20 +808,23 @@ def catch_up_missing_instants(
     -- both are real, already-existing quantities (the caller's own job
     timeout and the provider's documented per-IP interval,
     ``src.data.ogimet_hourly_client.OGIMET_MIN_INTERVAL_SECONDS``), not an
-    invented cap. Cities are drained oldest-hole-first (the order
-    ``find_pending_fills`` already returns, sorted by target_date ASC), so
-    whatever the budget cannot reach this run is simply the oldest-priority
-    work left for the next scan -- carry-forward the fixed daily shard
-    lacks, and idempotent by construction (an unfilled hole is still a
-    MISSING row next time). If ``deadline`` is None, Ogimet drains
-    everything pending, same as WU.
+    invented cap. If ``deadline`` is None, Ogimet drains everything pending,
+    same as WU.
 
-    (``daily_obs_append.catch_up_missing``'s analogous Ogimet half still
-    uses a bare ``max_ogimet_cities=2`` literal plus a day-rotation offset
-    for fairness across days; that is a separate, pre-existing surface and
-    is not touched here. Oldest-hole-first is not equivalent to that
-    rotation -- it is staleness-aware rather than blind -- so it is not
-    layered on top here.)
+    Cities are drained oldest-hole-first (the order ``find_pending_fills``
+    already returns, sorted by target_date ASC), so whatever the budget
+    cannot reach this run is simply the oldest-priority work left for the
+    next scan -- carry-forward the fixed daily shard lacks, and idempotent
+    by construction (an unfilled hole is still a MISSING row next time).
+    Only when the budget is smaller than the Ogimet population does this
+    also apply ``daily_obs_append.catch_up_missing``'s day-rotation offset
+    (same formula: ``today.toordinal() % population``) to the oldest-first
+    list before slicing to budget -- so a chronic budget shortfall cannot
+    let the same subset of cities monopolize every run, while a
+    sufficient budget (the common case) stays pure oldest-first with no
+    rotation. ``daily_obs_append.catch_up_missing`` itself still carries
+    its own separate ``max_ogimet_cities=2`` literal; that surface is not
+    touched here.
     """
     from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
     from src.data.tier_resolver import UnsupportedTierError
@@ -847,7 +864,7 @@ def catch_up_missing_instants(
     for city_name, dates in wu_by_city.items():
         try:
             result = _tick_wu_city(
-                city_name, conn, start_date=min(dates), end_date=max(dates), dry_run=False,
+                city_name, db_path, start_date=min(dates), end_date=max(dates), dry_run=False,
             )
         except Exception:
             logger.exception("catch_up_missing_instants: WU city %s failed", city_name)
@@ -859,8 +876,8 @@ def catch_up_missing_instants(
             totals["wu_cities_failed"] += 1
 
     # find_pending_fills already orders rows by target_date ASC, and dict
-    # insertion order tracks first-seen row per city, so this iteration is
-    # already oldest-hole-first without a separate sort.
+    # insertion order tracks first-seen row per city, so this is already
+    # oldest-hole-first without a separate sort.
     ogimet_items = list(ogimet_by_city.items())
     if deadline is None:
         ogimet_budget = len(ogimet_items)
@@ -869,10 +886,15 @@ def catch_up_missing_instants(
         ogimet_budget = max(0, int(remaining_seconds // OGIMET_MIN_INTERVAL_SECONDS))
     totals["ogimet_cities_deferred"] = max(0, len(ogimet_items) - ogimet_budget)
 
-    for city_name, dates in ogimet_items[:ogimet_budget]:
+    selected = ogimet_items
+    if ogimet_budget < len(ogimet_items):
+        offset = datetime.now(timezone.utc).date().toordinal() % len(ogimet_items)
+        selected = ogimet_items[offset:] + ogimet_items[:offset]
+
+    for city_name, dates in selected[:ogimet_budget]:
         try:
             result = _tick_ogimet_city(
-                city_name, conn, start_date=min(dates), end_date=max(dates), dry_run=False,
+                city_name, db_path, start_date=min(dates), end_date=max(dates), dry_run=False,
             )
         except Exception:
             logger.exception("catch_up_missing_instants: Ogimet city %s failed", city_name)

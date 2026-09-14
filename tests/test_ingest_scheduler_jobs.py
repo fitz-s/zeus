@@ -830,7 +830,15 @@ class TestHoleScannerInstantsDrain:
         assert mock_catch_up_obs.called
         # New observation_instants drain runs additively, on its own fresh
         # world connection (the scan's own world_conn was already closed).
-        mock_catch_up_instants.assert_called_once_with(instants_conn, days_back=30, deadline=ANY)
+        # instants_conn is read-only (find_pending_fills); the write path
+        # goes through db_path=DEFAULT_DB_PATH, the same path
+        # ingest_k2_obs_tick passes run_live_tick in production -- never a
+        # bare connection (see catch_up_missing_instants's docstring).
+        from scripts.obs_live_tick import DEFAULT_DB_PATH
+
+        mock_catch_up_instants.assert_called_once_with(
+            instants_conn, days_back=30, deadline=ANY, db_path=DEFAULT_DB_PATH,
+        )
         assert mock_wc.call_count == 2
         instants_conn.close.assert_called_once()
 

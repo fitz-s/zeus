@@ -1716,12 +1716,18 @@ def _k2_hole_scanner_tick():
         with get_forecasts_connection_with_world(write_class="bulk") as obs_conn:
             catch_up = catch_up_missing(obs_conn, days_back=30)
         logger.info("K2 hole_scanner observation catch-up: %s", catch_up)
-        from scripts.obs_live_tick import catch_up_missing_instants
+        from scripts.obs_live_tick import DEFAULT_DB_PATH, catch_up_missing_instants
         instants_deadline = tick_started_at + timedelta(seconds=_K2_HOLE_SCANNER_TIMEOUT_SECONDS)
+        # instants_conn is read-only here (find_pending_fills against
+        # data_coverage); the actual observation_instants writes go through
+        # db_path=DEFAULT_DB_PATH, the same path ingest_k2_obs_tick passes
+        # to run_live_tick in production -- see catch_up_missing_instants's
+        # docstring for why a bare connection must not be used for the write.
         instants_conn = get_world_connection(write_class="bulk")
         try:
             instants_catch_up = catch_up_missing_instants(
                 instants_conn, days_back=30, deadline=instants_deadline,
+                db_path=DEFAULT_DB_PATH,
             )
         finally:
             instants_conn.close()

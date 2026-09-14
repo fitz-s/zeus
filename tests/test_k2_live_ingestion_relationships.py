@@ -325,7 +325,11 @@ def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
     # Scan's own world connection closes before the OBSERVATIONS drain runs;
     # the observation_instants drain (added 2026-09-14) opens and closes a
     # second, fresh world connection of its own.
-    catch_up_instants.assert_called_once_with(instants_conn, days_back=30, deadline=ANY)
+    from scripts.obs_live_tick import DEFAULT_DB_PATH
+
+    catch_up_instants.assert_called_once_with(
+        instants_conn, days_back=30, deadline=ANY, db_path=DEFAULT_DB_PATH,
+    )
     world_conn.close.assert_called_once()
     instants_conn.close.assert_called_once()
     forecasts_conn.close.assert_called_once()
