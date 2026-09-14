@@ -2237,6 +2237,242 @@ def test_transitional_hints_ignore_dense_monitor_history_with_bounded_work(tmp_p
     assert progress_calls <= 500
 
 
+def test_batched_position_event_hints_match_naive_per_position_reference(tmp_path):
+    """The set-query batched hint helpers must return byte-identical results to
+    a naive per-position round-trip reference, across positions exercising the
+    common case, the unbounded Day0 fallback (event pushed outside the
+    recent-row cap), a real pending-exit transition, and a position with no
+    transitional-type events at all.
+    """
+    from src.state.db import (
+        _PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES,
+        _TRANSITIONAL_HINT_EVENT_TYPES,
+        _TRANSITIONAL_HINT_ROWS_PER_POSITION,
+        _exit_state_hint_from_event,
+        _latest_position_event_envs,
+        _portfolio_loader_runtime_state_from_phase,
+        _query_transitional_position_hints,
+        init_schema_trade_only,
+    )
+    from src.state.projection import POSITION_EVENT_ENVS
+
+    conn = get_connection(tmp_path / "batched-hint-equivalence.db")
+    init_schema_trade_only(conn)
+
+    # Position 1: common case — entry + Day0 both inside the recent-row window.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="pos-plain", phase="day0_window"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="pos-plain", event_type="ENTRY_ORDER_FILLED",
+        status="filled", occurred_at="2026-04-01T00:00:03+00:00", sequence_no=1,
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="pos-plain", event_type="DAY0_WINDOW_ENTERED",
+        status="entered", occurred_at="2026-04-01T00:05:00+00:00", sequence_no=2,
+        payload={"day0_entered_at": "2026-04-01T00:05:00+00:00"},
+    )
+
+    # Position 2: dense — an early DAY0_WINDOW_ENTERED pushed outside the
+    # top-N recent-row window by later transitional-type filler events; only
+    # the uncapped fallback (_hydrate_unbounded_day0_hints) recovers it.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="pos-dense-day0", phase="day0_window"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="pos-dense-day0", event_type="DAY0_WINDOW_ENTERED",
+        status="entered", occurred_at="2026-04-01T00:00:01+00:00", sequence_no=1,
+        payload={"day0_entered_at": "2026-04-01T00:00:01+00:00"},
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, env,
+            payload_json
+        ) VALUES (?, 'pos-dense-day0', 1, ?, 'POSITION_OPEN_INTENT', ?, 'day0_window',
+                  'day0_window', 'center_buy', NULL, 'snap-fill', NULL, NULL, 'test', ?,
+                  NULL, 'tests', 'test', '{}')
+        """,
+        (
+            (
+                f"pos-dense-day0:filler:{n}",
+                n,
+                f"2026-04-01T00:{n // 60:02d}:{n % 60:02d}+00:00",
+                f"pos-dense-day0:filler:{n}",
+            )
+            for n in range(2, 2 + _TRANSITIONAL_HINT_ROWS_PER_POSITION + 5)
+        ),
+    )
+
+    # Position 3: pending-exit — a real EXIT_INTENT transition into
+    # pending_exit, exercising _hydrate_pending_exit_pre_state_hints.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="pos-pending-exit", phase="pending_exit"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="pos-pending-exit", event_type="EXIT_INTENT",
+        status="pending", occurred_at="2026-04-01T00:10:00+00:00", sequence_no=1,
+        phase_before="active", phase_after="pending_exit",
+    )
+
+    # Position 4: bare — only a non-transitional event type.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="pos-bare", phase="active"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="pos-bare", event_type="MONITOR_REFRESHED",
+        status="refreshed", occurred_at="2026-04-01T00:00:00+00:00", sequence_no=1,
+        phase_before="active", phase_after="active",
+    )
+
+    conn.commit()
+
+    trade_ids = ["pos-plain", "pos-dense-day0", "pos-pending-exit", "pos-bare"]
+
+    actual_hints = _query_transitional_position_hints(conn, trade_ids)
+    actual_envs = _latest_position_event_envs(conn, trade_ids)
+
+    def naive_transitional_hints(conn, trade_ids):
+        event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
+        hints: dict[str, dict] = {}
+        for trade_id in trade_ids:
+            rows = conn.execute(
+                f"""
+                SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ({event_placeholders})
+                 ORDER BY sequence_no DESC
+                 LIMIT ?
+                """,
+                (trade_id, *_TRANSITIONAL_HINT_EVENT_TYPES, _TRANSITIONAL_HINT_ROWS_PER_POSITION),
+            ).fetchall()
+            for row in rows:
+                tid = str(row["trade_key"] or "")
+                bucket = hints.setdefault(tid, {})
+                try:
+                    details = json.loads(row["payload"] or "{}")
+                except Exception:
+                    details = {}
+                occurred_at = str(row["occurred_at"] or "")
+                if "entry_fill_verified" not in bucket and "entry_fill_verified" in details:
+                    bucket["entry_fill_verified"] = bool(details.get("entry_fill_verified"))
+                if "admin_exit_reason" not in bucket and details.get("admin_exit_reason"):
+                    bucket["admin_exit_reason"] = str(details.get("admin_exit_reason"))
+                if "day0_entered_at" not in bucket and details.get("day0_entered_at"):
+                    bucket["day0_entered_at"] = str(details.get("day0_entered_at"))
+                elif (
+                    "day0_entered_at" not in bucket
+                    and row["event_type"] == "DAY0_WINDOW_ENTERED"
+                    and occurred_at
+                ):
+                    bucket["day0_entered_at"] = occurred_at
+                if (
+                    "order_posted_at" not in bucket
+                    and row["event_type"] in {"POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"}
+                    and occurred_at
+                ):
+                    bucket["order_posted_at"] = occurred_at
+                if (
+                    "entered_at" not in bucket
+                    and row["event_type"] == "ENTRY_ORDER_FILLED"
+                    and occurred_at
+                ):
+                    bucket["entered_at"] = occurred_at
+                if "exit_state" not in bucket:
+                    if row["event_type"] == "EXIT_RETRY_RELEASED":
+                        bucket["exit_state"] = ""
+                        continue
+                    exit_state = _exit_state_hint_from_event(str(row["event_type"] or ""), details)
+                    if exit_state:
+                        bucket["exit_state"] = exit_state
+        missing_day0 = [t for t in trade_ids if not hints.get(t, {}).get("day0_entered_at")]
+        for trade_id in missing_day0:
+            row = conn.execute(
+                """
+                SELECT position_id, payload_json, occurred_at
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'DAY0_WINDOW_ENTERED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is not None:
+                try:
+                    details = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    details = {}
+                day0 = str(details.get("day0_entered_at") or row["occurred_at"] or "")
+                if day0:
+                    hints.setdefault(trade_id, {})["day0_entered_at"] = day0
+        missing_pre_exit = [t for t in trade_ids if not hints.get(t, {}).get("pre_exit_state")]
+        event_ph = ", ".join("?" for _ in _PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES)
+        for trade_id in missing_pre_exit:
+            row = conn.execute(
+                f"""
+                SELECT position_id, phase_before
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ({event_ph})
+                   AND phase_after = 'pending_exit'
+                   AND COALESCE(phase_before, '') != ''
+                   AND phase_before != phase_after
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (trade_id, *_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES),
+            ).fetchone()
+            if row is not None:
+                phase_before = str(row["phase_before"] or "")
+                if phase_before:
+                    hints.setdefault(trade_id, {})["pre_exit_state"] = (
+                        _portfolio_loader_runtime_state_from_phase(phase_before)
+                    )
+        return hints
+
+    def naive_latest_envs(conn, position_ids):
+        envs: dict[str, str] = {}
+        for pid in position_ids:
+            row = conn.execute(
+                """
+                SELECT position_id, env
+                  FROM position_events
+                 WHERE position_id = ?
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (pid,),
+            ).fetchone()
+            if row is None:
+                continue
+            env = str(row["env"] or "").strip().lower()
+            if env in POSITION_EVENT_ENVS:
+                envs[str(row["position_id"])] = env
+        return envs
+
+    expected_hints = naive_transitional_hints(conn, trade_ids)
+    expected_envs = naive_latest_envs(conn, trade_ids)
+    conn.close()
+
+    assert actual_hints == expected_hints
+    assert actual_envs == expected_envs
+    # Sanity: the fixture actually exercises the fallback/edge paths, not just
+    # the common case that both implementations would trivially agree on.
+    assert actual_hints["pos-dense-day0"]["day0_entered_at"] == "2026-04-01T00:00:01+00:00"
+    assert actual_hints["pos-pending-exit"]["pre_exit_state"]
+    assert "pos-bare" not in actual_hints
+    assert actual_envs == {
+        "pos-plain": "test",
+        "pos-dense-day0": "test",
+        "pos-pending-exit": "test",
+        "pos-bare": "test",
+    }
+
+
 def test_portfolio_loader_open_only_filters_target_families_in_sql(tmp_path):
     from src.state.db import query_portfolio_loader_view
 

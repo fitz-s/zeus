@@ -12318,22 +12318,31 @@ def _latest_position_event_envs(
         return {}
     if "env" not in _table_columns(conn, "position_events"):
         return {}
+    ids = [pid for pid in dict.fromkeys(str(position_id or "") for position_id in position_ids) if pid]
+    if not ids:
+        return {}
+    # Unlike the other batched hint helpers, this lookup carries no event_type
+    # filter -- it wants the single latest row of ANY type per position. A
+    # ROW_NUMBER() window here would force SQLite to materialize and sort each
+    # position's ENTIRE event history before it can pick rn=1, since a window
+    # function cannot stop early within a partition. The correlated scalar
+    # subquery below preserves the cheap "seek to the tail of this position's
+    # index range, read one row" plan the old per-position query used (EXPLAIN
+    # QUERY PLAN confirms one SEARCH ... USING INDEX per json_each row), while
+    # still running as a single round trip.
+    rows = conn.execute(
+        """
+        SELECT j.value AS position_id, (
+                   SELECT env FROM position_events pe
+                    WHERE pe.position_id = j.value
+                    ORDER BY sequence_no DESC LIMIT 1
+               ) AS env
+          FROM json_each(?) AS j
+        """,
+        (json.dumps(ids),),
+    ).fetchall()
     envs: dict[str, str] = {}
-    for position_id in dict.fromkeys(str(position_id or "") for position_id in position_ids):
-        if not position_id:
-            continue
-        row = conn.execute(
-            """
-            SELECT position_id, env
-              FROM position_events
-             WHERE position_id = ?
-             ORDER BY sequence_no DESC
-             LIMIT 1
-            """,
-            (position_id,),
-        ).fetchone()
-        if row is None:
-            continue
+    for row in rows:
         env = str(row["env"] or "").strip().lower()
         if env in POSITION_EVENT_ENVS:
             envs[str(row["position_id"])] = env
@@ -14261,30 +14270,30 @@ def _query_transitional_position_hints(
             else ""
         )
         event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
-        shared_params = (
-            *_TRANSITIONAL_HINT_EVENT_TYPES,
-            _TRANSITIONAL_HINT_ROWS_PER_POSITION,
-        )
-        rows = []
-        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in trade_ids):
-            if not trade_id:
-                continue
-            rows.extend(
-                conn.execute(
-                    f"""
+        ids = [tid for tid in dict.fromkeys(str(trade_id or "") for trade_id in trade_ids) if tid]
+        if not ids:
+            return {}
+        id_placeholders = ", ".join("?" for _ in ids)
+        rows = conn.execute(
+            f"""
+            SELECT trade_key, event_type, payload, occurred_at
+              FROM (
                     SELECT position_id AS trade_key,
                            event_type,
                            payload_json AS payload,
-                           occurred_at
+                           occurred_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY position_id ORDER BY sequence_no DESC
+                           ) AS rn
                       FROM position_events{index_clause}
-                     WHERE position_id = ?
+                     WHERE position_id IN ({id_placeholders})
                        AND event_type IN ({event_placeholders})
-                     ORDER BY sequence_no DESC
-                     LIMIT ?
-                    """,
-                    (trade_id, *shared_params),
-                ).fetchall()
-            )
+                   )
+             WHERE rn <= ?
+             ORDER BY trade_key, rn
+            """,
+            (*ids, *_TRANSITIONAL_HINT_EVENT_TYPES, _TRANSITIONAL_HINT_ROWS_PER_POSITION),
+        ).fetchall()
     else:
         logger.warning("position_events table missing expected columns"); return {}
     hints: dict[str, dict] = {}
@@ -14351,26 +14360,28 @@ def _hydrate_unbounded_day0_hints(
     missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("day0_entered_at")]
     if not missing:
         return
+    ids = [tid for tid in dict.fromkeys(str(trade_id or "") for trade_id in missing) if tid]
+    if not ids:
+        return
+    id_placeholders = ", ".join("?" for _ in ids)
     rows = []
     try:
-        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in missing):
-            if not trade_id:
-                continue
-            row = conn.execute(
-                """
-                SELECT position_id,
-                       payload_json,
-                       occurred_at
-                  FROM position_events
-                 WHERE position_id = ?
-                   AND event_type = 'DAY0_WINDOW_ENTERED'
-                 ORDER BY sequence_no DESC
-                 LIMIT 1
-                """,
-                (trade_id,),
-            ).fetchone()
-            if row is not None:
-                rows.append(row)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, payload_json, occurred_at
+              FROM (
+                    SELECT position_id, payload_json, occurred_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY position_id ORDER BY sequence_no DESC
+                           ) AS rn
+                      FROM position_events
+                     WHERE position_id IN ({id_placeholders})
+                       AND event_type = 'DAY0_WINDOW_ENTERED'
+                   )
+             WHERE rn = 1
+            """,
+            ids,
+        ).fetchall()
     except sqlite3.Error:
         return
     for row in rows:
@@ -14419,28 +14430,31 @@ def _hydrate_pending_exit_pre_state_hints(
         else ""
     )
     event_placeholders = ", ".join("?" for _ in _PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES)
+    ids = [tid for tid in dict.fromkeys(str(trade_id or "") for trade_id in missing) if tid]
+    if not ids:
+        return
+    id_placeholders = ", ".join("?" for _ in ids)
     rows = []
     try:
-        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in missing):
-            if not trade_id:
-                continue
-            row = conn.execute(
-                f"""
-                SELECT position_id,
-                       phase_before
-                  FROM position_events{index_clause}
-                 WHERE position_id = ?
-                   AND event_type IN ({event_placeholders})
-                   AND phase_after = 'pending_exit'
-                   AND COALESCE(phase_before, '') != ''
-                   AND phase_before != phase_after
-                 ORDER BY sequence_no DESC
-                 LIMIT 1
-                """,
-                (trade_id, *_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES),
-            ).fetchone()
-            if row is not None:
-                rows.append(row)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, phase_before
+              FROM (
+                    SELECT position_id, phase_before,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY position_id ORDER BY sequence_no DESC
+                           ) AS rn
+                      FROM position_events{index_clause}
+                     WHERE position_id IN ({id_placeholders})
+                       AND event_type IN ({event_placeholders})
+                       AND phase_after = 'pending_exit'
+                       AND COALESCE(phase_before, '') != ''
+                       AND phase_before != phase_after
+                   )
+             WHERE rn = 1
+            """,
+            (*ids, *_PENDING_EXIT_REAL_TRANSITION_EVENT_TYPES),
+        ).fetchall()
     except sqlite3.Error:
         return
     for row in rows:
