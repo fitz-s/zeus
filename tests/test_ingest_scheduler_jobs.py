@@ -1001,6 +1001,86 @@ class TestSettlementSigmaFloorRefitScheduled:
         job_ids = {str(kwargs["id"]) for _fn, _trigger, kwargs in im._ingest_main_job_specs()}
         assert "ingest_settlement_sigma_floor_refit" in job_ids
 
+    def test_skips_fitter_when_incumbent_already_fit_through_today(self, tmp_path) -> None:
+        """Boot catch-up (next_run_time=now) re-fires on EVERY mesh restart, not once a day --
+        a live incident showed a same-day restart repeating the DB read during a
+        memory-pressured cold boot and hitting the 600s bound while the artifact was already
+        fit through today. When the incumbent's _meta.asof already equals today's UTC date, the
+        tick must skip the subprocess entirely and report SUCCESS (not FAILED)."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        out_path.write_text(
+            _json.dumps({"_meta": {"asof": today}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.0}}}),
+            encoding="utf-8",
+        )
+        before_text = out_path.read_text(encoding="utf-8")
+
+        run_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        health_calls = []
+
+        def _fake_write_health(job_name, **kwargs):
+            health_calls.append((job_name, kwargs))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=_fake_write_health,
+            ),
+        ):
+            im._settlement_sigma_floor_refit_tick()
+
+        assert run_calls == [], "the fitter subprocess must not be invoked on a same-day skip"
+        assert out_path.read_text(encoding="utf-8") == before_text, "incumbent must be untouched"
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_settlement_sigma_floor_refit"
+        assert kwargs["failed"] is False, "a skip is a healthy outcome, not a failure"
+
+    def test_runs_fitter_when_incumbent_is_from_a_prior_day(self, tmp_path) -> None:
+        """An incumbent fit through YESTERDAY (or any earlier date) must still trigger a normal
+        refit -- the skip guard is asof-equality-to-today only, never a broader staleness check."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+
+        yesterday = (
+            _dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=1)
+        ).isoformat()
+        out_path = tmp_path / "settlement_sigma_floor.json"
+        out_path.write_text(
+            _json.dumps({"_meta": {"asof": yesterday}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.0}}}),
+            encoding="utf-8",
+        )
+
+        candidate = {"_meta": {}, "cells": {"C|JJA|high": {"sigma_floor_c": 2.1, "n": 30}}}
+        run_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            Path(cmd[cmd.index("--out") + 1]).write_text(_json.dumps(candidate), encoding="utf-8")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        assert len(run_calls) == 1, "a prior-day incumbent must not be skipped"
+
     def test_invokes_fitter_with_explicit_paths_and_asof(self, tmp_path) -> None:
         """The child process must receive explicit --fcst/--out/--asof pinned to
         src.config.STATE_DIR, not the fitter script's own repo-relative defaults."""

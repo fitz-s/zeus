@@ -4465,6 +4465,14 @@ def _settlement_sigma_floor_refit_tick():
     fitter measured 86.86s for the same query / 75.82s end-to-end against the same live DB and
     window, comfortably inside the 600s bound.
 
+    SKIPS (no subprocess, no fitter run, SUCCESS reported) when the incumbent artifact's
+    ``_meta.asof`` already equals today's UTC date -- a live incident showed ``next_run_time=now``
+    boot catch-up re-firing on EVERY mesh restart, not just once a day, and a same-day restart
+    during a cold-starting/memory-pressured boot repeated the ~25GB-class DB read and hit the
+    600s bound while the artifact was already fit through today from an earlier successful run.
+    A cron-triggered run never needs this check to fire (its date is new by construction each
+    day), so this one guard covers both trigger paths without distinguishing them.
+
     Fails LOUD (raises) on a non-zero exit, a timeout, an unreadable candidate artifact, OR a
     promotion gate that accepted ZERO cells (every overlapping cell carried forward, no new cell
     added -- the written table would be byte-for-byte the incumbent, which a healthy refit never
@@ -4488,6 +4496,28 @@ def _settlement_sigma_floor_refit_tick():
     out_path = STATE_DIR / "settlement_sigma_floor.json"
     candidate_path = STATE_DIR / "settlement_sigma_floor.json.refit_candidate"
     asof = datetime.now(timezone.utc).date().isoformat()
+
+    # BOOT-CATCH-UP RE-FIRE GUARD: next_run_time=now means this tick also runs on every mesh
+    # restart, not just once a day -- a live incident showed a same-day restart re-running the
+    # ~25GB-class DB read during a cold-starting, memory-pressured boot and hitting the 600s
+    # bound (the cron-time run earlier that day had already succeeded). If the incumbent is
+    # already fit through today, there is nothing to gain from refitting again before tomorrow's
+    # settlements exist -- skip and report SUCCESS (not FAILED, not a distinct skip status; a
+    # skip is a correct outcome, not an error). The cron path needs no separate case: a cron run
+    # only ever fires once asof has necessarily rolled to a new day, so this same check is always
+    # a no-op there (and correct if it somehow weren't).
+    if out_path.exists():
+        try:
+            incumbent_asof = json.loads(out_path.read_text(encoding="utf-8")).get("_meta", {}).get("asof")
+        except Exception:
+            incumbent_asof = None
+        if incumbent_asof == asof:
+            logger.info(
+                "[SETTLEMENT_SIGMA_FLOOR_REFIT] skipping -- incumbent already fit through %s",
+                asof,
+            )
+            return
+
     try:
         r = subprocess.run(
             [
