@@ -25,6 +25,7 @@ import inspect
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -424,24 +425,210 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
     assert not lock_held
 
 
-def test_ogimet_live_tick_shards_cover_each_noaa_city_once_daily() -> None:
+def _instants_db(tmp_path: Path, name: str = "instants.db") -> Path:
+    db_path = tmp_path / name
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE observation_instants (city TEXT, source TEXT, "
+        "target_date TEXT, utc_timestamp TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _write_complete_ogimet_day(
+    db_path: Path, *, city: str, station: str, target_date: str, hours: int = 24
+) -> None:
+    conn = sqlite3.connect(str(db_path))
+    source = f"ogimet_metar_{station.lower()}"
+    target = date.fromisoformat(target_date)
+    for h in range(hours):
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?, ?, ?, ?)",
+            (city, source, target_date, f"{target_date}T{h:02d}:00:00+00:00"),
+        )
+    following = (target + timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?)",
+        (city, source, following, f"{following}T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_ogimet_local_day_end_selection_picks_only_cities_whose_local_day_ended(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Mixed-timezone roster, single instant: a city whose local-day-end +1h
+    buffer has already elapsed is selected; a city whose local day ended
+    only minutes ago (buffer not yet satisfied) is not -- fixed-offset zones
+    (no DST) isolate exactly the day-end-relative-to-now boundary."""
     import scripts.obs_live_tick as obs_tick
+
+    monkeypatch.setattr(
+        obs_tick,
+        "cities_by_name",
+        {
+            # UTC+8: local day ended 2026-09-13T16:00Z; now (17:15Z) is
+            # 1h15m later -- past the 1h buffer.
+            "PlusEight": SimpleNamespace(timezone="Etc/GMT-8", wu_station="ZZZ8"),
+            # UTC+7: local day ended 2026-09-13T17:00Z; now (17:15Z) is only
+            # 15min later -- inside the 1h publish-lag buffer.
+            "PlusSeven": SimpleNamespace(timezone="Etc/GMT-7", wu_station="ZZZ7"),
+        },
+    )
+    db_path = _instants_db(tmp_path)
+    now_utc = datetime(2026, 9, 13, 17, 15, tzinfo=timezone.utc)
+
+    due = obs_tick._ogimet_cities_due_for_completion(
+        ["PlusEight", "PlusSeven"], now_utc, db_path=db_path
+    )
+
+    assert due == ["PlusEight"]
+
+
+def test_ogimet_local_day_end_selection_seattle_09_13_replay(monkeypatch, tmp_path: Path) -> None:
+    """Seattle's local day ends 07:00Z; it must be selected at the 08:15Z
+    tick (day-end + 1h + the :15 cron minute) and NOT at 17:15Z (the OLD
+    fixed-shard slot)."""
+    import scripts.obs_live_tick as obs_tick
+
+    monkeypatch.setattr(
+        obs_tick,
+        "cities_by_name",
+        {"Seattle": SimpleNamespace(timezone="America/Los_Angeles", wu_station="KSEA")},
+    )
+    db_path = _instants_db(tmp_path)
+
+    too_early = datetime(2026, 9, 13, 7, 30, tzinfo=timezone.utc)  # day-end + 30min only
+    assert obs_tick._ogimet_cities_due_for_completion(
+        ["Seattle"], too_early, db_path=db_path
+    ) == []
+
+    at_anchor = datetime(2026, 9, 13, 8, 15, tzinfo=timezone.utc)  # day-end + 1h15m
+    assert obs_tick._ogimet_cities_due_for_completion(
+        ["Seattle"], at_anchor, db_path=db_path
+    ) == ["Seattle"]
+
+
+def test_ogimet_local_day_end_selection_dst_transition(monkeypatch, tmp_path: Path) -> None:
+    """DST fall-back (US, 2026-11-01 02:00 local -> 01:00 local, Chicago):
+    the local day just ended is 25 wall-clock hours long. The selection must
+    still gate on the correct UTC day-end instant, not a naive +24h guess."""
+    import scripts.obs_live_tick as obs_tick
+
+    monkeypatch.setattr(
+        obs_tick,
+        "cities_by_name",
+        {"Chicago": SimpleNamespace(timezone="America/Chicago", wu_station="KORD")},
+    )
+    db_path = _instants_db(tmp_path)
+
+    # 2026-11-01 local midnight (CDT, UTC-5) is 2026-11-01T05:00Z; the DST
+    # fall-back happens later that local day, so the local day 2026-11-01
+    # ends at 2026-11-02T06:00Z (CST, UTC-6) -- 25h after it started.
+    before_end = datetime(2026, 11, 2, 6, 30, tzinfo=timezone.utc)  # only 30min past day-end
+    assert obs_tick._ogimet_cities_due_for_completion(
+        ["Chicago"], before_end, db_path=db_path
+    ) == []
+
+    after_anchor = datetime(2026, 11, 2, 7, 15, tzinfo=timezone.utc)  # day-end + 1h15m
+    assert obs_tick._ogimet_cities_due_for_completion(
+        ["Chicago"], after_anchor, db_path=db_path
+    ) == ["Chicago"]
+
+
+def test_ogimet_local_day_end_selection_skips_already_complete_city(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Idempotency: a rerun after success must not re-select the city --
+    completeness is derived from observation_instants itself, not a flag."""
+    import scripts.obs_live_tick as obs_tick
+
+    monkeypatch.setattr(
+        obs_tick,
+        "cities_by_name",
+        {"Beijing": SimpleNamespace(timezone="Asia/Shanghai", wu_station="ZBAA")},
+    )
+    db_path = _instants_db(tmp_path)
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", target_date="2026-09-13"
+    )
+    now_utc = datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc)
+
+    due = obs_tick._ogimet_cities_due_for_completion(["Beijing"], now_utc, db_path=db_path)
+
+    assert due == []
+
+
+def test_ogimet_local_day_end_selection_retries_incomplete_city_next_tick(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Carry-forward: a failed/partial attempt (fewer than the expected
+    hourly rows, or no next-day advancement proof) stays selected on the
+    following hourly tick -- no persisted retry state needed."""
+    import scripts.obs_live_tick as obs_tick
+
+    monkeypatch.setattr(
+        obs_tick,
+        "cities_by_name",
+        {"Beijing": SimpleNamespace(timezone="Asia/Shanghai", wu_station="ZBAA")},
+    )
+    db_path = _instants_db(tmp_path)
+    # Only 23 of 24 expected hours written, and no next-day advancement row --
+    # simulates a fetch that failed partway through.
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", target_date="2026-09-13", hours=23
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "DELETE FROM observation_instants WHERE target_date = '2026-09-14'"
+    )
+    conn.commit()
+    conn.close()
+
+    now_utc = datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc)
+    due_first = obs_tick._ogimet_cities_due_for_completion(["Beijing"], now_utc, db_path=db_path)
+    assert due_first == ["Beijing"]
+
+    next_tick = now_utc + timedelta(hours=1)
+    due_next = obs_tick._ogimet_cities_due_for_completion(["Beijing"], next_tick, db_path=db_path)
+    assert due_next == ["Beijing"]
+
+
+def test_ogimet_local_day_end_worst_cluster_fits_the_hourly_tick_budget() -> None:
+    """The worst UTC-hour cluster of cities anchored to the SAME local-day-end
+    (e.g. ~10-12 Chinese cities all ending their local day at 16:00Z) must
+    fit, serialized at the provider's 21s cadence, comfortably inside the
+    hourly ``ingest_k2_obs`` tick cadence (3600s) -- no spreading/ladder
+    mechanism is needed."""
+    import scripts.obs_live_tick as obs_tick
+    from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
 
     names = sorted(
         name
         for name in obs_tick.cities_by_name
         if obs_tick.tier_for_city(name) is obs_tick.Tier.OGIMET_METAR
     )
-    seen: list[str] = []
-    for hour in range(24):
-        seen.extend(
-            obs_tick._ogimet_city_shard_for_hour(
-                names,
-                datetime(2026, 9, 2, hour, tzinfo=timezone.utc),
-            )
-        )
-    assert seen == names
-    assert len(seen) == len(set(seen)) == 48
+    ref_date = date(2026, 9, 13)
+    clusters: dict[int, int] = {}
+    for name in names:
+        tz = ZoneInfo(obs_tick.cities_by_name[name].timezone)
+        day_end_utc = datetime.combine(
+            ref_date + timedelta(days=1), datetime.min.time(), tzinfo=tz
+        ).astimezone(timezone.utc)
+        trigger_hour = (day_end_utc + timedelta(hours=1)).hour
+        clusters[trigger_hour] = clusters.get(trigger_hour, 0) + 1
+
+    worst = max(clusters.values())
+    worst_case_seconds = worst * OGIMET_MIN_INTERVAL_SECONDS
+    # Half the hourly tick cadence as a safety margin against WU cities and
+    # per-city HTTP overhead sharing the same job invocation.
+    assert worst_case_seconds < 1800.0, (
+        f"worst Ogimet cluster ({worst} cities) needs {worst_case_seconds:.0f}s, "
+        "too close to the hourly tick cadence"
+    )
 
 
 def test_fast_obs_tick_can_exclude_slow_ogimet_mirror(monkeypatch, tmp_path: Path) -> None:
