@@ -7002,6 +7002,108 @@ def test_unbounded_load_portfolio_skips_venue_commands_scan_when_entry_proof_rev
         conn.close()
 
 
+def test_token_suppression_and_quarantine_queries_match_both_or_branches_after_index_rewrite():
+    """X-BJ (2026-09-14): query_token_suppression_tokens's chain_terminal statement and
+    query_chain_only_quarantine_rows were rewritten from a single OR-join EXISTS/NOT EXISTS
+    against unindexed position_current(token_id, no_token_id) into two single-column-indexed
+    EXISTS branches (idx_position_current_token_id / idx_position_current_no_token_id).
+    "exists (P or Q) == exists P or exists Q" makes this a pure query-shape change, not a
+    semantics change -- this test proves both OR branches (match via token_id, match via
+    no_token_id) and the no-match case still produce the same result as the original OR."""
+    from src.state.db import (
+        init_schema_trade_only,
+        query_chain_only_quarantine_rows,
+        query_token_suppression_tokens,
+        record_token_suppression,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "or-join-rewrite.db")
+        init_schema_trade_only(conn)
+        # p-by-token: chain-terminal phase, matches via pc.token_id = ts.token_id.
+        conn.execute(
+            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
+            "updated_at, temperature_metric, strategy_key) VALUES "
+            "('p-by-token','settled','p-by-token','tok-A','no-A-x','2026-01-01','high','s')"
+        )
+        # p-by-no-token: chain-terminal phase, matches via pc.no_token_id = ts.token_id.
+        conn.execute(
+            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
+            "updated_at, temperature_metric, strategy_key) VALUES "
+            "('p-by-no-token','settled','p-by-no-token','tok-B-x','tok-B','2026-01-01','high','s')"
+        )
+        # p-open: matches neither the terminal-phase filter (still active) -- suppression
+        # for its token must NOT be classified as chain-terminal-resolved.
+        conn.execute(
+            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
+            "updated_at, temperature_metric, strategy_key) VALUES "
+            "('p-open','active','p-open','tok-C','tok-C-no','2026-01-01','high','s')"
+        )
+        conn.commit()
+        for token_id in ("tok-A", "tok-B", "tok-C"):
+            record_token_suppression(
+                conn, token_id=token_id, suppression_reason="chain_only_quarantined", source_module="test"
+            )
+        conn.commit()
+
+        ignored = set(query_token_suppression_tokens(conn))
+        assert {"tok-A", "tok-B"} <= ignored, "both OR branches must resurrect-block via chain-terminal match"
+        assert "tok-C" not in ignored, "an open (non-terminal) position must not chain-terminal-suppress its token"
+
+        quarantine_tokens = {row["token_id"] for row in query_chain_only_quarantine_rows(conn)}
+        assert quarantine_tokens == {"tok-C"}, (
+            "only the still-open token's quarantine fact should remain unresolved; "
+            "chain-terminal matches via EITHER column must be excluded"
+        )
+        conn.close()
+
+
+def test_venue_commands_and_position_current_lookups_use_index_seeks_not_scans():
+    """X-BJ (2026-09-14): EXPLAIN QUERY PLAN assertions, run against a temp DB built by
+    init_schema_trade_only (never the live DB), that the four T_proofreview-identified
+    SCAN / TEMP-B-TREE / phase-partition-then-filter-in-memory shapes are gone after
+    adding idx_venue_commands_venue_order_intent, idx_venue_commands_token_intent,
+    idx_position_current_token_id, and idx_position_current_no_token_id, plus the
+    OR-join -> two-single-column-EXISTS-branches rewrite."""
+    from src.state.db import init_schema_trade_only
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "explain-plan.db")
+        conn.row_factory = None
+        init_schema_trade_only(conn)
+
+        def plan(sql: str) -> list[str]:
+            return [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()]
+
+        venue_order_plan = plan(
+            "SELECT decision_id FROM venue_commands WHERE venue_order_id = 'x' "
+            "AND intent_kind = 'ENTRY' ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        )
+        token_plan = plan(
+            "SELECT decision_id FROM venue_commands WHERE token_id = 'x' "
+            "AND intent_kind = 'ENTRY' ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        )
+        for name, p in (("venue_order_id lookup", venue_order_plan), ("token_id lookup", token_plan)):
+            assert not any("SCAN venue_commands" in step for step in p), f"{name}: still a full scan: {p}"
+            assert not any("TEMP B-TREE" in step for step in p), f"{name}: still sorting: {p}"
+            assert any("SEARCH venue_commands USING INDEX" in step for step in p), f"{name}: not an index seek: {p}"
+
+        or_join_plan = plan(
+            "SELECT ts.token_id FROM token_suppression ts WHERE ts.suppression_reason = 'chain_only_quarantined' "
+            "AND (EXISTS (SELECT 1 FROM position_current pc WHERE pc.token_id = ts.token_id "
+            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed')) "
+            "OR EXISTS (SELECT 1 FROM position_current pc WHERE pc.no_token_id = ts.token_id "
+            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed')))"
+        )
+        assert not any("SCAN ts" in step and "COVERING" not in step for step in or_join_plan), or_join_plan
+        assert not any(
+            "idx_position_current_phase_quote" in step for step in or_join_plan
+        ), f"must no longer fall back to the phase-partition index: {or_join_plan}"
+        assert sum(1 for step in or_join_plan if "idx_position_current_token_id" in step) == 1
+        assert sum(1 for step in or_join_plan if "idx_position_current_no_token_id" in step) == 1
+        conn.close()
+
+
 @pytest.mark.parametrize("kwargs", [
     {}, {"target_families": []},
     {"target_families": [("NYC", "2026-04-01", "high")], "open_positions_only": True},

@@ -3433,6 +3433,12 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_venue_commands_position ON venue_commands(position_id);
         CREATE INDEX IF NOT EXISTS idx_venue_commands_state ON venue_commands(state);
         CREATE INDEX IF NOT EXISTS idx_venue_commands_decision ON venue_commands(decision_id);
+        -- X-BJ (2026-09-14): mirrors the same two indexes added to this table's
+        -- _TRADE_CLASS_DDL copy (init_schema_trade_only) -- see that block's comment.
+        CREATE INDEX IF NOT EXISTS idx_venue_commands_venue_order_intent
+            ON venue_commands(venue_order_id, intent_kind, updated_at DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_venue_commands_token_intent
+            ON venue_commands(token_id, intent_kind, updated_at DESC, created_at DESC);
 
         -- P1.S1 (INV-28 / D-P1-3-a): append-only event log for venue_commands.
         -- Records every state transition.  NC-18 forbids UPDATE/DELETE outside
@@ -6243,6 +6249,13 @@ CREATE TABLE IF NOT EXISTS position_current (
 );
 CREATE INDEX IF NOT EXISTS idx_position_current_phase_quote
     ON position_current(phase, chain_state, chain_shares, token_id, no_token_id);
+-- X-BJ (2026-09-14): query_token_suppression_tokens / query_chain_only_quarantine_rows
+-- correlated (NOT) EXISTS join on (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+-- had no supporting index on either column, degrading to idx_position_current_phase_quote's
+-- phase-partition SEARCH filtered in memory by the unindexed OR. These two single-column
+-- indexes let the two-EXISTS-branches rewrite (same functions) use an index seek on each half.
+CREATE INDEX IF NOT EXISTS idx_position_current_token_id ON position_current(token_id);
+CREATE INDEX IF NOT EXISTS idx_position_current_no_token_id ON position_current(no_token_id);
 
 -- execution_fact (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS execution_fact (
@@ -6555,6 +6568,16 @@ CREATE TABLE IF NOT EXISTS venue_commands (
 CREATE INDEX IF NOT EXISTS idx_venue_commands_position ON venue_commands(position_id);
 CREATE INDEX IF NOT EXISTS idx_venue_commands_state ON venue_commands(state);
 CREATE INDEX IF NOT EXISTS idx_venue_commands_decision ON venue_commands(decision_id);
+-- X-BJ (2026-09-14): _query_edli_entry_proof_review_reasons's per-open-EDLI-row lookup
+-- (WHERE venue_order_id = ? / token_id = ? AND intent_kind = 'ENTRY' ORDER BY updated_at
+-- DESC, created_at DESC LIMIT 1) had no covering index -> SCAN venue_commands + TEMP
+-- B-TREE FOR ORDER BY per lookup (EXPLAIN QUERY PLAN confirmed against this DDL). These
+-- two composite indexes cover the exact WHERE+ORDER BY shape so SQLite answers with an
+-- index seek and no sort.
+CREATE INDEX IF NOT EXISTS idx_venue_commands_venue_order_intent
+    ON venue_commands(venue_order_id, intent_kind, updated_at DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_venue_commands_token_intent
+    ON venue_commands(token_id, intent_kind, updated_at DESC, created_at DESC);
 
 -- venue_command_events + indexes (from src/state/db.py:init_schema executescript block)
 CREATE TABLE IF NOT EXISTS venue_command_events (
@@ -13205,16 +13228,31 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     ).fetchall()
     chain_terminal: list = []
     if _table_exists(conn, "position_current"):
+        # X-BJ (2026-09-14): the OR-join on (token_id, no_token_id) had no
+        # supporting index and forced SQLite onto idx_position_current_phase_quote's
+        # phase-partition SEARCH, filtering the OR in memory over every terminal-
+        # phase row (EXPLAIN QUERY PLAN confirmed against this DDL). Split into two
+        # EXISTS branches (equivalent by "exists (P or Q) == exists P or exists Q")
+        # so each can use its own single-column index
+        # (idx_position_current_token_id / idx_position_current_no_token_id).
         chain_terminal = conn.execute(
             """
             SELECT ts.token_id
             FROM token_suppression ts
             WHERE ts.suppression_reason = 'chain_only_quarantined'
-              AND EXISTS (
-                  SELECT 1 FROM position_current pc
-                  WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
-                    AND pc.phase IN ('settled', 'voided', 'admin_closed',
-                                     'economically_closed')
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM position_current pc
+                      WHERE pc.token_id = ts.token_id
+                        AND pc.phase IN ('settled', 'voided', 'admin_closed',
+                                         'economically_closed')
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM position_current pc
+                      WHERE pc.no_token_id = ts.token_id
+                        AND pc.phase IN ('settled', 'voided', 'admin_closed',
+                                         'economically_closed')
+                  )
               )
             ORDER BY ts.created_at ASC, ts.token_id ASC
             """
@@ -13413,6 +13451,12 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
             """
         ).fetchall()
         return _with_chain_only_entry_block_scopes(conn, rows)
+    # X-BJ (2026-09-14): same OR-join-against-unindexed-columns defect and fix as
+    # query_token_suppression_tokens's chain_terminal statement above -- split via
+    # "not exists (P or Q) == not exists P and not exists Q" so each branch uses
+    # its own single-column index (idx_position_current_token_id /
+    # idx_position_current_no_token_id) instead of the phase-partition SEARCH
+    # filtered in memory by the unindexed OR (EXPLAIN QUERY PLAN confirmed).
     rows = conn.execute(
         """
         SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
@@ -13420,7 +13464,12 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
         WHERE ts.suppression_reason = 'chain_only_quarantined'
           AND NOT EXISTS (
               SELECT 1 FROM position_current pc
-              WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+              WHERE pc.token_id = ts.token_id
+                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM position_current pc
+              WHERE pc.no_token_id = ts.token_id
                 AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed')
           )
         ORDER BY ts.created_at ASC, ts.token_id ASC
