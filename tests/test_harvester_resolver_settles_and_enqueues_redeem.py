@@ -1038,3 +1038,212 @@ def test_resolver_refuses_to_settle_degraded_cohort_hydration(
         resolver.resolve_pnl_for_settled_markets(
             trade_conn, forecasts_conn_with_verified_settlement
         )
+
+
+def _empty_settlement_outcomes_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE settlement_outcomes (
+            city TEXT, target_date TEXT, market_slug TEXT, winning_bin TEXT,
+            temperature_metric TEXT, authority TEXT, settlement_source TEXT,
+            settlement_value REAL, settled_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def test_in_lease_reverify_narrows_to_empty_when_no_row_survives_into_the_lease(
+    trade_conn, monkeypatch
+):
+    """No discovered row makes it into the lease -> the in-lease re-verify
+    fingerprints no keys, instead of every open settlement key."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    portfolio, position = _winning_position()
+    trade_conn.execute(
+        """INSERT INTO position_current (
+               position_id, phase, city, target_date, temperature_metric, updated_at
+           ) VALUES (?, 'active', ?, ?, 'high', ?)""",
+        (position.trade_id, position.city, position.target_date, "before-writer"),
+    )
+    trade_conn.commit()
+    forecasts_conn = _empty_settlement_outcomes_conn()
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    # Pre-lease read finds one finalized payout (so the outer check enters the
+    # lease); the in-lease re-read of that same query comes back empty, as if
+    # the observation raced out from under it.
+    payout_calls = {"n": 0}
+
+    def payout_stub(_conn, _portfolio, _keys):
+        payout_calls["n"] += 1
+        if payout_calls["n"] == 1:
+            return [{
+                "city": position.city,
+                "target_date": position.target_date,
+                "market_slug": "slug",
+                "winning_bin": None,
+                "temperature_metric": "high",
+                "authority": "VENUE_RESOLVED",
+                "settlement_source": "polymarket_chain_rpc_finalized_v1",
+                "settlement_value": None,
+                "settlement_scope": "condition",
+                "condition_id": "0x" + "a" * 40,
+                "condition_yes_won": True,
+            }]
+        return []
+
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", payout_stub)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+
+    version_calls = []
+    original_versions = resolver._canonical_position_versions
+
+    def spy_versions(conn, keys):
+        keys = set(keys)
+        version_calls.append(keys)
+        return original_versions(conn, keys)
+
+    monkeypatch.setattr(resolver, "_canonical_position_versions", spy_versions)
+    settle = MagicMock()
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    assert result["status"] == "awaiting_truth_writer"
+    assert result["positions_settled"] == 0
+    settle.assert_not_called()
+    assert payout_calls["n"] == 2
+    # First call is the pre-lease snapshot over every open settlement key; the
+    # second is the in-lease re-verify, narrowed to what the applied rows
+    # reference -- here, nothing.
+    assert len(version_calls) == 2
+    assert version_calls[0] == {(position.city, position.target_date, "high")}
+    assert version_calls[1] == set()
+
+
+def test_in_lease_reverify_narrows_to_rows_referenced_keys(trade_conn, monkeypatch):
+    """The in-lease re-verify re-fingerprints only the keys the discovered rows
+    touch, and a fingerprint change on one of those keys still stales that row
+    even though the unrelated open keys are no longer re-scanned."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    portfolio, pos_a = _winning_position(
+        trade_id="fam-a", city="CityA", target_date="2026-06-01"
+    )
+    _, pos_b = _winning_position(trade_id="fam-b", city="CityB", target_date="2026-06-01")
+    _, pos_c = _winning_position(trade_id="fam-c", city="CityC", target_date="2026-06-01")
+    _, pos_d = _winning_position(trade_id="fam-d", city="CityD", target_date="2026-06-01")
+    portfolio.positions = [pos_a, pos_b, pos_c, pos_d]
+
+    for pos in (pos_a, pos_b, pos_c, pos_d):
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric, updated_at
+               ) VALUES (?, 'active', ?, ?, 'high', ?)""",
+            (pos.trade_id, pos.city, pos.target_date, "before-writer"),
+        )
+    trade_conn.commit()
+
+    forecasts_conn = _empty_settlement_outcomes_conn()
+    for pos in (pos_a, pos_b):
+        forecasts_conn.execute(
+            "INSERT INTO settlement_outcomes "
+            "(city, target_date, market_slug, winning_bin, temperature_metric, authority, "
+            " settlement_source, settlement_value, settled_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                pos.city, pos.target_date, f"{pos.city}-slug", pos.bin_label, "high",
+                "VERIFIED", "wu_icao", 27.0, "2026-06-03T18:46:00Z",
+            ),
+        )
+    forecasts_conn.commit()
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        # Concurrent mutation of CityA's position between the pre-lease
+        # snapshot and the in-lease re-verify: only its fingerprint moves.
+        trade_conn.execute(
+            """INSERT INTO position_events (
+                   event_id, position_id, event_version, sequence_no, event_type,
+                   occurred_at, phase_before, phase_after, source_module,
+                   payload_json, caused_by, env
+               ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                         'tests.harvester_resolver', '{}', 'monitor_refresh', 'live')""",
+            ("fam-a-changed", pos_a.trade_id, "2026-08-13T14:50:00+00:00"),
+        )
+        trade_conn.commit()
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+
+    version_calls = []
+    original_versions = resolver._canonical_position_versions
+
+    def spy_versions(conn, keys):
+        keys = set(keys)
+        version_calls.append(keys)
+        return original_versions(conn, keys)
+
+    monkeypatch.setattr(resolver, "_canonical_position_versions", spy_versions)
+
+    settled = []
+
+    def settle(_conn, _portfolio, city_name, target_date, *_args, **_kwargs):
+        settled.append((city_name, target_date))
+        return 1
+
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: MagicMock())
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    assert len(version_calls) == 2
+    all_keys = {
+        ("CityA", "2026-06-01", "high"),
+        ("CityB", "2026-06-01", "high"),
+        ("CityC", "2026-06-01", "high"),
+        ("CityD", "2026-06-01", "high"),
+    }
+    assert version_calls[0] == all_keys
+    # Narrowed to only the two keys the VERIFIED rows reference -- CityC and
+    # CityD are open but untouched by any discovered row.
+    assert version_calls[1] == {
+        ("CityA", "2026-06-01", "high"),
+        ("CityB", "2026-06-01", "high"),
+    }
+    # CityA's fingerprint moved underneath the lease; its row must still be
+    # rejected as stale even though the re-verify no longer scans CityC/CityD.
+    assert settled == [("CityB", "2026-06-01")]
+    assert result["positions_settled"] == 1

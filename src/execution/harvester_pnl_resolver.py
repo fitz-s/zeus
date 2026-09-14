@@ -793,8 +793,25 @@ def _apply_discovered_settlement_rows(
     from src.state.decision_chain import SettlementRecord, store_settlement_records
     from src.state.strategy_tracker import get_tracker
 
+    payout_rows = _read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        settlement_keys - verified_keys,
+    )
+    # Re-fingerprint only the keys the discovered rows actually touch, not
+    # every open settlement key. `rows` (verified/payout/venue) is already
+    # bounded to a handful of keys per tick; a system-wide re-verification
+    # here is what blows the write-lease deadline under a cold page cache.
+    applied_keys = {
+        (
+            str(_row_value(row, "city", 0, "") or ""),
+            str(_row_value(row, "target_date", 1, "") or ""),
+            str(_row_value(row, "temperature_metric", 4, "") or ""),
+        )
+        for row in (*verified_rows, *payout_rows, *venue_rows)
+    }
     current_versions = (
-        _canonical_position_versions(trade_conn, settlement_keys)
+        _canonical_position_versions(trade_conn, applied_keys)
         if canonical
         else {}
     )
@@ -822,11 +839,6 @@ def _apply_discovered_settlement_rows(
         for row in verified_rows
         if row_is_stable(row)
     ]
-    payout_rows = _read_finalized_payout_settlement_rows(
-        trade_conn,
-        portfolio,
-        settlement_keys - verified_keys,
-    )
     payout_rows = [
         row
         for row in payout_rows
