@@ -748,6 +748,19 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         settlement_keys - verified_keys,
         snapshots,
     )
+    # Keys this pre-lease read actually found a finalized payout candidate
+    # for. A key with no candidate here cannot become an applied row this
+    # tick regardless of what the lease finds (it would be discovered next
+    # tick) -- so the in-lease re-read below can be scoped to exactly this
+    # set without reopening the TOCTOU race it re-reads for.
+    payout_keys = {
+        (
+            str(_row_value(row, "city", 0, "") or ""),
+            str(_row_value(row, "target_date", 1, "") or ""),
+            str(_row_value(row, "temperature_metric", 4, "") or ""),
+        )
+        for row in payout_rows
+    }
     venue_rows = _read_venue_resolved_settlement_rows(
         trade_conn,
         portfolio,
@@ -788,6 +801,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             verified_keys=verified_keys,
             venue_rows=venue_rows,
             snapshots=snapshots,
+            payout_keys=payout_keys,
             canonical=canonical,
             deadline_monotonic=deadline_monotonic,
         )
@@ -825,6 +839,7 @@ def _apply_discovered_settlement_rows(
     verified_keys,
     venue_rows,
     snapshots,
+    payout_keys,
     canonical: bool,
     deadline_monotonic: float | None,
 ) -> tuple[dict, bool, bool, object | None]:
@@ -834,10 +849,17 @@ def _apply_discovered_settlement_rows(
     from src.state.decision_chain import SettlementRecord, store_settlement_records
     from src.state.strategy_tracker import get_tracker
 
+    # Re-read fresh, but only for the keys the pre-lease pass already found a
+    # finalized payout candidate for -- a key absent from `payout_keys` had no
+    # candidate before the lease and cannot produce an applied row this tick
+    # regardless of what a wider re-read would show (it is picked up next
+    # tick instead). This preserves the TOCTOU guarantee (every applied row's
+    # payout truth is re-read fresh inside this transaction) while dropping
+    # the fan-out over every other open-but-irrelevant settlement key.
     payout_rows = _read_finalized_payout_settlement_rows(
         trade_conn,
         portfolio,
-        settlement_keys - verified_keys,
+        payout_keys,
         snapshots,
     )
     # Re-fingerprint only the keys the discovered rows actually touch, not

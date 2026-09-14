@@ -1370,3 +1370,342 @@ def test_condition_ids_for_keys_matches_payout_reader_grouping(monkeypatch):
         "cond-b": [pos_b],
     }
     assert condition_ids == set(grouped) == {"cond-a", "cond-b"}
+
+
+def test_in_lease_payout_reread_scoped_to_empty_when_no_pre_lease_candidate(
+    trade_conn, monkeypatch
+):
+    """Two open, unverified keys; neither has a finalized payout pre-lease, but
+    a VERIFIED row on a third key still takes the lease. The in-lease payout
+    re-read must be called with an empty key set -- and therefore issue no
+    SQL -- rather than the parent code's `settlement_keys - verified_keys`."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    portfolio, pos_verified = _winning_position(
+        trade_id="ver-a", city="CityA", target_date="2026-08-12"
+    )
+    _, pos_unverified = _winning_position(
+        trade_id="unver-b", city="CityB", target_date="2026-08-12"
+    )
+    portfolio.positions = [pos_verified, pos_unverified]
+
+    for pos in (pos_verified, pos_unverified):
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric, updated_at
+               ) VALUES (?, 'active', ?, ?, 'high', ?)""",
+            (pos.trade_id, pos.city, pos.target_date, "before-writer"),
+        )
+    trade_conn.commit()
+
+    forecasts_conn = _empty_settlement_outcomes_conn()
+    forecasts_conn.execute(
+        "INSERT INTO settlement_outcomes "
+        "(city, target_date, market_slug, winning_bin, temperature_metric, authority, "
+        " settlement_source, settlement_value, settled_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "CityA", "2026-08-12", "citya-slug", pos_verified.bin_label, "high",
+            "VERIFIED", "wu_icao", 27.0, "2026-08-13T00:00:00Z",
+        ),
+    )
+    forecasts_conn.commit()
+    # CityB has no payout_observations rows at all -- the pre-lease payout
+    # scan over {CityB} finds nothing.
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    payout_calls: list[set] = []
+    original_payout_reader = resolver._read_finalized_payout_settlement_rows
+
+    def payout_spy(conn, portfolio_arg, keys, snapshots):
+        keys = set(keys)
+        payout_calls.append(keys)
+        return original_payout_reader(conn, portfolio_arg, keys, snapshots)
+
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", payout_spy)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+
+    settled = []
+
+    def settle(_conn, _portfolio, city_name, target_date, *_args, **_kwargs):
+        settled.append((city_name, target_date))
+        return 1
+
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: MagicMock())
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    assert len(payout_calls) == 2
+    # Pre-lease call scans the real unverified-key scope looking for a candidate.
+    assert payout_calls[0] == {("CityB", "2026-08-12", "high")}
+    # In-lease re-read is scoped to the pre-lease candidates found (none) --
+    # empty, not the parent code's full unverified-key set.
+    assert payout_calls[1] == set()
+    assert settled == [("CityA", "2026-08-12")]
+    assert result["positions_settled"] == 1
+
+
+def test_in_lease_payout_reread_scoped_to_pre_lease_candidate_only(
+    trade_conn, monkeypatch
+):
+    """Two open, unverified conditions A/B; a finalized chain payout exists
+    only for A pre-lease. The in-lease payout re-read must receive exactly
+    A's key -- B is never re-scanned -- and only A settles."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    condition_a = "0x" + "1" * 64
+    condition_b = "0x" + "2" * 64
+    portfolio, pos_a = _winning_position(
+        trade_id="cond-a", city="CityA", target_date="2026-08-12"
+    )
+    pos_a.condition_id = condition_a
+    pos_a.token_id = "yes-token-a"
+    pos_a.no_token_id = "no-token-a"
+    _, pos_b = _winning_position(
+        trade_id="cond-b", city="CityB", target_date="2026-08-12"
+    )
+    pos_b.condition_id = condition_b
+    pos_b.token_id = "yes-token-b"
+    pos_b.no_token_id = "no-token-b"
+    portfolio.positions = [pos_a, pos_b]
+
+    for pos in (pos_a, pos_b):
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric,
+                   condition_id, updated_at
+               ) VALUES (?, 'active', ?, ?, 'high', ?, ?)""",
+            (pos.trade_id, pos.city, pos.target_date, pos.condition_id, "before-writer"),
+        )
+    trade_conn.commit()
+
+    # Snapshot + a complete, terminal, finalized binary payout vector for A only.
+    trade_conn.execute(
+        """INSERT INTO executable_market_snapshots (
+               snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+               question_id, yes_token_id, no_token_id, enable_orderbook, active,
+               closed, min_tick_size, min_order_size, fee_details_json,
+               token_map_json, neg_risk, orderbook_top_bid, orderbook_top_ask,
+               orderbook_depth_json, raw_gamma_payload_hash,
+               raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+               captured_at, freshness_deadline
+           ) VALUES (
+               'snap-a', 'gamma', 'event', 'citya-aug-12', ?, 'question',
+               'yes-token-a', 'no-token-a', 1, 0, 1, '0.001', '1', '{}',
+               '{"YES":"yes-token-a","NO":"no-token-a"}', 0, '0', '0', '{}',
+               'g', 'c', 'b', 'CHAIN', '2026-08-13T07:20:00+00:00',
+               '2026-08-13T07:21:00+00:00'
+           )""",
+        (condition_a,),
+    )
+    _insert_payout(
+        trade_conn, condition_id=condition_a, outcome_index=0, numerator=0,
+        block_number=101, block_hash="0x101",
+    )
+    _insert_payout(
+        trade_conn, condition_id=condition_a, outcome_index=1, numerator=1,
+        block_number=100, block_hash="0x100",
+    )
+    trade_conn.commit()
+    # B has no snapshot and no payout_observations rows at all.
+
+    forecasts_conn = _empty_settlement_outcomes_conn()
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    payout_calls: list[set] = []
+    original_payout_reader = resolver._read_finalized_payout_settlement_rows
+
+    def payout_spy(conn, portfolio_arg, keys, snapshots):
+        keys = set(keys)
+        payout_calls.append(keys)
+        return original_payout_reader(conn, portfolio_arg, keys, snapshots)
+
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", payout_spy)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+
+    settled = []
+
+    def settle(_conn, _portfolio, city_name, target_date, *_args, **_kwargs):
+        settled.append((city_name, target_date))
+        return 1
+
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: MagicMock())
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    both_keys = {("CityA", "2026-08-12", "high"), ("CityB", "2026-08-12", "high")}
+    assert len(payout_calls) == 2
+    # Pre-lease call scans both unverified keys looking for a candidate.
+    assert payout_calls[0] == both_keys
+    # In-lease re-read is scoped to A only -- B was never a candidate pre-lease
+    # and is never re-scanned inside the lease.
+    assert payout_calls[1] == {("CityA", "2026-08-12", "high")}
+    assert settled == [("CityA", "2026-08-12")]
+    assert result["positions_settled"] == 1
+
+
+def test_in_lease_payout_reread_still_catches_retraction_between_reads(
+    trade_conn, monkeypatch
+):
+    """TOCTOU guard preserved: A's payout is retracted (one outcome slot
+    deleted) between the pre-lease read and the in-lease re-read. The
+    narrowing must not skip re-reading A -- since A was itself the pre-lease
+    candidate -- so the in-lease read still runs real SQL for A, sees the now
+    -incomplete vector, and A must NOT settle. No partial write."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    condition_a = "0x" + "3" * 64
+    portfolio, pos_a = _winning_position(
+        trade_id="cond-a-toctou", city="CityA", target_date="2026-08-12"
+    )
+    pos_a.condition_id = condition_a
+    pos_a.token_id = "yes-token-a"
+    pos_a.no_token_id = "no-token-a"
+    portfolio.positions = [pos_a]
+
+    trade_conn.execute(
+        """INSERT INTO position_current (
+               position_id, phase, city, target_date, temperature_metric,
+               condition_id, updated_at
+           ) VALUES (?, 'active', ?, ?, 'high', ?, ?)""",
+        (pos_a.trade_id, pos_a.city, pos_a.target_date, pos_a.condition_id, "before-writer"),
+    )
+    trade_conn.execute(
+        """INSERT INTO executable_market_snapshots (
+               snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+               question_id, yes_token_id, no_token_id, enable_orderbook, active,
+               closed, min_tick_size, min_order_size, fee_details_json,
+               token_map_json, neg_risk, orderbook_top_bid, orderbook_top_ask,
+               orderbook_depth_json, raw_gamma_payload_hash,
+               raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+               captured_at, freshness_deadline
+           ) VALUES (
+               'snap-a-toctou', 'gamma', 'event', 'citya-aug-12', ?, 'question',
+               'yes-token-a', 'no-token-a', 1, 0, 1, '0.001', '1', '{}',
+               '{"YES":"yes-token-a","NO":"no-token-a"}', 0, '0', '0', '{}',
+               'g', 'c', 'b', 'CHAIN', '2026-08-13T07:20:00+00:00',
+               '2026-08-13T07:21:00+00:00'
+           )""",
+        (condition_a,),
+    )
+    _insert_payout(
+        trade_conn, condition_id=condition_a, outcome_index=0, numerator=0,
+        block_number=101, block_hash="0x101",
+    )
+    _insert_payout(
+        trade_conn, condition_id=condition_a, outcome_index=1, numerator=1,
+        block_number=100, block_hash="0x100",
+    )
+    trade_conn.commit()
+
+    forecasts_conn = _empty_settlement_outcomes_conn()
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    payout_calls: list[set] = []
+    original_payout_reader = resolver._read_finalized_payout_settlement_rows
+
+    def payout_spy(conn, portfolio_arg, keys, snapshots):
+        keys = set(keys)
+        payout_calls.append(keys)
+        return original_payout_reader(conn, portfolio_arg, keys, snapshots)
+
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", payout_spy)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        # Concurrent retraction: a new (append-only) outcome_index=1
+        # observation supersedes the terminal one with a non-terminal state,
+        # between the pre-lease discovery read and the in-lease re-read --
+        # breaking the complete {0, 1} terminal vector the reader requires.
+        _insert_payout(
+            trade_conn, condition_id=condition_a, outcome_index=1, numerator=0,
+            denominator=0, state="UNRESOLVED", block_number=102, block_hash="0x102",
+        )
+        trade_conn.commit()
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+
+    settled = []
+
+    def settle(_conn, _portfolio, city_name, target_date, *_args, **_kwargs):
+        settled.append((city_name, target_date))
+        return 1
+
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+    store_calls = []
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records",
+        lambda records, **kw: store_calls.append(list(records)),
+    )
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: MagicMock())
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    # In-lease read is still scoped to A (A was the pre-lease candidate) --
+    # the narrowing does not skip A -- but the fresh read now sees the
+    # incomplete vector and rejects it.
+    assert payout_calls[1] == {("CityA", "2026-08-12", "high")}
+    assert settled == []
+    assert store_calls == [] or all(len(c) == 0 for c in store_calls)
+    assert result["positions_settled"] == 0
+    assert result["status"] == "awaiting_truth_writer"
