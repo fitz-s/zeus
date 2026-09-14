@@ -3053,6 +3053,23 @@ def _blocked_attempt_state(
     return marker_path, fingerprint, marker.get("attempt_fingerprint") == fingerprint
 
 
+def _attach_world_read_only(conn: sqlite3.Connection) -> None:
+    """Expose current observation truth without widening the forecast write lock.
+
+    Mirrors ``scripts/materialize_replacement_forecast_live.py:_attach_world_read_only``
+    exactly: the preflight twin must see the same ``world.observation_prints``
+    truth the authoritative materializer sees, or it cannot compute the same
+    causal boundary.
+    """
+    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached:
+        return
+    world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+    conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
+
+
 def _day0_carrier_vector_preflight_reason(
     *,
     forecast_db: Path | str | None,
@@ -3065,6 +3082,19 @@ def _day0_carrier_vector_preflight_reason(
     Unknown schema, identity, or DB state falls through to the authoritative
     materializer; only the same strict complete-bundle predicate may suppress a
     child process.
+
+    The remaining-window boundary is the latest causal same-station
+    observation (``read_day0_current_temperature_state``), not the timestamp
+    of the running extreme (``day0_observed_extreme_observation_time``): a
+    post-peak cooler HIGH print (or warmer LOW print) leaves the extreme
+    unchanged but still shortens the future opportunity window, and the
+    running-extreme timestamp can be hours older than the last causal print
+    (the extreme-ordered ``observation_instants`` row vs. the true latest
+    ``observation_prints`` row). Using the older extreme timestamp as the
+    window start over-widens the hours a hourly-vector bundle must cover,
+    declining bundles the materializer child would accept. That field is kept
+    only as ``fallback_window_start`` when no current-temperature witness is
+    available, matching the materializer exactly.
     """
 
     source = str(payload.get("day0_observed_extreme_source") or "").strip().lower()
@@ -3096,8 +3126,9 @@ def _day0_carrier_vector_preflight_reason(
     from src.data.day0_hourly_vectors import (  # noqa: PLC0415
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         day0_hourly_models_for_city,
+        read_day0_current_temperature_state,
         read_freshest_day0_hourly_vectors,
-        remaining_day_extremes_c,
+        remaining_day_extremes_c_with_current_state,
     )
 
     city = runtime_cities_by_name().get(city_name)
@@ -3122,6 +3153,22 @@ def _day0_carrier_vector_preflight_reason(
     conn: sqlite3.Connection | None = None
     try:
         conn = _queue_read_only_connection(Path(forecast_db))
+        _attach_world_read_only(conn)
+        current_state = read_day0_current_temperature_state(
+            conn=conn,
+            city=city,
+            target_date=target_date,
+            decision_time=computed_at,
+        )
+        if current_state is None:
+            # The materializer twin (``_day0_noaa_future_vector_members``)
+            # raises DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING
+            # here rather than falling back to the extreme's timestamp — a
+            # different failure than DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING.
+            # Only the same predicate may suppress a child process, so fall
+            # through and let the authoritative materializer run and report
+            # its own reason.
+            return None
         vectors = read_freshest_day0_hourly_vectors(
             city=city_name,
             target_date=target_date,
@@ -3129,17 +3176,19 @@ def _day0_carrier_vector_preflight_reason(
             expected_models=expected_models,
             require_expected=True,
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            remaining_window_start=observation_time,
+            remaining_window_start=current_state.observed_at,
             require_complete_remaining_window=True,
             conn=conn,
             raise_on_db_error=True,
         )
-        future = remaining_day_extremes_c(
+        future, _innovations = remaining_day_extremes_c_with_current_state(
             vectors,
             target_date=target_date,
-            now=computed_at,
+            decision_time=computed_at,
             metric=metric,
-            window_start=observation_time,
+            current_state=current_state,
+            settlement_unit=str(getattr(city, "settlement_unit", "") or "").upper(),
+            fallback_window_start=observation_time,
         )
     except _ClaimReadDeadlineExceeded:
         raise

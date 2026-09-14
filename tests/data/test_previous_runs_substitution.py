@@ -2815,6 +2815,7 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     calls: dict[str, object] = {}
+    extremes_calls: dict[str, object] = {}
     future = {"values": []}
 
     class _Connection:
@@ -2825,10 +2826,24 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
 
     conn = _Connection()
     sentinel_vector = object()
+    # The causal boundary the shared current-temperature-state reader
+    # returns is later than the persisted running-extreme timestamp below
+    # (17:00Z) — this is the normal case (a post-peak print, or simply a
+    # later hourly print, that leaves the extreme unchanged). The bundle
+    # coverage check must key off THIS boundary, not the extreme's time.
+    current_state = types.SimpleNamespace(
+        value_native=19.0,
+        observed_at=datetime(2099, 9, 3, 18, 0, tzinfo=timezone.utc),
+        source="ogimet_metar_ksat",
+    )
     monkeypatch.setattr(
         config_mod,
         "runtime_cities_by_name",
-        lambda: {"Austin": types.SimpleNamespace(timezone="America/Chicago")},
+        lambda: {
+            "Austin": types.SimpleNamespace(
+                timezone="America/Chicago", settlement_unit="C"
+            )
+        },
     )
     monkeypatch.setattr(
         vectors_mod, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
@@ -2838,13 +2853,24 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
         calls.update(kwargs)
         return [sentinel_vector]
 
+    def _read_current_state(**kwargs):
+        return current_state
+
+    def _remaining_extremes_with_state(_vectors, **kwargs):
+        extremes_calls.update(kwargs)
+        return future["values"], {}
+
     monkeypatch.setattr(vectors_mod, "read_freshest_day0_hourly_vectors", _read_vectors)
     monkeypatch.setattr(
+        vectors_mod, "read_day0_current_temperature_state", _read_current_state
+    )
+    monkeypatch.setattr(
         vectors_mod,
-        "remaining_day_extremes_c",
-        lambda _vectors, **_kwargs: future["values"],
+        "remaining_day_extremes_c_with_current_state",
+        _remaining_extremes_with_state,
     )
     monkeypatch.setattr(queue_mod, "_queue_read_only_connection", lambda _path: conn)
+    monkeypatch.setattr(queue_mod, "_attach_world_read_only", lambda _conn: None)
 
     reason = queue_mod._day0_carrier_vector_preflight_reason(
         forecast_db=tmp_path / "forecasts.db",
@@ -2865,12 +2891,21 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
     assert calls["expected_models"] == ("ecmwf_ifs",)
     assert calls["require_expected"] is True
     assert calls["require_complete_remaining_window"] is True
+    # The boundary is the current-temperature-state witness (18:00Z), not the
+    # persisted running-extreme timestamp (17:00Z) from the payload.
     assert calls["remaining_window_start"] == datetime(
-        2099, 9, 3, 17, 0, tzinfo=timezone.utc
+        2099, 9, 3, 18, 0, tzinfo=timezone.utc
     )
     assert calls["now"] == datetime(2099, 9, 3, 17, 16, tzinfo=timezone.utc)
     assert calls["raise_on_db_error"] is True
     assert conn.closed is True
+    # The extreme's timestamp still reaches the extremes computation as the
+    # documented no-current-state fallback, matching the materializer twin
+    # exactly, even though this call always has a current_state.
+    assert extremes_calls["fallback_window_start"] == datetime(
+        2099, 9, 3, 17, 0, tzinfo=timezone.utc
+    )
+    assert extremes_calls["current_state"] is current_state
 
     future["values"] = [19.0]
     assert (
@@ -2890,6 +2925,71 @@ def test_day0_carrier_vector_preflight_uses_materializer_bundle_contract(
         )
         is None
     )
+
+
+def test_day0_carrier_vector_preflight_falls_through_without_current_state(
+    tmp_path, monkeypatch
+) -> None:
+    """No current-temperature witness must fall through, not fabricate a decline.
+
+    The materializer twin (``_day0_noaa_future_vector_members``) raises a
+    DIFFERENT, more specific error
+    (``DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING``) when
+    the current-temperature-state reader returns nothing. The preflight must
+    not paper over that with the generic VECTOR_MISSING reason — only the
+    identical predicate may suppress a child process, so this must return
+    None and let the authoritative materializer run.
+    """
+    import src.config as config_mod
+    import src.data.day0_hourly_vectors as vectors_mod
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    class _Connection:
+        def close(self) -> None:
+            pass
+
+    conn = _Connection()
+    monkeypatch.setattr(
+        config_mod,
+        "runtime_cities_by_name",
+        lambda: {
+            "Austin": types.SimpleNamespace(
+                timezone="America/Chicago", settlement_unit="C"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        vectors_mod, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
+    )
+    monkeypatch.setattr(
+        vectors_mod, "read_day0_current_temperature_state", lambda **_kwargs: None
+    )
+
+    def _must_not_read_vectors(**_kwargs):
+        raise AssertionError(
+            "missing current_state must fall through before reading vectors"
+        )
+
+    monkeypatch.setattr(
+        vectors_mod, "read_freshest_day0_hourly_vectors", _must_not_read_vectors
+    )
+    monkeypatch.setattr(queue_mod, "_queue_read_only_connection", lambda _path: conn)
+    monkeypatch.setattr(queue_mod, "_attach_world_read_only", lambda _conn: None)
+
+    reason = queue_mod._day0_carrier_vector_preflight_reason(
+        forecast_db=tmp_path / "forecasts.db",
+        payload={
+            "city": "Austin",
+            "target_date": "2099-09-03",
+            "temperature_metric": "low",
+            "computed_at": "2099-09-03T17:16:00+00:00",
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2099-09-03T17:00:00+00:00",
+            "day0_observed_extreme_c": 21.0,
+        },
+    )
+
+    assert reason is None
 
 
 def test_materialization_queue_can_defer_seed_preparation_for_requests(
