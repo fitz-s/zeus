@@ -1118,7 +1118,15 @@ def test_chain_sync_read_cycle_disables_entry_proof_review_on_its_load_portfolio
     reads the EDLI-entry-proof-derived chain_only_facts before this subprocess exits, so
     the 2.5-5.5s SELF-time venue_commands scan (_query_edli_entry_proof_review_reasons)
     is pure waste for this specific caller. Every other load_portfolio call site keeps
-    the default True (unchanged)."""
+    the default True (unchanged).
+
+    Also (X-BJ follow-up, same date): must pass recent_exits=False -- nothing on this
+    call graph reads the query_authoritative_settlement_rows-derived
+    PortfolioState.recent_exits before this subprocess exits either (save_portfolio's
+    deprecated JSON-cache reader is never called from here; _track_exit only appends,
+    never reads pre-existing content). Two separate keywords, not one merged flag: the
+    two computations are unrelated (EDLI audit-trail vs. settlement/exit history) that
+    happen to both be dead work for this one caller today."""
     from src.data import polymarket_client
     from src.engine import cycle_runner
     from src.execution import post_trade_capital
@@ -1152,6 +1160,7 @@ def test_chain_sync_read_cycle_disables_entry_proof_review_on_its_load_portfolio
 
     assert len(load_portfolio_calls) == 1
     assert load_portfolio_calls[0].get("entry_proof_review") is False
+    assert load_portfolio_calls[0].get("recent_exits") is False
 
 
 def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):

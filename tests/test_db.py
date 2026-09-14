@@ -7002,6 +7002,44 @@ def test_unbounded_load_portfolio_skips_venue_commands_scan_when_entry_proof_rev
         conn.close()
 
 
+def test_unbounded_load_portfolio_skips_settlement_window_scan_when_recent_exits_is_false():
+    """X-BJ follow-up (2026-09-14): recent_exits=False must skip
+    query_authoritative_settlement_rows(limit=None) -- the limit=None defeats
+    query_settlement_events's own limit=50 default and loads every SETTLED
+    position_events row ever, each fanning out into
+    _query_entry_execution_fill_hints (which reads execution_fact). The result
+    feeds ONLY PortfolioState.recent_exits; verified (grep across src/) that
+    nothing on chain_sync_read_cycle's call graph reads it before that
+    subprocess exits. Default True keeps issuing it unchanged for every other
+    caller."""
+    from src.state import portfolio as portfolio_module
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "unbounded-recent-exits.db")
+        init_schema(conn)
+        conn.commit()
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        state_off = portfolio_module.load_portfolio(connection=conn, recent_exits=False)
+        conn.set_trace_callback(None)
+        assert not any("SETTLED" in s or "execution_fact" in s.lower() for s in statements), (
+            "recent_exits=False must not query the SETTLED window or execution_fact at all"
+        )
+        assert state_off.recent_exits == []
+
+        statements = []
+        conn.set_trace_callback(statements.append)
+        state_on = portfolio_module.load_portfolio(connection=conn)
+        conn.set_trace_callback(None)
+        assert any("SETTLED" in s for s in statements), (
+            "default recent_exits=True must still query the SETTLED window "
+            "(unchanged behavior for every other load_portfolio caller)"
+        )
+        assert state_on is not None
+        conn.close()
+
+
 def test_token_suppression_and_quarantine_queries_match_both_or_branches_after_index_rewrite():
     """X-BJ (2026-09-14): query_token_suppression_tokens's chain_terminal statement and
     query_chain_only_quarantine_rows were rewritten from a single OR-join EXISTS/NOT EXISTS

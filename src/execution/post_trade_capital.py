@@ -834,10 +834,29 @@ def chain_sync_read_cycle() -> None:
         # cycle_runner every cycle, not from here). The main cycle runner's
         # own unbounded load_portfolio() call (cycle_runner.py) is untouched
         # and keeps computing + alerting on this as before.
+        #
+        # recent_exits=False skips query_authoritative_settlement_rows(limit=None),
+        # which defeats query_settlement_events's own limit=50 default and loads
+        # every SETTLED position_events row ever (thousands), each fanning out
+        # into _query_entry_execution_fill_hints. The result feeds ONLY
+        # PortfolioState.recent_exits; verified (grep across src/) every reader:
+        # save_portfolio's deprecated JSON cache (never called from this
+        # function -- it imports but does not call save_portfolio) and
+        # _track_exit (via compute_economic_close / compute_settlement_close /
+        # mark_admin_closed / void_position), which only .append()s a fresh
+        # exit record and never reads the list's pre-existing content --
+        # reconcile() below does call void_position on this path, but that
+        # append is unaffected by starting from an empty list. riskguard.py
+        # independently computes and wholesale-replace()s recent_exits, never
+        # reading the incoming value. Kept as a separate keyword from
+        # entry_proof_review (see load_portfolio's docstring): the two gated
+        # computations are unrelated (EDLI audit-trail vs. settlement/exit
+        # history) that happen to both be dead work for this caller today.
         portfolio = load_portfolio(
             connection=conn,
             deadline_monotonic=deadline_monotonic,
             entry_proof_review=False,
+            recent_exits=False,
         )
         _log_phase("load_portfolio")
         with PolymarketClient() as clob:

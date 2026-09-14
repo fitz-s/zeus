@@ -2236,6 +2236,7 @@ def load_portfolio(
     connection: sqlite3.Connection | None = None,
     deadline_monotonic: float | None = None,
     entry_proof_review: bool = True,
+    recent_exits: bool = True,
 ) -> PortfolioState:
     """Load canonical portfolio truth; emit one timing log line per call.
 
@@ -2268,6 +2269,30 @@ def load_portfolio(
     Pass ``entry_proof_review=False`` ONLY from that call site; every other
     caller keeps the full computation and its operator-facing
     ``logger.error`` alert.
+
+    X-BJ follow-up (2026-09-14): ``recent_exits`` (default True) gates
+    ``query_authoritative_settlement_rows(conn, limit=None, env=...)`` --
+    the ``limit=None`` defeats ``query_settlement_events``'s own
+    ``limit=50`` default and loads every SETTLED position_events row ever
+    (thousands), each fanning out into ``_query_entry_execution_fill_hints``.
+    The result feeds ONLY ``PortfolioState.recent_exits`` (build site
+    below); verified (grep across src/) every reader of
+    ``.recent_exits``: ``save_portfolio``'s deprecated JSON cache (never
+    called from ``chain_sync_read_cycle`` -- it imports but does not call
+    ``save_portfolio``), and ``_track_exit`` (called from
+    ``compute_economic_close`` / ``compute_settlement_close`` /
+    ``mark_admin_closed`` / ``void_position``) which only ``.append()``s a
+    fresh exit record and never reads the list's pre-existing content --
+    ``reconcile()`` does call ``void_position`` on chain_sync's path, but
+    that append is unaffected by starting from an empty list.
+    ``riskguard.py`` independently computes and wholesale-``replace()``s
+    ``recent_exits``, never reading the incoming value. This is a second,
+    separate keyword rather than folding into ``entry_proof_review``:
+    entry-proof-review and recent-exits are unrelated computations (EDLI
+    audit-trail vs. settlement/exit history) that happen to both be dead
+    work for the same caller today; a merged flag would make
+    ``entry_proof_review`` mean something it doesn't say. Pass
+    ``recent_exits=False`` ONLY from ``chain_sync_read_cycle``.
     """
     from src.state.db import _LOAD_PORTFOLIO_STACK, _LOAD_PORTFOLIO_TIMING
 
@@ -2286,6 +2311,7 @@ def load_portfolio(
             connection=connection,
             deadline_monotonic=deadline_monotonic,
             entry_proof_review=entry_proof_review,
+            recent_exits=recent_exits,
         )
         return result
     finally:
@@ -2313,6 +2339,7 @@ def _load_portfolio_impl(
     connection: sqlite3.Connection | None = None,
     deadline_monotonic: float | None = None,
     entry_proof_review: bool = True,
+    recent_exits: bool = True,
 ) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     if settlement_cohort_only:
@@ -2440,7 +2467,11 @@ def _load_portfolio_impl(
                 ignored_tokens = query_token_suppression_tokens(conn)
             with _timed_portfolio_query("query_chain_only_quarantine_rows"):
                 chain_only_quarantines = query_chain_only_quarantine_rows(conn)
-        if not bounded_load and snapshot.get("status") in ("ok", "partial_stale", "empty"):
+        if (
+            not bounded_load
+            and recent_exits
+            and snapshot.get("status") in ("ok", "partial_stale", "empty")
+        ):
             try:
                 with _timed_portfolio_query("query_authoritative_settlement_rows"):
                     settlement_rows = query_authoritative_settlement_rows(
