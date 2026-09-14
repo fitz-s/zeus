@@ -3701,6 +3701,12 @@ def maybe_refresh_day0_hourly_vectors(
                 target_date: strict_window_start(city, target_date)
                 for target_date in target_dates
             }
+            # One fetch call covers every date in target_dates at once, so
+            # only one boundary can drive endpoint selection here. The map is
+            # populated per (city, target_date) -- not just each city's first
+            # date -- but target_dates[0] is the correct key to read: it is
+            # the earliest, already-started local date (a not-yet-started
+            # date has no boundary and gap (b) cannot apply to it anyway).
             causal_boundary = (causal_run_boundaries or {}).get(
                 (name, target_dates[0])
             )

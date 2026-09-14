@@ -6758,7 +6758,17 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         # check). A hint for endpoint selection, never authority: any failure
         # here degrades to today's freshest-run-only behavior, it never blocks
         # the refresh itself.
+        # Populated per (city, target_date), not just each city's first date:
+        # a city can be mid-refresh for more than one local date (e.g. near
+        # local midnight), and only a date whose local day has already
+        # started at decision_time can have a boundary at all --
+        # read_day0_current_temperature_state returns None for a
+        # not-yet-started date (confirmed by
+        # test_day0_current_temperature_state_none_for_not_yet_started_local_date),
+        # which correctly leaves gap (b) unappliable there: the freshest run
+        # is simply the right run for a date that has not started.
         causal_run_boundaries: dict[tuple[str, str], datetime] = {}
+        boundary_read_failures: list[str] = []
         try:
             with get_forecasts_connection_with_world_read_only() as boundary_conn:
                 for boundary_city in ordered_cities:
@@ -6773,27 +6783,43 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                         boundary_target_dates = day0_hourly_target_dates_for_refresh(
                             city=boundary_city, decision_time=decision_time
                         )
-                    except Exception:  # noqa: BLE001 -- hint, not authority
-                        continue
-                    if not boundary_target_dates:
-                        continue
-                    try:
-                        current_state = read_day0_current_temperature_state(
-                            conn=boundary_conn,
-                            city=boundary_city,
-                            target_date=boundary_target_dates[0],
-                            decision_time=decision_time,
+                    except Exception as exc:  # noqa: BLE001 -- hint, not authority
+                        boundary_read_failures.append(
+                            f"{boundary_city_name}/?:{type(exc).__name__}"
                         )
-                    except Exception:  # noqa: BLE001 -- hint, not authority
                         continue
-                    if current_state is not None:
-                        causal_run_boundaries[
-                            (boundary_city_name, boundary_target_dates[0])
-                        ] = current_state.observed_at
+                    for boundary_target_date in boundary_target_dates:
+                        try:
+                            current_state = read_day0_current_temperature_state(
+                                conn=boundary_conn,
+                                city=boundary_city,
+                                target_date=boundary_target_date,
+                                decision_time=decision_time,
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- hint, not authority
+                            boundary_read_failures.append(
+                                f"{boundary_city_name}/{boundary_target_date}:"
+                                f"{type(exc).__name__}"
+                            )
+                            continue
+                        if current_state is not None:
+                            causal_run_boundaries[
+                                (boundary_city_name, boundary_target_date)
+                            ] = current_state.observed_at
         except Exception as exc:  # noqa: BLE001 -- hint, not authority
             causal_run_boundaries = {}
+            boundary_read_failures.append(f"<connection>:{type(exc).__name__}")
+        if boundary_read_failures:
+            # A missing boundary degrades that (city, target_date) to today's
+            # freshest-run-only coverage behavior -- correct, per "unservable
+            # degrades like absent", but never silent: name every failed
+            # city/date and exception class in one line per cycle.
             _log.warning(
-                "edli_day0_hourly_refresh: causal boundary probe failed: %s", exc
+                "edli_day0_hourly_refresh: causal boundary probe degraded for "
+                "%d city/date entries (falling back to freshest-run-only "
+                "endpoint selection there): %s",
+                len(boundary_read_failures),
+                ", ".join(boundary_read_failures[:20]),
             )
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,

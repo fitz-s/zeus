@@ -4910,6 +4910,50 @@ def test_day0_run_selection_provenance_run_identity_is_endpoint_invariant(
     )
 
 
+def test_day0_current_temperature_state_none_for_not_yet_started_local_date():
+    """Confirms the team lead's steer: a target_date whose local day has not
+    started yet at decision_time has no causal boundary --
+    read_day0_current_temperature_state returns None for it rather than a
+    stale prior-day print, so run_edli_day0_hourly_refresh_cycle's boundary
+    map correctly carries no entry for that (city, target_date) and gate (b)
+    cannot fire there (the freshest run is simply the right run)."""
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    # A real, causally-available print for June 9 -- but none for June 10.
+    conn.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1, "Paris", "LFPG", "wu_icao_history", "2026-06-09T11:00:00+00:00",
+            22.0, "C", "2026-06-09T11:05:00+00:00", None,
+        ),
+    )
+    conn.commit()
+
+    city = _paris()
+    # Paris (CEST, UTC+2) local midnight for June 10 is 2026-06-09T22:00:00Z;
+    # this decision_time is hours before that -- June 10 has not started yet.
+    decision_time = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
+
+    same_day_state = read_day0_current_temperature_state(
+        conn=conn, city=city, target_date="2026-06-09", decision_time=decision_time,
+    )
+    assert same_day_state is not None
+    assert same_day_state.value_native == pytest.approx(22.0)
+
+    not_yet_started_state = read_day0_current_temperature_state(
+        conn=conn, city=city, target_date="2026-06-10", decision_time=decision_time,
+    )
+    assert not_yet_started_state is None
+
+
 def test_wu_revision_history_keeps_current_boundary_inside_probability():
     from src.data.day0_observation_reader import (
         wu_provisional_revision_likelihood,
