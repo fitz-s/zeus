@@ -345,6 +345,36 @@ def record_missing(
 # ---------------------------------------------------------------------------
 
 
+def coverage_row_status(
+    conn: WorldConnection,
+    *,
+    data_table: DataTable,
+    city: str,
+    data_source: str,
+    target_date: date | str,
+    sub_key: str = "",
+) -> tuple[str, Optional[str]] | None:
+    """Return ``(status, retry_after)`` for one exact coverage key, or
+    ``None`` if that row has never been written.
+
+    Single-key counterpart to ``find_pending_fills``'s bulk scan, for a
+    caller that already knows exactly which key it is about to fetch (a
+    local-day-end-anchored live tick) and only needs "is this one fetch
+    still owed" -- WRITTEN/LEGITIMATE_GAP are terminal (never re-fetch);
+    a FAILED row's own ``retry_after`` embargo still applies.
+    """
+    table_ref = _coverage_table_ref(conn)
+    row = conn.execute(
+        f"SELECT status, retry_after FROM {table_ref} "
+        "WHERE data_table = ? AND city = ? AND data_source = ? "
+        "AND target_date = ? AND sub_key = ?",
+        (data_table.value, city, data_source, _coerce_target_date(target_date), sub_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return (str(row[0]), row[1])
+
+
 def find_pending_fills(
     conn: WorldConnection,
     *,

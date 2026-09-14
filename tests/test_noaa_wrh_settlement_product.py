@@ -368,6 +368,7 @@ def _insert_observation(
     high: float,
     low: float,
     unit: str = "F",
+    fetched_at: str = "2026-09-12T00:00:00+00:00",
 ) -> None:
     conn.execute(
         """INSERT INTO observations
@@ -376,7 +377,7 @@ def _insert_observation(
            VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?, ?, ?)""",
         (
             city, target_date, source, high, low, unit, station_id,
-            "2026-09-12T00:00:00+00:00",
+            fetched_at,
             f"{target_date}T15:51:00-04:00",
             f"{target_date}T06:51:00-04:00",
         ),
@@ -418,6 +419,48 @@ def test_settlement_lookup_prefers_the_page_row_over_the_ogimet_row(module_path,
         assert obs["observed_temp"] == pytest.approx(80.0)
         assert obs["data_version"] == "noaa_wrh_timeseries_v1"
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    ["src.execution.harvester", "src.ingest.harvester_truth_writer"],
+)
+def test_settled_at_replay_seattle_09_13_lands_before_09z_not_18z(module_path, tmp_path):
+    """Seattle 2026-09-12 replay (T-truthlag): the OLD alphabetical daily
+    shard (`daily_obs_append._ogimet_city_shard_for_hour`, now replaced by
+    `_noaa_daily_target_dates_due`) fetched Seattle's WRH page at its shard
+    hour 18, so ``settled_at`` (= ``fetched_at``, this module's own
+    ``settled_at = obs_row.get("fetched_at")``) landed 18:05:05Z -- 11h05m
+    after Seattle's local day end (07:00Z). The new local-day-end anchor
+    selects Seattle at the first daily_tick (cron minute=5) at/after
+    day_end+1h = 08:00Z, i.e. 08:05Z. This test proves the settlement-truth
+    half of that fix: an ``observations`` row stamped at the NEW fetch time
+    (08:05Z) reads back through the unmodified ``_lookup_settlement_obs``
+    exactly as ``settled_at`` -- landing under 09:00Z, not at the old
+    18:05Z.
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+    conn = _observations_conn(tmp_path)
+    new_fetch_at = "2026-09-13T08:05:11+00:00"
+    _insert_observation(
+        conn, city="Seattle", target_date="2026-09-12", source="noaa_wrh_ksea",
+        station_id="KSEA", high=55.0, low=48.0, fetched_at=new_fetch_at,
+    )
+
+    obs = module._lookup_settlement_obs(
+        conn, cities_by_name["Seattle"], "2026-09-12", temperature_metric="high",
+    )
+
+    assert obs is not None
+    assert obs["fetched_at"] == new_fetch_at
+    settled_at = datetime.fromisoformat(obs["fetched_at"])
+    assert settled_at < datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc)
+    # The old shard's measured value (T-truthlag) would have failed this bound.
+    old_shard_settled_at = datetime(2026, 9, 13, 18, 5, 5, tzinfo=timezone.utc)
+    assert old_shard_settled_at >= datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc)
+    conn.close()
 
 
 @pytest.mark.parametrize(

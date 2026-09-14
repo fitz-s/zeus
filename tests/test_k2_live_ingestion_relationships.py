@@ -220,16 +220,145 @@ def test_R2_daily_obs_catch_up_skips_inapplicable_source(monkeypatch) -> None:
     assert result["inapplicable_pending_skipped"] == 1
 
 
-def test_R2_ogimet_daily_shards_cover_each_city_once() -> None:
-    seen: list[str] = []
-    for hour in range(24):
-        seen.extend(
-            daily_obs_append._ogimet_city_shard_for_hour(
-                datetime(2026, 9, 2, hour, tzinfo=timezone.utc)
-            )
-        )
-    assert seen == sorted(daily_obs_append.OGIMET_CITIES)
-    assert len(seen) == len(set(seen)) == 48
+def test_R2_noaa_daily_selection_anchors_to_local_day_end(monkeypatch) -> None:
+    """Replaces the removed fixed-shard partition invariant. Fixed-offset
+    (no-DST) synthetic zones isolate exactly the day-end-vs-now boundary:
+    a city whose local-day-end + 1h buffer has elapsed is selected; one
+    whose local day ended minutes ago is not."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        daily_obs_append,
+        "cities_by_name",
+        {
+            # UTC+8: local day ended 2026-09-13T16:00Z; now (17:15Z) is
+            # past the 1h buffer.
+            "PlusEight": SimpleNamespace(timezone="Etc/GMT-8", wu_station="ZZZ8"),
+            # UTC+7: local day ended 2026-09-13T17:00Z; now (17:15Z) is
+            # only 15min later -- inside the buffer.
+            "PlusSeven": SimpleNamespace(timezone="Etc/GMT-7", wu_station="ZZZ7"),
+        },
+    )
+    monkeypatch.setattr(
+        daily_obs_append,
+        "OGIMET_CITIES",
+        {
+            "PlusEight": daily_obs_append._OgimetTarget(
+                city_name="PlusEight", station="ZZZ8", kind="metar", source_tag="ogimet_metar_zzz8",
+            ),
+            "PlusSeven": daily_obs_append._OgimetTarget(
+                city_name="PlusSeven", station="ZZZ7", kind="metar", source_tag="ogimet_metar_zzz7",
+            ),
+        },
+    )
+    now_utc = datetime(2026, 9, 13, 17, 15, tzinfo=timezone.utc)
+
+    due = daily_obs_append._noaa_daily_target_dates_due(now_utc)
+
+    assert due == {"PlusEight": date(2026, 9, 13)}
+
+
+def test_R2_noaa_daily_selection_seattle_replay(monkeypatch) -> None:
+    """Seattle 2026-09-12 replay (T-truthlag): local day ends 07:00Z. The
+    daily settlement lanes must not be selected before day_end+1h, and must
+    be selected (target_date=2026-09-12) at the first daily_tick (cron
+    minute=5) at/after 08:00Z -- 08:05Z -- not the OLD shard's 18:05Z."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        daily_obs_append,
+        "cities_by_name",
+        {"Seattle": SimpleNamespace(timezone="America/Los_Angeles", wu_station="KSEA")},
+    )
+    monkeypatch.setattr(
+        daily_obs_append,
+        "OGIMET_CITIES",
+        {
+            "Seattle": daily_obs_append._OgimetTarget(
+                city_name="Seattle", station="KSEA", kind="metar", source_tag="ogimet_metar_ksea",
+            ),
+        },
+    )
+
+    too_early = datetime(2026, 9, 13, 7, 30, tzinfo=timezone.utc)
+    assert daily_obs_append._noaa_daily_target_dates_due(too_early) == {}
+
+    at_anchor = datetime(2026, 9, 13, 8, 5, tzinfo=timezone.utc)
+    assert daily_obs_append._noaa_daily_target_dates_due(at_anchor) == {
+        "Seattle": date(2026, 9, 12)
+    }
+
+
+def test_R2_noaa_daily_coverage_gate_idempotent_and_carries_forward() -> None:
+    """Idempotency + carry-forward for the WRH/Ogimet daily coverage gate:
+    a WRITTEN row is not re-fetched; a never-attempted or FAILED-with-
+    expired-embargo row is due; a FAILED row still inside its retry
+    embargo is not re-fetched yet."""
+    conn = _memdb()
+    target = date(2026, 9, 12)
+
+    # Never attempted.
+    assert daily_obs_append._daily_coverage_row_needs_fetch(
+        conn, data_source="noaa_wrh_ksea", city="Seattle", target_date=target,
+    )
+
+    record_written(
+        conn, data_table=DataTable.OBSERVATIONS, city="Seattle",
+        data_source="noaa_wrh_ksea", target_date=target,
+    )
+    assert not daily_obs_append._daily_coverage_row_needs_fetch(
+        conn, data_source="noaa_wrh_ksea", city="Seattle", target_date=target,
+    )
+
+    record_failed(
+        conn, data_table=DataTable.OBSERVATIONS, city="Miami",
+        data_source="noaa_wrh_kmia", target_date=target,
+        reason=CoverageReason.NETWORK_ERROR,
+        retry_after=datetime.now(timezone.utc) + timedelta(hours=2),
+    )
+    assert not daily_obs_append._daily_coverage_row_needs_fetch(
+        conn, data_source="noaa_wrh_kmia", city="Miami", target_date=target,
+    )
+
+    record_failed(
+        conn, data_table=DataTable.OBSERVATIONS, city="Miami",
+        data_source="noaa_wrh_kmia", target_date=target - timedelta(days=1),
+        reason=CoverageReason.NETWORK_ERROR,
+        retry_after=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    assert daily_obs_append._daily_coverage_row_needs_fetch(
+        conn, data_source="noaa_wrh_kmia", city="Miami", target_date=target - timedelta(days=1),
+    )
+
+
+def test_R2_noaa_daily_worst_cluster_fits_the_hourly_tick_budget() -> None:
+    """The worst UTC-hour cluster of NOAA cities anchored to the SAME
+    local-day-end must fit, serialized at the WRH page's 2s and the
+    Ogimet mirror's 21s per-request cadence, comfortably inside the
+    hourly ``ingest_k2_daily_obs`` tick cadence (3600s) -- same 48
+    page-fetches/day budget as before, just anchored in time."""
+    from src.config import cities_by_name as live_cities_by_name
+    from src.data.noaa_wrh_timeseries import _MIN_REQUEST_INTERVAL_SECONDS
+    from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
+
+    names = sorted(daily_obs_append.OGIMET_CITIES)
+    ref_date = date(2026, 9, 13)
+    clusters: dict[int, int] = {}
+    for name in names:
+        city_cfg = live_cities_by_name[name]
+        tz = ZoneInfo(city_cfg.timezone)
+        day_end_utc = datetime.combine(
+            ref_date + timedelta(days=1), datetime.min.time(), tzinfo=tz
+        ).astimezone(timezone.utc)
+        trigger_hour = (day_end_utc + timedelta(hours=1)).hour
+        clusters[trigger_hour] = clusters.get(trigger_hour, 0) + 1
+
+    worst = max(clusters.values())
+    worst_case_seconds = worst * (_MIN_REQUEST_INTERVAL_SECONDS + OGIMET_MIN_INTERVAL_SECONDS)
+    assert worst_case_seconds < 1800.0, (
+        f"worst NOAA daily cluster ({worst} cities) needs {worst_case_seconds:.0f}s, "
+        "too close to the hourly tick cadence"
+    )
 
 
 def test_R2_ogimet_catch_up_is_bounded_per_run(monkeypatch) -> None:

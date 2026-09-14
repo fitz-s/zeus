@@ -80,6 +80,7 @@ from src.data.daily_observation_writer import (
 )
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected
 from src.data.metar_temperature import metar_temperature_c
+from src.engine.time_context import city_local_day_end_target_date
 from src.types.temperature import Temperature
 # G10 helper-extraction (2026-04-26, con-nyx MAJOR #1): import from canonical
 # location to avoid transitively pulling src.signal into the ingest lane.
@@ -88,6 +89,7 @@ from src.state.data_coverage import (
     CoverageReason,
     CoverageStatus,
     DataTable,
+    coverage_row_status,
     record_failed,
     record_legitimate_gap,
     record_written,
@@ -1670,15 +1672,73 @@ def _build_ogimet_cities() -> dict[str, _OgimetTarget]:
 OGIMET_CITIES: dict[str, _OgimetTarget] = _build_ogimet_cities()
 
 
-def _ogimet_city_shard_for_hour(now_utc: datetime) -> tuple[str, ...]:
-    """Return this UTC hour's bounded slice of the daily NOAA city sweep."""
+def _noaa_daily_target_dates_due(now_utc: datetime) -> dict[str, date]:
+    """NOAA-tier cities whose settlement-grade daily lanes (WRH page +
+    Ogimet daily-atom mirror) for their own local day may still be owed.
 
-    names = sorted(OGIMET_CITIES)
-    if not names:
-        return ()
-    per_hour = max(1, math.ceil(len(names) / 24))
-    start_index = now_utc.hour * per_hour
-    return tuple(names[start_index:start_index + per_hour])
+    Replaces the fixed alphabetical UTC-hour shard (formerly
+    ``_ogimet_city_shard_for_hour``) that gave every city exactly one
+    attempt per UTC day regardless of its own local-day-end. The
+    settlement truth writer stamps ``settled_at = fetched_at`` off the
+    ``observations`` row this loop writes
+    (``src/ingest/harvester_truth_writer.py::_lookup_settlement_obs``), so
+    that shard's per-city hour being unrelated to the city's local-day-end
+    made settlement truth lag local-day-end by
+    ``(shard_hour - day_end_hour) mod 24``: measured median ~11h, up to
+    ~24h (Miami).
+
+    ``city_local_day_end_target_date`` (``src/engine/time_context.py``) is
+    the SAME predicate ``scripts/obs_live_tick.py`` uses for the Ogimet
+    observation_instants completing fetch -- one selector, both call
+    sites, no duplicate shard logic. A city stays a candidate for ~23h
+    after its local day ends (until the next day's end rolls the
+    target_date forward); the per-lane coverage-row check in
+    ``daily_tick`` below decides whether either lane still needs a
+    request this tick (WRITTEN/LEGITIMATE_GAP skip; a FAILED lane honors
+    its own retry embargo) -- so a city is not re-fetched every one of
+    those ~23 hourly ticks once it succeeds.
+    """
+    due: dict[str, date] = {}
+    for city_name in sorted(OGIMET_CITIES):
+        city_cfg = cities_by_name.get(city_name)
+        if city_cfg is None:
+            continue
+        target_date = city_local_day_end_target_date(city_cfg.timezone, now_utc)
+        if target_date is None:
+            continue
+        due[city_name] = target_date
+    return due
+
+
+def _daily_coverage_row_needs_fetch(
+    conn, *, data_source: str, city: str, target_date: date
+) -> bool:
+    """Whether one (city, data_source, target_date) daily row is still owed.
+
+    Reuses the WRITTEN/LEGITIMATE_GAP/FAILED-embargo state machine
+    ``data_coverage`` already encodes (see ``coverage_row_status``) instead
+    of a second retry policy -- the FAILED embargo (2-6h, set by
+    ``append_noaa_wrh_city``/``append_ogimet_city`` on failure) is exactly
+    the mechanism the per-IP Synoptic volume law
+    ([[noaa-settlement-page-value-law]]) requires: no more than one
+    successful request per station per local day, and a bounded number of
+    retries on top, never one request per hourly tick.
+    """
+    status = coverage_row_status(
+        conn,
+        data_table=DataTable.OBSERVATIONS,
+        city=city,
+        data_source=data_source,
+        target_date=target_date,
+    )
+    if status is None:
+        return True
+    state, retry_after = status
+    if state in (CoverageStatus.WRITTEN.value, CoverageStatus.LEGITIMATE_GAP.value):
+        return False
+    if state == CoverageStatus.FAILED.value and retry_after:
+        return retry_after <= datetime.now(timezone.utc).isoformat()
+    return True
 
 
 def daily_observation_source_for_city(
@@ -2283,37 +2343,46 @@ def daily_tick(
             accumulator_schema=hko_accumulator_schema,
         )
 
-    # NOAA cities carry two daily lanes over the same station and the same
-    # shard schedule: the weather.gov page feed is the settlement product, and
-    # Ogimet remains the hourly/history mirror and the row the settlement
-    # writer reads when the page feed produced nothing for that city/date.
-    # Both are sharded across the 24 hourly ticks so neither one turns into a
-    # 48-city request burst, and both run before the 45-minute
-    # harvester_truth_writer cron reads the day.
+    # NOAA cities carry two daily lanes over the same station: the weather.gov
+    # page feed is the settlement product, and Ogimet remains the
+    # hourly/history mirror and the row the settlement writer reads when the
+    # page feed produced nothing for that city/date. Both are anchored to
+    # each city's own local-day-end (`_noaa_daily_target_dates_due`) instead
+    # of a fixed UTC shard hour, and each lane is gated by its own
+    # data_coverage row so a city already WRITTEN for the day is not
+    # re-fetched on every one of the ~23 hourly ticks before its target_date
+    # rolls over -- see `_noaa_daily_target_dates_due`'s docstring.
     ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
     noaa_wrh_stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
         "window_too_old": 0,
     }
-    for city_name in _ogimet_city_shard_for_hour(now_utc):
+    for city_name, target_d in _noaa_daily_target_dates_due(now_utc).items():
         city_cfg = cities_by_name.get(city_name)
         if city_cfg is None:
             continue
-        local_today = now_utc.astimezone(ZoneInfo(city_cfg.timezone)).date()
-        local_yesterday = local_today - timedelta(days=1)
-        if settlement_source_type_for_city(city_cfg, local_yesterday) != "noaa":
+        if settlement_source_type_for_city(city_cfg, target_d) != "noaa":
             continue
-        wrh_stats = append_noaa_wrh_city(
-            city_name, [local_yesterday], conn,
-            rebuild_run_id=rebuild_run_id, now_utc=now_utc,
-        )
-        for k in noaa_wrh_stats:
-            noaa_wrh_stats[k] += wrh_stats.get(k, 0)
-        stats = append_ogimet_city(
-            city_name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
-        )
-        for k in ogimet_stats:
-            ogimet_stats[k] += stats.get(k, 0)
+        station = str(city_cfg.wu_station or "").strip().upper()
+        wrh_source = noaa_wrh_source_tag(station)
+        if _daily_coverage_row_needs_fetch(
+            conn, data_source=wrh_source, city=city_name, target_date=target_d
+        ):
+            wrh_stats = append_noaa_wrh_city(
+                city_name, [target_d], conn,
+                rebuild_run_id=rebuild_run_id, now_utc=now_utc,
+            )
+            for k in noaa_wrh_stats:
+                noaa_wrh_stats[k] += wrh_stats.get(k, 0)
+        ogimet_target = OGIMET_CITIES.get(city_name)
+        if ogimet_target is not None and _daily_coverage_row_needs_fetch(
+            conn, data_source=ogimet_target.source_tag, city=city_name, target_date=target_d
+        ):
+            stats = append_ogimet_city(
+                city_name, [target_d], conn, rebuild_run_id=rebuild_run_id,
+            )
+            for k in ogimet_stats:
+                ogimet_stats[k] += stats.get(k, 0)
 
     return {
         "wu": wu_totals,
