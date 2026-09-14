@@ -1758,13 +1758,15 @@ def _global_reduce_only_capture_tokens(
 ) -> tuple[str, ...]:
     """Return the exact held tokens represented by one probability slice."""
 
+    from src.solve.solver import actionable_family_payoff_bindings
+
     represented: set[str] = set()
     for raw_family_key, witness in probabilities.items():
         family_key = str(raw_family_key or "").strip()
         held = held_tokens_by_family.get(family_key, set())
         if not held:
             continue
-        for binding in tuple(getattr(witness, "bindings", ()) or ()):
+        for binding in actionable_family_payoff_bindings(witness):
             for raw_token in (
                 getattr(binding, "yes_token_id", ""),
                 getattr(binding, "no_token_id", ""),
@@ -11463,6 +11465,18 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if _urgent_book_preemption("after_full_metadata"):
                 return probabilities, None
+            if (
+                reduce_only_book_tokens is not None
+                and not _global_reduce_only_capture_tokens(
+                    bound_probabilities,
+                    held_tokens_by_family,
+                    reduce_only_book_tokens,
+                )
+            ):
+                # SCOPE: this cut has no actionable held payoff. DRAIN: retain
+                # held SELL debt for the next metadata/book cut. RESET: current
+                # evidence restores a nonempty scope; never widen empty to None.
+                return {}, None
             prefetched = _complete_current_prefetch(
                 bound_probabilities,
                 prefetched,

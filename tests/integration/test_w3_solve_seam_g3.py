@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-13
+# Last reused/audited: 2026-09-14
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -42484,3 +42484,120 @@ def test_sell_fee_guard_is_reproved_at_jit_and_preserves_zero_atom_exit(monkeypa
         assert drift is None
     else:
         assert drift.startswith("rounding_safe_fill:")
+
+
+def _partial_reduce_only_book_witness():
+    from src.solve.solver import deterministic_bin_payoff_witness_identity
+    at = _dt.datetime.now(_dt.timezone.utc)
+    fields = dict(
+        family_key=era.weather_family_id(city="London", target_date="2026-09-14", metric="high"),
+        bindings=tuple(OutcomeTokenBinding(
+            bin_id=f"bin-{kind}", condition_id=f"condition-{kind}",
+            yes_token_id=f"yes-{kind}", no_token_id=f"no-{kind}",
+        ) for kind in ("exact", "unknown")),
+        exact_yes_payoffs=(("bin-exact", 0),), q_version="q-exact",
+        resolution_identity="resolution", topology_identity="topology",
+        posterior_identity_hash="posterior", source_truth_identity="source",
+        authority_certificate_hash="authority", band_alpha=0.05,
+        band_basis="day0_deterministic_bin_payoff_v1", captured_at_utc=at,
+    )
+    return DeterministicBinPayoffWitness(
+        **fields, max_age=_dt.timedelta(seconds=180),
+        witness_identity=deterministic_bin_payoff_witness_identity(**fields),
+    )
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+def test_reduce_only_partial_payoff_capture_excludes_unknown_sibling(side):
+    from src.solve.solver import family_payoff_q_samples
+    witness = _partial_reduce_only_book_witness()
+    exact, unknown = f"{side}-exact", f"{side}-unknown"
+    holdings = {witness.family_key: {exact, unknown}}
+    tokens = era._global_reduce_only_capture_tokens(
+        {witness.family_key: witness}, holdings, frozenset({exact, unknown}),
+    )
+    assert tokens == (exact,)
+    assert holdings[witness.family_key] == {exact, unknown}
+    assert family_payoff_q_samples(witness, bin_id="bin-unknown", side=side.upper()) is None
+    at = witness.captured_at_utc
+    conn = _global_book_metadata_conn(
+        witness, captured_at=(at - _dt.timedelta(seconds=1)).isoformat(),
+        freshness_deadline=(at + _dt.timedelta(seconds=180)).isoformat(),
+    )
+    requested = []
+    try:
+        epoch = capture_current_global_book_epoch(
+            conn, probability_witnesses={witness.family_key: witness},
+            required_token_ids=frozenset(tokens), clock=lambda: at,
+            max_age=_dt.timedelta(seconds=180),
+            get_books=lambda ts: requested.extend(ts) or {
+                token: {"asset_id": token, "tick_size": "0.01", "min_order_size": "5",
+                        "bids": [{"price": "0.20", "size": "100"}],
+                        "asks": [{"price": "0.30", "size": "100"}]}
+                for token in ts
+            },
+        )
+        assert requested == [exact]
+        assert {state[4] for state in epoch.asset_states} == {exact}
+        assert {asset.token_id for asset in epoch.sell_assets} == {exact}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+def test_reduce_only_unknown_payoff_full_adapter_drains_empty_capture(monkeypatch, side):
+    witness = _partial_reduce_only_book_witness()
+    trade, forecast, topology, world = (sqlite3.connect(":memory:") for _ in range(4))
+    trade.execute("""CREATE TABLE position_current (
+        position_id TEXT,city TEXT,target_date TEXT,temperature_metric TEXT,
+        direction TEXT,token_id TEXT,no_token_id TEXT,phase TEXT,chain_shares REAL,shares REAL
+    )""")
+    trade.execute("INSERT INTO position_current VALUES(?,?,?,?,?,?,?,?,?,?)", (
+        "unknown-held", "London", "2026-09-14", "high", f"buy_{side}",
+        "yes-unknown", "no-unknown", "pending_exit", 7, 7,
+    ))
+    trade.commit()
+    captured = {}
+    def process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", process)
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    monkeypatch.setattr(era, "_entry_global_submit_suppression_reason", lambda: "test_reduce_only")
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade, get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast, topology_conn=topology, calibration_conn=world,
+    )
+    adapter.process_global_batch(
+        (replace(_global_scope_event(city="London", source_run_id="run"),
+                 event_type="DAY0_EXTREME_UPDATED"),), witness.captured_at_utc,
+    )
+    def bind(_conn, *, probability_witnesses, metadata_sink=None, **_):
+        for binding in witness.bindings:
+            for token in (binding.yes_token_id, binding.no_token_id):
+                metadata_sink[(binding.condition_id, token)] = {
+                    "_global_current_gamma": True, "enable_orderbook": True,
+                    "active": True, "closed": False, "accepting_orders": True,
+                    "tradeability_status_json": "{}",
+                }
+        return dict(probability_witnesses)
+    class NoBooks:
+        def __init__(self, **_): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def get_orderbook_snapshots(self, tokens, **_):
+            assert not tokens, "unknown payoffs cannot authorize book requests"
+            return {}
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch",
+                        lambda *_a, **_k: pytest.fail("empty scope must drain before capture"))
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", NoBooks)
+    try:
+        bound, epoch = captured["current_book_epoch_provider"](
+            {witness.family_key: witness}, witness.captured_at_utc,
+        )
+        assert bound == {} and epoch is None
+        assert trade.execute("SELECT shares,phase FROM position_current").fetchone() == (7, "pending_exit")
+    finally:
+        for conn in (trade, forecast, topology, world):
+            conn.close()
