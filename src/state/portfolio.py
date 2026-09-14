@@ -2242,13 +2242,24 @@ def load_portfolio(
     call -- success, degraded return, or raised TimeoutError/ValueError --
     logs one INFO line naming the elapsed cost of each SQL-executing helper
     it touched this call. Telemetry only: no change to the returned
-    PortfolioState or to which helpers are invoked. See
-    src.state.db._timed_portfolio_query / _LOAD_PORTFOLIO_TIMING.
+    PortfolioState or to which helpers are invoked.
+
+    R-BF review MEDIUM #1 (2026-09-14): these helpers nest (e.g.
+    query_portfolio_loader_view wraps _query_transitional_position_hints,
+    which wraps the two _hydrate_* calls), so each printed value is
+    EXCLUSIVE/self time -- a container's own printed number already has its
+    instrumented children subtracted out. This keeps the line additive:
+    `total_s >= sum(printed helper values)`, with the (typically small)
+    residual being untimed glue code (row materialization, JSON encode) that
+    load_portfolio does outside any named helper -- never double-counted
+    child time. See src.state.db._timed_portfolio_query /
+    _LOAD_PORTFOLIO_TIMING / _LOAD_PORTFOLIO_STACK.
     """
-    from src.state.db import _LOAD_PORTFOLIO_TIMING
+    from src.state.db import _LOAD_PORTFOLIO_STACK, _LOAD_PORTFOLIO_TIMING
 
     timings: dict[str, float] = {}
-    reset_token = _LOAD_PORTFOLIO_TIMING.set(timings)
+    timing_token = _LOAD_PORTFOLIO_TIMING.set(timings)
+    stack_token = _LOAD_PORTFOLIO_STACK.set([])
     start = time.perf_counter()
     result: PortfolioState | None = None
     try:
@@ -2263,7 +2274,8 @@ def load_portfolio(
         )
         return result
     finally:
-        _LOAD_PORTFOLIO_TIMING.reset(reset_token)
+        _LOAD_PORTFOLIO_TIMING.reset(timing_token)
+        _LOAD_PORTFOLIO_STACK.reset(stack_token)
         total_s = time.perf_counter() - start
         positions_n = len(result.positions) if result is not None else 0
         ranked = sorted(timings.items(), key=lambda kv: kv[1], reverse=True)

@@ -1678,13 +1678,34 @@ logger = logging.getLogger(__name__)
 # co-tenant host load, chain_sync_read's `phase=load_portfolio` elapsed swung
 # from ~3s to 41s (logs/zeus-post-trade-capital.log) with no visibility into
 # which query the page-read cost fell on. src.state.portfolio.load_portfolio
-# sets this ContextVar to a fresh dict for the duration of its call; the
-# helpers below accumulate their own elapsed seconds into it under their own
+# sets `_LOAD_PORTFOLIO_TIMING` to a fresh dict and `_LOAD_PORTFOLIO_STACK` to
+# a fresh list for the duration of its call; the helpers below accumulate
+# their own EXCLUSIVE (self) elapsed seconds into the dict under their own
 # name (keyed additively, since some helpers are called more than once per
-# load_portfolio). Outside an active load_portfolio call this stays None and
-# _timed_portfolio_query is a plain no-op passthrough.
+# load_portfolio -- e.g. `_query_entry_execution_fill_hints` from both
+# query_portfolio_loader_view and query_settlement_events). Outside an active
+# load_portfolio call both stay None/absent and _timed_portfolio_query is a
+# plain no-op passthrough.
+#
+# R-BF review MEDIUM #1 (2026-09-14): these helper calls nest (e.g.
+# query_portfolio_loader_view wraps position_current_select,
+# _query_entry_execution_fill_hints, _latest_position_event_envs, and
+# _query_transitional_position_hints, which itself wraps the two
+# _hydrate_* calls). A naive per-name gross-elapsed accumulator double-
+# (triple-)counts nested time, so summing the printed line overstates cost
+# by roughly 2x and misattributes it. `_timed_portfolio_query` therefore
+# tracks a call stack: each frame accumulates the elapsed time of the timed
+# calls made directly inside it, and a container's own printed value is its
+# gross elapsed MINUS that accumulated child time (exclusive/self time),
+# exactly like a flame graph's self-time column. This makes every printed
+# name additive: `total_s (measured by the load_portfolio wrapper) >= sum of
+# printed values`, with the residual being untimed glue code (row
+# materialization, JSON encode, etc.) rather than double-counted children.
 _LOAD_PORTFOLIO_TIMING: "contextvars.ContextVar[dict[str, float] | None]" = (
     contextvars.ContextVar("_load_portfolio_timing", default=None)
+)
+_LOAD_PORTFOLIO_STACK: "contextvars.ContextVar[list[float] | None]" = (
+    contextvars.ContextVar("_load_portfolio_stack", default=None)
 )
 
 
@@ -1694,11 +1715,23 @@ def _timed_portfolio_query(name: str):
     if bucket is None:
         yield
         return
+    stack = _LOAD_PORTFOLIO_STACK.get()
+    if stack is None:
+        # Defensive: a bucket with no stack (e.g. a future caller that sets
+        # _LOAD_PORTFOLIO_TIMING directly without _LOAD_PORTFOLIO_STACK)
+        # degrades to gross-elapsed accounting rather than crashing.
+        stack = []
+    stack.append(0.0)
     start = time.perf_counter()
     try:
         yield
     finally:
-        bucket[name] = bucket.get(name, 0.0) + (time.perf_counter() - start)
+        elapsed = time.perf_counter() - start
+        child_time = stack.pop()
+        self_time = elapsed - child_time
+        if stack:
+            stack[-1] += elapsed
+        bucket[name] = bucket.get(name, 0.0) + self_time
 
 
 def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:

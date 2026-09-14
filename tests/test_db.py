@@ -1817,13 +1817,20 @@ def test_load_portfolio_emits_per_helper_timing_line(tmp_path, caplog):
     """X-BF (2026-09-13): every load_portfolio call must log one INFO line
     naming the elapsed cost of each SQL-executing helper it touched, so a
     slow chain_sync_read cycle names the query rather than only the
-    whole-call elapsed already logged by post_trade_capital._log_phase."""
+    whole-call elapsed already logged by post_trade_capital._log_phase.
+
+    R-BF review MEDIUM #1 (2026-09-14): these helpers nest, so each printed
+    value must be EXCLUSIVE (self) time -- summing the line must not double-
+    count a container's instrumented children. Pass connection= explicitly
+    (bypassing load_portfolio's own DB-open/close) so nearly all of total_s
+    is covered by named helpers and the additivity check below is tight.
+    """
     from src.state.db import get_connection, init_schema
     from src.state.portfolio import load_portfolio
 
-    db = get_connection(tmp_path / "zeus.db")
-    init_schema(db)
-    db.execute(
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+    conn.execute(
         """
         INSERT INTO position_current
         (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
@@ -1835,11 +1842,11 @@ def test_load_portfolio_emits_per_helper_timing_line(tmp_path, caplog):
                 'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z', 'high')
         """
     )
-    db.commit()
-    db.close()
+    conn.commit()
 
     with caplog.at_level("INFO", logger="src.state.portfolio"):
-        state = load_portfolio(tmp_path / "missing.json")
+        state = load_portfolio(tmp_path / "missing.json", connection=conn)
+    conn.close()
 
     assert len(state.positions) == 1
 
@@ -1864,10 +1871,29 @@ def test_load_portfolio_emits_per_helper_timing_line(tmp_path, caplog):
         "query_authoritative_settlement_rows",
         "query_settlement_events",
     )
+    helper_values: dict[str, float] = {}
     for helper in expected_helpers:
         match = re.search(rf"(?<![\w]){re.escape(helper)}=([0-9.]+)", message)
         assert match is not None, f"missing helper {helper!r} in: {message}"
-        assert float(match.group(1)) >= 0.0
+        value = float(match.group(1))
+        assert value >= 0.0
+        helper_values[helper] = value
+
+    total_match = re.search(r"total_s=([0-9.]+)", message)
+    assert total_match is not None, f"missing total_s in: {message}"
+    total_s = float(total_match.group(1))
+
+    # Additivity (R-BF MEDIUM #1): exclusive-time accounting means summing
+    # the printed helper values must land within ~5% of total_s -- neither
+    # far above it (double-counted nested children) nor far below (a helper
+    # silently dropped from self-time bookkeeping).
+    sum_helpers = sum(helper_values.values())
+    tolerance = max(0.05 * total_s, 0.002)
+    assert abs(sum_helpers - total_s) <= tolerance, (
+        f"sum of printed helper values ({sum_helpers:.3f}s) is not within "
+        f"{tolerance:.3f}s of total_s ({total_s:.3f}s) -- possible double "
+        f"counting or a dropped helper: {message}"
+    )
 
 
 def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
