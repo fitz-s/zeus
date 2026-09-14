@@ -59,8 +59,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
-from zoneinfo import ZoneInfo
+from typing import Any, Callable, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -81,9 +80,8 @@ from src.data.tier_resolver import (  # noqa: E402
 )
 from src.data.wu_hourly_client import HourlyObservation, fetch_wu_hourly  # noqa: E402
 from src.engine.time_context import (  # noqa: E402
-    city_local_date_at,
+    city_local_day_end_target_date,
     city_local_fetch_window,
-    has_city_local_day_ended,
 )
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
@@ -664,49 +662,49 @@ def _run_city_with_sqlite_retry(
 def _ogimet_target_date_complete(
     conn: sqlite3.Connection,
     *,
-    city_name: str,
-    city_timezone: str,
-    station: str,
+    city: Any,
     target_date: date,
+    now_utc: datetime,
 ) -> bool:
-    """Whether ``target_date``'s Ogimet ledger already has full hourly
-    coverage plus proof the source advanced into the next local day.
+    """Whether ``target_date``'s Ogimet ledger already satisfies the exit
+    authority's own completeness bar.
 
-    Mirrors the completeness bar ``_final_complete_hourly_observation_extreme``
-    (``src/execution/day0_hard_fact_exit.py``) requires before treating a
-    NOAA day as authorized -- reused here only to decide whether this city's
-    completing fetch is still owed, never to grant authority itself.
+    Calls ``_final_complete_hourly_observation_extreme`` directly (the
+    predicate ``_latest_authorized_day0_fact``'s post-local-day gate is
+    built on, ``src/execution/day0_hard_fact_exit.py:284``) instead of a
+    second, hand-derived copy: exact expected-hour SET (not a count),
+    ``authority='VERIFIED'``/``causality_status='OK'``/
+    ``source_role='historical_hourly'``/``time_basis`` filters on every
+    counted row, and the SPECIFIC UTC boundary hour of the next local day
+    (not "any row of the next day exists"). The hole scanner cannot rescue
+    a city this predicate wrongly marks complete (its coverage grain is
+    presence-of-one-row, not per-hour) -- this is the only line of defense,
+    so it must be the exact bar, not a lookalike.
+
+    Checked for BOTH metrics (high, low): the two share one row per hour
+    bucket today (a single writer sets ``running_max``/``running_min``
+    together), but completeness here does not get to assume that stays
+    true forever.
     """
-    tz = ZoneInfo(city_timezone)
-    start = datetime.combine(target_date, datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
-    end = datetime.combine(
-        target_date + timedelta(days=1), datetime.min.time(), tzinfo=tz
-    ).astimezone(timezone.utc)
-    expected_hours = int((end - start).total_seconds() // 3600)
-    if expected_hours <= 0:
-        return False
-    source = f"ogimet_metar_{station.lower()}"
-    following = target_date + timedelta(days=1)
-    try:
-        (hour_count,) = conn.execute(
-            """
-            SELECT COUNT(DISTINCT utc_timestamp) FROM observation_instants
-             WHERE city = ? AND source = ? AND target_date = ?
-            """,
-            (city_name, source, target_date.isoformat()),
-        ).fetchone()
-        (advanced,) = conn.execute(
-            """
-            SELECT EXISTS(
-                SELECT 1 FROM observation_instants
-                 WHERE city = ? AND source = ? AND target_date = ?
-            )
-            """,
-            (city_name, source, following.isoformat()),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    return int(hour_count) >= expected_hours and bool(advanced)
+    from src.execution.day0_hard_fact_exit import (
+        _final_complete_hourly_observation_extreme,
+    )
+
+    target_iso = target_date.isoformat()
+    for metric in ("high", "low"):
+        if _final_complete_hourly_observation_extreme(
+            city=city, target_date=target_iso, metric=metric, now=now_utc, conn=conn,
+        ) is None:
+            return False
+    return True
+
+
+@dataclass
+class OgimetSelection:
+    """Result of one ``_ogimet_cities_due_for_completion`` call."""
+
+    cities: list[str]
+    fail_open: bool = False
 
 
 def _ogimet_cities_due_for_completion(
@@ -714,7 +712,7 @@ def _ogimet_cities_due_for_completion(
     now_utc: datetime,
     *,
     db_path: Path,
-) -> list[str]:
+) -> OgimetSelection:
     """Select OGIMET_METAR cities whose settlement-grade fetch is still owed.
 
     Anchors each city's completing fetch to its OWN local-day-end instead of
@@ -723,11 +721,11 @@ def _ogimet_cities_due_for_completion(
     own local-day-end only completed that day's record at the NEXT day's
     occurrence of the same slot -- median 11.25h, max 23.25h of exit-organ
     blindness). A city becomes due once its local day ended at least 1h ago
-    (``has_city_local_day_ended`` with a 1h-earlier reference time) -- the
-    buffer lets the 23:00-local observation and the first next-day
-    observation actually publish upstream before the fetch runs, so
-    ``_ogimet_target_date_complete`` is met on the first attempt for the
-    common case.
+    (``city_local_day_end_target_date``, shared with
+    ``src/data/daily_obs_append.py``'s NOAA-WRH selector) -- the buffer lets
+    the 23:00-local observation and the first next-day observation actually
+    publish upstream before the fetch runs, so ``_ogimet_target_date_complete``
+    is met on the first attempt for the common case.
 
     Idempotent by construction: completeness is read from
     ``observation_instants`` itself (never a flag/file), so a rerun after
@@ -735,20 +733,26 @@ def _ogimet_cities_due_for_completion(
     selected on every hourly tick until it completes or the local day rolls
     over onto the next target_date -- carry-forward without any persisted
     retry state.
+
+    Fails OPEN (every pending city selected, ``fail_open=True``) when the
+    world DB is not yet readable (e.g. first boot): worst case is 48 x
+    ``OGIMET_MIN_INTERVAL_SECONDS`` (~16.8min), comfortably inside the
+    hourly tick cadence, so retrying beats silently skipping. The caller
+    logs ``fail_open`` so an operator can tell a DB-outage burst from
+    normal selection from the tick's own log line.
     """
-    pending: list[tuple[str, str, str, date]] = []
+    pending: list[str] = []
     for city_name in city_names:
         city = cities_by_name[city_name]
-        tz = city.timezone
-        target_date = city_local_date_at(tz, now_utc) - timedelta(days=1)
-        if not has_city_local_day_ended(target_date, tz, now_utc - timedelta(hours=1)):
+        target_date = city_local_day_end_target_date(city.timezone, now_utc, buffer_hours=1.0)
+        if target_date is None:
             continue
         station = str(getattr(city, "wu_station", "") or "").strip()
         if not station:
             continue
-        pending.append((city_name, tz, station, target_date))
+        pending.append(city_name)
     if not pending:
-        return []
+        return OgimetSelection(cities=[])
 
     busy_ms = _sqlite_busy_timeout_ms()
     try:
@@ -759,20 +763,22 @@ def _ogimet_cities_due_for_completion(
     except sqlite3.Error:
         # No readable DB yet (e.g. first boot) -- fail open, same as a
         # genuinely incomplete day: every pending city is due.
-        return [city_name for city_name, _tz, _station, _target_date in pending]
+        return OgimetSelection(cities=list(pending), fail_open=True)
 
     try:
         due: list[str] = []
-        for city_name, tz, station, target_date in pending:
+        for city_name in pending:
+            city = cities_by_name[city_name]
+            target_date = city_local_day_end_target_date(
+                city.timezone, now_utc, buffer_hours=1.0
+            )
+            if target_date is None:
+                continue
             if not _ogimet_target_date_complete(
-                conn,
-                city_name=city_name,
-                city_timezone=tz,
-                station=station,
-                target_date=target_date,
+                conn, city=city, target_date=target_date, now_utc=now_utc,
             ):
                 due.append(city_name)
-        return due
+        return OgimetSelection(cities=due)
     finally:
         conn.close()
 
@@ -804,15 +810,25 @@ def run_live_tick(
     wu_names = [n for n in all_names if tier_for_city(n) == Tier.WU_ICAO]
     ogimet_names = [n for n in all_names if tier_for_city(n) == Tier.OGIMET_METAR]
     hko_names = [n for n in all_names if tier_for_city(n) == Tier.HKO_NATIVE]
+    ogimet_fail_open = False
     if not include_ogimet:
         ogimet_names = []
     elif gate_ogimet_by_local_day_end:
-        ogimet_names = _ogimet_cities_due_for_completion(ogimet_names, now_utc, db_path=db_path)
+        selection = _ogimet_cities_due_for_completion(ogimet_names, now_utc, db_path=db_path)
+        ogimet_names = selection.cities
+        ogimet_fail_open = selection.fail_open
+        if ogimet_fail_open:
+            logger.warning(
+                "obs_v2_live_tick: ogimet selection FAIL_OPEN (world DB unreadable) "
+                "-- selected all %d pending cities instead of the completeness-gated subset",
+                len(ogimet_names),
+            )
 
     logger.info(
-        "obs_v2_live_tick: city_local_window_policy=per_city days_back=%d wu=%d ogimet=%d hko_skipped=%d dry_run=%s",
+        "obs_v2_live_tick: city_local_window_policy=per_city days_back=%d wu=%d ogimet=%d "
+        "ogimet_fail_open=%s hko_skipped=%d dry_run=%s",
         days_back,
-        len(wu_names), len(ogimet_names), len(hko_names), dry_run,
+        len(wu_names), len(ogimet_names), ogimet_fail_open, len(hko_names), dry_run,
     )
 
     results: list[TickResult] = []

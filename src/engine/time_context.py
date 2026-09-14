@@ -124,3 +124,32 @@ def has_city_local_day_ended(
     reference = _coerce_datetime(reference_time)
     local_date = reference.astimezone(ZoneInfo(city_timezone)).date()
     return local_date > target_day
+
+
+def city_local_day_end_target_date(
+    city_timezone: str,
+    now_utc: datetime | str,
+    *,
+    buffer_hours: float = 1.0,
+) -> date | None:
+    """The most-recently-ended city-local day, once its publish-lag buffer
+    has elapsed; ``None`` while the buffer has not elapsed yet.
+
+    Shared anchor predicate for every NOAA/Ogimet settlement-grade daily
+    fetch: a city becomes due for its completing fetch once its OWN local
+    day ended at least ``buffer_hours`` ago (``has_city_local_day_ended``
+    evaluated ``buffer_hours`` in the past), instead of a fixed UTC shard
+    hour unrelated to the city's timezone. The buffer lets the day's final
+    local-hour observation and the first next-day observation actually
+    publish upstream before the caller's own completeness check runs.
+    Callers: ``scripts/obs_live_tick.py`` (Ogimet observation_instants) and
+    ``src/data/daily_obs_append.py`` (NOAA weather.gov WRH settlement page
+    + its Ogimet daily-atom mirror) -- one predicate, multiple call sites.
+    """
+    reference = _coerce_datetime(now_utc)
+    target_date = city_local_date_at(city_timezone, reference) - timedelta(days=1)
+    if not has_city_local_day_ended(
+        target_date, city_timezone, reference_time=reference - timedelta(hours=buffer_hours)
+    ):
+        return None
+    return target_date
