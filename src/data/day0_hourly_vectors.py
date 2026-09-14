@@ -1804,18 +1804,86 @@ def _day0_provider_run_meta(
     }
 
 
+@dataclass(frozen=True)
+class Day0RunEndpointSelection:
+    """Which endpoint proves one model's exact-run hourly vector, and why."""
+
+    endpoint_mode: str  # "single_runs" | "standard_meta_stamped"
+    reason: str
+
+
+def _select_day0_run_endpoint(
+    *,
+    run: datetime,
+    usable_at: datetime | None,
+    decision_utc: datetime,
+    boundary_utc: datetime | None,
+) -> Day0RunEndpointSelection:
+    """Choose the endpoint that proves this model's freshest run, and why.
+
+    Prefers the freshest run via the pinned single-runs endpoint. Falls back
+    to the standard (non-pinned) endpoint -- proving whatever run its own
+    meta.json bracket reports, not necessarily the freshest run -- when
+    either of two gates on the freshest run fails:
+
+    (a) it is not yet safely usable at decision time (``usable_at`` unknown,
+        because the provider has not confirmed a modification time yet, or
+        in the future relative to ``decision_utc``); or
+    (b) its own local start (single-runs ignores ``past_hours`` and starts
+        exactly at ``run``) is after the causal observation boundary the
+        caller already knows about, so single-runs would leave a coverage
+        gap between the boundary and the run.
+
+    Both gates collapse into one rule and one action: the standard endpoint's
+    own bracket is never ahead of what it can actually serve, so proving
+    whatever run it reports resolves either failure without a second
+    candidate-run list or a bigger constant.
+    """
+
+    if usable_at is None or decision_utc < usable_at:
+        return Day0RunEndpointSelection(
+            endpoint_mode="standard_meta_stamped",
+            reason=(
+                "DAY0_RUN_NOT_PUBLICLY_USABLE_AT_DECISION "
+                f"run={run.isoformat()} "
+                f"usable_at={'unknown' if usable_at is None else usable_at.isoformat()} "
+                f"decision_utc={decision_utc.isoformat()}"
+            ),
+        )
+    if boundary_utc is not None and run > boundary_utc:
+        return Day0RunEndpointSelection(
+            endpoint_mode="standard_meta_stamped",
+            reason=(
+                "DAY0_RUN_STARTS_AFTER_CAUSAL_BOUNDARY "
+                f"run={run.isoformat()} boundary_utc={boundary_utc.isoformat()}"
+            ),
+        )
+    return Day0RunEndpointSelection(
+        endpoint_mode="single_runs",
+        reason=f"DAY0_RUN_FRESHEST_USABLE run={run.isoformat()}",
+    )
+
+
 def _day0_exact_run_payloads(
     *,
     city: Any,
     models: list[str],
     decision_time: datetime,
     timeout_s: float,
+    causal_boundary_utc: datetime | None = None,
 ) -> tuple[list[tuple[str, Mapping[str, object], dict[str, object]]], dict[str, object]]:
     """Fetch one exact provider run per model, preserving the raw hourly payload.
 
     Model metadata is read directly, never from the stale source-clock JSONL cache. The
-    raw Single Runs request is delegated to the existing BPF transport adapter. The
-    standard endpoint is only accepted when its metadata bracket proves the same run.
+    raw Single Runs request is delegated to the existing BPF transport adapter. When the
+    freshest run fails either usability gate (see ``_select_day0_run_endpoint``), the
+    standard endpoint is used instead and whatever run its own metadata bracket reports
+    is accepted -- it is never asked to prove the disqualified freshest run. A genuine
+    transport failure on an otherwise-selected single-runs attempt still falls back to
+    proving that SAME frozen run via the standard endpoint, unchanged from before.
+    ``causal_boundary_utc`` is the latest same-station observation instant already known
+    to the caller (``read_day0_current_temperature_state(...).observed_at``); ``None``
+    means the caller has no such boundary in hand, so only gate (a) can be evaluated here.
     Metadata and the per-model exact requests share one bounded caller budget; a
     single-city refresh therefore fails closed rather than extending the cycle.
     """
@@ -1883,31 +1951,70 @@ def _day0_exact_run_payloads(
             if update.last_run_modification_time is not None
             else None
         )
-        if (
-            run > decision_utc
-            or available_at > decision_utc
-            or decision_utc < source_publicly_usable_at(update.to_source_run_clock())
-            or modified_at is None
-        ):
-            raise ValueError(f"DAY0_PROVIDER_RUN_NOT_PUBLICLY_USABLE:{model}")
+        usable_at = (
+            None
+            if modified_at is None
+            else max(
+                run,
+                available_at,
+                source_publicly_usable_at(update.to_source_run_clock()),
+            )
+        )
+        selection = _select_day0_run_endpoint(
+            run=run,
+            usable_at=usable_at,
+            decision_utc=decision_utc,
+            boundary_utc=causal_boundary_utc,
+        )
         model_api_id = OPENMETEO_MODEL_IDS.get(model, model)
         request_identity["models"].append(model_api_id)
-        request_identity["runs"][model] = run.isoformat()
         fetch_started = _day0_utc_now()
-        authority = "run_pinned_single_runs"
-        endpoint_mode = "single_runs"
-        try:
-            payloads = _fetch_single_runs_hourly_payloads_batched(
-                models=[model], locations=[location], run=run,
-                forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
-                deadline_monotonic=deadline_monotonic,
-                past_hours=DAY0_HOURLY_PAST_HOURS,
+        if selection.endpoint_mode == "single_runs":
+            authority = "run_pinned_single_runs"
+            endpoint_mode = "single_runs"
+            try:
+                payloads = _fetch_single_runs_hourly_payloads_batched(
+                    models=[model], locations=[location], run=run,
+                    forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                    deadline_monotonic=deadline_monotonic,
+                    past_hours=DAY0_HOURLY_PAST_HOURS,
+                )
+                payload = payloads[0]
+            except Exception as single_exc:
+                try:
+                    payloads, transport = _fetch_standard_meta_stamped_payloads(
+                        model=model, locations=[location], run=run,
+                        source_available_at=available_at,
+                        forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                        deadline_monotonic=deadline_monotonic,
+                        past_hours=DAY0_HOURLY_PAST_HOURS,
+                    )
+                    payload = payloads[0]
+                    run = transport.run.astimezone(UTC)
+                    available_at = transport.source_available_at.astimezone(UTC)
+                    modified_at = transport.modification_time.astimezone(UTC)
+                    authority = "provider_meta_declared"
+                    endpoint_mode = "standard_meta_stamped"
+                except Exception as standard_exc:
+                    raise ValueError(
+                        f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
+                        f"single={type(single_exc).__name__}:standard={type(standard_exc).__name__}"
+                    ) from standard_exc
+        else:
+            logger.info(
+                "DAY0_RUN_ENDPOINT_SELECTED model=%s run=%s usable_at=%s "
+                "decision_utc=%s boundary_utc=%s reason=%s",
+                model, run.isoformat(),
+                "unknown" if usable_at is None else usable_at.isoformat(),
+                decision_utc.isoformat(),
+                "unknown" if causal_boundary_utc is None else causal_boundary_utc.isoformat(),
+                selection.reason,
             )
-            payload = payloads[0]
-        except Exception as single_exc:
+            authority = "provider_meta_declared"
+            endpoint_mode = "standard_meta_stamped"
             try:
                 payloads, transport = _fetch_standard_meta_stamped_payloads(
-                    model=model, locations=[location], run=run,
+                    model=model, locations=[location], run=None,
                     source_available_at=available_at,
                     forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
                     deadline_monotonic=deadline_monotonic,
@@ -1917,14 +2024,15 @@ def _day0_exact_run_payloads(
                 run = transport.run.astimezone(UTC)
                 available_at = transport.source_available_at.astimezone(UTC)
                 modified_at = transport.modification_time.astimezone(UTC)
-                authority = "provider_meta_declared"
-                endpoint_mode = "standard_meta_stamped"
             except Exception as standard_exc:
                 raise ValueError(
                     f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
-                    f"single={type(single_exc).__name__}:standard={type(standard_exc).__name__}"
+                    f"single=skipped:standard={type(standard_exc).__name__}"
                 ) from standard_exc
         fetch_finished = _day0_utc_now()
+        # Set after any run/endpoint substitution above -- this must name the
+        # run actually used, never the originally-selected freshest run.
+        request_identity["runs"][model] = run.isoformat()
         request_identity["endpoint_modes"][model] = endpoint_mode
         fetched.append((model, payload, {
             "model_api_id": model_api_id,
@@ -1971,13 +2079,16 @@ def fetch_day0_hourly_vectors(
     models: Optional[list[str]] = None,
     now: Optional[datetime] = None,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    causal_boundary_utc: Optional[datetime] = None,
 ) -> tuple[list[Day0HourlyVector], str]:
     """Fetch exact-run hourly temperature curves for in-domain models.
 
     Returns (vectors, request_hash) — the hash is the replayable
     provenance identity persisted with every row (PR#404 P1: empty provenance
     identity is not acceptable for q-construction inputs). Fail-soft:
-    ([], "") on any transport/shape error.
+    ([], "") on any transport/shape error. ``causal_boundary_utc``, when the
+    caller has it, is the latest same-station observation instant the
+    exact-run selection must not start after (see ``_select_day0_run_endpoint``).
     """
     chosen = models if models is not None else day0_hourly_models_for_city(city)
     if not chosen:
@@ -1992,6 +2103,7 @@ def fetch_day0_hourly_vectors(
             models=[str(model).strip() for model in chosen if str(model).strip()],
             decision_time=source_time,
             timeout_s=timeout_s,
+            causal_boundary_utc=causal_boundary_utc,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft lane
         logger.warning(
@@ -3426,6 +3538,7 @@ def maybe_refresh_day0_hourly_vectors(
     quota_priority_cities: int = 0,
     allow_priority_recovery: bool = False,
     remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
+    causal_run_boundaries: Mapping[tuple[str, str], datetime] | None = None,
     provider_run_hwm: Mapping[str, Day0ProviderRunHwm] | None = None,
     release_due_city_dates: Iterable[tuple[str, str]] = (),
     persist_lock_blocking: bool = True,
@@ -3448,6 +3561,17 @@ def maybe_refresh_day0_hourly_vectors(
     quota.  When explicitly authorized, a priority city may use the bounded
     recovery lane after ordinary priority quota is exhausted.  That lane is
     capped below the critical limits, preserving a hard held-capital floor.
+
+    ``causal_run_boundaries`` is a separate, optional per-(city, target_date)
+    map from ``remaining_window_starts``: it carries
+    ``read_day0_current_temperature_state(...).observed_at`` (the same
+    predicate the materializer and the live-materialization-queue preflight
+    already use), consulted by the fetcher to choose between the pinned
+    single-runs endpoint and the standard endpoint for each model
+    (``_select_day0_run_endpoint``). A city/date pair absent from this map
+    fetches with no boundary known, so only the publicly-usable gate can be
+    resolved there; the coverage gate keeps today's freshest-run-only
+    behavior for that pair.
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -3577,6 +3701,9 @@ def maybe_refresh_day0_hourly_vectors(
                 target_date: strict_window_start(city, target_date)
                 for target_date in target_dates
             }
+            causal_boundary = (causal_run_boundaries or {}).get(
+                (name, target_dates[0])
+            )
             deterministic_ready = (
                 not release_due
                 and _current_provider_bundle_already_persisted(
@@ -3726,13 +3853,30 @@ def maybe_refresh_day0_hourly_vectors(
                                 models=models,
                                 now=source_decision_time,
                                 timeout_s=timeout_s,
+                                causal_boundary_utc=causal_boundary,
                             )
                         except TypeError as exc:
-                            if "timeout_s" not in str(exc):
+                            message = str(exc)
+                            if "causal_boundary_utc" in message:
+                                try:
+                                    vectors, request_hash = fetch_day0_hourly_vectors(
+                                        city,
+                                        models=models,
+                                        now=source_decision_time,
+                                        timeout_s=timeout_s,
+                                    )
+                                except TypeError as exc2:
+                                    if "timeout_s" not in str(exc2):
+                                        raise
+                                    vectors, request_hash = fetch_day0_hourly_vectors(
+                                        city, models=models, now=source_decision_time
+                                    )
+                            elif "timeout_s" in message:
+                                vectors, request_hash = fetch_day0_hourly_vectors(
+                                    city, models=models, now=source_decision_time
+                                )
+                            else:
                                 raise
-                            vectors, request_hash = fetch_day0_hourly_vectors(
-                                city, models=models, now=source_decision_time
-                            )
                     except Exception as exc:  # noqa: BLE001 - preserve ENS sibling
                         logger.warning(
                             "DAY0_HOURLY_VECTORS_FETCH_FAILED city=%s exc=%s: %s",

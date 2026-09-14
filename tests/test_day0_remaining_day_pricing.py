@@ -4139,9 +4139,17 @@ def test_live_hourly_fetch_persists_real_possession_clock_and_identity(
     assert json.loads(row[0]) == meta
 
 
-def test_day0_hourly_provider_run_requires_public_availability_boundary(
+def test_day0_hourly_provider_run_within_availability_wait_falls_back_to_standard(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """A freshest run still inside the 10-minute availability-consistency wait
+    used to be discarded outright (DAY0_PROVIDER_RUN_NOT_PUBLICLY_USABLE,
+    T_runusable.md gate a). It now falls back to the standard endpoint and
+    proves whatever run its own meta bracket reports (X-BC run-selection
+    rule) instead of losing the model -- see
+    test_day0_run_selection_gate_a_not_publicly_usable_falls_back_to_standard
+    for the equivalent scenario mocked at the transport-function boundary
+    rather than at openmeteo_client.fetch."""
     import src.data.openmeteo_client as openmeteo_client
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
 
@@ -4172,8 +4180,13 @@ def test_day0_hourly_provider_run_requires_public_availability_boundary(
     vectors, request_hash = fetch_day0_hourly_vectors(
         _paris(), models=["icon_d2"], now=now
     )
-    assert vectors == []
-    assert request_hash == ""
+    assert request_hash
+    assert len(vectors) == 1
+    assert vectors[0].model == "icon_d2"
+    meta = json.loads(vectors[0].source_run_meta_json)
+    assert meta["endpoint_mode"] == "standard_meta_stamped"
+    assert meta["source_run_authority"] == "provider_meta_declared"
+    assert meta["provider_source_cycle_time_utc"] == (now - timedelta(hours=2)).isoformat()
 
 
 def test_day0_hourly_provider_run_requires_modification_clock(
@@ -4410,6 +4423,491 @@ def test_day0_exact_run_budget_exhaustion_stops_before_transport(
             city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=1.0
         )
     assert transport_calls == []
+
+
+# ── Day0 run-selection: one rule, two gates (X-BC) ──────────────────────────
+# Trace evidence: T_runusable.md (gate a, DAY0_PROVIDER_RUN_NOT_PUBLICLY_USABLE
+# raises, e.g. 36/100 today on ncep_nbm_conus/Chicago) and T_nbmwindow.md (gate
+# b, single_runs ignores past_hours and starts exactly at ``run``, e.g.
+# Chicago NBM missing 17:00-19:00 CDT against a 16:51 CDT boundary; Buenos
+# Aires ICON/ECMWF missing the 14:00 local hour). Both collapse the freshest
+# run's own precheck failure into one action: prove whatever run the standard
+# (non-pinned) endpoint reports, instead of raising / silently dropping the
+# model from the bundle.
+
+
+def test_select_day0_run_endpoint_not_publicly_usable_at_decision():
+    from src.data.day0_hourly_vectors import _select_day0_run_endpoint
+
+    now = datetime.now(UTC)
+    run = now - timedelta(hours=1)
+    selection = _select_day0_run_endpoint(
+        run=run,
+        usable_at=now + timedelta(minutes=1),
+        decision_utc=now,
+        boundary_utc=None,
+    )
+    assert selection.endpoint_mode == "standard_meta_stamped"
+    assert "DAY0_RUN_NOT_PUBLICLY_USABLE_AT_DECISION" in selection.reason
+
+
+def test_select_day0_run_endpoint_missing_modification_time_forces_standard():
+    from src.data.day0_hourly_vectors import _select_day0_run_endpoint
+
+    now = datetime.now(UTC)
+    selection = _select_day0_run_endpoint(
+        run=now - timedelta(hours=1),
+        usable_at=None,
+        decision_utc=now,
+        boundary_utc=None,
+    )
+    assert selection.endpoint_mode == "standard_meta_stamped"
+    assert "usable_at=unknown" in selection.reason
+
+
+def test_select_day0_run_endpoint_starts_after_causal_boundary():
+    from src.data.day0_hourly_vectors import _select_day0_run_endpoint
+
+    now = datetime.now(UTC)
+    run = now - timedelta(minutes=10)
+    selection = _select_day0_run_endpoint(
+        run=run,
+        usable_at=now - timedelta(minutes=5),
+        decision_utc=now,
+        boundary_utc=run - timedelta(minutes=1),
+    )
+    assert selection.endpoint_mode == "standard_meta_stamped"
+    assert "DAY0_RUN_STARTS_AFTER_CAUSAL_BOUNDARY" in selection.reason
+
+
+def test_select_day0_run_endpoint_prefers_single_runs_when_clear():
+    from src.data.day0_hourly_vectors import _select_day0_run_endpoint
+
+    now = datetime.now(UTC)
+    run = now - timedelta(minutes=10)
+    selection = _select_day0_run_endpoint(
+        run=run,
+        usable_at=now - timedelta(minutes=5),
+        decision_utc=now,
+        boundary_utc=run,
+    )
+    assert selection.endpoint_mode == "single_runs"
+
+
+def test_day0_run_selection_gate_a_not_publicly_usable_falls_back_to_standard(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """(a): available_at + 10min > decision_utc -> standard path, run proven
+    from the bracket, payload persisted (fetch_day0_hourly_vectors returns a
+    non-empty, hashed bundle)."""
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime.now(UTC)
+    run = now - timedelta(hours=1)
+    available_at = now - timedelta(minutes=2)  # +10min wait is still in the future
+    modified_at = now - timedelta(minutes=2)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=available_at,
+                last_run_modification_time=modified_at,
+            )
+            for model in requested
+        ),
+    )
+
+    def single_runs(**_kwargs):
+        raise AssertionError(
+            "single-runs must not be attempted when the freshest run is not "
+            "yet publicly usable"
+        )
+
+    standard_calls: list[dict] = []
+    payload = {"hourly": {"time": ["2026-01-01T00:00"], "temperature_2m": [1.0]}}
+
+    def standard(**kwargs):
+        standard_calls.append(kwargs)
+        return (
+            (payload,),
+            SimpleNamespace(
+                run=run, source_available_at=available_at, modification_time=modified_at
+            ),
+        )
+
+    monkeypatch.setattr(download, "_fetch_single_runs_hourly_payloads_batched", single_runs)
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+
+    vectors, request_hash = fetch_day0_hourly_vectors(
+        _paris(), models=["ecmwf_ifs"], now=now, timeout_s=2.0
+    )
+    assert standard_calls and standard_calls[0]["run"] is None
+    assert request_hash
+    assert len(vectors) == 1
+    assert vectors[0].model == "ecmwf_ifs"
+    meta = json.loads(vectors[0].source_run_meta_json)
+    assert meta["endpoint_mode"] == "standard_meta_stamped"
+    assert meta["source_run_authority"] == "provider_meta_declared"
+    assert meta["provider_source_cycle_time_utc"] == run.isoformat()
+
+
+def test_day0_run_selection_gate_b_starts_after_boundary_falls_back_to_standard(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """(b): freshest run usable, but its own local start (== run, single_runs
+    ignores past_hours) is after the causal boundary -> standard path."""
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.day0_hourly_vectors import _day0_exact_run_payloads
+
+    now = datetime.now(UTC)
+    run = now - timedelta(minutes=20)
+    available_at = now - timedelta(hours=1)
+    modified_at = now - timedelta(hours=1)
+    boundary_utc = run - timedelta(minutes=1)  # boundary is before the run start
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=available_at,
+                last_run_modification_time=modified_at,
+            )
+            for model in requested
+        ),
+    )
+
+    def single_runs(**_kwargs):
+        raise AssertionError(
+            "single-runs must not be attempted when its run starts after the "
+            "causal boundary"
+        )
+
+    standard_calls: list[dict] = []
+    payload = {"hourly": {"time": ["2026-01-01T00:00"], "temperature_2m": [1.0]}}
+
+    def standard(**kwargs):
+        standard_calls.append(kwargs)
+        return (
+            (payload,),
+            SimpleNamespace(
+                run=run, source_available_at=available_at, modification_time=modified_at
+            ),
+        )
+
+    monkeypatch.setattr(download, "_fetch_single_runs_hourly_payloads_batched", single_runs)
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+
+    fetched, identity = _day0_exact_run_payloads(
+        city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=boundary_utc,
+    )
+    assert standard_calls and standard_calls[0]["run"] is None
+    model, payload_out, meta = fetched[0]
+    assert payload_out == payload
+    assert meta["endpoint_mode"] == "standard_meta_stamped"
+    assert identity["endpoint_modes"]["ecmwf_ifs"] == "standard_meta_stamped"
+    assert identity["runs"]["ecmwf_ifs"] == run.isoformat()
+
+
+def test_day0_run_selection_gate_clear_keeps_single_runs_path_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """(c): freshest run usable and starts at/before the boundary -> the
+    single-runs path is unchanged from parent behavior (no standard-endpoint
+    call, same provenance shape)."""
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.day0_hourly_vectors import _day0_exact_run_payloads
+
+    now = datetime.now(UTC)
+    run = now - timedelta(hours=2)
+    available_at = now - timedelta(minutes=30)
+    modified_at = now - timedelta(minutes=25)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=available_at,
+                last_run_modification_time=modified_at,
+            )
+            for model in requested
+        ),
+    )
+    payload = {"hourly": {"time": ["2026-01-01T00:00"], "temperature_2m": [1.0]}}
+    single_calls: list[dict] = []
+
+    def single_runs(**kwargs):
+        single_calls.append(kwargs)
+        return (payload,)
+
+    def standard(**_kwargs):
+        raise AssertionError(
+            "standard endpoint must not be used when the freshest run is "
+            "usable and covers the boundary"
+        )
+
+    monkeypatch.setattr(download, "_fetch_single_runs_hourly_payloads_batched", single_runs)
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+
+    fetched, identity = _day0_exact_run_payloads(
+        city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=run,  # boundary at the run start: no coverage gap
+    )
+    assert len(single_calls) == 1
+    assert single_calls[0]["run"] == run
+    model, payload_out, meta = fetched[0]
+    assert payload_out == payload
+    assert meta["endpoint_mode"] == "single_runs"
+    assert meta["source_run_authority"] == "run_pinned_single_runs"
+    assert meta["provider_source_cycle_time_utc"] == run.isoformat()
+    assert identity["runs"]["ecmwf_ifs"] == run.isoformat()
+    assert identity["endpoint_modes"]["ecmwf_ifs"] == "single_runs"
+
+
+def test_day0_run_selection_standard_bracket_mismatch_fails_like_transport_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """(d): the standard path's own bracket disagreeing must fail the model
+    exactly the way today's transport fallback already fails -- no new
+    fail-open silently substitutes a bad payload."""
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.day0_hourly_vectors import _day0_exact_run_payloads
+
+    now = datetime.now(UTC)
+    run = now - timedelta(hours=1)
+    available_at = now - timedelta(minutes=2)
+    modified_at = now - timedelta(minutes=2)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=available_at,
+                last_run_modification_time=modified_at,
+            )
+            for model in requested
+        ),
+    )
+
+    def standard(**_kwargs):
+        raise ValueError(
+            "ecmwf_ifs standard fallback discarded: provider metadata changed mid-fetch"
+        )
+
+    monkeypatch.setattr(
+        download,
+        "_fetch_single_runs_hourly_payloads_batched",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-runs must not be attempted")
+        ),
+    )
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+
+    with pytest.raises(
+        ValueError,
+        match=r"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:ecmwf_ifs:single=skipped:standard=ValueError",
+    ):
+        _day0_exact_run_payloads(
+            city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        )
+
+
+def test_day0_run_selection_provenance_run_identity_is_endpoint_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """(e): provider_run_id / provider_source_cycle_time_utc / etc. -- the
+    fields build_day0_causal_evidence_bundle actually uses to name the run --
+    are byte-identical for the same run regardless of endpoint, and change
+    for a different run, so a bundle can never claim a run it did not use.
+
+    Correction to both trace reports' assumption: the full
+    carrier_vector_hash/bundle_identity is NOT endpoint-invariant, because
+    ``vector_hash_fields`` also includes ``request_hash_by_model``, which
+    traces back to ``build_request_hash``'s bundle hash -- a hash of the
+    canonicalized request params (including the endpoint_modes dict) AND the
+    raw response payload bytes, deliberately (its own docstring: "which exact
+    request and response produced you"). That was already true before this
+    fix via the existing BPF transport-fallback path; this test documents it
+    directly instead of asserting a literal full-hash equality across
+    endpoints that the pre-existing code already contradicts.
+    """
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.day0_hourly_vectors import (
+        _day0_exact_run_payloads,
+        build_day0_causal_evidence_bundle,
+    )
+
+    now = datetime.now(UTC)
+    run = now - timedelta(minutes=20)
+    available_at = now - timedelta(hours=1)
+    modified_at = now - timedelta(hours=1)
+    payload = {"hourly": {"time": ["2026-01-01T00:00"], "temperature_2m": [1.0]}}
+
+    def set_updates(*, run_time):
+        monkeypatch.setattr(
+            "src.data.openmeteo_model_updates.fetch_model_updates",
+            lambda requested, **_kwargs: tuple(
+                OpenMeteoModelUpdate(
+                    model=model,
+                    last_run_initialisation_time=run_time,
+                    last_run_availability_time=available_at,
+                    last_run_modification_time=modified_at,
+                )
+                for model in requested
+            ),
+        )
+
+    monkeypatch.setattr(
+        download, "_fetch_single_runs_hourly_payloads_batched", lambda **_kwargs: (payload,)
+    )
+    monkeypatch.setattr(
+        download,
+        "_fetch_standard_meta_stamped_payloads",
+        lambda **kwargs: (
+            (payload,),
+            SimpleNamespace(
+                run=run, source_available_at=available_at, modification_time=modified_at
+            ),
+        ),
+    )
+
+    set_updates(run_time=run)
+    # Same run: boundary at run -> single_runs; boundary just before run -> standard.
+    via_single, _ = _day0_exact_run_payloads(
+        city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=run,
+    )
+    via_standard, _ = _day0_exact_run_payloads(
+        city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=run - timedelta(minutes=1),
+    )
+    single_meta = via_single[0][2]
+    standard_meta = via_standard[0][2]
+    assert single_meta["endpoint_mode"] == "single_runs"
+    assert standard_meta["endpoint_mode"] == "standard_meta_stamped"
+
+    run_identity_fields = (
+        "provider_run_id",
+        "provider_source_cycle_time_utc",
+        "provider_source_available_at_utc",
+        "provider_source_modified_at_utc",
+    )
+    for field in run_identity_fields:
+        assert single_meta[field] == standard_meta[field], field
+    # Transport/capture identity legitimately differs by endpoint -- documented,
+    # deliberate, and already true before this fix.
+    assert single_meta["request_hash"] != standard_meta["request_hash"]
+
+    # A different run must change the run-identity fields.
+    other_run = run - timedelta(hours=6)
+    set_updates(run_time=other_run)
+    via_other_run, _ = _day0_exact_run_payloads(
+        city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=other_run,
+    )
+    other_meta = via_other_run[0][2]
+    assert other_meta["provider_run_id"] != single_meta["provider_run_id"]
+    assert (
+        other_meta["provider_source_cycle_time_utc"]
+        != single_meta["provider_source_cycle_time_utc"]
+    )
+
+    def witness(meta: dict) -> dict:
+        return {
+            "vector_ids_by_model": {"ecmwf_ifs": "v1"},
+            "capture_times_by_model_utc": {"ecmwf_ifs": meta["fetch_finished_at"]},
+            "request_hash_by_model": {"ecmwf_ifs": meta["request_hash"]},
+            "source_run_id_by_model": {"ecmwf_ifs": meta["source_run_id"]},
+            "provider_run_id_by_model": {"ecmwf_ifs": meta["provider_run_id"]},
+            "provider_source_cycle_time_by_model_utc": {
+                "ecmwf_ifs": meta["provider_source_cycle_time_utc"]
+            },
+            "provider_source_available_at_by_model_utc": {
+                "ecmwf_ifs": meta["provider_source_available_at_utc"]
+            },
+            "provider_source_modified_at_by_model_utc": {
+                "ecmwf_ifs": meta["provider_source_modified_at_utc"]
+            },
+        }
+
+    common = dict(
+        city="Paris",
+        target_date="2026-01-01",
+        metric="high",
+        observation_context={
+            "source": "x",
+            "observation_time": run.isoformat(),
+            "observed_extreme_c": 1.0,
+            "unit": "C",
+        },
+        cutoff_utc=now.isoformat(),
+    )
+
+    def run_identity_only_witness(meta: dict) -> dict:
+        full = witness(meta)
+        # capture_times_by_model_utc is real wall-clock fetch time, not run
+        # identity -- two separate _day0_exact_run_payloads calls in this test
+        # legitimately capture at different instants even for the same run.
+        # source_run_id is f"day0_hourly:{request_hash}" -- derived from the
+        # capture/transport-identity request_hash, not the run (mirrors
+        # _DAY0_CAPTURE_EQUIVALENCE_ONLY_META's own grouping of these two
+        # fields as capture-only, day0_hourly_vectors.py:489-495).
+        del full["request_hash_by_model"]
+        del full["capture_times_by_model_utc"]
+        del full["source_run_id_by_model"]
+        return full
+
+    # Run-identity-only witness (no request_hash_by_model / capture time / source_run_id): endpoint-invariant.
+    bundle_single_run_only = build_day0_causal_evidence_bundle(
+        **common, vector_witness=run_identity_only_witness(single_meta)
+    )
+    bundle_standard_run_only = build_day0_causal_evidence_bundle(
+        **common, vector_witness=run_identity_only_witness(standard_meta)
+    )
+    assert (
+        bundle_single_run_only["carrier_vector_hash"]
+        == bundle_standard_run_only["carrier_vector_hash"]
+    )
+    assert (
+        bundle_single_run_only["bundle_identity"]
+        == bundle_standard_run_only["bundle_identity"]
+    )
+
+    # Full witness (with request_hash_by_model, as a real capture produces):
+    # the full hash legitimately differs by endpoint -- the correction above.
+    bundle_single_full = build_day0_causal_evidence_bundle(
+        **common, vector_witness=witness(single_meta)
+    )
+    bundle_standard_full = build_day0_causal_evidence_bundle(
+        **common, vector_witness=witness(standard_meta)
+    )
+    assert (
+        bundle_single_full["carrier_vector_hash"]
+        != bundle_standard_full["carrier_vector_hash"]
+    )
+
+    # A different run changes the run-identity-only bundle too.
+    bundle_other_run_only = build_day0_causal_evidence_bundle(
+        **common, vector_witness=run_identity_only_witness(other_meta)
+    )
+    assert (
+        bundle_other_run_only["carrier_vector_hash"]
+        != bundle_single_run_only["carrier_vector_hash"]
+    )
+    assert (
+        bundle_other_run_only["bundle_identity"]
+        != bundle_single_run_only["bundle_identity"]
+    )
 
 
 def test_wu_revision_history_keeps_current_boundary_inside_probability():

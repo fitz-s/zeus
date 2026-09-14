@@ -1353,7 +1353,7 @@ def _fetch_standard_meta_stamped_payloads(
     *,
     model: str,
     locations: Sequence[tuple[float, float, str, Sequence[date]]],
-    run: datetime,
+    run: datetime | None,
     source_available_at: datetime | str | None,
     forecast_hours: int,
     deadline_monotonic: float | None,
@@ -1364,6 +1364,14 @@ def _fetch_standard_meta_stamped_payloads(
     Run identity is (model, last_run_initialisation_time) only: replicas behind Open-Meteo's
     meta.json endpoint disagree on last_run_availability_time for the same run, so availability
     is recorded as evidence (earliest of before/after) but never gates the refuse/discard checks.
+
+    ``run=None`` means "prove whatever run the provider's own meta bracket
+    reports" instead of refusing unless it matches a frozen run -- the
+    transport-fallback invariant (same run, different endpoint) only applies
+    when the caller passes a concrete ``run``; a caller that already knows the
+    pinned run is disqualified (not yet usable, or starting after the causal
+    boundary) has nothing to freeze against and accepts the reported run
+    instead.
     """
 
     if source_available_at is None:
@@ -1372,7 +1380,7 @@ def _fetch_standard_meta_stamped_payloads(
     from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL  # noqa: PLC0415
     from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
 
-    expected_run = _utc_datetime(run)
+    expected_run = _utc_datetime(run) if run is not None else None
 
     def _meta() -> object:
         deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
@@ -1392,7 +1400,7 @@ def _fetch_standard_meta_stamped_payloads(
     before_run = meta_before.last_run_initialisation_time.astimezone(UTC)
     before_available = meta_before.last_run_availability_time.astimezone(UTC)
     before_modified = meta_before.last_run_modification_time
-    if before_run != expected_run:
+    if expected_run is not None and before_run != expected_run:
         raise ValueError(
             f"{model} standard fallback refused: provider metadata no longer matches frozen run"
         )

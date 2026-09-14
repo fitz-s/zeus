@@ -6522,9 +6522,12 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import (
             day0_hourly_release_due_city_dates,
+            day0_hourly_target_dates_for_refresh,
             maybe_refresh_day0_hourly_vectors,
             probe_day0_provider_run_hwm,
+            read_day0_current_temperature_state,
         )
+        from src.state.db import get_forecasts_connection_with_world_read_only
 
         decision_time = datetime.now(timezone.utc)
         refresh_budget_seconds = _day0_hourly_refresh_budget_seconds()
@@ -6746,6 +6749,52 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 max(0.0, remaining_budget_seconds),
             )
             return
+        # Causal run-selection boundary: the same latest-same-station-print
+        # predicate the materializer and the live-materialization-queue
+        # preflight already use (read_day0_current_temperature_state), NOT
+        # priority_probe.window_starts above (that is a coarser,
+        # possibly-staler predicate built from _latest_authorized_day0_fact's
+        # running extreme, used only for the post-fetch coverage/staleness
+        # check). A hint for endpoint selection, never authority: any failure
+        # here degrades to today's freshest-run-only behavior, it never blocks
+        # the refresh itself.
+        causal_run_boundaries: dict[tuple[str, str], datetime] = {}
+        try:
+            with get_forecasts_connection_with_world_read_only() as boundary_conn:
+                for boundary_city in ordered_cities:
+                    if time.monotonic() >= refresh_deadline_monotonic:
+                        break
+                    boundary_city_name = str(
+                        getattr(boundary_city, "name", "") or ""
+                    ).strip()
+                    if not boundary_city_name:
+                        continue
+                    try:
+                        boundary_target_dates = day0_hourly_target_dates_for_refresh(
+                            city=boundary_city, decision_time=decision_time
+                        )
+                    except Exception:  # noqa: BLE001 -- hint, not authority
+                        continue
+                    if not boundary_target_dates:
+                        continue
+                    try:
+                        current_state = read_day0_current_temperature_state(
+                            conn=boundary_conn,
+                            city=boundary_city,
+                            target_date=boundary_target_dates[0],
+                            decision_time=decision_time,
+                        )
+                    except Exception:  # noqa: BLE001 -- hint, not authority
+                        continue
+                    if current_state is not None:
+                        causal_run_boundaries[
+                            (boundary_city_name, boundary_target_dates[0])
+                        ] = current_state.observed_at
+        except Exception as exc:  # noqa: BLE001 -- hint, not authority
+            causal_run_boundaries = {}
+            _log.warning(
+                "edli_day0_hourly_refresh: causal boundary probe failed: %s", exc
+            )
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
@@ -6765,6 +6814,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 (city_name, target_date): window_start
                 for city_name, target_date, window_start in priority_probe.window_starts
             },
+            causal_run_boundaries=causal_run_boundaries,
             provider_run_hwm=provider_run_hwm,
             release_due_city_dates=release_due_city_dates,
             persist_lock_blocking=False,
