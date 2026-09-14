@@ -932,3 +932,81 @@ def test_catch_up_missing_instants_drained_row_matches_live_tick_stamping(monkey
     assert drained_row is not None, "setup failure: drain wrote no row"
 
     assert tuple(drained_row) == tuple(live_row)
+
+
+def test_catch_up_missing_instants_routes_by_tier_at_the_holes_own_date(monkeypatch) -> None:
+    """A city whose effective tier differs between two dates -- the real
+    precedent is Taipei's 2026-04-15 settlement_source_type migration,
+    tier_resolver.py's own comment -- must have EACH hole routed through
+    the fetcher for THAT date's tier, not the city's current tier.
+    build_expected_set already resolves per-city sources this way
+    (settlement_source_type_for_city(city, target_date)); this drain must
+    call tier_for_city with the hole's own target_date to match, or a
+    migrated city's old holes become a permanent phantom hole routed to
+    the wrong fetcher every scan forever."""
+    import scripts.obs_live_tick as obs_tick
+    from src.data.tier_resolver import Tier as _Tier
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="Testville", data_source="ogimet_metar_xxxx", target_date="2026-04-10")
+    _seed_instants_missing(conn, city="Testville", data_source="wu_icao_history", target_date="2026-04-20")
+
+    def fake_tier_for_city(city_name, target_date=None):
+        assert target_date is not None, (
+            "must resolve tier at the hole's own target_date, not the city's current default"
+        )
+        return _Tier.OGIMET_METAR if str(target_date) < "2026-04-15" else _Tier.WU_ICAO
+
+    monkeypatch.setattr(obs_tick, "tier_for_city", fake_tier_for_city)
+
+    wu_calls: list[str] = []
+    ogimet_calls: list[str] = []
+    monkeypatch.setattr(
+        obs_tick, "_tick_wu_city",
+        lambda city_name, *_a, **_k: wu_calls.append(city_name)
+        or obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_written=1),
+    )
+    monkeypatch.setattr(
+        obs_tick, "_tick_ogimet_city",
+        lambda city_name, *_a, **_k: ogimet_calls.append(city_name)
+        or obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=1),
+    )
+
+    # Both seeded holes are ~5 months before "today" (whenever the suite
+    # runs); a large days_back keeps this test independent of wall-clock
+    # date rather than freezing datetime.now for a single-purpose check.
+    obs_tick.catch_up_missing_instants(conn, days_back=9999)
+
+    assert wu_calls == ["Testville"]
+    assert ogimet_calls == ["Testville"]
+
+
+def test_catch_up_missing_instants_retries_sqlite_lock_not_a_hard_failure(monkeypatch) -> None:
+    """A transient SQLITE_BUSY from a concurrently-running tick (e.g.
+    ingest_k2_obs_fast_tick, a different advisory lock) must be retried
+    via _run_city_with_sqlite_retry -- the same wrapper run_live_tick uses
+    for every city -- not recorded as a permanent failure on first
+    contention."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="Taipei", data_source="wu_icao_history", target_date="2026-09-13")
+
+    calls = {"n": 0}
+
+    def flaky_then_ok(city_name, _conn, *, start_date, end_date, dry_run):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_written=24)
+
+    monkeypatch.setenv("ZEUS_OBS_LIVE_TICK_SQLITE_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(obs_tick, "_tick_wu_city", flaky_then_ok)
+    monkeypatch.setattr(obs_tick.time, "sleep", lambda _delay: None)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30)
+
+    assert calls["n"] == 2, "must have retried after the first BUSY, not given up"
+    assert totals["wu_cities_touched"] == 1
+    assert totals["wu_cities_failed"] == 0
+    assert totals["wu_rows_written"] == 24

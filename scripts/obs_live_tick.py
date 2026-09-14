@@ -800,7 +800,24 @@ def catch_up_missing_instants(
     branch that fires only for a ``Path`` -- the same discipline the live
     tick itself relies on against its own concurrent writes to this table.
 
-    Routes by ``tier_for_city``, never by matching the coverage row's source
+    Each hole's fetcher is resolved via ``_tick_wu_city``/``_tick_ogimet_city``
+    called through ``_run_city_with_sqlite_retry`` -- the same wrapper
+    ``run_live_tick`` uses for every city -- so a transient SQLITE_BUSY from
+    a concurrently-running tick (e.g. ``ingest_k2_obs_fast_tick``, a
+    different advisory lock) is retried with the same backoff, not recorded
+    as a permanent failure on first contention.
+
+    Routes by ``tier_for_city(city, target_date)`` -- evaluated PER HOLE at
+    that hole's own ``target_date``, never the city's current tier -- so a
+    city that migrated source families (e.g. Taipei's 2026-04-15 mapping
+    change; see ``tier_resolver.py``'s own comment) still routes its
+    pre-migration holes to the tier that was actually effective on that
+    date. ``build_expected_set`` already resolves per-city sources this way;
+    this drain matches it. A single city can therefore appear in both the
+    WU and Ogimet buckets at once if its pending holes straddle a
+    migration -- each bucket only ever holds dates for which that tier was
+    actually in effect, so the per-bucket date range passed to the fetcher
+    never crosses tiers. Never routes by matching the coverage row's source
     string, so an HKO-tier (or any non-WU/Ogimet) row can never reach
     ``_tick_ogimet_city``. WU has no provider rate limit and drains every
     pending hole. Ogimet is bounded by ``deadline``: the number of cities
@@ -840,18 +857,33 @@ def catch_up_missing_instants(
         target = date.fromisoformat(r["target_date"])
         if target < cutoff:
             continue
+        city_name = r["city"]
         try:
-            tier = tier_for_city(r["city"])
+            # Resolved AT this hole's own target_date, not the city's
+            # current tier -- a mid-migration city must route its
+            # pre-migration holes to the tier effective on that date.
+            tier = tier_for_city(city_name, target)
         except UnsupportedTierError:
+            logger.warning(
+                "catch_up_missing_instants: skipping %s target_date=%s -- "
+                "unknown city or unsupported settlement_source_type "
+                "(check config/cities.json)",
+                city_name, target,
+            )
             skipped += 1
             continue
         if tier == Tier.WU_ICAO:
-            wu_by_city.setdefault(r["city"], []).append(target)
+            wu_by_city.setdefault(city_name, []).append(target)
         elif tier == Tier.OGIMET_METAR:
-            ogimet_by_city.setdefault(r["city"], []).append(target)
+            ogimet_by_city.setdefault(city_name, []).append(target)
         else:
             # HKO_NATIVE (or any future tier): not this drain's job -- HKO
             # has its own accumulator (hko_ingest_tick.py --project-only).
+            logger.info(
+                "catch_up_missing_instants: skipping %s target_date=%s "
+                "tier=%s -- has its own accumulator, by design",
+                city_name, target, tier,
+            )
             skipped += 1
 
     totals = {
@@ -863,8 +895,9 @@ def catch_up_missing_instants(
 
     for city_name, dates in wu_by_city.items():
         try:
-            result = _tick_wu_city(
-                city_name, db_path, start_date=min(dates), end_date=max(dates), dry_run=False,
+            result = _run_city_with_sqlite_retry(
+                _tick_wu_city, city_name, db_path,
+                start_date=min(dates), end_date=max(dates), dry_run=False,
             )
         except Exception:
             logger.exception("catch_up_missing_instants: WU city %s failed", city_name)
@@ -893,8 +926,9 @@ def catch_up_missing_instants(
 
     for city_name, dates in selected[:ogimet_budget]:
         try:
-            result = _tick_ogimet_city(
-                city_name, db_path, start_date=min(dates), end_date=max(dates), dry_run=False,
+            result = _run_city_with_sqlite_retry(
+                _tick_ogimet_city, city_name, db_path,
+                start_date=min(dates), end_date=max(dates), dry_run=False,
             )
         except Exception:
             logger.exception("catch_up_missing_instants: Ogimet city %s failed", city_name)
