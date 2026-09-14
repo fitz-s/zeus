@@ -91,12 +91,43 @@ _scheduler: Any | None = None
 # _graceful_shutdown matches src/main.py / src/ingest_main.py / src/riskguard/riskguard.py.
 _PROCESS_START = time.monotonic()
 
+
+def _install_timestamped_logging() -> None:
+    """Install this daemon's own timestamped formatter on the root logger.
+
+    Logging split: INFO/DEBUG -> stdout (.log), WARNING+ -> stderr (.err) --
+    daemon parity. ``main()`` and the one-shot ``python -c`` children
+    (chain_sync_read, collateral_snapshot_refresh) all call this SAME function
+    so there is exactly one format string. Without it, a fresh child
+    interpreter has no handler on its root logger, so its log calls fall
+    through to ``logging.lastResort`` and print with no timestamp at all --
+    the child then cannot be phase-timed after the fact (T-chainsync2).
+    """
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    stdout_h = logging.StreamHandler(sys.stdout)
+    stdout_h.setLevel(logging.INFO)
+    stdout_h.setFormatter(fmt)
+    stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
+    stderr_h = logging.StreamHandler(sys.stderr)
+    stderr_h.setLevel(logging.WARNING)
+    stderr_h.setFormatter(fmt)
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.addHandler(stdout_h)
+    root.addHandler(stderr_h)
+
+
 _COLLATERAL_CHILD_CODE = (
+    "from src.ingest.post_trade_capital_daemon import _install_timestamped_logging; "
+    "_install_timestamped_logging(); "
     "from src.execution.post_trade_capital import collateral_snapshot_refresh_cycle; "
     "collateral_snapshot_refresh_cycle()"
 )
 _COLLATERAL_CHILD_EXIT_GRACE_SECONDS = 2.0
 _CHAIN_SYNC_CHILD_CODE = (
+    "from src.ingest.post_trade_capital_daemon import _install_timestamped_logging; "
+    "_install_timestamped_logging(); "
     "from src.execution.post_trade_capital import chain_sync_read_cycle; "
     "chain_sync_read_cycle()"
 )
@@ -671,20 +702,7 @@ def main() -> None:
     global _scheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
 
-    # Logging split: INFO/DEBUG → stdout (.log), WARNING+ → stderr (.err) — daemon parity.
-    _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    _stdout_h = logging.StreamHandler(sys.stdout)
-    _stdout_h.setLevel(logging.INFO)
-    _stdout_h.setFormatter(_fmt)
-    _stdout_h.addFilter(lambda r: r.levelno < logging.WARNING)
-    _stderr_h = logging.StreamHandler(sys.stderr)
-    _stderr_h.setLevel(logging.WARNING)
-    _stderr_h.setFormatter(_fmt)
-    _root = logging.getLogger()
-    _root.handlers.clear()
-    _root.setLevel(logging.INFO)
-    _root.addHandler(_stdout_h)
-    _root.addHandler(_stderr_h)
+    _install_timestamped_logging()
     logger.info("Zeus post-trade-capital daemon starting (pid=%d)", os.getpid())
 
     # Proxy health gate — must precede any HTTP call (Gamma/CLOB/RPC).

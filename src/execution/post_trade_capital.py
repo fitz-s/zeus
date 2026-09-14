@@ -65,6 +65,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -718,6 +719,7 @@ def chain_sync_read_cycle() -> None:
         load_portfolio,
         save_portfolio,
     )
+    from src.ingest.post_trade_capital_daemon import _chain_sync_child_deadline_seconds
     from src.state.write_coordinator import (
         DBIdentity,
         WritePriority,
@@ -725,14 +727,45 @@ def chain_sync_read_cycle() -> None:
         default_runtime_write_coordinator,
     )
 
-    conn = get_connection()
+    # T-chainsync2 (2026-09-13): derive ONE deadline_monotonic from the SAME
+    # function the parent uses to size the subprocess kill timeout
+    # (_chain_sync_child_deadline_seconds, post_trade_capital_daemon.py), so
+    # every budget inside this child is a slice of the clock the parent kills
+    # on. Before this, get_connection() below opened with no deadline at all,
+    # so connect_or_degrade re-granted the default 30s busy_timeout to every
+    # PRAGMA/ATTACH statement and the cutover-lease flock acquisition was
+    # unbounded -- the child could spend its whole ~75s budget before its
+    # first network call.
+    cycle_started_at = time.monotonic()
+    deadline_monotonic = cycle_started_at + _chain_sync_child_deadline_seconds()
+
+    def _log_phase(phase: str, *, level: int = logging.INFO) -> None:
+        logger.log(
+            level,
+            "chain_sync_read phase=%s elapsed_s=%.2f remaining_s=%.2f",
+            phase,
+            time.monotonic() - cycle_started_at,
+            deadline_monotonic - time.monotonic(),
+        )
+
+    conn = get_connection(deadline_monotonic=deadline_monotonic)
     if conn is None:
+        # R-AW MEDIUM (2026-09-13): connect_or_degrade swallows a deadline
+        # TimeoutError into a plain None return, so this is the exact case
+        # this fix exists to make observable -- the connect step itself
+        # exhausted the child's budget. Log the same elapsed/remaining pair
+        # _log_phase would have emitted on success, at ERROR, before raising.
+        _log_phase("connect", level=logging.ERROR)
         raise RuntimeError("chain_sync_read: DB write-lock degraded before cycle")
+    _log_phase("connect")
 
     # STANDARD priority / deadline_ms=1_500 / max_hold_ms=500 mirror the comparable
     # non-MONITOR TRADE sidecar convention in
     # src/engine/event_reactor_adapter.py::_persist_global_jit_authority_snapshot_isolated
     # (owner differs; parameters are the cited sibling's, not invented here).
+    # These stay FIXED (not derived from deadline_monotonic, R-AW LOW 2026-09-13):
+    # they bound the downstream committed-write admission window, not the
+    # connect/read budget this fix addresses.
     #
     # R-AD fast-follow (2026-09-13): bounded_sqlite_write, not a hand-rolled
     # busy_timeout dance -- .lease() alone only RECORDS max_hold_ms in telemetry, it
@@ -790,7 +823,8 @@ def chain_sync_read_cycle() -> None:
         # skips load_portfolio's redundant connect+ATTACH entirely (it detects
         # 'world' already attached via _attached_schema_names and skips its own
         # ATTACH), so no second connection is opened at all for this path.
-        portfolio = load_portfolio(connection=conn)
+        portfolio = load_portfolio(connection=conn, deadline_monotonic=deadline_monotonic)
+        _log_phase("load_portfolio")
         with PolymarketClient() as clob:
             # chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
             # Degrades gracefully if Keychain funder_address is absent (REST call fails -> caught).
@@ -808,6 +842,7 @@ def chain_sync_read_cycle() -> None:
                 )
                 if chain_stats:
                     summary["chain_sync"] = chain_stats
+                _log_phase("chain_sync")
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "chain_sync_read: chain sync failed: %s", exc, exc_info=True
@@ -824,6 +859,7 @@ def chain_sync_read_cycle() -> None:
             # in that case before close() below.
             try:
                 conn.commit()
+                _log_phase("commit")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "chain_sync_read: chain-sync commit failed: %s", exc

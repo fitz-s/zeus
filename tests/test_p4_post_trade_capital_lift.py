@@ -1140,7 +1140,7 @@ def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):
     def _fail_chain_sync(*args, **kwargs):
         raise RuntimeError("venue unavailable")
 
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fail_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
@@ -1266,7 +1266,7 @@ def test_chain_sync_read_reconcile_dml_runs_inside_trade_coordinator_lease(monke
             pass  # simulates reconcile_with_chain's DML; the scope's own commit fires on exit
         return {"synced": 1}, True
 
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
@@ -1341,7 +1341,7 @@ def test_chain_sync_read_write_lease_timeout_reaches_child_exit_status(monkeypat
         with write_scope():
             raise AssertionError("must never reach the DML when the lease itself fails")
 
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
@@ -1433,7 +1433,7 @@ def test_chain_sync_read_dml_busy_is_classified_via_bounded_sqlite_write(monkeyp
             # ordinary commit -- exactly the collision this whole fix targets.
             raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
@@ -1495,7 +1495,7 @@ def test_chain_sync_read_cycle_reuses_its_own_connection_for_load_portfolio(monk
         assert passed_conn is conn
         return {}, False
 
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
     monkeypatch.setattr(cycle_runner, "load_portfolio", _fake_load_portfolio)
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fake_run_chain_sync)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
@@ -1503,6 +1503,171 @@ def test_chain_sync_read_cycle_reuses_its_own_connection_for_load_portfolio(monk
     post_trade_capital.chain_sync_read_cycle()
 
     assert captured_kwargs.get("connection") is conn
+
+
+def test_chain_sync_read_cycle_derives_deadline_via_shared_function(monkeypatch):
+    """T-chainsync2 (2026-09-13): the child derives ONE deadline_monotonic from
+    ``_chain_sync_child_deadline_seconds`` -- the SAME function the parent uses to
+    size the subprocess kill timeout in ``_chain_sync_read_isolated`` -- and threads
+    it into ``get_connection()``. Before this fix ``get_connection()`` opened with
+    no deadline at all, so every PRAGMA/ATTACH re-granted the default 30s
+    busy_timeout and the cutover-lease flock acquisition was unbounded.
+    """
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    class _Connection:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    conn = _Connection()
+    captured: dict = {}
+
+    def _fake_get_connection(**kwargs):
+        captured.update(kwargs)
+        return conn
+
+    monkeypatch.setattr(daemon, "_chain_sync_child_deadline_seconds", lambda: 5.0)
+    monkeypatch.setattr(cycle_runner, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda *a, **k: ({}, False))
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+
+    before = time.monotonic()
+    post_trade_capital.chain_sync_read_cycle()
+    after = time.monotonic()
+
+    assert "deadline_monotonic" in captured
+    deadline = captured["deadline_monotonic"]
+    assert before + 5.0 <= deadline <= after + 5.0
+
+
+def test_chain_sync_read_cycle_logs_four_timestamped_phases(monkeypatch, caplog):
+    """T-chainsync2: each phase transition (connect / load_portfolio / chain_sync /
+    commit) logs one INFO line carrying elapsed_s/remaining_s, so a killed cycle can
+    be phase-timed after the fact instead of leaving no reconstructable timeline.
+    """
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    class _Connection:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    conn = _Connection()
+
+    monkeypatch.setattr(daemon, "_chain_sync_child_deadline_seconds", lambda: 75.0)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cycle_runner, "_run_chain_sync", lambda *a, **k: ({"synced": 1}, False)
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+
+    with caplog.at_level("INFO", logger="zeus.post_trade_capital"):
+        post_trade_capital.chain_sync_read_cycle()
+
+    phase_lines = [
+        m for m in caplog.messages if m.startswith("chain_sync_read phase=")
+    ]
+    phases = [line.split("phase=", 1)[1].split(" ", 1)[0] for line in phase_lines]
+    assert phases == ["connect", "load_portfolio", "chain_sync", "commit"]
+    for line in phase_lines:
+        assert "elapsed_s=" in line
+        assert "remaining_s=" in line
+
+
+def test_chain_sync_read_cycle_logs_connect_exhaustion_before_raising(monkeypatch, caplog):
+    """R-AW MEDIUM (2026-09-13): connect_or_degrade swallows a deadline
+    TimeoutError into a plain ``None`` return from ``get_connection()`` -- the
+    exact case this fix exists to make observable. A killed-before-connect
+    cycle must still emit one ERROR-level elapsed_s/remaining_s line before
+    the RuntimeError propagates, not silence.
+    """
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    monkeypatch.setattr(daemon, "_chain_sync_child_deadline_seconds", lambda: 75.0)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: None)
+
+    with caplog.at_level("INFO", logger="zeus.post_trade_capital"):
+        with pytest.raises(
+            RuntimeError, match="chain_sync_read: DB write-lock degraded before cycle"
+        ):
+            post_trade_capital.chain_sync_read_cycle()
+
+    phase_records = [
+        r for r in caplog.records if r.getMessage().startswith("chain_sync_read phase=connect")
+    ]
+    assert len(phase_records) == 1
+    assert phase_records[0].levelname == "ERROR"
+    message = phase_records[0].getMessage()
+    assert "elapsed_s=" in message
+    assert "remaining_s=" in message
+
+
+def test_install_timestamped_logging_is_shared_by_main_and_both_children():
+    """T-chainsync2: main() and the chain-sync + collateral one-shot children all
+    call the SAME formatter-installing function, so there is exactly one format
+    string and a killed child's own lines carry a timestamp instead of falling
+    through to ``logging.lastResort``.
+    """
+    import logging as logging_mod
+
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    assert "_install_timestamped_logging" in daemon._CHAIN_SYNC_CHILD_CODE
+    assert "_install_timestamped_logging" in daemon._COLLATERAL_CHILD_CODE
+
+    main_node = _find_func(_P4_DAEMON, "main")
+    assert main_node is not None
+    main_calls = {
+        n.func.id
+        for n in ast.walk(main_node)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "_install_timestamped_logging" in main_calls
+
+    root = logging_mod.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    try:
+        daemon._install_timestamped_logging()
+        assert len(root.handlers) == 2
+        for handler in root.handlers:
+            assert handler.formatter is not None
+            assert (
+                handler.formatter._fmt
+                == "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+            )
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
 
 
 def test_payout_observer_runs_in_killable_child(monkeypatch):
