@@ -3070,6 +3070,8 @@ def test_single_runs_payload_cache_legacy_entry_loaded_but_not_indexed(
     superset hit, never a wrong one)."""
     import json as json_module
 
+    from datetime import UTC, datetime
+
     import src.data.bayes_precision_fusion_download as dl
 
     cache_path = tmp_path / "single_runs_payload_cache.json"
@@ -3083,7 +3085,7 @@ def test_single_runs_payload_cache_legacy_entry_loaded_but_not_indexed(
             "entries": {
                 legacy_key: {
                     "payload": _CHENGDU_120H_PAYLOAD,
-                    "recorded_at": "2026-09-06T00:00:00+00:00",
+                    "recorded_at": datetime.now(UTC).isoformat(),  # within the 24 h bound: the subject here is indexing, not age
                     # deliberately no identity_key/forecast_hours/past_hours -- this is
                     # the pre-fix, on-disk shape.
                 },
@@ -3347,3 +3349,76 @@ def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
         _CHENGDU_72H_PAYLOAD, ["ecmwf_ifs"], date(2026, 9, 7), _CHENGDU_TIMEZONE,
     )
     assert served == native
+
+
+def test_single_runs_payload_cache_in_process_honours_entry_bound(monkeypatch) -> None:
+    """T_ingestmem (2026-09-14): the durable mirror was bounded to 400 entries but the
+    in-process dict, its superset index and the indexed-key set only ever grew for the
+    daemon's lifetime. The same overflow rule (oldest-first) now applies in-process."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: False)
+    monkeypatch.setattr(dl, "_SINGLE_RUNS_PAYLOAD_CACHE_MAX_ENTRIES", 3)
+    for i in range(5):
+        dl._store_single_runs_payload_cache(
+            f"k{i}", {"hourly": {"time": [i]}}, identity_key=f"id{i}", forecast_hours=24, past_hours=0
+        )
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE) == {"k2", "k3", "k4"}
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == {"k2", "k3", "k4"}
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX) == {"id2", "id3", "id4"}
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT) == {"k2", "k3", "k4"}
+
+
+def test_single_runs_payload_cache_in_process_honours_age_bound(monkeypatch) -> None:
+    """An entry older than the durable max age is evicted from every in-process
+    structure on the next store, exactly as the file would drop it."""
+    from datetime import UTC, datetime, timedelta
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: False)
+    dl._store_single_runs_payload_cache(
+        "k_old", {"hourly": {"time": [0]}}, identity_key="id_old", forecast_hours=24, past_hours=0
+    )
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT["k_old"] = datetime.now(UTC) - timedelta(
+        hours=dl._SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS + 1
+    )
+    dl._store_single_runs_payload_cache(
+        "k_new", {"hourly": {"time": [1]}}, identity_key="id_new", forecast_hours=24, past_hours=0
+    )
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE) == {"k_new"}
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == {"k_new"}
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX) == {"id_new"}
+
+
+def test_single_runs_payload_cache_load_drops_expired_durable_entries(tmp_path, monkeypatch) -> None:
+    """A durable file written yesterday can carry entries past the max age when it is
+    loaded today; they must not be resurrected in-process."""
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    cache_path = tmp_path / "single_runs_payload_cache.json"
+    fresh_at = datetime.now(UTC).isoformat()
+    stale_at = (datetime.now(UTC) - timedelta(hours=dl._SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS + 1)).isoformat()
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dl._SINGLE_RUNS_PAYLOAD_CACHE_SCHEMA_VERSION,
+                "entries": {
+                    "k_fresh": {"payload": {"hourly": {"time": [1]}}, "recorded_at": fresh_at,
+                                "identity_key": "id_fresh", "forecast_hours": 24, "past_hours": 0},
+                    "k_stale": {"payload": {"hourly": {"time": [0]}}, "recorded_at": stale_at,
+                                "identity_key": "id_stale", "forecast_hours": 24, "past_hours": 0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
+    dl._load_persisted_single_runs_payload_cache(force=True)
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE) == {"k_fresh"}
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == {"k_fresh"}
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX) == {"id_fresh"}

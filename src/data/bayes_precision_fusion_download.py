@@ -818,6 +818,9 @@ _SINGLE_RUNS_PAYLOAD_CACHE_INDEX: dict[str, list[tuple[int, int, str]]] = {}
 # Cache keys already folded into the index above, so repeated 30s reloads of the
 # persisted file don't append duplicate tuples for the same entry.
 _SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS: set[str] = set()
+# In-process store time per key: the same age/count bounds the durable mirror
+# applies (24 h / 400 entries) are applied here from these stamps.
+_SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT: dict[str, datetime] = {}
 
 
 def _single_runs_payload_cache_persistence_enabled() -> bool:
@@ -890,6 +893,39 @@ def _index_single_runs_payload_cache_entry(
         (int(forecast_hours), int(past_hours), key)
     )
     _SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.add(key)
+
+
+def _prune_single_runs_payload_cache_in_process(now_dt: datetime) -> None:
+    """Apply the durable mirror's age/count bounds to the in-process structures.
+
+    The on-disk copy was bounded from the start (age, then oldest-first overflow),
+    but the in-process dict, its superset index and the indexed-key set only ever
+    grew: every key stored or loaded stayed for the daemon's lifetime
+    (T_ingestmem, 2026-09-14). The identical bounds, from the identical constants,
+    now hold in-process, so the process holds exactly what the file would.
+    """
+    age_floor = now_dt - timedelta(hours=_SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS)
+    stamp = _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT
+    dropped = {k for k in _SINGLE_RUNS_PAYLOAD_CACHE if stamp.get(k, now_dt) < age_floor}
+    overflow = len(_SINGLE_RUNS_PAYLOAD_CACHE) - len(dropped) - _SINGLE_RUNS_PAYLOAD_CACHE_MAX_ENTRIES
+    if overflow > 0:
+        survivors = sorted(
+            (k for k in _SINGLE_RUNS_PAYLOAD_CACHE if k not in dropped),
+            key=lambda k: stamp.get(k, now_dt),
+        )
+        dropped.update(survivors[:overflow])
+    if not dropped:
+        return
+    for k in dropped:
+        _SINGLE_RUNS_PAYLOAD_CACHE.pop(k, None)
+        stamp.pop(k, None)
+        _SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.discard(k)
+    for identity_key in list(_SINGLE_RUNS_PAYLOAD_CACHE_INDEX):
+        kept = [e for e in _SINGLE_RUNS_PAYLOAD_CACHE_INDEX[identity_key] if e[2] not in dropped]
+        if kept:
+            _SINGLE_RUNS_PAYLOAD_CACHE_INDEX[identity_key] = kept
+        else:
+            del _SINGLE_RUNS_PAYLOAD_CACHE_INDEX[identity_key]
 
 
 def _recover_single_runs_payload_identity(
@@ -995,6 +1031,14 @@ def _load_persisted_single_runs_payload_cache(*, force: bool = False) -> None:
             continue
         str_key = str(key)
         _SINGLE_RUNS_PAYLOAD_CACHE.setdefault(str_key, raw_payload)
+        try:
+            recorded = datetime.fromisoformat(str(entry.get("recorded_at")))
+        except (TypeError, ValueError):
+            recorded = None
+        if recorded is not None:
+            if recorded.tzinfo is None:
+                recorded = recorded.replace(tzinfo=UTC)
+            _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.setdefault(str_key, recorded)
         # 2026-09-07 (identity fix): prefer the identity _store_single_runs_payload_cache
         # persisted alongside this entry -- the REQUEST's own (run, lat, lon, tz) -- over
         # any recovery from the payload's own bytes. Recovery (_recover_single_runs_
@@ -1027,6 +1071,7 @@ def _load_persisted_single_runs_payload_cache(*, force: bool = False) -> None:
                 forecast_hours=forecast_hours,
                 past_hours=past_hours,
             )
+    _prune_single_runs_payload_cache_in_process(datetime.now(UTC))
 
 
 def _payload_cache_entry_expired(entry: Mapping[str, object], age_floor: datetime) -> bool:
@@ -1063,12 +1108,15 @@ def _store_single_runs_payload_cache(
     -> echo 30.544815,103.97647), so recovery from the payload never reproduces the
     identity a live request will compute (see _recover_single_runs_payload_identity).
     """
+    now_dt = datetime.now(UTC)
     stored = copy.deepcopy(dict(payload))
     _SINGLE_RUNS_PAYLOAD_CACHE[key] = stored
+    _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT[key] = now_dt
     if identity_key is not None and forecast_hours is not None and past_hours is not None:
         _index_single_runs_payload_cache_entry(
             key, identity_key=identity_key, forecast_hours=forecast_hours, past_hours=past_hours
         )
+    _prune_single_runs_payload_cache_in_process(now_dt)
     if not _single_runs_payload_cache_persistence_enabled():
         return
     path = _single_runs_payload_cache_path()
@@ -1096,7 +1144,6 @@ def _store_single_runs_payload_cache(
                 if not isinstance(entries, dict):
                     entries = {}
                     on_disk["entries"] = entries
-                now_dt = datetime.now(UTC)
                 recorded_at = now_dt.isoformat()
                 entry_record: dict[str, object] = {"payload": stored, "recorded_at": recorded_at}
                 if identity_key is not None and forecast_hours is not None and past_hours is not None:
