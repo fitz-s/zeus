@@ -7237,4 +7237,188 @@ def test_degraded_loader_returns_fail_closed_state(tmp_path):
     assert state.positions == []
     assert state.portfolio_loader_degraded is True
     assert state.authority == "degraded"
+
+
+def test_partial_exit_caused_by_queries_use_partial_index_not_position_scan():
+    """R-BM / harvester settlement write-lease audit (2026-09-14):
+    fill_dedup.py's recorded_partial_exit_fill_cursors / partial_exit_realized_pnl_fold /
+    legacy_partial_exit_repair_fills and harvester.py's _canonical_partial_exit_residual_basis
+    all filter `caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')` against
+    position_events. No prior index covered `caused_by`, so SQLite fell back to
+    sqlite_autoindex_position_events_3 (position_id=?) and residual-filtered caused_by
+    row-by-row over the position's WHOLE event history (2,146 events / 26 MB payload_json on
+    a live stuck position, inside the 5s settlement write lease).
+
+    All three producers of these caused_by values build their base event via
+    build_monitor_refreshed_canonical_write, which hardcodes event_type='MONITOR_REFRESHED' --
+    event_type cannot discriminate these rows from the position's ordinary monitor-refresh
+    history, ruling out an event_type predicate. idx_position_events_position_partial_exit_sequence
+    (a partial index on caused_by) is the fix.
+
+    Built against init_schema_trade_only (never the live DB) -- the schema init path the live
+    daemon actually uses. A decoy position with 2,000 plain MONITOR_REFRESHED events (0 partial
+    fills) gives the old plan a realistic-shape cost disadvantage; on a tiny fixture SQLite's
+    cost-based optimizer would pick a scan regardless of which index exists."""
+    from src.state.db import init_schema_trade_only
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "partial-exit-caused-by-plan.db")
+        conn.row_factory = None
+        init_schema_trade_only(conn)
+
+        position_id = "pos-decoy-2000ev"
+        rows = []
+        for seq in range(1, 2001):
+            rows.append((
+                f"{position_id}:mr:{seq}", position_id, 1, seq, "MONITOR_REFRESHED",
+                f"2026-09-01T00:{seq % 60:02d}:00Z", "active", "active", "center_buy",
+                None, None, None, None, None, "monitor_refresh", f"{position_id}:idem:{seq}",
+                "src.engine.cycle_runtime", "live", "{}",
+            ))
+        conn.executemany(
+            """INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, venue_status,
+                caused_by, idempotency_key, source_module, env, payload_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+
+        query = """
+            SELECT event_id, caused_by, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
+             ORDER BY sequence_no, event_id
+            """
+        plan_rows = conn.execute(f"EXPLAIN QUERY PLAN {query}", (position_id,)).fetchall()
+        details = [str(row[3]) for row in plan_rows]
+        plan_text = "\n".join(details).upper()
+
+        assert "SCAN" not in plan_text, f"expected no scan for a 2,000-event decoy position: {details}"
+        assert any(
+            "IDX_POSITION_EVENTS_POSITION_PARTIAL_EXIT_SEQUENCE" in d.upper()
+            for d in details
+        ), (
+            f"expected the caused_by partial index, got: {details}"
+        )
+        conn.close()
+
+
+def test_sd1_trade_decisions_update_uses_runtime_trade_id_index_not_scan():
+    """R-BM (2026-09-14): harvester.py's SD-1 statement
+    (`UPDATE trade_decisions ... WHERE runtime_trade_id = ? AND status NOT IN (...)`) runs
+    inside the settlement write lease for every settled position. trade_decisions carried no
+    index at all, so this was a full SCAN (5,765 rows live). idx_trade_decisions_runtime_trade_id
+    fixes it. 5,000 decoy rows give the scan a realistic-shape cost disadvantage."""
+    from src.state.db import init_schema_trade_only
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "sd1-trade-decisions-plan.db")
+        conn.row_factory = None
+        init_schema_trade_only(conn)
+
+        decoy_rows = [
+            (
+                f"m-decoy-{i}", "55-56F", "buy_yes", 10, 0.5, "2026-09-01T00:00:00Z",
+                0.5, 0.5, 0.1, 0.4, 0.6, 0.05, "exited", f"decoy-{i}", "live",
+            )
+            for i in range(5000)
+        ]
+        conn.executemany(
+            """INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id, env
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            decoy_rows,
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+
+        query = """UPDATE trade_decisions
+                       SET settlement_edge_usd = ?,
+                           exit_reason = COALESCE(exit_reason, 'SETTLEMENT'),
+                           status = CASE WHEN status IN ('entered', 'day0_window') THEN 'settled' ELSE status END
+                       WHERE runtime_trade_id = ?
+                         AND status NOT IN ('exited', 'unresolved_ghost', 'settled')"""
+        plan_rows = conn.execute(f"EXPLAIN QUERY PLAN {query}", ("1.0", "decoy-1")).fetchall()
+        details = [str(row[3]) for row in plan_rows]
+        plan_text = "\n".join(details).upper()
+
+        assert "SCAN" not in plan_text, f"expected no scan over trade_decisions: {details}"
+        assert any("IDX_TRADE_DECISIONS_RUNTIME_TRADE_ID" in d.upper() for d in details), (
+            f"expected idx_trade_decisions_runtime_trade_id, got: {details}"
+        )
+        conn.close()
+
+
+def test_current_phase_in_db_seeks_position_current_pk_not_scan():
+    """R-BM (2026-09-14): harvester._current_phase_in_db queried
+    `WHERE trade_id = ?` on position_current, an unindexed column separate from the
+    `position_id` primary key. build_position_current_projection
+    (src/engine/lifecycle_events.py) always writes trade_id == position_id for every
+    canonical row, so the two are interchangeable for lookup by a single position's own id;
+    querying by position_id instead is a PK seek with zero new DDL. Built against
+    init_schema_trade_only with decoy rows to give a full scan a realistic-shape cost
+    disadvantage."""
+    from src.execution.harvester import _current_phase_in_db
+    from src.state.db import init_schema_trade_only
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "current-phase-in-db-plan.db")
+        conn.row_factory = sqlite3.Row
+        init_schema_trade_only(conn)
+
+        for i in range(500):
+            conn.execute(
+                "INSERT INTO position_current (position_id, phase, trade_id, city, "
+                "target_date, strategy_key, updated_at, temperature_metric) "
+                "VALUES (?, 'active', ?, ?, '2026-09-01', 'center_buy', 't', 'high')",
+                (f"decoy-{i}", f"decoy-{i}", f"DecoyCity{i}"),
+            )
+        target_id = "target-position"
+        conn.execute(
+            "INSERT INTO position_current (position_id, phase, trade_id, city, "
+            "target_date, strategy_key, updated_at, temperature_metric) "
+            "VALUES (?, 'active', ?, 'Seattle', '2026-09-13', 'center_buy', 't', 'high')",
+            (target_id, target_id),
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+
+        class _SqlCapture:
+            """Records the last SQL/params _current_phase_in_db actually issues,
+            so the plan assertion below traces the real statement instead of a
+            hand-typed duplicate that could silently drift from the source."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.last_sql = None
+                self.last_params = None
+
+            def execute(self, sql, params=()):
+                self.last_sql = sql
+                self.last_params = tuple(params)
+                return self._inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        spy = _SqlCapture(conn)
+        result = _current_phase_in_db(spy, target_id)
+        assert result == {"status": "ok", "phase": "active"}
+        assert spy.last_sql is not None
+
+        plan_rows = conn.execute(
+            f"EXPLAIN QUERY PLAN {spy.last_sql}", spy.last_params
+        ).fetchall()
+        details = [str(row["detail"]) for row in plan_rows]
+        plan_text = "\n".join(details).upper()
+        assert "SCAN" not in plan_text, f"expected a PK seek, got: {details}"
+        assert any("SEARCH" in d.upper() for d in details), f"expected a SEARCH plan: {details}"
+        conn.close()
     conn.close()

@@ -2729,6 +2729,14 @@ def init_schema(
             risk_throttling_usd REAL DEFAULT 0.0,
             settlement_edge_usd REAL DEFAULT 0.0
         );
+        -- 2026-09-14 (harvester settlement write-lease audit): SD-1
+        -- (harvester.py's `UPDATE trade_decisions ... WHERE runtime_trade_id = ?`,
+        -- run inside the 5s settlement write lease) had no supporting index --
+        -- trade_decisions carried none at all -- forcing a full SCAN (5,765 rows
+        -- live) on every settled position. EXPLAIN QUERY PLAN on a temp DB
+        -- confirms this index turns it into a SEARCH.
+        CREATE INDEX IF NOT EXISTS idx_trade_decisions_runtime_trade_id
+            ON trade_decisions(runtime_trade_id);
 
         -- Durable per-decision probability lineage.
         -- This is not portfolio/lifecycle authority; it records decision-time
@@ -6163,6 +6171,28 @@ CREATE INDEX IF NOT EXISTS idx_position_events_entry_execution_occurred_at
         'ENTRY_ORDER_REJECTED',
         'ENTRY_ORDER_VOIDED'
     );
+-- 2026-09-14 (harvester settlement write-lease audit): fill_dedup.py's
+-- recorded_partial_exit_fill_cursors / partial_exit_realized_pnl_fold /
+-- legacy_partial_exit_repair_fills and harvester.py's
+-- _canonical_partial_exit_residual_basis all filter
+-- `caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')`, a
+-- predicate no prior index covers -- SQLite fell back to
+-- sqlite_autoindex_position_events_3 (position_id=?) and residual-filtered
+-- caused_by row-by-row over the position's WHOLE history (2,146 events /
+-- 26 MB payload_json on a live stuck position) inside the 5s settlement
+-- write lease. All three producers of these caused_by values
+-- (exit_lifecycle.py's _build_partial_exit_projection_event, harvester.py's
+-- _repair_legacy_partial_exit_economics, command_recovery.py's partial-exit
+-- repair writer) build their base event via
+-- build_monitor_refreshed_canonical_write, which hardcodes
+-- event_type='MONITOR_REFRESHED' -- event_type cannot discriminate these
+-- rows from the position's ordinary monitor-refresh history, so a
+-- non-partial predicate cannot replace this index. Confirmed via EXPLAIN
+-- QUERY PLAN on a temp DB that SQLite picks this index for the exact
+-- caused_by IN (...) query text unchanged.
+CREATE INDEX IF NOT EXISTS idx_position_events_position_partial_exit_sequence
+    ON position_events(position_id, sequence_no, event_id)
+    WHERE caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair');
 
 -- position_current (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS position_current (
@@ -6350,6 +6380,14 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
     risk_throttling_usd REAL DEFAULT 0.0,
     settlement_edge_usd REAL DEFAULT 0.0
 );
+-- 2026-09-14 (harvester settlement write-lease audit): SD-1
+-- (harvester.py's `UPDATE trade_decisions ... WHERE runtime_trade_id = ?`,
+-- run inside the 5s settlement write lease) had no supporting index --
+-- trade_decisions carried none at all -- forcing a full SCAN (5,765 rows
+-- live) on every settled position. EXPLAIN QUERY PLAN on a temp DB
+-- confirms this index turns it into a SEARCH.
+CREATE INDEX IF NOT EXISTS idx_trade_decisions_runtime_trade_id
+    ON trade_decisions(runtime_trade_id);
 
 -- venue_submission_envelopes + triggers (from src/state/db.py:init_provenance_projection_schema)
 CREATE TABLE IF NOT EXISTS venue_submission_envelopes (

@@ -342,8 +342,12 @@ def _current_phase_in_db(conn, trade_id: str) -> dict:
     if not trade_id:
         return {"status": "missing"}
     try:
+        # position_current.position_id is the PK and is always written equal
+        # to trade_id (build_position_current_projection sets both from
+        # getattr(position, "trade_id")) -- querying by position_id instead
+        # of the unindexed trade_id column turns this into a PK seek.
         row = conn.execute(
-            "SELECT phase FROM position_current WHERE trade_id = ? LIMIT 1",
+            "SELECT phase FROM position_current WHERE position_id = ? LIMIT 1",
             (trade_id,),
         ).fetchone()
     except Exception as exc:
