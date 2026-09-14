@@ -51,6 +51,7 @@ from src.state.ledger import (
     append_many_and_project,
 )
 from src.state.projection import POSITION_EVENT_ENVS
+from src.state.lifecycle_manager import TERMINAL_STATES as _SETTLEMENT_TERMINAL_STATES
 from src.state.market_topology_repo import write_market_topology_state
 from src.state.snapshot_repo import init_snapshot_schema
 from src.observability.counters import increment as _cnt_inc
@@ -12727,28 +12728,43 @@ def query_portfolio_loader_view(
         event_envs: dict[str, str] = {}
         transitional_hints: dict[str, dict] = {}
     else:
-        # Terminal positions (settled/voided/admin_closed/economically_closed)
-        # never surface these hints downstream: _position_from_projection_row
-        # only keeps day0_entered_at when state=='day0_window' and only keeps
-        # exit_state when phase=='pending_exit', pre_exit_state is consumed
-        # only by exit_lifecycle's pending-exit machinery, admin_exit_reason
-        # has position_current's own durable column as its primary source
-        # (the hint is a fallback with no live reader of Position.admin_exit_reason
+        # A settlement-terminal position (settled/voided/admin_closed -- the
+        # harvester's own TERMINAL_STATES, imported above, NOT the broader
+        # chain_reconciliation.INACTIVE_RUNTIME_STATES which also folds in
+        # economically_closed) never surfaces these hints downstream:
+        # _position_from_projection_row only keeps day0_entered_at when
+        # state=='day0_window' and only keeps exit_state when
+        # phase=='pending_exit', pre_exit_state is consumed only by
+        # exit_lifecycle's pending-exit machinery, admin_exit_reason has
+        # position_current's own durable column as its primary source (the
+        # hint is a fallback with no live reader of Position.admin_exit_reason
         # -- is_admin_exit has none), and env likewise falls back to the hint
-        # only when position_current.env (a NOT NULL column) is empty. Same
-        # precedent as query_position_current_status_view's `WHERE phase IN
-        # OPEN_EXPOSURE_PHASES` scoping above. Restricting the event-hint
-        # fanout to open-exposure rows only skips work whose result was
-        # already discarded for terminal rows.
+        # only when position_current.env (a NOT NULL column) is empty.
+        #
+        # economically_closed is deliberately EXCLUDED from this skip: it is
+        # not in TERMINAL_STATES (its legal fold still includes settled/
+        # voided) and the harvester's db_phase_allows_settlement treats it as
+        # settlement-eligible -- run_harvester()'s load_portfolio() call
+        # (not runtime_exposure_only) feeds these Position objects straight
+        # into _settle_positions -> log_settlement_event -> log_outcome_fact,
+        # which reads pos.entered_at to derive hold_duration_hours for the
+        # durable outcome_fact table. Gating on OPEN_EXPOSURE_PHASES instead
+        # of TERMINAL_STATES would silently drop entered_at for every
+        # position settling through the ordinary economically_closed ->
+        # settled transition -- caught in review before this shipped.
+        needs_event_hints = [
+            str(row["phase"] or "") not in _SETTLEMENT_TERMINAL_STATES
+            for row in rows
+        ]
         open_trade_ids = [
             str(row["trade_id"] or row["position_id"] or "")
-            for row in rows
-            if str(row["phase"] or "") in OPEN_EXPOSURE_PHASES
+            for row, needs_hints in zip(rows, needs_event_hints)
+            if needs_hints
         ]
         open_position_ids = [
             str(row["position_id"] or row["trade_id"] or "")
-            for row in rows
-            if str(row["phase"] or "") in OPEN_EXPOSURE_PHASES
+            for row, needs_hints in zip(rows, needs_event_hints)
+            if needs_hints
         ]
         event_envs = _latest_position_event_envs(conn, open_position_ids)
         transitional_hints = (

@@ -2475,23 +2475,34 @@ def test_batched_position_event_hints_match_naive_per_position_reference(tmp_pat
 
 def test_loader_skips_event_hint_hydration_for_terminal_positions(tmp_path):
     """query_portfolio_loader_view must not hydrate transitional/env hints for
-    terminal (non-OPEN_EXPOSURE_PHASES) positions -- STEP 1 audit (see the
-    perf(state) commit hydrating hints only for open-exposure rows) found no
-    live reader of these fields for a terminal position:
-    _position_from_projection_row only keeps day0_entered_at when
-    state=='day0_window' and only keeps exit_state when phase=='pending_exit';
-    admin_exit_reason's only reader (Position.is_admin_exit) has zero callers;
-    entry_fill_verified/entered_at are read only by open-position flows
-    (chain_reconciliation's INACTIVE_RUNTIME_STATES-excluded auto-resolve,
-    fill_tracker, monitor_refresh, command_recovery). This test proves the
-    settled position genuinely HAS hydratable history (so this isn't a
-    vacuous "nothing to hydrate anyway" fixture), that the loader's raw
-    output now defaults those fields for it, and that the resulting Position
-    objects are byte-identical to what the OLD unrestricted hydration would
-    have produced.
-    """
-    from dataclasses import replace as _dc_replace
+    settlement-terminal (settled/voided/admin_closed) positions, but MUST
+    still hydrate them for economically_closed -- R-AY2 review finding: that
+    phase is not in lifecycle_manager.TERMINAL_STATES (its legal fold still
+    includes settled/voided), and the harvester's own
+    db_phase_allows_settlement treats it as settlement-eligible.
+    run_harvester()'s load_portfolio() call feeds these Position objects
+    straight into _settle_positions -> log_settlement_event ->
+    log_outcome_fact, which reads pos.entered_at to derive
+    hold_duration_hours for the durable outcome_fact table. Gating on
+    OPEN_EXPOSURE_PHASES (which excludes economically_closed) instead of
+    TERMINAL_STATES would silently drop entered_at for every position
+    settling through the ordinary economically_closed -> settled transition.
 
+    STEP 1 audit found no live reader of these fields for a genuinely
+    settlement-terminal position: _position_from_projection_row only keeps
+    day0_entered_at when state=='day0_window' and only keeps exit_state when
+    phase=='pending_exit'; admin_exit_reason's only reader
+    (Position.is_admin_exit) has zero callers; entry_fill_verified/entered_at
+    are read only by open-position flows (chain_reconciliation's
+    INACTIVE_RUNTIME_STATES-excluded auto-resolve, fill_tracker,
+    monitor_refresh, command_recovery). This test proves the settled
+    position genuinely HAS hydratable history (so this isn't a vacuous
+    "nothing to hydrate anyway" fixture), that the loader's raw output now
+    defaults those fields for it, that economically_closed keeps entered_at
+    hydrated, and that the settled row's resulting Position object is
+    byte-identical (apart from entered_at, documented as differing) to what
+    the OLD unrestricted hydration would have produced.
+    """
     from src.state.db import (
         _latest_position_event_envs,
         _query_transitional_position_hints,
@@ -2503,8 +2514,9 @@ def test_loader_skips_event_hint_hydration_for_terminal_positions(tmp_path):
     conn = get_connection(tmp_path / "terminal-hint-skip.db")
     init_schema(conn)
 
-    # A settled (terminal) position with a full transitional event history --
-    # exactly the shape that used to cost a payload_json fetch per event.
+    # A settled (settlement-terminal) position with a full transitional event
+    # history -- exactly the shape that used to cost a payload_json fetch per
+    # event.
     _insert_current_position_for_fill_authority_view_test(
         conn, position_id="terminal-settled", phase="settled"
     )
@@ -2526,6 +2538,17 @@ def test_loader_skips_event_hint_hydration_for_terminal_positions(tmp_path):
         conn, position_id="open-active", event_type="ENTRY_ORDER_FILLED",
         status="filled", occurred_at="2026-04-01T00:00:03+00:00", sequence_no=1,
     )
+
+    # An economically_closed position -- NOT settlement-terminal -- awaiting
+    # its final settlement transition through the harvester. entered_at must
+    # survive for it.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="econ-closed", phase="economically_closed"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="econ-closed", event_type="ENTRY_ORDER_FILLED",
+        status="filled", occurred_at="2026-04-01T00:00:03+00:00", sequence_no=1,
+    )
     conn.commit()
 
     # Prove the settled position genuinely has hydratable history: calling the
@@ -2541,15 +2564,22 @@ def test_loader_skips_event_hint_hydration_for_terminal_positions(tmp_path):
     positions_by_id = {row["position_id"]: row for row in view["positions"]}
     terminal_row = positions_by_id["terminal-settled"]
     open_row = positions_by_id["open-active"]
+    econ_closed_row = positions_by_id["econ-closed"]
 
-    # The raw loader output must now show DEFAULTS for the terminal row --
-    # this is the field-level difference the audit requires surfacing.
+    # The raw loader output must now show DEFAULTS for the settlement-terminal
+    # row -- this is the field-level difference the audit requires surfacing.
     assert terminal_row["entered_at"] == ""
     assert terminal_row["day0_entered_at"] == ""
     assert terminal_row["exit_state"] == ""
     assert terminal_row["admin_exit_reason"] == ""
     # The open position is unaffected (regression control).
     assert open_row["entered_at"] == "2026-04-01T00:00:03+00:00"
+    # economically_closed is NOT settlement-terminal: entered_at must survive
+    # so the harvester's log_settlement_event -> log_outcome_fact can still
+    # derive hold_duration_hours from a real value, not "".
+    assert econ_closed_row["entered_at"] == "2026-04-01T00:00:03+00:00"
+    econ_closed_position = _position_from_projection_row(dict(econ_closed_row), current_mode="test")
+    assert econ_closed_position.entered_at == "2026-04-01T00:00:03+00:00"
 
     # Reconstruct what the OLD unrestricted hydration would have put in the
     # terminal row's raw dict, then run BOTH through the same projection
