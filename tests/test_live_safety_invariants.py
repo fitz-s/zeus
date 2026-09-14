@@ -24456,6 +24456,112 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
     conn.close()
 
 
+def test_full_book_pulse_carries_write_lock_release_and_open_count_telemetry(
+    monkeypatch,
+):
+    """XBI (2026-09-14): the exit-monitor pulse must carry
+    monitor_write_lock_releases/monitor_write_lock_release_failed (already
+    set into `summary` by _release_monitor_write_lock_boundary) and
+    full_book_open_position_count (previously a bare local variable in
+    run_exit_monitor_cycle, never persisted) so a future F_GETLK-style hold
+    can be paired with releases-per-position from the pulse alone.
+    """
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    outcomes = []
+    pulse_payloads = []
+    position_ids = ["p1", "p2", "p3"]
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(trade_id=pid) for pid in position_ids],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+
+    def full_coverage_monitor(
+        _conn,
+        _clob,
+        _portfolio,
+        _artifact,
+        _tracker,
+        summary,
+        **_kwargs,
+    ):
+        # Simulates a 3-position pass where every raw per-position write
+        # reached its trailing _release_monitor_write_lock_boundary commit
+        # (the counters that function increments directly into `summary`).
+        summary.update(
+            held_monitor_candidates=len(position_ids),
+            held_monitor_candidate_position_ids=list(position_ids),
+            held_monitor_canonical_position_ids=list(position_ids),
+            held_monitor_discharged_position_ids=[],
+            monitor_write_lock_releases=3,
+            monitor_write_lock_release_failed=0,
+        )
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", full_coverage_monitor)
+    monkeypatch.setattr(
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda _conn, _artifact, *, summary, deadline_monotonic: (True, "artifact-1"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_schedule_exit_monitor_status_pulse",
+        lambda payload: pulse_payloads.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+        failure_outcome_sink=outcomes.append,
+    ) is True
+    assert outcomes == []
+    assert len(pulse_payloads) == 1
+    payload = pulse_payloads[0]
+    assert payload["full_book_open_position_count"] == 3
+    assert payload["monitor_write_lock_releases"] >= 3
+    assert payload["monitor_write_lock_release_failed"] == 0
+    # No real trade DB in this sandbox, so get_held_monitor_read_connection's
+    # open fails and run_exit_monitor_cycle falls back to `conn` -- proves
+    # the label reaches the pulse either way (see the dedicated db.py tests
+    # for the "read_only" case against a real file-backed trade DB).
+    assert payload["held_monitor_read_connection"] == "fallback_write"
+    conn.close()
+
+
 def test_artifact_retry_never_outlives_monitor_claim_deadline(monkeypatch):
     """A late writer retry defers; it cannot consume the successor quantum."""
     from src.execution import executor, exit_lifecycle

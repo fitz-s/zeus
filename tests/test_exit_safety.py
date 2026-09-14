@@ -15188,6 +15188,382 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
     ) == request
 
 
+def test_execute_monitoring_phase_routes_pure_reads_off_write_capable_connection(
+    tmp_path, monkeypatch
+):
+    """XBI (2026-09-14): per-position reads inside the held-monitor loop must
+    run on a genuine read-only connection, never on `conn` while it might be
+    mid-write-transaction. F_GETLK caught src.main holding the real SQLite
+    WAL write lock for 32.2s/32.1s -- the only two >30s holds in 1,481
+    sampled -- each ending within 0.5s of a coordinated MONITOR writer's
+    SQLITE_BUSY at BEGIN IMMEDIATE (harvester, chain_sync_read,
+    collateral_snapshot_persist).
+
+    This simulates a write left open on the write-capable connection --
+    exactly the state several of the loop's raw per-position writes leave
+    `conn` in between the write statement and its trailing
+    `_release_monitor_write_lock_boundary` commit (e.g.
+    update_trade_lifecycle, record_global_sell_reauction_reserved) -- and
+    proves the first per-position read reaches
+    `_latest_fresh_snapshot_min_order_for_token` on a DIFFERENT,
+    always-clean connection instead of the dirty one. On the parent
+    (6b3fe8e65) this call passes `conn=conn` directly, so `first_conn is
+    conn` and `first_in_transaction is True`.
+
+    `read_conn`'s lifecycle (open/fallback/close) belongs to the caller
+    that owns `conn` (run_exit_monitor_cycle, exit_lifecycle.py) -- this
+    test builds one the same way that caller does and passes it in, so it
+    exercises exactly execute_monitoring_phase's contract: route reads to
+    whatever `read_conn` it is handed, never to `conn`.
+    """
+    import logging
+    import sqlite3 as sqlite3_module
+
+    import src.state.db as db_module
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+    from src.state.db import get_held_monitor_read_connection, init_schema_trade_only
+    from src.state.portfolio import PortfolioState, Position
+
+    trade_path = tmp_path / "zeus_trades.db"
+    with sqlite3_module.connect(trade_path) as bootstrap:
+        init_schema_trade_only(bootstrap)
+        bootstrap.commit()
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+
+    conn = sqlite3_module.connect(trade_path)
+    conn.row_factory = sqlite3_module.Row
+    conn.execute("CREATE TABLE IF NOT EXISTS _dirty_probe (x INTEGER)")
+    conn.execute("INSERT INTO _dirty_probe (x) VALUES (1)")
+    assert conn.in_transaction is True
+
+    read_conn = get_held_monitor_read_connection()
+    assert read_conn is not None and read_conn is not conn
+
+    position = Position(
+        trade_id="xbi-monitor-hold-dust",
+        market_id="condition-xbi-monitor-hold",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-09-14",
+        temperature_metric="high",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id="xbi-monitor-hold-token",
+        no_token_id="xbi-monitor-hold-token-no",
+        condition_id="condition-xbi-monitor-hold",
+        state="pending_exit",
+        exit_state="backoff_exhausted",
+        exit_reason="",
+        chain_state="synced",
+        shares=4.0,
+        chain_shares=4.0,
+        order_status="backoff_exhausted",
+        strategy_key="forecast_qkernel_entry",
+        env="test",
+        entered_at="2026-09-14T11:00:00+00:00",
+    )
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: (position,),
+    )
+
+    calls: list[tuple[object, object]] = []
+
+    def spy_leaf(token_id, *, conn, now=None, deadline_monotonic=None):
+        calls.append((conn, getattr(conn, "in_transaction", None)))
+        return None
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_fresh_snapshot_min_order_for_token",
+        spy_leaf,
+    )
+
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_xbi_monitor_hold"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
+        },
+    )
+    artifact = type("Artifact", (), {"add_monitor_result": lambda *_args: None})()
+    tracker = type("Tracker", (), {"record_exit": lambda *_args: None})()
+    summary = {"monitors": 0, "exits": 0}
+
+    try:
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            object(),
+            PortfolioState(positions=[position]),
+            artifact,
+            tracker,
+            summary,
+            deps=deps,
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=30.0,
+            read_conn=read_conn,
+        )
+    finally:
+        conn.close()
+        read_conn.close()
+
+    assert calls, "expected the read leaf to be reached at least once"
+    first_conn, first_in_transaction = calls[0]
+    assert first_conn is not conn, (
+        "the first per-position read must run on the held-monitor's "
+        "read-only connection, not the write-capable one"
+    )
+    assert first_conn is read_conn
+    assert first_in_transaction is False
+
+
+def test_request_global_sell_snapshot_reauction_reads_off_write_capable_connection(
+    tmp_path, monkeypatch
+):
+    """R-BI (review of 4d2e87869, HIGH): arm_global_sell_reauction_obligation
+    and request_global_sell_snapshot_reauction are closures defined inside
+    execute_monitoring_phase before the per-position loop's read_conn setup
+    line runs; they don't take a conn/read_conn parameter, so by Python
+    closure scoping they see whatever `read_conn` currently resolves to in
+    the enclosing scope at CALL time (not def time) -- same mechanism that
+    used to make them (incorrectly) run on `conn`. This drives the SHALLOW
+    reachable path to request_global_sell_snapshot_reauction (the historical
+    global-sell-debt drain, not the deep execute_exit->same-turn-drain path)
+    and proves its `latest_held_sell_reauction_obligation` call lands on
+    read_conn, not the dirty write-capable conn.
+    """
+    import logging
+    import sqlite3 as sqlite3_module
+
+    import src.state.db as db_module
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+    from src.state.db import get_held_monitor_read_connection, init_schema_trade_only
+    from src.state.portfolio import PortfolioState, Position
+
+    trade_path = tmp_path / "zeus_trades.db"
+    with sqlite3_module.connect(trade_path) as bootstrap:
+        init_schema_trade_only(bootstrap)
+        bootstrap.commit()
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+
+    conn = sqlite3_module.connect(trade_path)
+    conn.row_factory = sqlite3_module.Row
+    conn.execute("CREATE TABLE IF NOT EXISTS _dirty_probe (x INTEGER)")
+    conn.execute("INSERT INTO _dirty_probe (x) VALUES (1)")
+    assert conn.in_transaction is True
+
+    read_conn = get_held_monitor_read_connection()
+    assert read_conn is not None and read_conn is not conn
+
+    position = Position(
+        trade_id="xbi-monitor-hold-debt",
+        market_id="condition-xbi-monitor-hold-debt",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-09-14",
+        temperature_metric="high",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id="xbi-monitor-hold-debt-token",
+        no_token_id="xbi-monitor-hold-debt-token-no",
+        condition_id="condition-xbi-monitor-hold-debt",
+        state="pending_exit",
+        chain_state="synced",
+        shares=4.0,
+        chain_shares=4.0,
+        order_status="filled",
+        strategy_key="forecast_qkernel_entry",
+        env="test",
+        entered_at="2026-09-14T11:00:00+00:00",
+    )
+
+    # Skip the whole primary per-position loop (not the path under test) --
+    # the historical global-sell-debt drain below scans `portfolio.positions`
+    # directly, independent of the monitor-eligible set.
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT,
+    )
+
+    calls: list[tuple[object, object]] = []
+    real_obligation = exit_lifecycle.latest_held_sell_reauction_obligation
+
+    def spy_obligation(spy_conn, spy_position):
+        calls.append((spy_conn, getattr(spy_conn, "in_transaction", None)))
+        return real_obligation(spy_conn, spy_position)
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        spy_obligation,
+    )
+
+    def recover_calls_requester(position, *, conn, requester, deadline_monotonic):
+        # Mirrors the real recover_global_sell_snapshot_reauction_debt's
+        # contract closely enough for this test: it invokes the requester
+        # callback (request_global_sell_snapshot_reauction) it was handed.
+        return requester(position, False)
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover_calls_requester,
+    )
+
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_xbi_monitor_hold_debt"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
+        },
+    )
+    artifact = type("Artifact", (), {"add_monitor_result": lambda *_args: None})()
+    tracker = type("Tracker", (), {"record_exit": lambda *_args: None})()
+    summary = {"monitors": 0, "exits": 0}
+
+    try:
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            object(),
+            PortfolioState(positions=[position]),
+            artifact,
+            tracker,
+            summary,
+            deps=deps,
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=30.0,
+            read_conn=read_conn,
+        )
+    finally:
+        conn.close()
+        read_conn.close()
+
+    assert calls, (
+        "expected latest_held_sell_reauction_obligation to be reached via "
+        "request_global_sell_snapshot_reauction"
+    )
+    for call_conn, in_transaction in calls:
+        assert call_conn is read_conn
+        assert in_transaction is False
+
+
+def test_run_exit_monitor_cycle_closes_read_connection_on_mid_loop_exception(
+    monkeypatch,
+):
+    """XBI (2026-09-14) steer: read_conn's lifecycle belongs to the caller
+    that owns `conn` (run_exit_monitor_cycle) -- it must close read_conn in
+    its own existing finally block even when the monitoring phase raises,
+    not only on the normal return path. execute_monitoring_phase itself no
+    longer owns read_conn's lifecycle at all (no internal try/finally,
+    matching the pre-fix shape of that huge function -- see the routing
+    substitutions in this same file/module for what changed instead).
+    """
+    import threading
+    import time
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import src.state.db as db_module
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    outcomes = []
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(trade_id="xbi-monitor-hold-exc")],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    class _SpyReadConn:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    spy_read_conn = _SpyReadConn()
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(
+        db_module,
+        "get_held_monitor_read_connection",
+        lambda **_kwargs: spy_read_conn,
+    )
+
+    def raising_monitor(
+        _conn,
+        _clob,
+        _portfolio,
+        _artifact,
+        _tracker,
+        summary,
+        **_kwargs,
+    ):
+        raise RuntimeError("xbi-boom: simulated mid-loop failure")
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", raising_monitor)
+    monkeypatch.setattr(
+        "src.risk_allocator.summary",
+        lambda: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+        failure_outcome_sink=outcomes.append,
+    )
+
+    conn.close()
+    assert result is False
+    assert spy_read_conn.close_calls == 1
+
+
 def test_same_turn_reauction_release_commit_failure_restores_runtime(monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position

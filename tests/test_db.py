@@ -139,6 +139,62 @@ def test_forecasts_read_only_connection_does_not_create_missing_db(tmp_path, mon
     assert not db_path.exists()
 
 
+def test_held_monitor_read_connection_is_query_only_with_world_and_forecasts(
+    tmp_path, monkeypatch
+):
+    """XBI (2026-09-14): the held-monitor's per-position reads must run on a
+    genuine read-only handle that still sees world/forecasts (mirrors
+    cycle_runner.get_connection's ATTACH set) so it can be swapped in for
+    every read currently sharing the write-capable monitor connection.
+    """
+    import src.state.db as db_module
+    from src.state.db import get_held_monitor_read_connection, init_schema_trade_only
+
+    trade_path = tmp_path / "zeus_trades.db"
+    with sqlite3.connect(trade_path) as trade_conn:
+        init_schema_trade_only(trade_conn)
+        trade_conn.commit()
+    world_path = tmp_path / "zeus-world.db"
+    with sqlite3.connect(world_path) as world_conn:
+        world_conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+        world_conn.commit()
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    with sqlite3.connect(forecasts_path) as forecasts_conn:
+        forecasts_conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+        forecasts_conn.commit()
+
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_path)
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+
+    conn = get_held_monitor_read_connection()
+    try:
+        assert conn is not None
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        # trade-DB schema is reachable (main).
+        conn.execute("SELECT COUNT(*) FROM position_current").fetchone()
+        # world/forecasts are ATTACHed, per get_connection's own ATTACH set.
+        conn.execute("SELECT COUNT(*) FROM world.probe").fetchone()
+        conn.execute("SELECT COUNT(*) FROM forecasts.probe").fetchone()
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO world.probe (id) VALUES (1)")
+    finally:
+        conn.close()
+
+
+def test_held_monitor_read_connection_degrades_to_none_on_missing_trade_db(
+    tmp_path, monkeypatch
+):
+    import src.state.db as db_module
+    from src.state.db import get_held_monitor_read_connection
+
+    missing_path = tmp_path / "missing-trades.db"
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: missing_path)
+
+    assert get_held_monitor_read_connection() is None
+    assert not missing_path.exists()
+
+
 def _create_outcome_fact_table(conn):
     conn.execute(
         """

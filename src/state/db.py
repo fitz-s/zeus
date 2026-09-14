@@ -591,6 +591,55 @@ def get_trade_connection_read_only(
     )
 
 
+def get_held_monitor_read_connection(
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection | None:
+    """Read-only trade+world+forecasts connection for held-monitor reads.
+
+    XBI (2026-09-14): F_GETLK caught ``src.main`` holding the real SQLite WAL
+    write lock for 32.2s/32.1s -- the only two >30s holds in 1,481 sampled --
+    each ending within 0.5s of a coordinated MONITOR writer's SQLITE_BUSY at
+    BEGIN IMMEDIATE (harvester, chain_sync_read, collateral_snapshot_persist).
+    Mechanism: the held-position monitor's per-position loop ran its reads
+    (quote/orderbook fetches, probability refresh, obligation/witness lookups)
+    on the SAME write-capable connection as its writes, so an implicit
+    DEFERRED transaction opened by a write could span the following reads'
+    network waits, holding the real lock coordinator-invisibly (raw `conn` is
+    never registered with ``default_runtime_write_coordinator()``).
+
+    This mirrors ``get_connection``'s (src/engine/cycle_runner.py) world +
+    forecasts ATTACH set on a genuine ``mode=ro`` handle, so per-position
+    monitor reads can run without ever joining the write-capable monitor
+    connection's transaction. ATTACH failure is non-fatal (mirrors
+    ``get_connection``): a read that needs the missing schema fails on its
+    own query, same as today.
+    """
+    try:
+        conn = get_trade_connection_read_only(deadline_monotonic=deadline_monotonic)
+    except sqlite3.OperationalError as exc:
+        logger.warning(
+            "held-monitor read-only connection open failed (%s: %s) -- "
+            "falling back to the write-capable monitor connection for reads "
+            "this cycle",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    try:
+        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except sqlite3.OperationalError as exc:
+        logger.warning(
+            "held-monitor read-only connection ATTACH world/forecasts failed "
+            "(%s: %s) -- non-fatal, a read needing that schema fails on its "
+            "own query same as get_connection's ATTACH set",
+            type(exc).__name__,
+            exc,
+        )
+    return conn
+
+
 def get_connection_read_only(
     db_path: Path,
     *,

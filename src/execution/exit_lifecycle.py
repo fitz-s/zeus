@@ -14957,9 +14957,24 @@ def run_exit_monitor_cycle(
         _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
         return False
 
+    # XBI (2026-09-14): a genuine read-only connection for the monitoring
+    # phase's per-position reads, so they never join `conn`'s (write-capable)
+    # transaction -- see get_held_monitor_read_connection's docstring
+    # (src/state/db.py) for the F_GETLK evidence. Falls back to `conn` if the
+    # read-only open/ATTACH fails (get_held_monitor_read_connection logs a
+    # warning naming the exception class) -- never worse than pre-fix.
+    from src.state.db import get_held_monitor_read_connection
+
+    read_conn = get_held_monitor_read_connection(
+        deadline_monotonic=monitor_deadline_monotonic
+    ) or conn
+
     summary: dict = {
         "monitors": 0,
         "exits": 0,
+        "held_monitor_read_connection": (
+            "read_only" if read_conn is not conn else "fallback_write"
+        ),
         "risk_level": risk_level.value,
         "held_monitor_preparation_budget_seconds": max(
             0.0,
@@ -15015,6 +15030,12 @@ def run_exit_monitor_cycle(
         monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
         if target_families is None:
             full_book_open_position_count = len(monitor_portfolio.positions)
+            # XBI (2026-09-14): persist alongside the already-tracked
+            # monitor_write_lock_releases/monitor_write_lock_release_failed
+            # (set by _release_monitor_write_lock_boundary directly into this
+            # same `summary`) so a future F_GETLK-style hold can be paired
+            # with releases-per-position from the pulse alone.
+            summary["full_book_open_position_count"] = full_book_open_position_count
         if target_families is not None:
             summary["targeted_exit_monitor"] = True
             summary["target_family_count"] = len(
@@ -15053,6 +15074,7 @@ def run_exit_monitor_cycle(
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
                     current_riskguard_red=risk_level is RiskLevel.RED,
+                    read_conn=read_conn,
                 )
                 portfolio_dirty = portfolio_dirty or monitor_portfolio_dirty
             except Exception as exc:
@@ -15151,6 +15173,11 @@ def run_exit_monitor_cycle(
             conn.close()
         except Exception:
             pass
+        if read_conn is not conn:
+            try:
+                read_conn.close()
+            except Exception:
+                pass
         if not monitor_completion_marked:
             mark_held_position_monitor_complete()
 

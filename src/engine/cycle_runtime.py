@@ -7181,6 +7181,7 @@ def execute_monitoring_phase(
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
     defer_partial_orderbook_gaps: bool = False,
     current_riskguard_red: bool = False,
+    read_conn: sqlite3.Connection | None = None,
 ):
     from src.engine.monitor_refresh import (
         _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
@@ -7310,7 +7311,12 @@ def execute_monitoring_phase(
             )
         existing = getattr(position, "_held_sell_reauction_obligation", None)
         if not isinstance(existing, dict):
-            existing = latest_held_sell_reauction_obligation(conn, position)
+            # R-BI (review of 4d2e87869): this closure is defined before the
+            # per-position loop's read_conn setup line runs, but read_conn is
+            # already a parameter of the enclosing execute_monitoring_phase --
+            # Python resolves free variables at call time, not def time, and
+            # this closure is only ever called after that line has run.
+            existing = latest_held_sell_reauction_obligation(read_conn, position)
         residual_proof = existing.get("residual_proof")
         if isinstance(residual_proof, dict):
             # A fresh q/book attempt supersedes only the auction witness.  The
@@ -7340,7 +7346,7 @@ def execute_monitoring_phase(
                 )
             from src.events.reactor import request_global_auction_completion
 
-            obligation = latest_held_sell_reauction_obligation(conn, position)
+            obligation = latest_held_sell_reauction_obligation(read_conn, position)
             if not isinstance(obligation, dict) or not obligation:
                 obligation = getattr(
                     position,
@@ -7349,10 +7355,10 @@ def execute_monitoring_phase(
                 )
                 obligation = obligation if isinstance(obligation, dict) else {}
             def load_canonical_monitor_cut() -> tuple[str, dict[str, object], str]:
-                if not force_new_generation or conn is None:
+                if not force_new_generation or read_conn is None:
                     return "", {}, ""
                 try:
-                    monitor_rows = conn.execute(
+                    monitor_rows = read_conn.execute(
                         """
                         SELECT event_id, sequence_no, occurred_at, payload_json
                           FROM position_events
@@ -7449,7 +7455,7 @@ def execute_monitoring_phase(
                     request_deadline,
                 )
                 try:
-                    refresh_position(conn, clob, position)
+                    refresh_position(read_conn, clob, position)
                 finally:
                     if previous_deadline is None:
                         try:
@@ -7791,9 +7797,11 @@ def execute_monitoring_phase(
     )
 
     def has_global_snapshot_retry_runtime(position) -> bool:
+        # Pure read (has_global_sell_snapshot_reauction_retry has zero write
+        # statements) -- runs on read_conn, not the write-capable conn.
         return has_global_sell_snapshot_reauction_retry(
             position,
-            conn,
+            read_conn,
         )
 
     def snapshot_global_retry_runtime() -> dict[int, dict[str, object]]:
@@ -8655,6 +8663,15 @@ def execute_monitoring_phase(
         str(getattr(position, "trade_id", "") or ""): position
         for position in monitor_positions
     }
+    # XBI (2026-09-14): per-position reads below run on read_conn -- a
+    # genuine read-only connection so they never join `conn`'s
+    # (write-capable) transaction -- see get_held_monitor_read_connection's
+    # docstring (src/state/db.py) for the F_GETLK evidence. Lifecycle
+    # (open/fallback/close) belongs to the caller that owns `conn`
+    # (run_exit_monitor_cycle); a caller that doesn't pass one gets the
+    # pre-fix behavior unchanged.
+    if read_conn is None:
+        read_conn = conn
     for position_index, pos in enumerate(monitor_positions):
         armed_obligation = None
         completion_request = None
@@ -8827,7 +8844,7 @@ def execute_monitoring_phase(
                     )
                 elif _is_non_executable_dust_hold(
                     pos,
-                    conn=conn,
+                    conn=read_conn,
                     deadline_monotonic=position_deadline,
                 ):
                     pending_exit_monitor_only = True
@@ -8991,7 +9008,7 @@ def execute_monitoring_phase(
                     deadline_monotonic=position_deadline,
                 ):
                     probability_refreshed = _refresh_monitor_probability_without_book(
-                        conn,
+                        read_conn,
                         clob,
                         pos,
                         durable_hard_facts.get(id(pos)),
@@ -9044,7 +9061,7 @@ def execute_monitoring_phase(
                     ):
                         probability_refreshed = (
                             _refresh_monitor_probability_without_book(
-                                conn,
+                                read_conn,
                                 clob,
                                 pos,
                                 durable_hard_facts.get(id(pos)),
@@ -9099,7 +9116,7 @@ def execute_monitoring_phase(
                 network_prefetch_started = True
                 network_prefetch: dict = {}
                 _prefetch_held_monitor_orderbooks(
-                    conn,
+                    read_conn,
                     clob,
                     network_positions,
                     network_prefetch,
@@ -9484,15 +9501,17 @@ def execute_monitoring_phase(
             if _day0_hard_fact_position_eligible(pos) and city is not None:
                 try:
                     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-                    # Pass conn as world_conn so the METAR kill-memo cold-start
-                    # recovery does not open per-city independent world connections
-                    # (connection-burst antibody 2026-06-13).
+                    # Pass read_conn as world_conn so the METAR kill-memo
+                    # cold-start recovery does not open per-city independent
+                    # world connections (connection-burst antibody
+                    # 2026-06-13) -- read-only (XBI 2026-09-14): this lane is
+                    # SELECT-only, so it must not join conn's write txn.
                     if _hard_fact is None:
                         _hard_fact = evaluate_hard_fact_exit(
                             position=pos,
                             city=city,
                             now=deps._utcnow(),
-                            world_conn=conn,
+                            world_conn=read_conn,
                         )
                 except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
                     deps.logger.warning(
@@ -9506,7 +9525,7 @@ def execute_monitoring_phase(
                 # No remote market metadata read may start after the cycle
                 # deadline.  Static close evidence is local and remains safe.
                 closed_market_info = _closed_by_static_market_end_info(
-                    conn,
+                    read_conn,
                     pos,
                     decision_time=deps._utcnow(),
                 )
@@ -9515,7 +9534,7 @@ def execute_monitoring_phase(
                 # change the hold decision, so only the local close timestamp is
                 # relevant; remote market/book reads would delay unrelated exits.
                 closed_market_info = _closed_by_static_market_end_info(
-                    conn,
+                    read_conn,
                     pos,
                     decision_time=deps._utcnow(),
                 )
@@ -9524,7 +9543,7 @@ def execute_monitoring_phase(
                 closed_market_info = _closed_non_accepting_market_info(
                     clob,
                     pos,
-                    conn,
+                    read_conn,
                     decision_time=deps._utcnow(),
                     deadline_monotonic=position_deadline,
                 )
@@ -9770,7 +9789,7 @@ def execute_monitoring_phase(
                     summary[
                         "held_monitor_primary_belief_started_position_ids"
                     ].append(str(getattr(pos, "trade_id", "") or ""))
-                    edge_ctx = refresh_position(conn, clob, pos)
+                    edge_ctx = refresh_position(read_conn, clob, pos)
                     admitted_child_stage = None
                     _primary_read_elapsed = getattr(
                         pos,
@@ -9888,7 +9907,7 @@ def execute_monitoring_phase(
             ):
                 admitted_child_stage = "pending_exit_retry_quote"
                 exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
-                    conn=conn,
+                    conn=read_conn,
                     clob=clob,
                     pos=pos,
                     exit_context=exit_context,
@@ -9998,7 +10017,7 @@ def execute_monitoring_phase(
                 and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
             ):
                 selection_guard_decision = _entry_selection_guard_exit_decision(
-                    conn=conn,
+                    conn=read_conn,
                     pos=pos,
                     exit_context=exit_context,
                     summary=summary,
@@ -10178,7 +10197,7 @@ def execute_monitoring_phase(
                 if fresh_min_order is None or fresh_min_order <= 0:
                     fresh_min_order = _latest_fresh_snapshot_min_order(
                         pos,
-                        conn=conn,
+                        conn=read_conn,
                         now=(
                             deps._utcnow()
                             if hasattr(deps, "_utcnow")
@@ -10351,7 +10370,7 @@ def execute_monitoring_phase(
                     except Exception:
                         coverage_checked_at = datetime.now(timezone.utc)
                     coverage_result = _current_monitor_global_holding_coverage(
-                        conn=conn,
+                        conn=read_conn,
                         clob=clob,
                         portfolio=portfolio,
                         position=pos,
@@ -10404,7 +10423,7 @@ def execute_monitoring_phase(
             existing_reauction_obligation = {}
             if statistical_sell_requires_global:
                 existing_reauction_obligation = (
-                    latest_held_sell_reauction_obligation(conn, pos)
+                    latest_held_sell_reauction_obligation(read_conn, pos)
                 )
                 if not isinstance(existing_reauction_obligation, dict):
                     existing_reauction_obligation = {}
@@ -10733,7 +10752,7 @@ def execute_monitoring_phase(
                     book_ask=exit_context.best_ask,
                     observed_at=monitor_now_utc.isoformat(),
                 )
-                red_handoff = recover_red_exit_handoff(conn, pos)
+                red_handoff = recover_red_exit_handoff(read_conn, pos)
                 if red_handoff is None:
                     red_attestation = read_risk_attestation(now=monitor_now_utc)
                 if red_handoff is not None:
@@ -11247,7 +11266,7 @@ def execute_monitoring_phase(
             break
         debt_status = classify_global_sell_snapshot_reauction_debt(
             position,
-            conn,
+            read_conn,
             auxiliary_deadline=debt_scan_deadline,
         )
         if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
