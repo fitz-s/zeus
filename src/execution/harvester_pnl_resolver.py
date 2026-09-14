@@ -1164,6 +1164,20 @@ def _apply_discovered_settlement_rows(
 
     commit_then_export(trade_conn, db_op=_db_op, json_exports=[])
 
+    # Definitive settlement log: harvester.py's per-position SETTLEMENT_APPLIED
+    # line fires before this commit (inside a row savepoint a later row or this
+    # commit can still roll back), so it is not proof of a durable settlement.
+    # Only here -- after commit_then_export returns without raising -- is the
+    # batch durably applied.
+    for record in settlement_records:
+        logger.info(
+            "SETTLED %s: %s %s pnl=%s (committed)",
+            record.trade_id,
+            record.direction,
+            record.range_label,
+            record.pnl,
+        )
+
     return (
         {
             "status": "ok",

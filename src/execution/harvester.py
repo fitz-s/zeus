@@ -3257,8 +3257,12 @@ def _settle_positions(
 
         settled += 1
 
+        # Emitted INSIDE the row savepoint, before the caller's batch commit
+        # (harvester_pnl_resolver._apply_discovered_settlement_rows) -- a
+        # later row or the commit itself can still fail and roll this back.
+        # The definitive "SETTLED" line is only logged there, after commit.
         logger.info(
-            "SETTLED %s: %s %s %s (market_bin_%s) — PnL=$%.2f",
+            "SETTLEMENT_APPLIED (pending commit) %s: %s %s %s (market_bin_%s) — PnL=$%.2f",
             pos.trade_id,
             "POSITION_WON" if exit_price > 0 else "POSITION_LOST",
             pos.direction,
