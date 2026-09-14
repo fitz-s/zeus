@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-12
+# Last reused/audited: 2026-09-14
 # Lifecycle: created=2026-04-27; last_reviewed=2026-09-04; last_reused=2026-09-12
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -15510,6 +15510,7 @@ def test_run_exit_monitor_cycle_closes_read_connection_on_mid_loop_exception(
             self.close_calls += 1
 
     spy_read_conn = _SpyReadConn()
+    phase_calls = []
 
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
@@ -15535,9 +15536,10 @@ def test_run_exit_monitor_cycle_closes_read_connection_on_mid_loop_exception(
         summary,
         **_kwargs,
     ):
+        phase_calls.append((_conn, _kwargs["read_conn"]))
         raise RuntimeError("xbi-boom: simulated mid-loop failure")
 
-    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", raising_monitor)
+    monkeypatch.setattr(cycle_runner._runtime, "execute_monitoring_phase", raising_monitor)
     monkeypatch.setattr(
         "src.risk_allocator.summary",
         lambda: {"configured": False},
@@ -15561,6 +15563,7 @@ def test_run_exit_monitor_cycle_closes_read_connection_on_mid_loop_exception(
 
     conn.close()
     assert result is False
+    assert phase_calls == [(conn, spy_read_conn)]
     assert spy_read_conn.close_calls == 1
 
 

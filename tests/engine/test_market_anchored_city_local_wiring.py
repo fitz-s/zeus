@@ -1,7 +1,7 @@
 """City-local calendar identity tests for market-anchored correction."""
 
 # Created: 2026-09-08
-# Last reused or audited: 2026-09-11
+# Last reused or audited: 2026-09-14
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
@@ -499,11 +499,14 @@ def test_active_provider_scope_is_context_local_and_resets_after_exception():
     assert get_active_provider() is None
 
 
-def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(monkeypatch):
+@pytest.mark.parametrize("dedicated_reader", (True, False))
+def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(monkeypatch, dedicated_reader):
     observed: list[object] = []
+    routed = []
 
     def fake_execute(*args, **kwargs):
         observed.append(get_active_provider())
+        routed.append((args[0], kwargs["read_conn"]))
         return False, False
 
     monkeypatch.setattr(cycle_runner._runtime, "execute_monitoring_phase", fake_execute)
@@ -512,6 +515,8 @@ def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(m
         lambda: {"city-0": SimpleNamespace(timezone="UTC")},
     )
     conn = sqlite3.connect(":memory:")
+    read_conn = sqlite3.connect(":memory:")
+    read_conn.execute("PRAGMA query_only=ON")
     try:
         assert cycle_runner._execute_monitoring_phase(
             conn,
@@ -521,15 +526,18 @@ def test_cycle_runner_monitor_wrapper_uses_current_connection_and_cleans_scope(m
             None,
             {},
             held_position_monitor_budget_seconds=10.0,
+            **({"read_conn": read_conn} if dedicated_reader else {}),
         ) == (False, False)
     finally:
         conn.close()
+        read_conn.close()
     assert len(observed) == 1
     from src.calibration.market_anchored_live_fit import HeldEntryCalibrationProvider
 
     assert isinstance(observed[0], HeldEntryCalibrationProvider)
     assert observed[0]._trade_conn is conn
     assert observed[0]._world_schema_alias == "world"
+    assert routed == [(conn, read_conn if dedicated_reader else None)]
     assert get_active_provider() is None
 
 

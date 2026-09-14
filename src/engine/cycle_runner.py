@@ -601,6 +601,7 @@ def _execute_monitoring_phase(
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
     current_riskguard_red: bool = False,
+    read_conn: sqlite3.Connection | None = None,
 ):
     provider_setup_started = time.monotonic()
     monitor_budget = _runtime._held_position_monitor_budget_seconds(
@@ -659,6 +660,7 @@ def _execute_monitoring_phase(
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
             defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
             current_riskguard_red=current_riskguard_red,
+            read_conn=read_conn,
         )
 
 
