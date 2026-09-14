@@ -673,8 +673,53 @@ def test_catch_up_missing_instants_one_city_failure_does_not_abort_others(monkey
 
     monkeypatch.setattr(obs_tick, "_tick_ogimet_city", flaky_ogimet_city)
 
-    totals = obs_tick.catch_up_missing_instants(conn, days_back=30, max_ogimet_cities=2)
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30)
 
     assert totals["ogimet_cities_failed"] == 1
     assert totals["ogimet_cities_touched"] == 1
     assert totals["ogimet_rows_written"] == 24
+
+
+def test_catch_up_missing_instants_derives_ogimet_budget_from_deadline(monkeypatch) -> None:
+    """No invented cap: the number of Ogimet cities drained this run is
+    floor(remaining_seconds / OGIMET_MIN_INTERVAL_SECONDS) -- the caller's
+    own deadline against the provider's documented per-IP interval. With
+    65s remaining and a 21s slot, exactly 3 of 4 pending cities drain; the
+    4th is left as a MISSING row for the next scan (carry-forward)."""
+    import scripts.obs_live_tick as obs_tick
+    from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
+
+    assert OGIMET_MIN_INTERVAL_SECONDS == 21.0  # pins the constant this test's arithmetic assumes
+
+    conn = _coverage_db()
+    cities = ["London", "Miami", "NYC", "Sao Paulo"]
+    sources = {
+        "London": "ogimet_metar_eglc",
+        "Miami": "ogimet_metar_kmia",
+        "NYC": "ogimet_metar_klga",
+        "Sao Paulo": "ogimet_metar_sbgl",
+    }
+    for i, city in enumerate(cities):
+        # Oldest-first ordering: London's hole is oldest, Sao Paulo's newest.
+        _seed_instants_missing(
+            conn, city=city, data_source=sources[city],
+            target_date=(date(2026, 9, 10) + timedelta(days=i)).isoformat(),
+        )
+
+    drained: list[str] = []
+
+    def fake_ogimet_city(city_name, _conn, *, start_date, end_date, dry_run):
+        drained.append(city_name)
+        return obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=24)
+
+    monkeypatch.setattr(obs_tick, "_tick_ogimet_city", fake_ogimet_city)
+
+    frozen_now = datetime(2026, 9, 14, 4, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(obs_tick, "datetime", SimpleNamespace(now=lambda tz=None: frozen_now))
+    deadline = frozen_now + timedelta(seconds=65)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30, deadline=deadline)
+
+    assert drained == ["London", "Miami", "NYC"]
+    assert totals["ogimet_cities_touched"] == 3
+    assert totals["ogimet_cities_deferred"] == 1

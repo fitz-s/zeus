@@ -773,7 +773,7 @@ def catch_up_missing_instants(
     conn,
     *,
     days_back: int = 30,
-    max_ogimet_cities: int = 2,
+    deadline: datetime | None = None,
 ) -> dict:
     """Drain observation_instants MISSING/retry-ready-FAILED rows for the
     WU_ICAO / OGIMET_METAR live-tick sources.
@@ -788,12 +788,28 @@ def catch_up_missing_instants(
 
     Routes by ``tier_for_city``, never by matching the coverage row's source
     string, so an HKO-tier (or any non-WU/Ogimet) row can never reach
-    ``_tick_ogimet_city``. Ogimet is capped at ``max_ogimet_cities`` with a
-    day-rotation offset -- the same bound ``daily_obs_append.catch_up_missing``
-    already applies to the identical 21s-per-request Ogimet API -- so the
-    drain cannot balloon into hammering the provider; WU has no such limit
-    and is unbounded, matching that same sibling function.
+    ``_tick_ogimet_city``. WU has no provider rate limit and drains every
+    pending hole. Ogimet is bounded by ``deadline``: the number of cities
+    drained this call is ``floor(remaining_seconds / OGIMET_MIN_INTERVAL_SECONDS)``
+    -- both are real, already-existing quantities (the caller's own job
+    timeout and the provider's documented per-IP interval,
+    ``src.data.ogimet_hourly_client.OGIMET_MIN_INTERVAL_SECONDS``), not an
+    invented cap. Cities are drained oldest-hole-first (the order
+    ``find_pending_fills`` already returns, sorted by target_date ASC), so
+    whatever the budget cannot reach this run is simply the oldest-priority
+    work left for the next scan -- carry-forward the fixed daily shard
+    lacks, and idempotent by construction (an unfilled hole is still a
+    MISSING row next time). If ``deadline`` is None, Ogimet drains
+    everything pending, same as WU.
+
+    (``daily_obs_append.catch_up_missing``'s analogous Ogimet half still
+    uses a bare ``max_ogimet_cities=2`` literal plus a day-rotation offset
+    for fairness across days; that is a separate, pre-existing surface and
+    is not touched here. Oldest-hole-first is not equivalent to that
+    rotation -- it is staleness-aware rather than blind -- so it is not
+    layered on top here.)
     """
+    from src.data.ogimet_hourly_client import OGIMET_MIN_INTERVAL_SECONDS
     from src.data.tier_resolver import UnsupportedTierError
     from src.state.data_coverage import DataTable, find_pending_fills
 
@@ -824,6 +840,7 @@ def catch_up_missing_instants(
     totals = {
         "wu_cities_touched": 0, "wu_rows_written": 0, "wu_cities_failed": 0,
         "ogimet_cities_touched": 0, "ogimet_rows_written": 0, "ogimet_cities_failed": 0,
+        "ogimet_cities_deferred": 0,
         "skipped_non_drainable_tier": skipped,
     }
 
@@ -841,11 +858,18 @@ def catch_up_missing_instants(
         if result.failure_reason:
             totals["wu_cities_failed"] += 1
 
+    # find_pending_fills already orders rows by target_date ASC, and dict
+    # insertion order tracks first-seen row per city, so this iteration is
+    # already oldest-hole-first without a separate sort.
     ogimet_items = list(ogimet_by_city.items())
-    if ogimet_items:
-        offset = datetime.now(timezone.utc).date().toordinal() % len(ogimet_items)
-        ogimet_items = ogimet_items[offset:] + ogimet_items[:offset]
-    for city_name, dates in ogimet_items[:max_ogimet_cities]:
+    if deadline is None:
+        ogimet_budget = len(ogimet_items)
+    else:
+        remaining_seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+        ogimet_budget = max(0, int(remaining_seconds // OGIMET_MIN_INTERVAL_SECONDS))
+    totals["ogimet_cities_deferred"] = max(0, len(ogimet_items) - ogimet_budget)
+
+    for city_name, dates in ogimet_items[:ogimet_budget]:
         try:
             result = _tick_ogimet_city(
                 city_name, conn, start_date=min(dates), end_date=max(dates), dry_run=False,

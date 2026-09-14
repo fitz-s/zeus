@@ -33,7 +33,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -325,7 +325,7 @@ def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
     # Scan's own world connection closes before the OBSERVATIONS drain runs;
     # the observation_instants drain (added 2026-09-14) opens and closes a
     # second, fresh world connection of its own.
-    catch_up_instants.assert_called_once_with(instants_conn, days_back=30)
+    catch_up_instants.assert_called_once_with(instants_conn, days_back=30, deadline=ANY)
     world_conn.close.assert_called_once()
     instants_conn.close.assert_called_once()
     forecasts_conn.close.assert_called_once()
@@ -404,6 +404,46 @@ def test_R2_observation_instants_sources_cover_live_tick_writers() -> None:
         target.source_tag for target in daily_obs_append.OGIMET_CITIES.values()
     } <= set(expected)
     assert hourly_instants_append.SOURCE in expected
+
+
+def test_build_expected_set_yields_live_tick_rows_for_observation_instants() -> None:
+    """The registry extension must actually flow through build_expected_set:
+    a NOAA/Ogimet city yields an (city, ogimet_metar_<station>, date) row, a
+    WU city yields a (city, wu_icao_history, date) row, and the pre-existing
+    openmeteo_archive_hourly row (applies-to-all-cities fallback branch of
+    _source_applies_to_city) is still produced -- the addition is additive,
+    not a replacement.
+    """
+    from src.data.hole_scanner import ExceptionsConfig, build_expected_set
+    from src.config import cities_by_name
+
+    cfg = ExceptionsConfig(
+        model_retro_starts={},
+        publication_lag_days={},
+        global_onboarding_floor=date(2026, 9, 13),
+        read_cities_json_onboarded_at=False,
+        auto_fill_ceiling_days=7,
+        auto_alert_floor_days=30,
+        max_holes_per_city_per_scan=90,
+    )
+    london = cities_by_name["London"]  # Ogimet-tier (settlement_source_type == "noaa")
+    wu_city = cities_by_name["Taipei"]  # WU_ICAO-tier
+
+    rows = build_expected_set(
+        ScannerDataTable.OBSERVATION_INSTANTS,
+        today=date(2026, 9, 15),
+        config=cfg,
+        city_list=[london, wu_city],
+    )
+    tuples = {(r.city, r.data_source, r.target_date) for r in rows}
+
+    assert (london.name, "ogimet_metar_eglc", "2026-09-13") in tuples
+    assert (wu_city.name, daily_obs_append.WU_SOURCE, "2026-09-13") in tuples
+    assert (london.name, "openmeteo_archive_hourly", "2026-09-13") in tuples
+    assert (wu_city.name, "openmeteo_archive_hourly", "2026-09-13") in tuples
+    # A WU city never gets an Ogimet row and vice versa -- routing is per-city.
+    assert (wu_city.name, "ogimet_metar_eglc", "2026-09-13") not in tuples
+    assert (london.name, daily_obs_append.WU_SOURCE, "2026-09-13") not in tuples
 
 
 def test_hole_scanner_detects_ogimet_live_tick_miss_in_observation_instants() -> None:

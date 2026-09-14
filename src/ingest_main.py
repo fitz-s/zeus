@@ -1659,6 +1659,14 @@ def _k2_forecasts_daily_tick():
     logger.info("K2 forecasts_daily_tick: %s", result)
 
 
+# The hole-scanner job's own registered timeout below (add_job's
+# misfire_grace_time) -- the single source of truth for both the APScheduler
+# registration and the wall-clock budget the observation_instants Ogimet
+# drain derives its per-run city count from (see _k2_hole_scanner_tick):
+# ogimet_budget = floor(remaining_seconds / OGIMET_MIN_INTERVAL_SECONDS).
+_K2_HOLE_SCANNER_TIMEOUT_SECONDS = 3600
+
+
 @_scheduler_job("ingest_k2_hole_scanner")
 def _k2_hole_scanner_tick():
     """K2 hole scanner and bounded recent-hole drain (ingest daemon copy).
@@ -1673,10 +1681,14 @@ def _k2_hole_scanner_tick():
 
     Also drains observation_instants MISSING rows for the WU_ICAO /
     OGIMET_METAR live-tick sources (scripts/obs_live_tick.py) -- the
-    scanner already tracks these (hole_scanner.SOURCES_BY_TABLE) but until
-    this drain, a miss (e.g. a transient host DNS outage during a city's
+    scanner tracks these (hole_scanner.SOURCES_BY_TABLE) but until this
+    drain, a miss (e.g. a transient host DNS outage during a city's
     once-daily Ogimet shard slot) had no repair path except that city's
-    next scheduled slot 24h later.
+    next scheduled slot 24h later. The Ogimet side of that drain is bounded
+    by a deadline derived from this job's own ``_K2_HOLE_SCANNER_TIMEOUT_SECONDS``
+    (not an invented cap): whatever the per-IP rate limit does not let it
+    reach this run stays a MISSING row for the next scan (idempotent
+    carry-forward). WU has no such provider limit and always drains fully.
     """
     from src.data.job_lock import acquire_lock
     from src.data.daily_obs_append import catch_up_missing
@@ -1686,6 +1698,7 @@ def _k2_hole_scanner_tick():
         get_forecasts_connection_with_world,
         get_world_connection,
     )
+    tick_started_at = datetime.now(timezone.utc)
     with acquire_lock("hole_scanner") as acquired:
         if not acquired:
             logger.info("ingest k2_hole_scanner_tick skipped_lock_held")
@@ -1704,9 +1717,12 @@ def _k2_hole_scanner_tick():
             catch_up = catch_up_missing(obs_conn, days_back=30)
         logger.info("K2 hole_scanner observation catch-up: %s", catch_up)
         from scripts.obs_live_tick import catch_up_missing_instants
+        instants_deadline = tick_started_at + timedelta(seconds=_K2_HOLE_SCANNER_TIMEOUT_SECONDS)
         instants_conn = get_world_connection(write_class="bulk")
         try:
-            instants_catch_up = catch_up_missing_instants(instants_conn, days_back=30)
+            instants_catch_up = catch_up_missing_instants(
+                instants_conn, days_back=30, deadline=instants_deadline,
+            )
         finally:
             instants_conn.close()
         logger.info("K2 hole_scanner observation_instants catch-up: %s", instants_catch_up)
@@ -4680,7 +4696,8 @@ def _ingest_main_job_specs() -> list[tuple]:
         (_k2_forecasts_daily_tick, "cron", dict(hour=7, minute=30, id="ingest_k2_forecasts_daily",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_k2_hole_scanner_tick, "cron", dict(hour=4, minute=0, id="ingest_k2_hole_scanner",
-            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+            max_instances=1, coalesce=True,
+            misfire_grace_time=_K2_HOLE_SCANNER_TIMEOUT_SECONDS)),
         (_k2_obs_tick, "cron", dict(minute=15, id="ingest_k2_obs",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         # Option-C fast tick: every 15 min, active-window cities only (day0_obs_fastlane_plan §4.3).

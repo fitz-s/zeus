@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -789,6 +789,7 @@ class TestHoleScannerInstantsDrain:
 
     def test_hole_scanner_tick_drains_both_observations_and_instants(self) -> None:
         import src.ingest_main as im
+        from datetime import datetime, timedelta, timezone
 
         scanner_instance = MagicMock()
         scanner_instance.scan_all.return_value = []
@@ -829,9 +830,19 @@ class TestHoleScannerInstantsDrain:
         assert mock_catch_up_obs.called
         # New observation_instants drain runs additively, on its own fresh
         # world connection (the scan's own world_conn was already closed).
-        mock_catch_up_instants.assert_called_once_with(instants_conn, days_back=30)
+        mock_catch_up_instants.assert_called_once_with(instants_conn, days_back=30, deadline=ANY)
         assert mock_wc.call_count == 2
         instants_conn.close.assert_called_once()
+
+        # The deadline passed to the drain is derived from the job's own
+        # registered timeout (_K2_HOLE_SCANNER_TIMEOUT_SECONDS), not an
+        # independent literal -- it must land within a few seconds of
+        # now + that constant.
+        deadline = mock_catch_up_instants.call_args.kwargs["deadline"]
+        expected = datetime.now(timezone.utc) + timedelta(
+            seconds=im._K2_HOLE_SCANNER_TIMEOUT_SECONDS
+        )
+        assert abs((deadline - expected).total_seconds()) < 5
 
 
 class TestDay0DiurnalResidualRefitScheduled:
