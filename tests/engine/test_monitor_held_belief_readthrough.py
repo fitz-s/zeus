@@ -2464,6 +2464,279 @@ def test_day0_post_local_day_without_observation_still_waits(monkeypatch):
         )
 
 
+def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
+    monkeypatch,
+):
+    """R-BB review of a9a2c139f (FIX-FIRST): the finality broadening for METAR/
+    monotone sources must stay scoped to the held continuation path
+    (`current_day0_redecision_only` / `post_local_incomplete_monitor_authority`,
+    both structurally False whenever `probability_use is ENTRY`). It must NOT
+    also change live intraday ENTRY admission for the same METAR fact. This
+    pins the three consumers R-BB flagged as byte-identical to parent 9408a5658
+    for a live-day (not post-local-day) ENTRY with a METAR settlement-channel
+    fact and a mainline replacement bundle present:
+
+    1. `candidate_payoff_q_lcb_caps` stays populated (not suppressed) --
+       `provisional_day0_observation` is still `False` for METAR (unchanged
+       narrow `==` comparison), so `not provisional_day0_observation` still
+       holds at the caps-assignment site.
+    2. The bundle-bypass / posterior-identity recompute condition still fires
+       (`not provisional_day0_observation` alone already satisfied this before
+       the fix; unchanged).
+    3. `_edli_day0_provisional_revision_likelihood` is NOT stamped into the
+       payload for this live entry -- proving the new
+       `settlement_bound_day0_observation` branch at the carrier-rebuild
+       producer is correctly gated to the held path and never fires here.
+
+    A second scenario in the same test (`readiness is None`, the degraded
+    fallback arm) proves the `direct_day0_entry_carrier` branch stays dead for
+    METAR entries exactly as it did on parent -- it requires
+    `provisional_day0_observation` (unchanged, still False for METAR), never
+    `settlement_bound_day0_observation`.
+    """
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.qkernel_spine_bridge as qkernel
+    import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+    candidates = (
+        SimpleNamespace(
+            condition_id="condition-30",
+            yes_token_id="yes-30",
+            no_token_id="no-30",
+            bin=SimpleNamespace(low=None, high=30.0, unit="C", label="<30C"),
+        ),
+        SimpleNamespace(
+            condition_id="condition-30plus",
+            yes_token_id="yes-30plus",
+            no_token_id="no-30plus",
+            bin=SimpleNamespace(low=30.0, high=None, unit="C", label="30C+"),
+        ),
+    )
+    family = SimpleNamespace(
+        city="Sao Paulo",
+        target_date="2026-06-08",
+        metric="high",
+        family_id="Sao Paulo|2026-06-08|high",
+        binding_hash="family-binding-sp-entry",
+        candidates=candidates,
+    )
+    event = SimpleNamespace(
+        event_id="event-live-entry-sp",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="snapshot-live-entry-sp",
+        payload_json=json.dumps(
+            {"city": "Sao Paulo", "target_date": "2026-06-08", "metric": "high"}
+        ),
+    )
+    observation_time = "2026-06-08T15:00:00+00:00"
+    fact = {
+        "observation_source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "observation_available_at": observation_time,
+        "observed_extreme_native": 29.5,
+        "unit": "C",
+        "source": "aviationweather_metar",
+        "station_id": "SBSP",
+    }
+    # Same local day as decision_time (LIVE, not post-local-day).
+    decision_time = datetime(2026, 6, 8, 18, 0, tzinfo=timezone.utc)
+
+    class _Bound:
+        def evaluate(self, _request):
+            return SimpleNamespace(
+                status="CANDIDATE_FAMILY_READY",
+                candidate_family=family,
+            )
+
+    monkeypatch.setattr(era, "EventBoundDecisionEngine", _Bound)
+    monkeypatch.setattr(era, "_event_family_market_topology_rows", lambda *_: [0, 1])
+    monkeypatch.setattr(
+        era,
+        "_topology_candidate_from_market_event",
+        lambda row, *_: candidates[int(row)],
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "market_bin_topology_hash_from_rows",
+        lambda *_args, **_kwargs: "topology-hash",
+    )
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {
+            "Sao Paulo": SimpleNamespace(
+                timezone="America/Sao_Paulo",
+                settlement_unit="C",
+                settlement_source_type="wu",
+                wu_station="SBSP",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit, "_final_daily_observation_extreme", lambda **_: None
+    )
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fact)
+    monkeypatch.setattr(
+        qkernel, "build_forecast_case", lambda *_a, **_k: object()
+    )
+    monkeypatch.setattr(
+        qkernel,
+        "build_outcome_space",
+        lambda *_a, **_k: SimpleNamespace(
+            resolution=SimpleNamespace(measurement_unit="C"),
+            bins=tuple(
+                SimpleNamespace(
+                    bin_id=candidate.condition_id,
+                    condition_id=candidate.condition_id,
+                    yes_token_id=candidate.yes_token_id,
+                    no_token_id=candidate.no_token_id,
+                )
+                for candidate in candidates
+            ),
+            topology_hash="topology-hash",
+        ),
+    )
+    monkeypatch.setattr(qkernel, "_event_resolution_identity", lambda *_: "resolution")
+    monkeypatch.setattr(
+        era, "_day0_payoff_truth_rows", lambda **_: ()
+    )
+    monkeypatch.setattr(
+        era, "_day0_physical_frontier_supersedes_settlement", lambda **_: False
+    )
+
+    observation_conn = sqlite3.connect(":memory:")
+    observation_conn.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, running_max REAL, utc_timestamp TEXT, "
+        "local_timestamp TEXT, source TEXT, causality_status TEXT, authority TEXT, "
+        "source_role TEXT, training_allowed INTEGER)"
+    )
+
+    # --- Scenario 1: mainline bundle-present ENTRY path ---
+    bundle = SimpleNamespace(
+        posterior_identity_hash="bundle-posterior-identity",
+        dependency_hash="bundle-dependency",
+        posterior_config_hash="bundle-config",
+        source_cycle_time="2026-06-08T12:00:00+00:00",
+        source_available_at="2026-06-08T12:05:00+00:00",
+        posterior_id=99,
+    )
+    monkeypatch.setattr(
+        readiness_reader,
+        "latest_replacement_readiness",
+        lambda *_a, **_k: SimpleNamespace(dependency_json={}),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code=None),
+    )
+    monkeypatch.setattr(
+        era, "_replacement_uses_provisional_day0_conditioning", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        era, "_fast_residual_day0_conditioning", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        era, "_day0_replacement_conditioning", lambda *_a, **_k: {}
+    )
+    monkeypatch.setattr(
+        era, "_amber_inflated_predictive_sigma_c", lambda *_a, **_k: 1.0
+    )
+
+    def fake_global_day0_execution_payload(*_args, **_kwargs):
+        return {
+            "_edli_global_day0_binding": {"observation_time": observation_time},
+            "settlement_source": "aviationweather_metar",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "observation_time": observation_time,
+            "observed_extreme_native": 29.5,
+            "rounded_value": 29.5,
+            "settlement_unit": "C",
+        }
+
+    monkeypatch.setattr(
+        era, "_global_day0_execution_payload", fake_global_day0_execution_payload
+    )
+
+    samples = np.array(
+        [[0.4, 0.6], [0.42, 0.58], [0.38, 0.62]] * 200, dtype=np.float64
+    )
+    point_q = np.array([0.4, 0.6], dtype=np.float64)
+    monkeypatch.setattr(
+        era,
+        "_day0_absorbing_exact_probability_components",
+        lambda **_k: (samples, point_q, "sp-entry-band-basis"),
+    )
+
+    def fail_remaining_components(*_a, **_k):
+        raise AssertionError(
+            "live METAR entry with an absorbing exact result reached the "
+            "remaining-day builder -- the exact-components mock should have "
+            "short-circuited it"
+        )
+
+    monkeypatch.setattr(
+        era, "_day0_remaining_global_probability_components", fail_remaining_components
+    )
+    monkeypatch.setattr(
+        era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_k: (("f", "c", "b", "YES", 0.5),)
+    )
+    # Orthogonal to this fix: the unconditional exact-payoff-witness lookup near
+    # the function's end runs for both entry and held, and only short-circuits
+    # early when target_date != decision_time's local date. For this live-day
+    # (target_date == local date) scenario it would otherwise need a full
+    # `assert_absorbing_day0_payload_authority` fixture unrelated to what this
+    # test pins.
+    monkeypatch.setattr(
+        era, "_prepare_current_day0_exact_family", lambda *_a, **_k: None
+    )
+
+    payload_out: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=observation_conn,
+        topology_conn=observation_conn,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        max_age=timedelta(hours=6),
+        day0_payload_out=payload_out,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
+    )
+
+    # (1) caps not suppressed -- `not provisional_day0_observation` (still False
+    # for METAR, unchanged) keeps this assignment identical to parent.
+    assert prepared.candidate_payoff_q_lcb_caps == (("f", "c", "b", "YES", 0.5),)
+    # (2) bundle-bypass / posterior-identity recompute still fires (unchanged:
+    # `not provisional_day0_observation` alone already satisfied this on parent).
+    assert prepared.probability_witness.posterior_identity_hash != (
+        bundle.posterior_identity_hash
+    )
+    # (3) the held-path-only carrier-rebuild producer must not fire for entry.
+    assert "_edli_day0_provisional_revision_likelihood" not in payload_out
+
+    # --- Scenario 2: `readiness is None` degraded fallback arm ---
+    monkeypatch.setattr(
+        readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: None
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=observation_conn,
+            topology_conn=observation_conn,
+            observation_conn=observation_conn,
+            decision_time=decision_time,
+            max_age=timedelta(hours=6),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.ENTRY,
+        )
+
+
 def test_day0_pinned_carrier_rejects_entry_authority():
     import src.engine.event_reactor_adapter as era
 
