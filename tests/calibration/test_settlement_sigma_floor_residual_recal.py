@@ -153,6 +153,12 @@ def _make_fcst_db(tmp_path, rows):
     settlement_value, settlement_unit, authority) tuples. One settlement_outcomes row is written
     per distinct (city, metric, target_date); every matching forecast_posteriors row is written
     verbatim (a test may pass several rows for the same event to exercise dedup).
+
+    ``computed_at`` (needed by ``_RESIDUAL_QUERY``'s served-row ordering: latest computed_at,
+    then highest posterior_id/rowid) is synthesized from insertion order rather than taken from
+    ``rows`` -- no existing test cares about a specific computed_at value, only that later-listed
+    rows for the same cycle are treated as more recently written, which insertion order already
+    guarantees.
     """
     import json as _json
     import sqlite3 as _sqlite3
@@ -161,18 +167,19 @@ def _make_fcst_db(tmp_path, rows):
     con = _sqlite3.connect(str(db_path))
     con.execute(
         "CREATE TABLE forecast_posteriors (city TEXT, temperature_metric TEXT, target_date TEXT, "
-        "source_cycle_time TEXT, provenance_json TEXT)"
+        "source_cycle_time TEXT, provenance_json TEXT, computed_at TEXT)"
     )
     con.execute(
         "CREATE TABLE settlement_outcomes (city TEXT, temperature_metric TEXT, target_date TEXT, "
         "settlement_value REAL, settlement_unit TEXT, authority TEXT)"
     )
     seen_settlements = set()
-    for city, metric, tdate, sct, anchor_c, sval, sunit, authority in rows:
+    for i, (city, metric, tdate, sct, anchor_c, sval, sunit, authority) in enumerate(rows):
+        computed_at = f"2026-01-01T00:00:{i:02d}+00:00"
         con.execute(
             "INSERT INTO forecast_posteriors (city, temperature_metric, target_date, "
-            "source_cycle_time, provenance_json) VALUES (?, ?, ?, ?, ?)",
-            (city, metric, tdate, sct, _json.dumps({"anchor_value_c": anchor_c})),
+            "source_cycle_time, provenance_json, computed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (city, metric, tdate, sct, _json.dumps({"anchor_value_c": anchor_c}), computed_at),
         )
         key = (city, metric, tdate)
         if key not in seen_settlements:

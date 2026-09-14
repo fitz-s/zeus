@@ -160,17 +160,72 @@ def mad_sigma_about_zero(residuals: "np.ndarray") -> float:
 # pushed into the WHERE clause (not a python post-filter) so the query itself, not just the
 # python-side loop, is bounded — the fixed-start cumulative query this replaces scanned the full
 # multi-month history on every refit.
+#
+# DEDUPE BEFORE TOUCHING THE BLOB (2026-09-14 — measured live: the naive one-shot join below,
+# joining directly against forecast_posteriors and json_extract-ing every matched row, took
+# 546.37s / 516,992 rows against the live 89 GB DB, over the daily refit job's 600s bound;
+# EXPLAIN QUERY PLAN confirmed the JOIN itself was already index-usable — the cost is
+# provenance_json's blob width (measured mean 93,186 bytes, max 122,822), not a table scan). A
+# family (city, target_date, metric) carries one forecast_posteriors row per forecast CYCLE
+# (source_cycle_time) but often several rows PER cycle (re-materializations) — and
+# `_load_residuals` below only needs ONE representative row per (family, cycle) to compute its
+# per-event median. So the query is now two stages, wired as SQLite CTEs so the planner cannot
+# collapse them back into the naive plan (SQLite otherwise propagates the literal target_date
+# range across the equi-join onto BOTH tables, which defeats a per-row equality bind — the first
+# CTE uses ``MATERIALIZED`` specifically to block that flattening):
+#   1. ``so_filtered`` — VERIFIED settlements in the trailing window (settlement_outcomes is
+#      ~13.5K rows total; this touches no blob at all).
+#   2. ``families`` — for each settled family, GROUP BY (city, target_date, metric,
+#      source_cycle_time) and pick ONE row per cycle: the served-row ordering used at every
+#      other read site in the repo (bundle_reader, production, cycle_advance_trigger,
+#      materialization_queue, position_belief, live_health, event_reactor_adapter — all order by
+#      ``computed_at DESC, posterior_id DESC``) — latest computed_at, then highest posterior_id
+#      to break a same-instant tie. Expressed as a single ``MAX(fp.computed_at)`` aggregate with
+#      every other selected column left BARE: SQLite's documented bare-column rule for a query
+#      with exactly one min()/max() aggregate returns those bare columns from the SAME row that
+#      produced the max (not an arbitrary row in the group) — so ``fp.rowid`` (posterior_id's
+#      rowid alias; used rather than the column name so this also runs against a minimal test
+#      fixture that omits it) here IS the served row's id, not merely "some" row in the group.
+#      Ties on computed_at within one cycle (rare; not observed to change anchor_value_c when
+#      sampled live) are the one residual this can't fully resolve, since SQLite does not support
+#      combining a second ORDER BY column inside the same MAX() tie-break — accepted per the
+#      derivation review, since the served path's own posterior_id tie-break exists only to pick
+#      a deterministic value among equals, not to select a materially different one.
+#      Answerable from idx_forecast_posteriors_target's (city, target_date, temperature_metric)
+#      EQUALITY prefix, extended with computed_at, without touching provenance_json at all;
+#      confirmed via EXPLAIN QUERY PLAN: `SEARCH fp USING INDEX idx_forecast_posteriors_target
+#      (city=? AND target_date=? AND temperature_metric=?)`, not a range scan, no blob read.
+#   The final SELECT then joins back on rowid (`SEARCH fp USING INTEGER PRIMARY KEY (rowid=?)` —
+#   one point lookup per deduped row) to json_extract anchor_value_c on only the deduped set.
+#   Measured on the same live DB/window: 26,780 rows (19x fewer blob reads) in 53.7s.
+#   SEMANTICS NOTE: when a cycle was re-materialized more than once, this now uses the served
+#   row for that cycle (latest computed_at, then highest posterior_id) instead of every
+#   re-materialized row separately — a correctness fix riding along with the perf fix, since the
+#   un-deduped query let a re-materialized cycle double- (or triple-) weight its residual in the
+#   per-event median this function already computes over one value per lead_days.
 _RESIDUAL_QUERY = (
-    "SELECT fp.city, fp.temperature_metric, fp.target_date, "
+    "WITH so_filtered AS MATERIALIZED ( "
+    "    SELECT city, target_date, temperature_metric, settlement_value, settlement_unit "
+    "    FROM settlement_outcomes "
+    "    WHERE authority='VERIFIED' AND settlement_value IS NOT NULL "
+    "      AND target_date > ? AND target_date <= ? "
+    "), "
+    "families AS ( "
+    "    SELECT fp.city, fp.target_date, fp.temperature_metric, fp.source_cycle_time, "
+    "           MAX(fp.computed_at) AS served_computed_at, fp.rowid AS pid, "
+    "           so.settlement_value, so.settlement_unit "
+    "    FROM so_filtered so "
+    "    JOIN forecast_posteriors fp "
+    "      ON fp.city = so.city AND fp.target_date = so.target_date "
+    "     AND fp.temperature_metric = so.temperature_metric "
+    "    GROUP BY fp.city, fp.target_date, fp.temperature_metric, fp.source_cycle_time "
+    ") "
+    "SELECT families.city, families.temperature_metric, families.target_date, "
     "       json_extract(fp.provenance_json,'$.anchor_value_c') AS center, "
-    "       so.settlement_value, so.settlement_unit, fp.source_cycle_time "
-    "FROM forecast_posteriors fp "
-    "JOIN settlement_outcomes so "
-    "  ON so.city=fp.city AND so.target_date=fp.target_date "
-    " AND so.temperature_metric=fp.temperature_metric "
-    "WHERE json_extract(fp.provenance_json,'$.anchor_value_c') IS NOT NULL "
-    "  AND so.authority='VERIFIED' AND so.settlement_value IS NOT NULL "
-    "  AND fp.target_date > ? AND fp.target_date <= ?"
+    "       families.settlement_value, families.settlement_unit, fp.source_cycle_time "
+    "FROM families "
+    "JOIN forecast_posteriors fp ON fp.rowid = families.pid "
+    "WHERE json_extract(fp.provenance_json,'$.anchor_value_c') IS NOT NULL"
 )
 
 

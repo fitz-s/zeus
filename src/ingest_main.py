@@ -4413,6 +4413,18 @@ def _settlement_sigma_floor_merge_gate(
     return merged, gate_meta
 
 
+def _cleanup_settlement_sigma_floor_candidate(candidate_path: Path) -> None:
+    """Best-effort removal of the refit tick's throwaway candidate AND the fitter's own
+    internal ``<candidate>.tmp`` (written just before its atomic ``os.replace`` onto
+    ``--out``) -- so a subprocess timeout or non-zero exit never leaves a stray file in
+    STATE_DIR for the next tick, or an operator, to trip over."""
+    for path in (candidate_path, Path(f"{candidate_path}.tmp")):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 @_scheduler_job("ingest_settlement_sigma_floor_refit")
 def _settlement_sigma_floor_refit_tick():
     """Daily refit of state/settlement_sigma_floor.json (EMPIRICAL settlement sigma-floor).
@@ -4442,11 +4454,16 @@ def _settlement_sigma_floor_refit_tick():
     cover: a dropped cell (city ran dry in the trailing window) and a cell that jumped an
     implausible multiple in one day (see ``_settlement_sigma_floor_merge_gate``).
 
-    Runs the fitter in a bounded child process (measured 11.5s wall for the bare bounded join
-    over the live 89 GB zeus-forecasts.db, well inside this bound) with explicit
-    ``--fcst``/``--out``/``--asof`` paths resolved from ``src.config.STATE_DIR`` -- mirrors
+    Runs the fitter in a bounded child process with explicit ``--fcst``/``--out``/``--asof``
+    paths resolved from ``src.config.STATE_DIR`` -- mirrors
     ``_day0_diurnal_residual_refit_tick``'s reasoning for pinning explicit paths rather than the
-    script's own repo-relative defaults.
+    script's own repo-relative defaults. The 600s bound was measured live, not assumed: the
+    boot-catch-up tick's first run timed out (the fitter's un-deduped join joined 516,992 rows,
+    each json_extract-ing a ~93KB provenance_json blob, for 546.37s wall). The fitter itself was
+    fixed (see fit_settlement_sigma_floor.py's ``_RESIDUAL_QUERY`` docstring: dedupe to one row
+    per forecast cycle BEFORE touching the blob) rather than the timeout raised -- the fixed
+    fitter measured 86.86s for the same query / 75.82s end-to-end against the same live DB and
+    window, comfortably inside the 600s bound.
 
     Fails LOUD (raises) on a non-zero exit, a timeout, an unreadable candidate artifact, OR a
     promotion gate that accepted ZERO cells (every overlapping cell carried forward, no new cell
@@ -4455,7 +4472,11 @@ def _settlement_sigma_floor_refit_tick():
     records a FAILED entry in scheduler_jobs_health.json in every one of those cases. This is a
     single fitter with its own hard refusal gate, not the four-artifact fail-soft batch
     (``_artifact_refit_tick``). The live artifact is written only via tmp+``os.replace`` (atomic),
-    so a failed or killed run never corrupts the prior artifact.
+    so a failed or killed run never corrupts the prior artifact. On a timeout or a non-zero exit,
+    ``_cleanup_settlement_sigma_floor_candidate`` best-effort-removes the tick's own throwaway
+    candidate (and the fitter's internal ``<candidate>.tmp``) so a failed run never leaves a
+    stray file in STATE_DIR -- ``subprocess.run``'s own timeout path already kills the child
+    process itself (no orphan to clean up separately).
     """
     import subprocess
 
@@ -4467,16 +4488,26 @@ def _settlement_sigma_floor_refit_tick():
     out_path = STATE_DIR / "settlement_sigma_floor.json"
     candidate_path = STATE_DIR / "settlement_sigma_floor.json.refit_candidate"
     asof = datetime.now(timezone.utc).date().isoformat()
-    r = subprocess.run(
-        [
-            venv_python, str(script_path),
-            "--fcst", str(forecast_db),
-            "--out", str(candidate_path),
-            "--asof", asof,
-        ],
-        capture_output=True, text=True, timeout=600,
-    )
+    try:
+        r = subprocess.run(
+            [
+                venv_python, str(script_path),
+                "--fcst", str(forecast_db),
+                "--out", str(candidate_path),
+                "--asof", asof,
+            ],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        # subprocess.run's own timeout path already kills the child (no orphan process to
+        # clean up here), but the fitter writes its OWN internal tmp (f"{--out}.tmp") before its
+        # atomic os.replace onto --out -- a kill landing in that narrow window could leave either
+        # file behind. Best-effort removal so a timed-out tick never leaves a stray file in
+        # STATE_DIR for the next tick (or an operator) to trip over.
+        _cleanup_settlement_sigma_floor_candidate(candidate_path)
+        raise
     if r.returncode != 0:
+        _cleanup_settlement_sigma_floor_candidate(candidate_path)
         raise RuntimeError(
             f"fit_settlement_sigma_floor.py exit={r.returncode}: "
             f"{(r.stderr or '').strip()[-1000:]}"

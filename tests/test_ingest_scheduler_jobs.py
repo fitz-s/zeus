@@ -1035,7 +1035,11 @@ class TestSettlementSigmaFloorRefitScheduled:
         assert cmd[cmd.index("--out") + 1] == str(
             tmp_path / "settlement_sigma_floor.json.refit_candidate"
         )
-        assert cmd[cmd.index("--asof") + 1] == str(date.today())
+        # the tick stamps asof from UTC (datetime.now(timezone.utc).date()), not local date.today()
+        # -- comparing against the same UTC clock avoids a flake at the UTC day boundary.
+        import datetime as _dt
+
+        assert cmd[cmd.index("--asof") + 1] == str(_dt.datetime.now(_dt.timezone.utc).date())
         assert captured["timeout"] == 600
         # the throwaway candidate path must not survive the tick.
         assert not (tmp_path / "settlement_sigma_floor.json.refit_candidate").exists()
@@ -1295,3 +1299,50 @@ class TestSettlementSigmaFloorRefitScheduled:
             im._settlement_sigma_floor_refit_tick()
 
         assert health_calls[-1][1]["failed"] is True
+
+    def test_timeout_removes_the_tick_own_candidate_tmp_files(self, tmp_path) -> None:
+        """A killed child could have left the throwaway --out candidate (or the fitter's own
+        internal <candidate>.tmp, written just before its atomic os.replace) sitting in
+        STATE_DIR. On a timeout the tick must best-effort remove BOTH before propagating, so a
+        failed run never leaves a stray file for the next tick or an operator to trip over."""
+        import subprocess as sp
+
+        import src.ingest_main as im
+
+        candidate = tmp_path / "settlement_sigma_floor.json.refit_candidate"
+        candidate.write_text("partial", encoding="utf-8")
+        candidate_tmp = tmp_path / "settlement_sigma_floor.json.refit_candidate.tmp"
+        candidate_tmp.write_text("partial-tmp", encoding="utf-8")
+
+        def _fake_run(cmd, **kwargs):
+            raise sp.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            pytest.raises(sp.TimeoutExpired),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        assert not candidate.exists(), "the tick's own candidate must be removed on timeout"
+        assert not candidate_tmp.exists(), "the fitter's internal .tmp must be removed on timeout"
+
+    def test_nonzero_exit_removes_the_tick_own_candidate_tmp_files(self, tmp_path) -> None:
+        """Same hygiene on a non-zero (non-timeout) exit -- a broken fitter that partially wrote
+        its own tmp before crashing must not leave it behind either."""
+        import src.ingest_main as im
+
+        candidate_tmp = tmp_path / "settlement_sigma_floor.json.refit_candidate.tmp"
+        candidate_tmp.write_text("partial-tmp", encoding="utf-8")
+
+        def _fake_run(cmd, **kwargs):
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+            pytest.raises(RuntimeError, match="exit=1"),
+        ):
+            im._settlement_sigma_floor_refit_tick.__wrapped__()
+
+        assert not candidate_tmp.exists()
