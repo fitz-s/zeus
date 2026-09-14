@@ -6946,6 +6946,62 @@ def test_settlement_cohort_loader_is_bounded_and_preserves_closed_economics(tmp_
     conn.close()
 
 
+def test_unbounded_load_portfolio_skips_venue_commands_scan_when_entry_proof_review_is_false():
+    """X-BJ (2026-09-14): entry_proof_review=False must skip the ONLY statement in
+    load_portfolio's whole unbounded query graph that reads venue_commands
+    (_query_edli_entry_proof_review_reasons, portfolio.py:1769-1791) -- confirmed by
+    grep there is no other venue_commands reference inside query_portfolio_loader_view /
+    query_token_suppression_tokens / query_chain_only_quarantine_rows. Default (True)
+    keeps issuing it unchanged for every other caller (e.g. the main cycle runner)."""
+    from src.state import portfolio as portfolio_module
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "unbounded-entry-proof.db")
+        init_schema(conn)
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            "CREATE TABLE world.edli_no_submit_receipts (event_id TEXT, token_id TEXT, created_at TEXT, receipt_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE world.decision_certificates (certificate_type TEXT, semantic_key TEXT, payload_json TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE world.edli_live_order_events (
+                aggregate_id TEXT,
+                event_sequence INTEGER,
+                event_type TEXT,
+                payload_json TEXT,
+                occurred_at TEXT
+            )
+            """
+        )
+        # entry_method='ens_member_counting' is hardcoded by this helper, which alone
+        # satisfies _is_open_edli_entry_position_row's OR-filter regardless of trade_id.
+        _insert_current_position_for_fill_authority_view_test(conn, position_id="edli-open-1", phase="active")
+        conn.commit()
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        state_off = portfolio_module.load_portfolio(connection=conn, entry_proof_review=False)
+        conn.set_trace_callback(None)
+        assert not any("venue_commands" in s.lower() for s in statements), (
+            "entry_proof_review=False must not query venue_commands at all"
+        )
+        assert state_off is not None
+
+        statements = []
+        conn.set_trace_callback(statements.append)
+        state_on = portfolio_module.load_portfolio(connection=conn)
+        conn.set_trace_callback(None)
+        assert any("venue_commands" in s.lower() for s in statements), (
+            "default entry_proof_review=True must still query venue_commands "
+            "(unchanged behavior for every other load_portfolio caller)"
+        )
+        assert state_on is not None
+        conn.close()
+
+
 @pytest.mark.parametrize("kwargs", [
     {}, {"target_families": []},
     {"target_families": [("NYC", "2026-04-01", "high")], "open_positions_only": True},

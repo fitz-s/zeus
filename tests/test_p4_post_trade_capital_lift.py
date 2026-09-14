@@ -1112,6 +1112,48 @@ def test_chain_sync_child_timeout_is_scheduler_failure(monkeypatch):
     ]
 
 
+def test_chain_sync_read_cycle_disables_entry_proof_review_on_its_load_portfolio_call(monkeypatch):
+    """X-BJ (2026-09-14): chain_sync_read_cycle must pass entry_proof_review=False --
+    nothing on its call graph (post_trade_capital.py:656 -> _run_chain_sync -> reconcile)
+    reads the EDLI-entry-proof-derived chain_only_facts before this subprocess exits, so
+    the 2.5-5.5s SELF-time venue_commands scan (_query_edli_entry_proof_review_reasons)
+    is pure waste for this specific caller. Every other load_portfolio call site keeps
+    the default True (unchanged)."""
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+
+    class _Connection:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    load_portfolio_calls = []
+
+    def _spy_load_portfolio(**kwargs):
+        load_portfolio_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **kwargs: _Connection())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", _spy_load_portfolio)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda *a, **kw: ({}, None))
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+
+    post_trade_capital.chain_sync_read_cycle()
+
+    assert len(load_portfolio_calls) == 1
+    assert load_portfolio_calls[0].get("entry_proof_review") is False
+
+
 def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):
     from src.data import polymarket_client
     from src.engine import cycle_runner

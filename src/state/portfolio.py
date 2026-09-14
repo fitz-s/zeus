@@ -2235,6 +2235,7 @@ def load_portfolio(
     monitor_bootstrap_only: bool = False,
     connection: sqlite3.Connection | None = None,
     deadline_monotonic: float | None = None,
+    entry_proof_review: bool = True,
 ) -> PortfolioState:
     """Load canonical portfolio truth; emit one timing log line per call.
 
@@ -2254,6 +2255,19 @@ def load_portfolio(
     load_portfolio does outside any named helper -- never double-counted
     child time. See src.state.db._timed_portfolio_query /
     _LOAD_PORTFOLIO_TIMING / _LOAD_PORTFOLIO_STACK.
+
+    X-BJ (2026-09-14): ``entry_proof_review`` (default True, unchanged
+    behavior for every existing caller) gates
+    ``_query_edli_entry_proof_review_reasons`` -- a per-open-EDLI-row
+    ``venue_commands`` lookup that costs 2.5-5.5s SELF time on the unbounded
+    load. Verified (grep across src/, full read of chain_sync_read_cycle):
+    ``chain_sync_read_cycle`` (post_trade_capital.py:656) is the only caller
+    whose entire process exits before anything reads the
+    entry-proof-review-derived ``chain_only_facts`` entries this
+    computation produces -- see the reader table in this commit's body.
+    Pass ``entry_proof_review=False`` ONLY from that call site; every other
+    caller keeps the full computation and its operator-facing
+    ``logger.error`` alert.
     """
     from src.state.db import _LOAD_PORTFOLIO_STACK, _LOAD_PORTFOLIO_TIMING
 
@@ -2271,6 +2285,7 @@ def load_portfolio(
             monitor_bootstrap_only=monitor_bootstrap_only,
             connection=connection,
             deadline_monotonic=deadline_monotonic,
+            entry_proof_review=entry_proof_review,
         )
         return result
     finally:
@@ -2297,6 +2312,7 @@ def _load_portfolio_impl(
     monitor_bootstrap_only: bool = False,
     connection: sqlite3.Connection | None = None,
     deadline_monotonic: float | None = None,
+    entry_proof_review: bool = True,
 ) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     if settlement_cohort_only:
@@ -2392,7 +2408,12 @@ def _load_portfolio_impl(
     entry_proof_review_reasons: dict[str, str] = {}
     try:
         attached = _attached_schema_names(conn)
-        if not bounded_load and "world" not in attached and ZEUS_WORLD_DB_PATH.exists():
+        if (
+            not bounded_load
+            and entry_proof_review
+            and "world" not in attached
+            and ZEUS_WORLD_DB_PATH.exists()
+        ):
             try:
                 conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
             except sqlite3.OperationalError:
@@ -2408,12 +2429,13 @@ def _load_portfolio_impl(
                 target_families=target_families,
                 monitor_bootstrap_only=monitor_bootstrap_only,
             )
-        if not bounded_load:
+        if not bounded_load and entry_proof_review:
             with _timed_portfolio_query("_query_edli_entry_proof_review_reasons"):
                 entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
                     conn,
                     list(snapshot.get("positions", [])),
                 )
+        if not bounded_load:
             with _timed_portfolio_query("query_token_suppression_tokens"):
                 ignored_tokens = query_token_suppression_tokens(conn)
             with _timed_portfolio_query("query_chain_only_quarantine_rows"):

@@ -823,7 +823,22 @@ def chain_sync_read_cycle() -> None:
         # skips load_portfolio's redundant connect+ATTACH entirely (it detects
         # 'world' already attached via _attached_schema_names and skips its own
         # ATTACH), so no second connection is opened at all for this path.
-        portfolio = load_portfolio(connection=conn, deadline_monotonic=deadline_monotonic)
+        # X-BJ (2026-09-14): entry_proof_review=False skips
+        # _query_edli_entry_proof_review_reasons (2.5-5.5s SELF time on the
+        # unbounded load, per-open-EDLI-row venue_commands lookups). Verified
+        # by reading this cycle's full body plus reconcile()'s: nothing this
+        # subprocess runs before exit ever reads the EDLI-entry-proof-derived
+        # chain_only_facts entries that computation produces (reconcile() only
+        # APPENDS a different fact type at chain_reconciliation.py:3061; the
+        # 48h-escalation reader check_quarantine_timeouts is called by
+        # cycle_runner every cycle, not from here). The main cycle runner's
+        # own unbounded load_portfolio() call (cycle_runner.py) is untouched
+        # and keeps computing + alerting on this as before.
+        portfolio = load_portfolio(
+            connection=conn,
+            deadline_monotonic=deadline_monotonic,
+            entry_proof_review=False,
+        )
         _log_phase("load_portfolio")
         with PolymarketClient() as clob:
             # chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
