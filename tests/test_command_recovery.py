@@ -39231,6 +39231,246 @@ def test_terminal_fak_priority_rotation_continues_after_chain_mismatch(monkeypat
     assert seen == ["chain-mismatch", "eligible"]
 
 
+def test_terminal_fak_partial_exit_review_deadline_interrupt_not_counted_as_error(
+    monkeypatch, caplog
+):
+    """An interrupt from the cycle's own expired budget logs INFO, not an error."""
+    from src.execution import command_recovery
+
+    candidates = [
+        {
+            "command_id": "budget-expired",
+            "venue_order_id": "order-budget-expired",
+            "state": "REVIEW_REQUIRED",
+            "intent_kind": "EXIT",
+            "side": "SELL",
+        }
+    ]
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: candidates,
+    )
+
+    def _raise_interrupted(*_args, **_kwargs):
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_confirmed_bound_trade_fact_summary",
+        _raise_interrupted,
+    )
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 100.0)
+
+    with sqlite3.connect(":memory:") as isolated, caplog.at_level(
+        "INFO", logger=command_recovery.logger.name
+    ):
+        summary = command_recovery._reconcile_terminal_fak_partial_exit_reviews(
+            isolated,
+            deadline_monotonic=99.0,
+        )
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 0}
+    assert any(
+        record.levelname == "INFO" and "budget-expired" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
+
+
+def test_terminal_fak_partial_exit_review_interrupt_before_deadline_is_error(
+    monkeypatch, caplog
+):
+    """An interrupt that fires before the deadline is a genuine error."""
+    from src.execution import command_recovery
+
+    candidates = [
+        {
+            "command_id": "early-interrupt",
+            "venue_order_id": "order-early-interrupt",
+            "state": "REVIEW_REQUIRED",
+            "intent_kind": "EXIT",
+            "side": "SELL",
+        }
+    ]
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: candidates,
+    )
+
+    def _raise_interrupted(*_args, **_kwargs):
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_confirmed_bound_trade_fact_summary",
+        _raise_interrupted,
+    )
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 50.0)
+
+    with sqlite3.connect(":memory:") as isolated, caplog.at_level(
+        "INFO", logger=command_recovery.logger.name
+    ):
+        summary = command_recovery._reconcile_terminal_fak_partial_exit_reviews(
+            isolated,
+            deadline_monotonic=99.0,
+        )
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+    assert any(
+        record.levelname == "ERROR" and "early-interrupt" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_terminal_fak_partial_exit_review_non_interrupt_after_deadline_is_error(
+    monkeypatch, caplog
+):
+    """A non-interrupt exception past the deadline is still a genuine error.
+
+    The budget-expiry classification must gate on the exception's identity
+    (sqlite3.OperationalError with "interrupted" in its message), not on
+    elapsed time alone -- an unrelated failure (e.g. a schema/KeyError bug)
+    that happens to land after the deadline must not be silently dropped.
+    """
+    from src.execution import command_recovery
+
+    candidates = [
+        {
+            "command_id": "unrelated-failure",
+            "venue_order_id": "order-unrelated-failure",
+            "state": "REVIEW_REQUIRED",
+            "intent_kind": "EXIT",
+            "side": "SELL",
+        }
+    ]
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: candidates,
+    )
+
+    def _raise_unrelated(*_args, **_kwargs):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_confirmed_bound_trade_fact_summary",
+        _raise_unrelated,
+    )
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 100.0)
+
+    with sqlite3.connect(":memory:") as isolated, caplog.at_level(
+        "INFO", logger=command_recovery.logger.name
+    ):
+        summary = command_recovery._reconcile_terminal_fak_partial_exit_reviews(
+            isolated,
+            deadline_monotonic=99.0,
+        )
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+    assert any(
+        record.levelname == "ERROR" and "unrelated-failure" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_terminal_exit_residual_status_repair_non_interrupt_after_deadline_is_error(
+    monkeypatch, caplog,
+):
+    """A non-interrupt status-repair candidate read failure past the deadline
+    is still a genuine error, not a silently-dropped budget expiry."""
+    from src.execution import command_recovery
+
+    def _raise_unrelated(*_args, **_kwargs):
+        raise RuntimeError("schema drift")
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_status_repair_command_ids",
+        _raise_unrelated,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_reconcile_terminal_fak_partial_exit_reviews",
+        lambda *_args, **_kwargs: {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_exit_lifecycle_alignment_repairs",
+        lambda *_args, **_kwargs: {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 100.0)
+
+    with sqlite3.connect(":memory:") as isolated, caplog.at_level(
+        "WARNING", logger=command_recovery.logger.name
+    ):
+        summary = command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=0,
+            deadline_monotonic=99.0,
+        )
+    assert summary["errors"] == 1
+    assert any(
+        record.levelname == "WARNING"
+        and "status-repair candidate read failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_terminal_exit_residual_pass_forwards_deadline_without_rederiving(
+    monkeypatch,
+):
+    """The pass forwards its exact deadline object; it never recomputes one."""
+    from src.execution import command_recovery
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_status_repair_command_ids",
+        lambda *_args, **_kwargs: (),
+    )
+    seen_deadlines = []
+
+    def _fake_review(_conn, *, limit, rotation_slot, deadline_monotonic):
+        seen_deadlines.append(deadline_monotonic)
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_reconcile_terminal_fak_partial_exit_reviews",
+        _fake_review,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_exit_lifecycle_alignment_repairs",
+        lambda *_args, **_kwargs: {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+
+    sentinel_deadline = 42.5
+    with sqlite3.connect(":memory:") as isolated:
+        command_recovery._reconcile_terminal_exit_residual_priority_pass(
+            isolated,
+            limit=4,
+            rotation_slot=0,
+            deadline_monotonic=sentinel_deadline,
+        )
+    assert seen_deadlines == [sentinel_deadline]
+
+
 def test_terminal_fak_priority_rotation_reaches_fifth_candidate(monkeypatch):
     """Wall-clock rotation advances the bounded terminal-review window."""
     from src.execution import command_recovery
@@ -39324,7 +39564,7 @@ def test_terminal_fak_priority_shared_quota_keeps_alignment_fair(monkeypatch):
 
     calls = []
 
-    def _reviews(_conn, *, limit, rotation_slot):
+    def _reviews(_conn, *, limit, rotation_slot, deadline_monotonic=None):
         calls.append(("review", limit, rotation_slot))
         return {"scanned": limit, "advanced": 0, "stayed": limit, "errors": 0}
 
@@ -39398,7 +39638,7 @@ def test_terminal_priority_status_quota_rotates_with_review_and_alignment(
     monkeypatch.setattr(
         command_recovery,
         "_reconcile_terminal_fak_partial_exit_reviews",
-        lambda _conn, *, limit, rotation_slot: calls.append(
+        lambda _conn, *, limit, rotation_slot, deadline_monotonic=None: calls.append(
             ("review", limit, rotation_slot)
         )
         or {"scanned": limit, "advanced": 0, "stayed": limit, "errors": 0},

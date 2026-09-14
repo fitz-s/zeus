@@ -13717,6 +13717,7 @@ def reconcile_terminal_exit_residual_projections_priority(
             lambda conn: _reconcile_terminal_exit_residual_priority_pass(
                 conn,
                 limit=_TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
+                deadline_monotonic=deadline,
             ),
             conn_factory=apply_factory,
             label="recovery.terminal_exit_residual_projection_priority",
@@ -13736,6 +13737,7 @@ def _reconcile_terminal_exit_residual_priority_pass(
     *,
     limit: int = _TERMINAL_EXIT_RESIDUAL_PRIORITY_MAX_CANDIDATES,
     rotation_slot: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Drain status-only facts, terminal reviews, and residual alignment fairly."""
 
@@ -13761,11 +13763,23 @@ def _reconcile_terminal_exit_residual_priority_pass(
                 rotation_slot=slot,
             )
         except Exception as exc:  # noqa: BLE001 - legacy lanes still drain.
-            logger.warning(
-                "recovery: terminal EXIT status-repair candidate read failed: %s",
-                exc,
+            is_budget_expiry = (
+                deadline_monotonic is not None
+                and time.monotonic() >= float(deadline_monotonic)
+                and isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in str(exc).lower()
             )
-            status_query_failed = True
+            if is_budget_expiry:
+                logger.info(
+                    "recovery: terminal EXIT status-repair candidate read ran "
+                    "out of its own budget; resuming next rotation"
+                )
+            else:
+                logger.warning(
+                    "recovery: terminal EXIT status-repair candidate read failed: %s",
+                    exc,
+                )
+                status_query_failed = True
     status_scanned = 0
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     if status_query_failed:
@@ -13815,6 +13829,7 @@ def _reconcile_terminal_exit_residual_priority_pass(
         conn,
         limit=review_limit,
         rotation_slot=slot,
+        deadline_monotonic=deadline_monotonic,
     )
     for key in ("scanned", "advanced", "stayed", "errors"):
         summary[key] += review_summary[key]
@@ -15009,6 +15024,7 @@ def _reconcile_terminal_fak_partial_exit_reviews(
     *,
     limit: int | None = None,
     rotation_slot: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Reconcile terminal FAK EXIT reviews with an optional fair bound."""
 
@@ -15069,13 +15085,26 @@ def _reconcile_terminal_fak_partial_exit_reviews(
             else:
                 summary["stayed"] += 1
         except Exception as exc:
-            logger.error(
-                "recovery: terminal FAK partial EXIT review recovery failed "
-                "for command %s: %s",
-                command_id,
-                exc,
+            is_budget_expiry = (
+                deadline_monotonic is not None
+                and time.monotonic() >= float(deadline_monotonic)
+                and isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in str(exc).lower()
             )
-            summary["errors"] += 1
+            if is_budget_expiry:
+                logger.info(
+                    "recovery: terminal FAK partial EXIT review ran out of "
+                    "its own budget for command %s; resuming next rotation",
+                    command_id,
+                )
+            else:
+                logger.error(
+                    "recovery: terminal FAK partial EXIT review recovery failed "
+                    "for command %s: %s",
+                    command_id,
+                    exc,
+                )
+                summary["errors"] += 1
     return summary
 
 
