@@ -8112,13 +8112,22 @@ def select_global_single_order(
             witness = probability_witnesses.get(family_key)
             if not isinstance(witness, JointOutcomeProbabilityWitness):
                 continue
-            if any(
+            exact_winner_ids = {
+                candidate.candidate_id
+                for candidate in positive_family_candidates
+                if candidate.settlement_locked_exact_payoff is True
+                and family_exact_yes_payoff(witness, bin_id=candidate.bin_id)
+                == (1 if candidate.side == "YES" else 0)
+            }
+            if len(exact_winner_ids) == len(positive_family_candidates) or any(
                 buy_corrections.get(candidate.candidate_id) is not None
                 for candidate in family_candidates
             ):
                 # Per-claim calibrated probabilities are not a MECE joint law.
-                # Keep their standalone Kelly targets and the existing family
-                # cash budget; a raw joint solve cannot overwrite either.
+                # Exact winners also retain their capacity-independent Kelly
+                # targets: a cash-capped joint solve followed by another kappa
+                # haircut must not erase a legal order. Both paths share the
+                # same cumulative family budget and still submit only one order.
                 family_ids = {c.candidate_id for c in family_candidates}
                 standalone_scores = {
                     score.candidate.candidate_id: score
@@ -8189,6 +8198,7 @@ def select_global_single_order(
                         ),
                         fractional_kelly_multiplier=multiplier,
                         current_token_shares=endowment.current_token_shares,
+                        settlement_locked_exact_payoff=(candidate_id in exact_winner_ids),
                     )
                     rejections.pop(candidate_id, None)
                     rejected_buy_economics_by_id.pop(candidate_id, None)

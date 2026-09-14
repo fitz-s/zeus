@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-13
+# Last reused/audited: 2026-09-14
 # Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
@@ -1860,6 +1860,118 @@ def test_joint_statistical_endpoint_does_not_gain_untyped_exact_payoff():
     )
     witness = _GLOBAL_PROBABILITY_WITNESSES[statistical.probability_witness_identity]
     assert S.family_exact_yes_payoff(witness, bin_id=statistical.bin_id) is None
+
+
+def _exact_capacity_candidate(witness, binding, *, side, price="0.20", bid="0.06", depth="100"):
+    token = binding.yes_token_id if side == "YES" else binding.no_token_id
+    return S.global_candidate_from_native(
+        SimpleNamespace(
+            no_trade_reason=None,
+            executable_cost_curve=_global_curve(
+                side=side, token=token, levels=((price, depth),), min_order="1",
+            ),
+            family_key=witness.family_key, bin_id=binding.bin_id,
+            condition_id=binding.condition_id, side=side, token_id=token,
+            hypothesis_id=f"capacity-{token}",
+        ),
+        probability_witness=witness, ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=witness.captured_at_utc, neg_risk=False,
+        native_bid_levels=(BookLevel(price=Decimal(bid), size=Decimal("100")),),
+    )
+
+
+def _exact_capacity_endowment(witness, *, cash="5", committed="0", capital="100"):
+    return S.FamilyPortfolioEndowment(
+        family_key=witness.family_key,
+        payout_by_bin_usd=tuple((key, Decimal("0")) for key in witness.bin_ids),
+        current_token_shares=(), wealth_floor_usd=Decimal(capital),
+        spendable_cash_usd=Decimal(cash), portfolio_capital_usd=Decimal(capital),
+        committed_capital_usd=Decimal(committed), ledger_snapshot_id="ledger-current",
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("capital,cash,price,depth,shares,cost", [
+    ("100", "5", "0.20", "100", "25", "5"),
+    ("10000", "500", "0.80", "10000", "625", "500"),
+    ("10000", "500", "0.80", "20", "20", "16"),
+])
+def test_exact_winner_capacity_is_independent_of_joint_container(side, capital, cash, price, depth, shares, cost):
+    parent, child, bindings = _joint_exact_fixture(
+        parent_samples=np.tile([1.0, 0.0, 0.0] if side == "YES" else [0.0, 0.6, 0.4], (400, 1)),
+        child_exact=(("dead", int(side == "YES")),),
+    )
+    results = []
+    for witness in (child, parent):
+        candidate = _exact_capacity_candidate(witness, bindings[0], side=side, price=price, depth=depth)
+        decision = _global_select(
+            (candidate,), probability_witnesses={witness.family_key: witness},
+            floor=capital, ceiling=capital, cash=cash, cap=cash,
+            fractional_kelly_multiplier="0.125",
+            family_portfolio_endowment_resolver=lambda _: _exact_capacity_endowment(witness, cash=cash, capital=capital),
+        )
+        assert decision.candidate is candidate
+        assert decision.expected_terminal_wealth.win_probability_mean == 1.0
+        assert decision.expected_terminal_wealth.loss_probability_mean == 0.0
+        assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+        results.append((decision.shares, decision.cost_usd))
+    assert results == [(Decimal(shares), Decimal(cost))] * 2
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("committed,expected_cost", [("9.5", "3"), ("12.5", "0")])
+def test_exact_joint_winner_rescore_preserves_shared_budget_and_payoff(side, committed, expected_cost):
+    witness, _, bindings = _joint_exact_fixture(
+        parent_samples=np.tile([1.0, 0.0, 0.0] if side == "YES" else [0.0, 0.6, 0.4], (400, 1)),
+        child_exact=(("dead", int(side == "YES")),),
+    )
+    # Statistical liquidation capacity is zero; this typed winner can settle.
+    candidate = _exact_capacity_candidate(witness, bindings[0], side=side, bid="0.04")
+    decision = _global_select(
+        (candidate,), probability_witnesses={witness.family_key: witness},
+        floor="100", ceiling="100", cash="100", cap="100",
+        fractional_kelly_multiplier="0.125",
+        family_portfolio_endowment_resolver=lambda _: _exact_capacity_endowment(
+            witness, cash="100", committed=committed,
+        ),
+    )
+    if expected_cost == "0":
+        assert decision.candidate is None
+        assert decision.rejection_reasons[candidate.candidate_id] == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
+    else:
+        assert decision.candidate is candidate
+        assert decision.cost_usd == Decimal(expected_cost)
+        assert decision.max_spend_usd <= Decimal(expected_cost)
+        assert decision.expected_terminal_wealth.win_probability_mean == 1.0
+        assert decision.expected_growth.expected_ev_usd > 0
+
+
+@pytest.mark.parametrize("all_exact", (True, False))
+def test_exact_family_routing_requires_every_positive_claim_proved(all_exact, monkeypatch):
+    witness, _, bindings = _joint_exact_fixture(
+        parent_samples=np.tile([1.0, 0.0, 0.0], (400, 1)),
+        child_exact=(("dead", 1), ("warm", 0)) if all_exact else (("dead", 1),),
+    )
+    yes = _exact_capacity_candidate(witness, bindings[0], side="YES")
+    no = _exact_capacity_candidate(witness, bindings[1], side="NO", price="0.30")
+    original = S.plan_family_joint_buy_targets
+    joint_calls = []
+
+    def capture(*args, **kwargs):
+        joint_calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(S, "plan_family_joint_buy_targets", capture)
+    decision = _global_select(
+        (yes, no), probability_witnesses={witness.family_key: witness},
+        floor="100", ceiling="100", cash="5", cap="5",
+        fractional_kelly_multiplier="0.125",
+        family_portfolio_endowment_resolver=lambda _: _exact_capacity_endowment(witness),
+    )
+    assert bool(joint_calls) is not all_exact
+    if all_exact:
+        assert decision.candidate is yes
+        assert decision.cost_usd == Decimal("5")
 
 
 def test_global_rejected_buy_detail_failure_does_not_abort_auction(monkeypatch):
