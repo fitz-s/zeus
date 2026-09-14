@@ -27,7 +27,7 @@ from src.data.replacement_input_hwm import (
     prime_frozen_replacement_artifact_hwm,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
-from src.engine.time_context import has_city_local_day_started
+from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 from src.state.db import _connect_read_only
 
 
@@ -2626,6 +2626,22 @@ def build_replacement_forecast_current_target_plan(
                 if row["city_timezone"]
             }
         )
+        # A family whose city-local target day has already ended must not stay in scope:
+        # the market has stopped trading and no posterior committed after local-day-end
+        # is ever consumed, so every re-materialization request for it is pure waste
+        # (measured: 3,488 wasted requests since 09-12, 407 for London 2026-09-13 alone,
+        # one per minute until UTC midnight, because the queries above only filter on
+        # `target_local_date`/`target_date >= today` in UTC). `_ref_clock` is this
+        # function's single decision clock (never a second wall-clock read). A city with
+        # no known timezone is left in scope (fail open) rather than silently excluded.
+        rows = [
+            row
+            for row in rows
+            if not (
+                (tz := timezone_by_city.get(str(row["city"])))
+                and has_city_local_day_ended(str(row["target_date"]), tz, _ref_clock)
+            )
+        ]
         expected_by_metric = {
             metric: expected_replacement_dependency_identity_by_role(metric)
             for metric in {str(row["temperature_metric"]) for row in rows}

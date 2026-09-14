@@ -1651,6 +1651,114 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
+def test_single_family_reseed_skips_when_target_local_day_has_ended(
+    tmp_path, monkeypatch
+) -> None:
+    """A single-family reseed for a city-local target day that already ended must be a
+    fail-soft skip with no DB or file work: London's local day ends 23:00Z (BST), so a
+    request at 03:07Z the next day is 4+ hours into a day the market has already closed."""
+    db_path = tmp_path / "forecasts.db"  # deliberately never created
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._city_timezone_by_name",
+        lambda: {"London": "Europe/London"},
+    )
+
+    def _fail_if_called(*_args, **_kwargs):
+        pytest.fail("target-local-day-ended reseed must not reach family_materializable_cycle")
+
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle", _fail_if_called)
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fail_if_called)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="London",
+        target_date="2026-09-13",
+        metric="high",
+        computed_at=datetime(2026, 9, 14, 3, 7, tzinfo=UTC),
+    )
+
+    assert report["status"] == cycle_advance.RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED
+    assert report["enqueued"] is False
+    assert not db_path.exists()
+    assert not (tmp_path / "seeds").exists()
+
+
+def test_single_family_reseed_enqueues_when_target_local_day_still_open(
+    tmp_path, monkeypatch
+) -> None:
+    """Same family, 40 minutes before London's local-day rollover (23:00Z): the day is still
+    open, so the reseed must proceed exactly as it did before the local-day-end guard existed."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = datetime(2026, 9, 13, 12, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._city_timezone_by_name",
+        lambda: {"London": "Europe/London"},
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+
+    def _fake_build_seed(_conn_arg, **kwargs):
+        path = Path(
+            kwargs.get("output_path")
+            or Path(kwargs["seed_path"]) / "London.2026-09-13.high.seed.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="London",
+        target_date="2026-09-13",
+        metric="high",
+        computed_at=datetime(2026, 9, 13, 22, 30, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+    assert report["enqueued"] is True
+    seed_file = Path(str(report["seed_file"]))
+    assert json.loads(seed_file.read_text(encoding="utf-8")) == {
+        "upgrade_trigger": "missing_live_posterior_reseed",
+    }
+
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT consumed_cycle_time, target_cycle_time, seed_file, reason
+        FROM cycle_advance_enqueues
+        WHERE city = 'London' AND target_date = '2026-09-13' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row["consumed_cycle_time"] == "NO_LIVE_POSTERIOR"
+    assert row["target_cycle_time"] == cycle.isoformat()
+    assert row["seed_file"] == str(seed_file)
+    assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
 def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
     tmp_path, monkeypatch
 ) -> None:

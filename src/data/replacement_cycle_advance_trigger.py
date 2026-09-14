@@ -60,10 +60,18 @@ from src.contracts.replacement_pipeline_files import (
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
+from src.engine.time_context import has_city_local_day_ended
 
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 
 UTC = timezone.utc
+
+# A city-local target day that has already ended is no longer a live scope: the market has
+# stopped trading it and no posterior committed after local-day-end is ever consumed (see
+# `has_city_local_day_ended` and `build_replacement_forecast_current_target_plan`'s row filter,
+# the sibling gate on the poll-lane batch variant below). Single spelling shared by every
+# single-family enqueue path that reaches `enqueue_single_family_cycle_advance_reseed`.
+RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED = "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED"
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
@@ -2375,6 +2383,27 @@ def enqueue_single_family_cycle_advance_reseed(
         "held_position": bool(held_position),
         "enqueued": False,
     }
+
+    # Reject an already-ended city-local target day before any DB/file work: the market has
+    # stopped trading it and no posterior committed after local-day-end is ever consumed
+    # (root of the 3,488-request materializer waste; see plan-level sibling gate in
+    # build_replacement_forecast_current_target_plan). A city with no known timezone is left
+    # eligible (fail open) rather than silently skipped.
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        _city_timezone_by_name,
+    )
+
+    _city_timezone = _city_timezone_by_name().get(city)
+    if _city_timezone and has_city_local_day_ended(target_date, _city_timezone, now):
+        report["status"] = RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED
+        _LOG.info(
+            "cycle-advance single-family reseed skipped, target local day ended city=%s "
+            "target_date=%s metric=%s",
+            city,
+            target_date,
+            metric,
+        )
+        return report
 
     def _require_deadline() -> None:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:

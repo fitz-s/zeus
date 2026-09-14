@@ -3555,3 +3555,134 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
 
     assert plan.status == "BLOCKED"
     assert plan.reason_codes == ("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING",)
+
+
+def _create_ended_day_probe_db(path) -> None:
+    """Minimal market-only-branch DB (no source_run_coverage -> no source-run-targets path)
+    with one market per (city, target_date) so a row's mere presence/absence in plan.rows is
+    the only thing under test -- coverage/posterior state is irrelevant here."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                event_id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                token_id TEXT,
+                range_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                data_version TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                trade_authority_status TEXT NOT NULL,
+                training_allowed INTEGER NOT NULL,
+                runtime_layer TEXT NOT NULL DEFAULT 'live',
+                q_lcb_json TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE readiness_state (
+                readiness_id TEXT PRIMARY KEY,
+                strategy_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'READY',
+                provenance_json TEXT NOT NULL,
+                expires_at TEXT
+            )
+            """
+        )
+        for city, target_date in (
+            ("London", "2026-09-13"),
+            ("London", "2026-09-14"),
+            ("SaoPaulo", "2026-09-13"),
+            ("SaoPaulo", "2026-09-14"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events (city, target_date, temperature_metric, token_id, range_label)
+                VALUES (?, ?, 'high', ?, 'range')
+                """,
+                (city, target_date, f"token-{city}-{target_date}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ended_day_probe_timezones(monkeypatch) -> None:
+    monkeypatch.setattr(
+        current_target_plan,
+        "_city_timezone_by_name",
+        lambda: {"London": "Europe/London", "SaoPaulo": "America/Sao_Paulo"},
+    )
+
+
+def _scope_present(plan, city: str, target_date: str) -> bool:
+    return any(
+        row.city == city and row.target_date == target_date for row in plan.rows
+    )
+
+
+def test_current_target_plan_excludes_ended_local_days_both_directions(
+    tmp_path, monkeypatch
+) -> None:
+    """At 03:30Z 09-14: London's day ends 23:00Z (BST) -> 09-13 excluded, 09-14 included.
+    Sao Paulo's day ends 03:00Z (UTC-3, no DST) -> 09-13 excluded, 09-14 included. Confirms the
+    predicate fires for both an east-of-UTC and a west-of-UTC city at the same instant."""
+    db = tmp_path / "forecasts.db"
+    _create_ended_day_probe_db(db)
+    _ended_day_probe_timezones(monkeypatch)
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        min_target_date="2026-09-13",
+        require_raw_artifacts=False,
+        now_utc=datetime(2026, 9, 14, 3, 30, tzinfo=timezone.utc),
+    )
+
+    assert not _scope_present(plan, "London", "2026-09-13")
+    assert _scope_present(plan, "London", "2026-09-14")
+    assert not _scope_present(plan, "SaoPaulo", "2026-09-13")
+    assert _scope_present(plan, "SaoPaulo", "2026-09-14")
+
+
+def test_current_target_plan_keeps_western_city_open_before_its_local_midnight(
+    tmp_path, monkeypatch
+) -> None:
+    """At 02:30Z 09-14, Sao Paulo's 09-13 local day is still open (ends 03:00Z) even though UTC
+    has already rolled to 09-14. Within the window the plan actually fetched (min_target_date
+    passed explicitly, as the reactor/Day0-bridge/explicit-scopes callers effectively do), the
+    new post-fetch predicate must not ALSO drop this still-open row -- pinning the "still open ->
+    keep" direction for a city west of UTC, symmetric with the east-of-UTC exclusion above.
+
+    NOTE: this does NOT pin the under-inclusion claim for the *default* `min_target_date`
+    floor (`now.date().isoformat()`, used by the scopes=None poll-lane caller): that floor is
+    computed upstream of this predicate and is unchanged by this fix. Verified empirically that
+    both parent and fixed code drop SaoPaulo/2026-09-13 from the SQL fetch itself when
+    min_target_date defaults at 02:30Z 09-14 (`target_date >= '2026-09-14'`) -- a separate,
+    pre-existing floor-selection issue this task's two sites do not touch or fix."""
+    db = tmp_path / "forecasts.db"
+    _create_ended_day_probe_db(db)
+    _ended_day_probe_timezones(monkeypatch)
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        min_target_date="2026-09-13",
+        require_raw_artifacts=False,
+        now_utc=datetime(2026, 9, 14, 2, 30, tzinfo=timezone.utc),
+    )
+
+    assert _scope_present(plan, "SaoPaulo", "2026-09-13")

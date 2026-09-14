@@ -103,3 +103,24 @@ def has_city_local_day_started(
     reference = _coerce_datetime(reference_time).astimezone(timezone.utc)
     target_start_local = datetime.combine(target_day, time.min, tzinfo=ZoneInfo(city_timezone))
     return target_start_local.astimezone(timezone.utc) <= reference
+
+
+def has_city_local_day_ended(
+    target_date: date | str,
+    city_timezone: str,
+    reference_time: datetime | str | None = None,
+) -> bool:
+    """Whether the city-local settlement day has fully ended at ``reference_time``.
+
+    A UTC-only ``target_date >= today`` filter keeps a city's already-ended local
+    day eligible until UTC midnight (up to 24h late for a city east of UTC) and,
+    symmetrically, drops a city's still-open local day too early (up to a few
+    hours for a city west of UTC, e.g. Sao Paulo UTC-3 loses its last 3h). This
+    is the single city-local-calendar predicate: strictly greater than, so the
+    last local second of the target day still counts as open.
+    """
+
+    target_day = _coerce_target_date(target_date)
+    reference = _coerce_datetime(reference_time)
+    local_date = reference.astimezone(ZoneInfo(city_timezone)).date()
+    return local_date > target_day

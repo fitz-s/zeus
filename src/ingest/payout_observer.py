@@ -52,8 +52,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
-from zoneinfo import ZoneInfo
-
+from src.engine.time_context import has_city_local_day_ended
 from src.venue.polymarket_v2_adapter import (
     DEFAULT_POLYGON_RPC_URL,
     POLYGON_CTF_ADDRESS,
@@ -147,7 +146,6 @@ def _target_date_has_ended(
     city_configs: dict[str, object] | None = None,
 ) -> bool:
     try:
-        target = datetime.fromisoformat(str(target_date)).date()
         if city_configs is None:
             from src.config import runtime_cities_by_name
 
@@ -156,7 +154,7 @@ def _target_date_has_ended(
         timezone_name = str(getattr(city_config, "timezone", "") or "")
         if not timezone_name:
             return False
-        return now.astimezone(ZoneInfo(timezone_name)).date() > target
+        return has_city_local_day_ended(str(target_date), timezone_name, now)
     except (TypeError, ValueError, KeyError):
         return False
 
