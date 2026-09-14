@@ -3989,3 +3989,198 @@ def test_local_day_still_open_hard_fact_overlay_unchanged(monkeypatch):
     )
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 440a58af-e7b replay (team-lead acceptance criterion, corrected 2026-09-14):
+# Seattle 2026-09-13 high, buy_no, entry 0.60, phase day0_window, post-local-day
+# since 07:00Z. world.observation_instants' ogimet_metar_ksea coverage is
+# PARTIAL (00:00-10:00 local only; running_max 55.04F) — the local day's METAR
+# record does NOT cover the day end, so the settlement-grade final extreme is
+# genuinely unavailable, not merely unread. _post_local_day_final_daily_verdict
+# (monitor_refresh.py) reads it via _final_daily_observation_extreme
+# (day0_hard_fact_exit.py), which requires either a VERIFIED daily row or
+# every expected local-day UTC hour present plus proof of next-day advancement
+# before returning a value — partial coverage correctly yields None here, not
+# a verdict built from the incomplete running max.
+# ---------------------------------------------------------------------------
+
+
+def _440a58af_shaped_position():
+    from src.state.portfolio import Position
+
+    return Position(
+        trade_id="440a58af-e7b",
+        market_id="m-440a58af",
+        city="Seattle",
+        cluster="Seattle",
+        target_date="2026-09-13",
+        bin_label="Will the highest temperature in Seattle be between 60-61°F on September 13?",
+        direction="buy_no",
+        unit="F",
+        temperature_metric="high",
+        entry_method="qkernel_spine",
+        entry_price=0.60,
+        p_posterior=0.4558,
+        state="day0_window",
+        condition_id="0x" + "eb" * 32,
+    )
+
+
+def test_440a58af_replay_partial_coverage_declines_named_calibration_never_reached(
+    monkeypatch,
+):
+    """440a58af-e7b's actual shape: post-local-day, PARTIAL METAR coverage
+    (running_max 55.04F over 00:00-10:00 local only, day not complete) ->
+    routed to the hard-fact method, coverage incomplete -> the named
+    POST_LOCAL_DAY reason, missing= names fresh_prob_is_fresh (not 'belief'),
+    both freshness flags revoked, Position._exit_q_mean_and_source never
+    reaches the market-anchored calibration branch (source stays "raw")."""
+    import src.engine.monitor_refresh as mr
+    import src.execution.day0_hard_fact_exit as hfe
+    from src.engine.cycle_runtime import (
+        _incomplete_exit_observability_reason,
+        _revoke_monitor_action_authority,
+    )
+    from src.state.portfolio import ExitContext
+
+    position = _440a58af_shaped_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: True)
+    # Complete-day settlement-grade record genuinely unavailable (partial
+    # METAR coverage — the real function would also return None here).
+    monkeypatch.setattr(hfe, "_final_daily_observation_extreme", lambda **_kw: None)
+    # The intraday exclusion machinery also finds no verdict: 55.04F does not
+    # exceed the [60,61] bin's upper bound, so hard_fact_bin_verdict declines
+    # to confirm OR exclude from partial evidence — exactly as designed.
+    monkeypatch.setattr(hfe, "evaluate_hard_fact_exit", lambda **_kw: None)
+    monkeypatch.setattr(mr, "_would_use_day0_monitor_lane", lambda *_a, **_k: True)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _pos: position.condition_id)
+    monkeypatch.setattr(
+        mr,
+        "_refresh_current_global_day0_probability",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("must not reach the remaining-window recompute path")
+        ),
+    )
+
+    city = SimpleNamespace(name="Seattle", timezone="America/Los_Angeles", settlement_source_type="noaa")
+    prob, refreshed, is_fresh = mr.monitor_probability_refresh(
+        position, conn=object(), city=city, target_d="2026-09-13",
+    )
+
+    assert is_fresh is False
+    assert prob == pytest.approx(position.p_posterior)
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in refreshed.applied_validations
+    assert getattr(refreshed, mr._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is False
+
+    # Mirror refresh_position's actual field assignment (monitor_refresh.py
+    # ~7666-7668): last_monitor_prob/last_monitor_prob_is_fresh come from this
+    # tuple, not from refreshed.p_posterior (the entry-time value, untouched).
+    refreshed.last_monitor_prob_is_fresh = is_fresh is True
+    refreshed.last_monitor_prob = float(prob) if refreshed.last_monitor_prob_is_fresh else float("nan")
+
+    # Feed the refreshed (non-fresh) position through the real exit-context
+    # observability path: missing= must name a real field, never 'belief',
+    # and the operator's calibration branch must never be reached.
+    ctx = ExitContext(
+        fresh_prob=refreshed.last_monitor_prob,
+        fresh_prob_is_fresh=refreshed.last_monitor_prob_is_fresh,
+        current_market_price=0.0,
+        current_market_price_is_fresh=True,
+        best_bid=0.0,
+        current_ci=None,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    reason = _incomplete_exit_observability_reason(
+        SimpleNamespace(reason="EVIDENCE_UNAVAILABLE"), ctx, pos=refreshed,
+    )
+    # is_fresh=False -> refreshed.last_monitor_prob is NaN (mirroring
+    # refresh_position), so missing_authority_fields() names the non-finite
+    # fresh_prob field itself (not the fresh_prob_is_fresh sub-case, and never
+    # the 'belief' placeholder).
+    assert reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob)"
+    assert "belief" not in reason
+
+    q_raw, evidence_ok, exit_q_source = refreshed._exit_q_mean_and_source(ctx)
+    assert evidence_ok is False
+    assert exit_q_source == "raw"
+    assert "entry_calibration_unavailable" not in refreshed.applied_validations
+
+    _revoke_monitor_action_authority(
+        refreshed, missing_fields={"fresh_prob"},
+    )
+    assert refreshed.last_monitor_prob_is_fresh is False
+    assert refreshed.last_monitor_market_price_is_fresh is False
+
+
+def test_440a58af_shaped_position_complete_coverage_yields_determinate_exit_q(
+    monkeypatch,
+):
+    """Sibling of the 440a58af replay: same shape, but the complete-day
+    settlement-grade final extreme IS on record -> a determinate exit_q
+    (hard-fact method, fresh, full exit authority), still never touching the
+    market-anchored calibration branch."""
+    import src.engine.monitor_refresh as mr
+    import src.execution.day0_hard_fact_exit as hfe
+
+    position = _440a58af_shaped_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: True)
+    # A complete local day: final settled high resolves outside [60,61] -> the
+    # buy_no held side structurally won.
+    observation = hfe.FinalDailyObservation(
+        raw_extreme=58.4,
+        settled_extreme=58.0,
+        source="ogimet_metar_ksea:following_day_observed",
+        station_id="KSEA",
+        unit="F",
+        fetched_at=datetime(2026, 9, 14, 8, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(hfe, "_final_daily_observation_extreme", lambda **_kw: observation)
+
+    city = SimpleNamespace(name="Seattle", timezone="America/Los_Angeles", settlement_source_type="noaa")
+    prob, refreshed, is_fresh = mr.monitor_probability_refresh(
+        position, conn=object(), city=city, target_d="2026-09-13",
+    )
+
+    assert is_fresh is True
+    assert prob == pytest.approx(1.0)
+    assert refreshed.selected_method == mr.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert getattr(refreshed, mr._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is True
+    assert any(
+        v.startswith("belief_source=day0_final_daily_observation")
+        for v in refreshed.applied_validations
+    )
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" not in refreshed.applied_validations
+
+    from src.state.portfolio import ExitContext
+
+    # Mirror refresh_position's actual field assignment (monitor_refresh.py
+    # ~7666-7668): last_monitor_prob/last_monitor_prob_is_fresh come from this
+    # tuple, not from refreshed.p_posterior (the entry-time value, untouched).
+    refreshed.last_monitor_prob_is_fresh = is_fresh is True
+    refreshed.last_monitor_prob = float(prob) if refreshed.last_monitor_prob_is_fresh else float("nan")
+
+    ctx = ExitContext(
+        fresh_prob=refreshed.last_monitor_prob,
+        fresh_prob_is_fresh=refreshed.last_monitor_prob_is_fresh,
+        current_market_price=0.0,
+        current_market_price_is_fresh=True,
+        best_bid=0.0,
+        current_ci=(1.0, 1.0),
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    import src.calibration.market_anchored_live_fit as calib
+
+    monkeypatch.setattr(calib, "get_active_provider", lambda: None)
+    q_raw, evidence_ok, exit_q_source = refreshed._exit_q_mean_and_source(ctx)
+    assert evidence_ok is True
+    assert exit_q_source == "raw"
+    assert float(q_raw) == pytest.approx(1.0)

@@ -5495,6 +5495,130 @@ def _detect_whale_toxicity_from_orderbook(
     return None
 
 
+def _post_local_day_final_daily_verdict(
+    *,
+    pos: Position,
+    conn,
+    city,
+    target_d,
+    metric: str,
+) -> tuple[float, Position, bool] | None:
+    """Definitive post-local-day verdict from the COMPLETE-day settlement-grade
+    final extreme.
+
+    This is deliberately distinct from evaluate_hard_fact_exit's intraday
+    monotonic EXCLUSION-only machinery below: hard_fact_bin_verdict can only
+    ever KILL a bounded bin (a running extreme so far never proves the final
+    will not move further), and its HardFactEvidence.is_complete_for() checks
+    payload provenance only — it has no concept of day-coverage at all. Using
+    that machinery to CONFIRM a post-day position from a merely partial
+    running extreme (e.g. a METAR feed that stopped reporting mid-day) would
+    silently authorize a wrong exit. _final_daily_observation_extreme already
+    requires either a VERIFIED settlement-family daily row, or complete hourly
+    coverage of every expected local-day UTC hour plus proof the source
+    advanced to the next day, before returning a value — None here means the
+    complete-day record genuinely is not available yet, not that it was never
+    checked.
+    """
+    if conn is None:
+        return None
+    try:
+        from src.execution.day0_hard_fact_exit import (
+            _final_daily_observation_extreme,
+            final_observed_bin_verdict,
+            hard_fact_monitor_belief,
+        )
+
+        observation = _final_daily_observation_extreme(
+            city=city,
+            target_date=str(target_d),
+            metric=metric,
+            now=datetime.now(timezone.utc),
+            conn=conn,
+        )
+        if observation is None:
+            return None
+        bin_low, bin_high = _parse_temp_range(pos.bin_label)
+        verdict = final_observed_bin_verdict(
+            metric=metric,
+            direction=getattr(pos, "direction", ""),
+            bin_low=bin_low,
+            bin_high=bin_high,
+            final_extreme=observation.settled_extreme,
+        )
+        if verdict is None:
+            return None
+        belief = hard_fact_monitor_belief(
+            verdict=verdict, direction=getattr(pos, "direction", ""),
+        )
+        if belief is None:
+            return None
+    except Exception as exc:  # noqa: BLE001 - hard-fact overlay must fail soft
+        logger.warning(
+            "monitor_probability_refresh: post-local-day final-daily overlay "
+            "failed for %s: %s",
+            getattr(pos, "trade_id", "?"),
+            exc,
+        )
+        return None
+
+    hard_pos = _clone_for_probability_refresh(pos)
+    setattr(hard_pos, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(hard_pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(
+        hard_pos,
+        (
+            "belief_source=day0_final_daily_observation;"
+            "kind=deterministic_final_daily;"
+            f"metric={verdict.metric};"
+            f"yes_verdict={belief.yes_verdict};"
+            f"held_verdict={belief.held_verdict};"
+            f"yes_prob={belief.yes_prob:.6f};"
+            f"held_prob={belief.held_side_prob:.6f};"
+            f"final_extreme={verdict.rounded_extreme:g};"
+            f"source={observation.source};"
+            f"station_id={observation.station_id};"
+            f"fetched_at={observation.fetched_at.isoformat()}"
+        ),
+    )
+    if belief.held_verdict == "STRUCTURAL_WIN":
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_win_hold")
+    else:
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_loss")
+    _append_monitor_validation(
+        hard_pos,
+        "model_divergence_panic_inapplicable:day0_absorbing_hard_fact",
+    )
+    _append_monitor_validation(
+        hard_pos,
+        "forecast_posteriors_dominated_by_day0_hard_fact",
+    )
+    setattr(
+        hard_pos,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        _compact_monitor_probability_receipt(
+            {
+                "schema_version": 1,
+                "selected_method": SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT,
+                "probability_authority": "day0_final_daily_observation",
+                "probability_functional": "DETERMINISTIC_ABSORBING_FACT",
+                "held_side_probability": float(belief.held_side_prob),
+                "final_daily_observation": {
+                    "source": observation.source,
+                    "station_id": observation.station_id,
+                    "unit": observation.unit,
+                    "raw_extreme": observation.raw_extreme,
+                    "settled_extreme": observation.settled_extreme,
+                    "fetched_at": observation.fetched_at.isoformat(),
+                },
+            }
+        ),
+    )
+    _set_monitor_probability_fresh(hard_pos, True)
+    _set_day0_zero_probability_exit_authority(hard_pos, True)
+    return float(belief.held_side_prob), hard_pos, True
+
+
 def _day0_absorbing_hard_fact_overlay(
     *,
     pos: Position,
@@ -5511,16 +5635,18 @@ def _day0_absorbing_hard_fact_overlay(
     # held-side evidence_ok check while carrying no real information, and the
     # exit organ never learns that its belief is meaningless. This overlay is
     # the durable-evidence lane that can name that gap; extend its window to
-    # cover "day already ended" so a past-local-day position tries the same
-    # hard-fact evidence first. A plain "no verdict" (city not on this lane,
-    # family paused, bin unparseable, or no durable evidence found yet) is
-    # deliberately left to fall through unchanged — evaluate_hard_fact_exit's
-    # return value does not distinguish "not applicable" from "applicable, no
-    # evidence yet", and the downstream global-simplex path already has its
-    # own, more careful post-local-day handling for that ambiguity. Only a
-    # verdict that WAS found but could not be resolved to a belief, or an
-    # unexpected failure while a verdict was in hand, declines by name here
-    # instead of silently falling through.
+    # cover "day already ended" so a past-local-day position first tries the
+    # COMPLETE-day settlement-grade final extreme
+    # (_post_local_day_final_daily_verdict — can CONFIRM either outcome, not
+    # only exclude), then the same intraday monotonic-exclusion evidence this
+    # overlay already used for same-day (evaluate_hard_fact_exit — can still
+    # validly KILL a bin from partial evidence). Only when NEITHER produces
+    # anything AND a real connection was available to check (conn is not
+    # None — with no connection we cannot tell "unavailable" from "untested",
+    # so leave test doubles that pass conn=None on the pre-existing fallback
+    # path) does it decline by the named POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE
+    # reason instead of silently falling through into the degenerate
+    # remaining-window recompute.
     is_after_target_day = _is_position_after_target_local_day(pos, city, target_d)
     if not (_is_position_target_local_day(pos, city, target_d) or is_after_target_day):
         return None
@@ -5528,7 +5654,7 @@ def _day0_absorbing_hard_fact_overlay(
     def _post_local_day_final_observation_unavailable() -> (
         tuple[float, Position, bool] | None
     ):
-        if not is_after_target_day:
+        if not is_after_target_day or conn is None:
             return None
         stale = _clone_for_probability_refresh(pos)
         setattr(stale, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
@@ -5540,6 +5666,14 @@ def _day0_absorbing_hard_fact_overlay(
     metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
     if metric not in {"high", "low"}:
         return None
+
+    if is_after_target_day:
+        final_daily = _post_local_day_final_daily_verdict(
+            pos=pos, conn=conn, city=city, target_d=target_d, metric=metric,
+        )
+        if final_daily is not None:
+            return final_daily
+
     try:
         from src.execution.day0_hard_fact_exit import (
             evaluate_hard_fact_exit,
@@ -5557,7 +5691,7 @@ def _day0_absorbing_hard_fact_overlay(
             durable_only=True,
         )
         if verdict is None:
-            return None
+            return _post_local_day_final_observation_unavailable()
         evidence = getattr(verdict, "evidence", None)
         if evidence is None or not evidence.is_complete_for(city):
             stale = _clone_for_probability_refresh(pos)
