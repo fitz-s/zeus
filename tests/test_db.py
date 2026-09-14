@@ -7142,6 +7142,72 @@ def test_venue_commands_and_position_current_lookups_use_index_seeks_not_scans()
         conn.close()
 
 
+def test_canonical_position_versions_join_uses_city_date_metric_index_at_realistic_scale():
+    """R-BK (2026-09-14): harvester_pnl_resolver._canonical_position_versions joins a
+    small `requested` VALUES-list against position_current on (city, target_date,
+    temperature_metric). Before this fix, the COALESCE(pc.temperature_metric, 'high')
+    join predicate defeated any index on that column, forcing SQLite onto
+    idx_position_current_phase_quote's phase=? SEARCH and filtering the join in memory
+    over the whole phase partition (~2,485 rows / 278 pages per call, per R-BK,
+    independent of the requested key-set size). idx_position_current_city_date_metric
+    plus the plain-equality rewrite (COALESCE removed -- the column is NOT NULL on
+    every DDL path) let SQLite seek directly on the 3-column key instead.
+
+    Built against init_schema_trade_only (never the live DB) -- the schema init path
+    the live daemon actually uses (src/main.py:10732) and the only place this sibling
+    index family lives (matching idx_position_current_phase_quote's own precedent).
+    Decoy rows + ANALYZE give the phase-partition scan a realistic-shape cost
+    disadvantage; on a tiny fixture SQLite's cost-based optimizer prefers a scan
+    regardless of which index exists, which would mask a regression."""
+    from src.state.db import init_schema_trade_only
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / "canonical-position-versions-plan.db")
+        conn.row_factory = None
+        init_schema_trade_only(conn)
+        for i in range(500):
+            conn.execute(
+                "INSERT INTO position_current (position_id, phase, city, target_date, "
+                "temperature_metric, updated_at) VALUES (?, 'active', ?, ?, ?, 't')",
+                (f"decoy-{i}", f"DecoyCity{i}", f"2026-0{(i % 9) + 1}-01", "high" if i % 2 == 0 else "low"),
+            )
+        requested = [
+            ("CityA", "2026-06-01", "high"),
+            ("CityB", "2026-06-02", "high"),
+            ("CityC", "2026-06-03", "low"),
+        ]
+        for i, (city, target_date, metric) in enumerate(requested):
+            conn.execute(
+                "INSERT INTO position_current (position_id, phase, city, target_date, "
+                "temperature_metric, updated_at) VALUES (?, 'active', ?, ?, ?, 't')",
+                (f"pos-plan-{i}", city, target_date, metric),
+            )
+        conn.commit()
+        conn.execute("ANALYZE")
+
+        placeholders = ",".join("(?, ?, ?)" for _ in requested)
+        params = [part for key in requested for part in key]
+        sql = f"""EXPLAIN QUERY PLAN
+            WITH requested(city, target_date, temperature_metric) AS (
+                VALUES {placeholders}
+            )
+            SELECT pc.* FROM position_current pc
+              JOIN requested r
+                ON r.city = pc.city AND r.target_date = pc.target_date
+               AND r.temperature_metric = pc.temperature_metric
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')"""
+        details = [row[3] for row in conn.execute(sql, params).fetchall()]
+        plan_text = "\n".join(details)
+        assert "SCAN pc" not in plan_text, f"position_current access must not be a scan: {details}"
+        assert not any(
+            "idx_position_current_phase_quote" in step for step in details
+        ), f"must no longer fall back to the phase-partition index: {details}"
+        assert any(
+            "SEARCH pc USING INDEX idx_position_current_city_date_metric" in step for step in details
+        ), f"expected the 3-column city/date/metric index seek: {details}"
+        conn.close()
+
+
 @pytest.mark.parametrize("kwargs", [
     {}, {"target_families": []},
     {"target_families": [("NYC", "2026-04-01", "high")], "open_positions_only": True},

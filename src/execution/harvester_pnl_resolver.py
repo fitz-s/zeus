@@ -162,7 +162,7 @@ def _open_position_settlement_keys(trade_conn, portfolio) -> set[tuple[str, str,
     try:
         rows = trade_conn.execute(
             """
-            SELECT DISTINCT city, target_date, COALESCE(temperature_metric, 'high') AS temperature_metric
+            SELECT DISTINCT city, target_date, temperature_metric
             FROM position_current
             WHERE phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
             """
@@ -220,6 +220,12 @@ def _canonical_position_versions(trade_conn, keys) -> dict[str, dict]:
         return {}
     placeholders = ",".join("(?, ?, ?)" for _ in key_list)
     params = [part for key in key_list for part in key]
+    # R-BK (2026-09-14): position_current.temperature_metric is NOT NULL on every DDL
+    # path (fresh CREATE TABLE and the legacy ALTER TABLE ... ADD COLUMN ... NOT NULL
+    # DEFAULT 'high' backfill, db.py) -- COALESCE(pc.temperature_metric, 'high') was
+    # dead code that also defeated idx_position_current_city_date_metric (a function
+    # over the column blocks the index seek), forcing a phase-partition SEARCH filtered
+    # in memory over every open position instead of a 3-column seek per requested key.
     rows = trade_conn.execute(
         f"""WITH requested(city, target_date, temperature_metric) AS (
                     VALUES {placeholders}
@@ -232,7 +238,7 @@ def _canonical_position_versions(trade_conn, keys) -> dict[str, dict]:
                   JOIN requested r
                     ON r.city = pc.city
                    AND r.target_date = pc.target_date
-                   AND r.temperature_metric = COALESCE(pc.temperature_metric, 'high')
+                   AND r.temperature_metric = pc.temperature_metric
                  WHERE pc.phase IN ('active', 'day0_window', 'pending_exit',
                                     'economically_closed')""",
         params,
@@ -336,7 +342,7 @@ def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str
                        authority, settlement_source, settlement_value
                 FROM settlement_outcomes
                 WHERE authority = 'VERIFIED'
-                  AND (city, target_date, COALESCE(temperature_metric, 'high')) IN ({placeholders})
+                  AND (city, target_date, temperature_metric) IN ({placeholders})
                 ORDER BY settled_at DESC
                 """,
                 params,

@@ -1917,7 +1917,17 @@ def test_canonical_position_versions_query_plan_is_one_seek_no_count(trade_conn)
     harvester_pnl_resolver.py's in-lease re-fingerprint call), the fingerprint
     query must contain no COUNT aggregate, no TEMP B-TREE, exactly one
     correlated subquery against position_events, and that subquery must be a
-    SEARCH (index seek), never a SCAN."""
+    SEARCH (index seek), never a SCAN.
+
+    Note (R-BK, 2026-09-14): this test's ``trade_conn`` fixture builds its
+    schema via plain ``init_schema()``, which creates position_current from
+    the kernel SQL file with NO named index at all (not even the pre-existing
+    idx_position_current_phase_quote) -- so it cannot exercise
+    idx_position_current_city_date_metric, which (matching that sibling
+    index's own precedent) lives only in _TRADE_CLASS_DDL, the schema
+    init_schema_trade_only applies to the real trade DB. See
+    test_canonical_position_versions_join_uses_city_date_metric_index_at_realistic_scale
+    in test_db.py for that EXPLAIN assertion against the real init path."""
     from src.execution import harvester_pnl_resolver as resolver
 
     keys = {

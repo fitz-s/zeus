@@ -6256,6 +6256,15 @@ CREATE INDEX IF NOT EXISTS idx_position_current_phase_quote
 -- indexes let the two-EXISTS-branches rewrite (same functions) use an index seek on each half.
 CREATE INDEX IF NOT EXISTS idx_position_current_token_id ON position_current(token_id);
 CREATE INDEX IF NOT EXISTS idx_position_current_no_token_id ON position_current(no_token_id);
+-- R-BK (2026-09-14): _canonical_position_versions (src/execution/harvester_pnl_resolver.py)
+-- joins a small `requested` VALUES-list on (city, target_date, temperature_metric); with
+-- no supporting index SQLite falls back to idx_position_current_phase_quote's phase=?
+-- SEARCH and filters the join in memory over the whole phase partition (~2,485 rows /
+-- 278 pages per call, independent of the requested key-set size, at both call sites
+-- including inside the 5s MONITOR write lease). This composite index lets SQLite seek
+-- directly on the 3-column key instead.
+CREATE INDEX IF NOT EXISTS idx_position_current_city_date_metric
+    ON position_current(city, target_date, temperature_metric);
 
 -- execution_fact (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS execution_fact (
