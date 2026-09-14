@@ -294,6 +294,7 @@ def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
         yield True
 
     world_conn = MagicMock()
+    instants_conn = MagicMock()
     forecasts_conn = MagicMock()
     obs_conn = MagicMock()
     obs_ctx = MagicMock()
@@ -301,22 +302,32 @@ def test_R2_hole_scanner_tick_drains_observation_holes() -> None:
     obs_ctx.__exit__.return_value = False
     scanner = MagicMock()
     scanner.scan_all.return_value = []
+    world_conns = [world_conn, instants_conn]
 
     with (
         patch("src.data.job_lock.acquire_lock", acquired_lock),
         patch("src.data.hole_scanner.HoleScanner", return_value=scanner),
-        patch("src.state.db.get_world_connection", return_value=world_conn),
+        patch(
+            "src.state.db.get_world_connection",
+            side_effect=lambda **_k: world_conns.pop(0),
+        ),
         patch("src.state.db.get_forecasts_connection", return_value=forecasts_conn),
         patch("src.state.db.get_forecasts_connection_with_world", return_value=obs_ctx),
         patch(
             "src.data.daily_obs_append.catch_up_missing",
             return_value={"wu_inserted": 0},
         ) as catch_up,
+        patch("scripts.obs_live_tick.catch_up_missing_instants", return_value={}) as catch_up_instants,
     ):
         ingest_main._k2_hole_scanner_tick()
 
     catch_up.assert_called_once_with(obs_conn, days_back=30)
+    # Scan's own world connection closes before the OBSERVATIONS drain runs;
+    # the observation_instants drain (added 2026-09-14) opens and closes a
+    # second, fresh world connection of its own.
+    catch_up_instants.assert_called_once_with(instants_conn, days_back=30)
     world_conn.close.assert_called_once()
+    instants_conn.close.assert_called_once()
     forecasts_conn.close.assert_called_once()
 
 
@@ -375,6 +386,59 @@ def test_R2_forecasts_sources_match_registry() -> None:
         f"forecasts_append.MODEL_SOURCE_MAP values {actual!r} != "
         f"hole_scanner's FORECASTS sources {expected!r}"
     )
+
+
+def test_R2_observation_instants_sources_cover_live_tick_writers() -> None:
+    """The live tick (scripts/obs_live_tick.py) writes wu_icao_history and
+    per-city ogimet_metar_<station> rows into observation_instants, but
+    until this test's contract, `SOURCES_BY_TABLE[OBSERVATION_INSTANTS]`
+    only tracked `openmeteo_archive_hourly` (a separate backfill lane). A
+    live-tick miss for a tag not in this registry can never surface as a
+    MISSING row -- not detected-but-undrained, genuinely undetected (the
+    2026-09-14 London/Miami/NYC host-DNS-outage incident). Membership, not
+    equality, so `openmeteo_archive_hourly` staying tracked is unaffected.
+    """
+    expected = SOURCES_BY_TABLE[ScannerDataTable.OBSERVATION_INSTANTS]
+    assert daily_obs_append.WU_SOURCE in expected
+    assert {
+        target.source_tag for target in daily_obs_append.OGIMET_CITIES.values()
+    } <= set(expected)
+    assert hourly_instants_append.SOURCE in expected
+
+
+def test_hole_scanner_detects_ogimet_live_tick_miss_in_observation_instants() -> None:
+    """A day the live tick's Ogimet fetch fails for a NOAA/Ogimet city must
+    surface as an OBSERVATION_INSTANTS MISSING row so the drain has
+    something to act on. Bounds the scan window via a narrow ExceptionsConfig
+    (not the real yaml, which spans 2024-01-01..today across 46 cities and
+    takes ~20s per table) so this stays a fast, targeted assertion.
+    """
+    from src.data.hole_scanner import ExceptionsConfig
+
+    conn = _memdb()
+    cfg = ExceptionsConfig(
+        model_retro_starts={},
+        publication_lag_days={},
+        global_onboarding_floor=date(2026, 9, 12),
+        read_cities_json_onboarded_at=False,
+        auto_fill_ceiling_days=7,
+        auto_alert_floor_days=30,
+        max_holes_per_city_per_scan=90,
+    )
+    scanner = HoleScanner(conn, today=date(2026, 9, 15), config=cfg)
+    scanner.scan(ScannerDataTable.OBSERVATION_INSTANTS)
+
+    pending = find_pending_fills(
+        conn,
+        data_table=DataTable.OBSERVATION_INSTANTS,
+        city="London",
+        data_source="ogimet_metar_eglc",
+    )
+    # Window is [global_onboarding_floor, today - default publication lag=2],
+    # i.e. [2026-09-12, 2026-09-13] -- both dates are genuine holes (no
+    # physical row seeded for either), and 2026-09-13 (the incident date) is
+    # the one this test cares about.
+    assert "2026-09-13" in [row["target_date"] for row in pending]
 
 
 def test_R2_hourly_failure_commits_before_next_fetch(monkeypatch) -> None:

@@ -551,3 +551,130 @@ def test_obs_tick_partial_city_failures_do_not_fail_whole_job() -> None:
             SimpleNamespace(city="Tokyo", skipped_hko=False, failure_reason="provider timeout"),
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# catch_up_missing_instants — hole-scanner drain for the live-tick sources
+# (2026-09-14 London/Miami/NYC host-DNS-outage incident: a live-tick miss
+# had no repair path except that city's next fixed daily Ogimet slot).
+# ---------------------------------------------------------------------------
+
+
+def _coverage_db() -> sqlite3.Connection:
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    return conn
+
+
+def _seed_instants_missing(conn: sqlite3.Connection, *, city: str, data_source: str, target_date: str) -> None:
+    from src.state.data_coverage import DataTable, record_missing
+
+    record_missing(
+        conn,
+        data_table=DataTable.OBSERVATION_INSTANTS,
+        city=city,
+        data_source=data_source,
+        target_date=target_date,
+    )
+
+
+def test_catch_up_missing_instants_drains_ogimet_miss(monkeypatch) -> None:
+    """A scanner-recorded OBSERVATION_INSTANTS MISSING row for a NOAA/Ogimet
+    city must invoke `_tick_ogimet_city` exactly once for that city and date
+    range -- never `_tick_wu_city`."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="London", data_source="ogimet_metar_eglc", target_date="2026-09-13")
+
+    ogimet_calls: list[tuple] = []
+
+    def fake_ogimet_city(city_name, _conn, *, start_date, end_date, dry_run):
+        ogimet_calls.append((city_name, start_date, end_date, dry_run))
+        return obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=24)
+
+    def fail_wu_city(*_args, **_kwargs):
+        raise AssertionError("_tick_wu_city must not be called for an Ogimet-tier hole")
+
+    monkeypatch.setattr(obs_tick, "_tick_ogimet_city", fake_ogimet_city)
+    monkeypatch.setattr(obs_tick, "_tick_wu_city", fail_wu_city)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30)
+
+    assert ogimet_calls == [("London", date(2026, 9, 13), date(2026, 9, 13), False)]
+    assert totals["ogimet_cities_touched"] == 1
+    assert totals["ogimet_rows_written"] == 24
+    assert totals["ogimet_cities_failed"] == 0
+
+
+def test_catch_up_missing_instants_noop_without_holes(monkeypatch) -> None:
+    """No OBSERVATION_INSTANTS holes -> no fetcher call at all (idempotent)."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("fetcher must not be called when there are no pending fills")
+
+    monkeypatch.setattr(obs_tick, "_tick_ogimet_city", fail)
+    monkeypatch.setattr(obs_tick, "_tick_wu_city", fail)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30)
+
+    assert totals["ogimet_cities_touched"] == 0
+    assert totals["wu_cities_touched"] == 0
+
+
+def test_catch_up_missing_instants_routes_wu_and_skips_non_drainable_tier(monkeypatch) -> None:
+    """A WU-tier hole routes to `_tick_wu_city`, never `_tick_ogimet_city`;
+    a hole for a tier this drain does not own (HKO has its own accumulator)
+    is skipped rather than mis-routed."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="Taipei", data_source="wu_icao_history", target_date="2026-09-13")
+    _seed_instants_missing(conn, city="Hong Kong", data_source="hko_daily_api", target_date="2026-09-13")
+
+    wu_calls: list[str] = []
+
+    def fake_wu_city(city_name, _conn, *, start_date, end_date, dry_run):
+        wu_calls.append(city_name)
+        return obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_written=24)
+
+    def fail_ogimet_city(*_args, **_kwargs):
+        raise AssertionError("_tick_ogimet_city must not be called for a WU/HKO-tier hole")
+
+    monkeypatch.setattr(obs_tick, "_tick_wu_city", fake_wu_city)
+    monkeypatch.setattr(obs_tick, "_tick_ogimet_city", fail_ogimet_city)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30)
+
+    assert wu_calls == ["Taipei"]
+    assert totals["wu_cities_touched"] == 1
+    assert totals["skipped_non_drainable_tier"] == 1
+
+
+def test_catch_up_missing_instants_one_city_failure_does_not_abort_others(monkeypatch) -> None:
+    """One city's fetcher raising must not abort the drain for the rest of
+    the missing set; the failure is recorded in the existing totals shape."""
+    import scripts.obs_live_tick as obs_tick
+
+    conn = _coverage_db()
+    _seed_instants_missing(conn, city="London", data_source="ogimet_metar_eglc", target_date="2026-09-13")
+    _seed_instants_missing(conn, city="Miami", data_source="ogimet_metar_kmia", target_date="2026-09-13")
+
+    def flaky_ogimet_city(city_name, _conn, *, start_date, end_date, dry_run):
+        if city_name == "London":
+            raise RuntimeError("NETWORK_ERROR")
+        return obs_tick.TickResult(city=city_name, tier="OGIMET_METAR", rows_written=24)
+
+    monkeypatch.setattr(obs_tick, "_tick_ogimet_city", flaky_ogimet_city)
+
+    totals = obs_tick.catch_up_missing_instants(conn, days_back=30, max_ogimet_cities=2)
+
+    assert totals["ogimet_cities_failed"] == 1
+    assert totals["ogimet_cities_touched"] == 1
+    assert totals["ogimet_rows_written"] == 24

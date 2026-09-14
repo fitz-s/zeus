@@ -58,7 +58,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -767,6 +767,99 @@ def run_live_tick(
         _append_log(log_path, r, start_date=start_date, end_date=end_date)
 
     return results
+
+
+def catch_up_missing_instants(
+    conn,
+    *,
+    days_back: int = 30,
+    max_ogimet_cities: int = 2,
+) -> dict:
+    """Drain observation_instants MISSING/retry-ready-FAILED rows for the
+    WU_ICAO / OGIMET_METAR live-tick sources.
+
+    Companion to ``hourly_instants_append.catch_up_missing``, which drains
+    the same table's Open-Meteo Archive API source. That source is a
+    separate backfill lane; it never covered the per-city ``wu_icao_history``
+    / ``ogimet_metar_<station>`` tags the live tick (``run_live_tick`` above)
+    writes, so a live-tick miss -- e.g. a transient host DNS outage landing
+    on a city's once-daily Ogimet shard slot (``_ogimet_city_shard_for_hour``)
+    -- had no repair path until that city's next scheduled slot 24h later.
+
+    Routes by ``tier_for_city``, never by matching the coverage row's source
+    string, so an HKO-tier (or any non-WU/Ogimet) row can never reach
+    ``_tick_ogimet_city``. Ogimet is capped at ``max_ogimet_cities`` with a
+    day-rotation offset -- the same bound ``daily_obs_append.catch_up_missing``
+    already applies to the identical 21s-per-request Ogimet API -- so the
+    drain cannot balloon into hammering the provider; WU has no such limit
+    and is unbounded, matching that same sibling function.
+    """
+    from src.data.tier_resolver import UnsupportedTierError
+    from src.state.data_coverage import DataTable, find_pending_fills
+
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
+    rows = find_pending_fills(conn, data_table=DataTable.OBSERVATION_INSTANTS, max_rows=10_000)
+
+    wu_by_city: dict[str, list[date]] = {}
+    ogimet_by_city: dict[str, list[date]] = {}
+    skipped = 0
+    for r in rows:
+        target = date.fromisoformat(r["target_date"])
+        if target < cutoff:
+            continue
+        try:
+            tier = tier_for_city(r["city"])
+        except UnsupportedTierError:
+            skipped += 1
+            continue
+        if tier == Tier.WU_ICAO:
+            wu_by_city.setdefault(r["city"], []).append(target)
+        elif tier == Tier.OGIMET_METAR:
+            ogimet_by_city.setdefault(r["city"], []).append(target)
+        else:
+            # HKO_NATIVE (or any future tier): not this drain's job -- HKO
+            # has its own accumulator (hko_ingest_tick.py --project-only).
+            skipped += 1
+
+    totals = {
+        "wu_cities_touched": 0, "wu_rows_written": 0, "wu_cities_failed": 0,
+        "ogimet_cities_touched": 0, "ogimet_rows_written": 0, "ogimet_cities_failed": 0,
+        "skipped_non_drainable_tier": skipped,
+    }
+
+    for city_name, dates in wu_by_city.items():
+        try:
+            result = _tick_wu_city(
+                city_name, conn, start_date=min(dates), end_date=max(dates), dry_run=False,
+            )
+        except Exception:
+            logger.exception("catch_up_missing_instants: WU city %s failed", city_name)
+            totals["wu_cities_failed"] += 1
+            continue
+        totals["wu_cities_touched"] += 1
+        totals["wu_rows_written"] += result.rows_written
+        if result.failure_reason:
+            totals["wu_cities_failed"] += 1
+
+    ogimet_items = list(ogimet_by_city.items())
+    if ogimet_items:
+        offset = datetime.now(timezone.utc).date().toordinal() % len(ogimet_items)
+        ogimet_items = ogimet_items[offset:] + ogimet_items[:offset]
+    for city_name, dates in ogimet_items[:max_ogimet_cities]:
+        try:
+            result = _tick_ogimet_city(
+                city_name, conn, start_date=min(dates), end_date=max(dates), dry_run=False,
+            )
+        except Exception:
+            logger.exception("catch_up_missing_instants: Ogimet city %s failed", city_name)
+            totals["ogimet_cities_failed"] += 1
+            continue
+        totals["ogimet_cities_touched"] += 1
+        totals["ogimet_rows_written"] += result.rows_written
+        if result.failure_reason:
+            totals["ogimet_cities_failed"] += 1
+
+    return totals
 
 
 def _append_log(log_path: Path, result: TickResult, *, start_date: date, end_date: date) -> None:

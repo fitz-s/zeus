@@ -777,6 +777,63 @@ class TestSingleLiveCalibrationJobs:
         assert "ingest_artifact_refit" in job_ids
 
 
+class TestHoleScannerInstantsDrain:
+    """The 2026-09-14 host-DNS-outage incident: a live-tick miss for
+    London/Miami/NYC's Ogimet fetch had no repair path in
+    observation_instants because ingest_k2_hole_scanner only drained the
+    OBSERVATIONS table via daily_obs_append.catch_up_missing. This pins
+    that the daily tick also drains observation_instants for the WU/Ogimet
+    live-tick sources (scripts.obs_live_tick.catch_up_missing_instants),
+    additively -- the existing OBSERVATIONS drain call is untouched.
+    """
+
+    def test_hole_scanner_tick_drains_both_observations_and_instants(self) -> None:
+        import src.ingest_main as im
+
+        scanner_instance = MagicMock()
+        scanner_instance.scan_all.return_value = []
+        world_conn = MagicMock()
+        instants_conn = MagicMock()
+        forecasts_conn = MagicMock()
+        world_conn_calls = [world_conn, instants_conn]
+
+        @contextmanager
+        def fake_lock(_name):
+            yield True
+
+        @contextmanager
+        def fake_forecasts_with_world(**_kwargs):
+            yield MagicMock()
+
+        with (
+            patch("src.data.job_lock.acquire_lock", side_effect=fake_lock),
+            patch("src.data.hole_scanner.HoleScanner", return_value=scanner_instance),
+            patch(
+                "src.state.db.get_world_connection",
+                side_effect=lambda **_k: world_conn_calls.pop(0),
+            ) as mock_wc,
+            patch("src.state.db.get_forecasts_connection", return_value=forecasts_conn),
+            patch(
+                "src.state.db.get_forecasts_connection_with_world",
+                side_effect=fake_forecasts_with_world,
+            ),
+            patch("src.data.daily_obs_append.catch_up_missing") as mock_catch_up_obs,
+            patch("scripts.obs_live_tick.catch_up_missing_instants") as mock_catch_up_instants,
+        ):
+            mock_catch_up_obs.return_value = {"ogimet_cities_touched": 0}
+            mock_catch_up_instants.return_value = {"ogimet_cities_touched": 0}
+
+            im._k2_hole_scanner_tick.__wrapped__()
+
+        # Existing OBSERVATIONS drain is untouched.
+        assert mock_catch_up_obs.called
+        # New observation_instants drain runs additively, on its own fresh
+        # world connection (the scan's own world_conn was already closed).
+        mock_catch_up_instants.assert_called_once_with(instants_conn, days_back=30)
+        assert mock_wc.call_count == 2
+        instants_conn.close.assert_called_once()
+
+
 class TestDay0DiurnalResidualRefitScheduled:
     """Antibody for the diurnal-residual artifact staleness bomb: the loader
     (src/calibration/day0_diurnal_residual.py) silently returns None once

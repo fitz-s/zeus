@@ -1670,6 +1670,13 @@ def _k2_hole_scanner_tick():
     source-specific catch-up after recording holes.
     RESET: a successful observation write moves its exact coverage key to
     WRITTEN; transient failures retain their existing retry embargo.
+
+    Also drains observation_instants MISSING rows for the WU_ICAO /
+    OGIMET_METAR live-tick sources (scripts/obs_live_tick.py) -- the
+    scanner already tracks these (hole_scanner.SOURCES_BY_TABLE) but until
+    this drain, a miss (e.g. a transient host DNS outage during a city's
+    once-daily Ogimet shard slot) had no repair path except that city's
+    next scheduled slot 24h later.
     """
     from src.data.job_lock import acquire_lock
     from src.data.daily_obs_append import catch_up_missing
@@ -1696,6 +1703,13 @@ def _k2_hole_scanner_tick():
         with get_forecasts_connection_with_world(write_class="bulk") as obs_conn:
             catch_up = catch_up_missing(obs_conn, days_back=30)
         logger.info("K2 hole_scanner observation catch-up: %s", catch_up)
+        from scripts.obs_live_tick import catch_up_missing_instants
+        instants_conn = get_world_connection(write_class="bulk")
+        try:
+            instants_catch_up = catch_up_missing_instants(instants_conn, days_back=30)
+        finally:
+            instants_conn.close()
+        logger.info("K2 hole_scanner observation_instants catch-up: %s", instants_catch_up)
 
 
 @_scheduler_job("ingest_k2_obs_tick")

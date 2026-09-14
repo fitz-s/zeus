@@ -95,7 +95,19 @@ SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
             for target in OGIMET_CITIES.values()
         ),
     ),
-    DataTable.OBSERVATION_INSTANTS: ("openmeteo_archive_hourly",),
+    DataTable.OBSERVATION_INSTANTS: (
+        "openmeteo_archive_hourly",
+        # The live tick (scripts/obs_live_tick.py) writes wu_icao_history and
+        # per-city ogimet_metar_<station> rows into this same physical table,
+        # but until this line those sources had no expected-set entry at all
+        # (not just coarser granularity — genuinely absent), so a live-tick
+        # miss (e.g. a transient host DNS outage during a city's once-daily
+        # Ogimet shard slot) could never surface as a MISSING row and had no
+        # repair path except waiting for the next fixed daily slot. Mirrors
+        # the noaa_wrh_ addition to OBSERVATIONS above for the same reason.
+        WU_SOURCE,
+        *(target.source_tag for target in OGIMET_CITIES.values()),
+    ),
     DataTable.SOLAR_DAILY: ("openmeteo_archive_solar",),
     DataTable.FORECASTS: forecast_table_source_ids(),
 }
