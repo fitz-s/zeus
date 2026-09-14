@@ -5788,3 +5788,45 @@ def test_readonly_materialization_keeps_source_and_witness_on_one_snapshot(
     finally:
         writer.close()
         reader.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("carrier_hour,anchor_hour", [(6, 12), (12, 6), (6, 6)])
+def test_independent_current_anchor_clock_preserves_prewrite_and_anchor_identity(
+    metric, carrier_hour, anchor_hour
+) -> None:
+    request = replace(
+        _request(source_cycle_time=_dt(carrier_hour), computed_at=_dt(14),
+                 expires_at=_dt(15), baseline_source_available_at=_dt(13),
+                 openmeteo_source_available_at=_dt(13)),
+        temperature_metric=metric,
+        baseline_data_version=_current_baseline_data_version(metric),
+        openmeteo_anchor=_anchor(source_cycle_time=_dt(anchor_hour)),
+    )
+    assert materializer_mod._prewrite_block_reasons(request) == ()
+    conn = _conn()
+    try:
+        anchor_id = materializer_mod._insert_anchor(conn, request, metric=metric)
+        row = conn.execute(
+            "SELECT source_cycle_time FROM deterministic_forecast_anchors WHERE anchor_id = ?",
+            (anchor_id,),
+        ).fetchone()
+        assert row[0] == _dt(anchor_hour).isoformat()
+        # A new ENS carrier cannot change the identity of the same provider fact.
+        assert materializer_mod._insert_anchor(
+            conn, replace(request, source_cycle_time=_dt(12)), metric=metric
+        ) == anchor_id
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("anchor_cycle", [_dt(6), _dt(0) - timedelta(days=3)])
+def test_independent_anchor_clock_does_not_launder_future_or_stale_input(anchor_cycle) -> None:
+    request = replace(_request(), openmeteo_anchor=_anchor(source_cycle_time=anchor_cycle))
+    reasons = materializer_mod._prewrite_block_reasons(request)
+    expected = (
+        "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_IN_FUTURE"
+        if anchor_cycle > request.computed_at
+        else "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TOO_STALE"
+    )
+    assert expected in reasons

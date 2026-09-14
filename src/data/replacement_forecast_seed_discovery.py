@@ -1221,12 +1221,27 @@ def discover_replacement_forecast_materialization_seeds(
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_MANIFEST_METADATA_INCOMPLETE")
                 continue
+            from src.data.replacement_input_hwm import (  # noqa: PLC0415
+                latest_eligible_ensemble_input_cycle,
+            )
+
+            carrier_cycle = latest_eligible_ensemble_input_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=computed,
+            )
+            if carrier_cycle is None:
+                failed.append(target_key)
+                reasons.append("REPLACEMENT_SEED_DISCOVERY_ELIGIBLE_ENSEMBLE_MISSING")
+                continue
             coverage = latest_baseline_coverage_for_replacement_seed(
                 conn,
                 city=city,
                 target_date=target_date,
                 temperature_metric=metric,
-                not_after_source_cycle_time=openmeteo.source_cycle_time,
+                not_after_source_cycle_time=carrier_cycle,
                 as_of_time=computed,
             )
             bins = market_bins_for_replacement_seed(
@@ -1251,6 +1266,7 @@ def discover_replacement_forecast_materialization_seeds(
                 precision_metadata_json=_resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
                 computed_at=computed,
                 base_dir=seed_path,
+                carrier_cycle_time=carrier_cycle,
                 **day0_seed_payload,
             )
             if not seed_result.ok or seed_result.seed is None:

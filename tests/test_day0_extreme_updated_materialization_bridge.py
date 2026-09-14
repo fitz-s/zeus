@@ -4155,7 +4155,7 @@ def test_day0_reseed_does_not_wait_for_deterministic_cycle_ahead_of_ens(
 
     assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
     assert report["target_cycle"] == consumed.isoformat()
-    assert calls["manifest_cycles"] == [consumed.isoformat()]
+    assert calls["manifest_cycles"] == [deterministic_ahead.isoformat(), consumed.isoformat()]
 
 
 def test_day0_report_marks_posterior_matched_only_when_gap_actually_drained(

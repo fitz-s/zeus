@@ -692,14 +692,15 @@ def test_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
     assert observed["manifests"] is family_manifests
 
 
-def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
+def test_upgrade_seed_uses_ens_carrier_and_newest_independent_manifest(
     tmp_path: Path,
 ) -> None:
     """Fusion upgrades must satisfy the current causal baseline lookup API."""
-    cycle = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+    carrier = datetime(2026, 7, 24, 6, 0, tzinfo=UTC)
+    anchor_cycle = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
     computed_at = datetime(2026, 7, 24, 13, 0, tzinfo=UTC)
     manifest = SimpleNamespace(
-        source_cycle_time=cycle,
+        source_cycle_time=anchor_cycle,
         artifact_path=tmp_path / "anchor.json",
     )
     observed: dict[str, object] = {}
@@ -709,10 +710,15 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         return {"coverage": True}
 
     def _latest_manifest(*_args, **kwargs):
-        observed["cycle_admissible"] = kwargs["cycle_admissible"]
+        if "cycle_admissible" in kwargs:
+            observed["cycle_admissible"] = kwargs["cycle_admissible"]
         return manifest
 
     output = tmp_path / "staging" / "seed.json"
+
+    def _build_seed(**kwargs):
+        observed["build_seed_kwargs"] = kwargs
+        return SimpleNamespace(ok=True, seed={})
 
     def _write_seed(path, payload):
         observed["seed_payload"] = payload
@@ -729,8 +735,8 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         seed_path=tmp_path / "seeds",
         seed_file=output,
         computed_at=computed_at,
-        source_cycle_time=cycle,
-        build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
+        source_cycle_time=carrier,
+        build_seed=_build_seed,
         latest_baseline_coverage=_coverage,
         market_bins=lambda *_args, **_kwargs: (object(),),
         write_seed=_write_seed,
@@ -748,13 +754,11 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
     )
 
     assert built == output
-    assert observed["not_after_source_cycle_time"] == cycle
+    assert observed["not_after_source_cycle_time"] == carrier
     assert observed["as_of_time"] == computed_at
-    assert observed["cycle_admissible"](manifest)
+    assert observed["build_seed_kwargs"]["carrier_cycle_time"] == carrier
+    assert "cycle_admissible" not in observed
     assert observed["seed_payload"]["input_revision_sources"] == ["hko_fnd"]
-    assert not observed["cycle_admissible"](
-        SimpleNamespace(source_cycle_time=cycle + timedelta(hours=6))
-    )
 
 
 def test_consumed_failed_publication_reclaims_same_transition_marker(

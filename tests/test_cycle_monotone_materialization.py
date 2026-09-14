@@ -394,39 +394,65 @@ def _legs_for(metric: str, *, city: str, target_date: str, cycle: datetime,
     return out
 
 
-def test_family_materializable_cycle_anchor_present_returns_cycle() -> None:
-    """Current live leg present for the family -> the family-scoped cycle is materializable."""
-    cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
-    manifests = _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
+def test_family_materializable_cycle_uses_eligible_ens_carrier_with_newer_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OM availability admits the scope; the returned posterior carrier is ENS's own clock."""
+    carrier = datetime(2026, 6, 12, 6, tzinfo=UTC)
+    newest_anchor = datetime(2026, 6, 12, 12, tzinfo=UTC)
+    manifests = _legs_for(
+        "high", city="CityA", target_date="2026-06-13", cycle=newest_anchor
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: carrier,
+    )
     got, missing = family_materializable_cycle(
-        manifests, city="CityA", target_date="2026-06-13", metric="high",
+        _conn(),
+        manifests,
+        city="CityA",
+        target_date="2026-06-13",
+        metric="high",
+        decision_time=newest_anchor,
         expected_identity=expected_replacement_dependency_identity_by_role,
         latest_manifest=_fake_latest_manifest,
     )
-    assert got == cyc
+    assert got == carrier
     assert missing == ()
 
 
-def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
+def test_cycle_advance_bounds_baseline_selection_by_ens_carrier(
     tmp_path: Path,
 ) -> None:
-    cycle = datetime(2026, 6, 12, 6, tzinfo=UTC)
+    carrier = datetime(2026, 6, 12, 6, tzinfo=UTC)
+    anchor_cycle = datetime(2026, 6, 12, 12, tzinfo=UTC)
     anchor_identity = expected_replacement_dependency_identity_by_role("high")[
         "openmeteo_ifs9_anchor"
     ]
     manifest = SimpleNamespace(
         source_id=anchor_identity.source_id,
         data_version=anchor_identity.data_version,
-        source_cycle_time=cycle,
+        source_cycle_time=anchor_cycle,
         artifact_path="openmeteo.json",
         product_metadata={},
     )
     selected: dict[str, object] = {}
+    built: dict[str, object] = {}
     written: list[dict[str, object]] = []
 
     def latest_coverage(_conn, **kwargs):
         selected.update(kwargs)
         return {"source_run_id": "causal-baseline"}
+
+    def build_seed(**kwargs):
+        built.update(kwargs)
+        return SimpleNamespace(
+            ok=True,
+            seed={
+                "ready": True,
+                "baseline_source_run_id": "causal-baseline",
+            },
+        )
 
     conn = sqlite3.connect(":memory:")
     result = cycle_advance._build_and_write_advance_seed(
@@ -438,13 +464,8 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
         raw_dir=tmp_path,
         seed_path=tmp_path,
         computed_at=datetime(2026, 6, 12, 12, tzinfo=UTC),
-        build_seed=lambda **_kwargs: SimpleNamespace(
-            ok=True,
-            seed={
-                "ready": True,
-                "baseline_source_run_id": "causal-baseline",
-            },
-        ),
+        carrier_cycle_time=carrier,
+        build_seed=build_seed,
         latest_baseline_coverage=latest_coverage,
         market_bins=lambda *_args, **_kwargs: ({"bin": "32C"},),
         write_seed=lambda _path, payload: written.append(dict(payload)),
@@ -460,8 +481,9 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
     )
 
     assert result == tmp_path / "seed.json"
-    assert selected["not_after_source_cycle_time"] == cycle
+    assert selected["not_after_source_cycle_time"] == carrier
     assert selected["as_of_time"] == datetime(2026, 6, 12, 12, tzinfo=UTC)
+    assert built["carrier_cycle_time"] == carrier
     assert written == [
         {
             "ready": True,
@@ -472,11 +494,39 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
     conn.close()
 
 
-def test_family_materializable_cycle_missing_anchor_blocks_and_names_gap() -> None:
+def test_day0_carrier_filter_keeps_newer_independent_openmeteo_manifest() -> None:
+    """ENS06 Day0 redecision may still use the later eligible OM12 provider input."""
+    ens06 = datetime(2026, 6, 12, 6, tzinfo=UTC)
+    om00 = _legs_for(
+        "high",
+        city="CityA",
+        target_date="2026-06-13",
+        cycle=datetime(2026, 6, 12, 0, tzinfo=UTC),
+    )[0]
+    om12 = _legs_for(
+        "high",
+        city="CityA",
+        target_date="2026-06-13",
+        cycle=datetime(2026, 6, 12, 12, tzinfo=UTC),
+    )[0]
+
+    assert cycle_advance._manifests_through_cycle((om00, om12), target_cycle=ens06) == (
+        om00,
+        om12,
+    )
+
+
+def test_family_materializable_cycle_missing_anchor_blocks_and_names_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """THE FINDING after AIFS removal: OM9 12Z exists only for CityA. The universe-wide freshest
     cycle says 12Z is materializable, but family_materializable_cycle for CityB MUST return None
     and name the missing OM9 leg."""
     cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
+    monkeypatch.setattr(
+        "src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: cyc,
+    )
     # Universe: CityA has the live OM9 leg at 12Z; CityB lacks it.
     manifests = (
         _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
@@ -484,14 +534,24 @@ def test_family_materializable_cycle_missing_anchor_blocks_and_names_gap() -> No
     )
     # CityA: fully materializable.
     got_a, missing_a = family_materializable_cycle(
-        manifests, city="CityA", target_date="2026-06-13", metric="high",
+        _conn(),
+        manifests,
+        city="CityA",
+        target_date="2026-06-13",
+        metric="high",
+        decision_time=cyc,
         expected_identity=expected_replacement_dependency_identity_by_role,
         latest_manifest=_fake_latest_manifest,
     )
     assert got_a == cyc and missing_a == ()
     # CityB: NOT materializable — anchor leg absent for THIS family. No false advance.
     got_b, missing_b = family_materializable_cycle(
-        manifests, city="CityB", target_date="2026-06-13", metric="high",
+        _conn(),
+        manifests,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        decision_time=cyc,
         expected_identity=expected_replacement_dependency_identity_by_role,
         latest_manifest=_fake_latest_manifest,
     )

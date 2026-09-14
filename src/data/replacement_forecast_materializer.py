@@ -2062,8 +2062,10 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISSING")
     else:
         openmeteo_source_cycle_time = _to_utc(request.openmeteo_anchor.source_cycle_time, field_name="openmeteo_source_cycle_time")
-        if openmeteo_source_cycle_time != request_source_cycle_time:
-            reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH")
+        if openmeteo_source_cycle_time > computed_at:
+            reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_IN_FUTURE")
+        if cycle_age_outside_bound(computed_at, openmeteo_source_cycle_time):
+            reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TOO_STALE")
     target_window = compute_target_local_day_window_utc(
         city_timezone=request.city_timezone,
         target_local_date=request.target_date,
@@ -2215,7 +2217,7 @@ def _cycle_monotone_block_reasons(
 def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest, *, metric: str) -> int:
     anchor = request.openmeteo_anchor
     target_date = _date_text(request.target_date)
-    source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
+    source_cycle_time = _to_utc(anchor.source_cycle_time, field_name="openmeteo_source_cycle_time").isoformat()
     # C1-AVAIL-CLOCK: anchor availability = proof of possession of the openmeteo
     # fetch — route through the canonical producer (auto-upgrades to the real
     # source_run.fetch_finished_at where present, else the request's existing

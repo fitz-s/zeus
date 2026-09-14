@@ -1830,7 +1830,7 @@ def _build_and_write_upgrade_seed(
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
 
-    expected_cycle = cycle_utc(source_cycle_time)
+    carrier_cycle = cycle_utc(source_cycle_time)
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -1838,10 +1838,6 @@ def _build_and_write_upgrade_seed(
         city=city,
         target_date=target_date,
         city_timezone=city_timezone,
-        cycle_admissible=lambda manifest: cycle_utc(
-            manifest.source_cycle_time
-        )
-        == expected_cycle,
     )
     if openmeteo is None:
         return None
@@ -1854,7 +1850,7 @@ def _build_and_write_upgrade_seed(
         city=city,
         target_date=target_date,
         temperature_metric=metric,
-        not_after_source_cycle_time=openmeteo.source_cycle_time,
+        not_after_source_cycle_time=carrier_cycle,
         as_of_time=computed_at,
     )
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
@@ -1872,6 +1868,7 @@ def _build_and_write_upgrade_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        carrier_cycle_time=carrier_cycle,
         **dict(day0_payload or {}),
     )
     if not seed_result.ok or seed_result.seed is None:

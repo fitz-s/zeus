@@ -182,6 +182,7 @@ def build_replacement_forecast_materialization_seed(
     computed_at: datetime | str,
     base_dir: Path | str,
     expires_at: datetime | str | None = None,
+    carrier_cycle_time: datetime | str | None = None,
     anchor_weight: float = 0.80,
     anchor_sigma_c: float = 3.00,
     day0_observed_extreme_c: float | None = None,
@@ -238,10 +239,18 @@ def build_replacement_forecast_materialization_seed(
     if openmeteo_manifest.source_id != expected["openmeteo_ifs9_anchor"].source_id or openmeteo_manifest.data_version != expected["openmeteo_ifs9_anchor"].data_version:
         reasons.append("OPENMETEO_MANIFEST_IDENTITY_MISMATCH")
     baseline_source_cycle_time = baseline_coverage.get("source_cycle_time")
+    baseline_cycle = None
     if baseline_source_cycle_time is not None and str(baseline_source_cycle_time).strip():
         baseline_cycle = _dt(baseline_source_cycle_time, field_name="baseline_source_cycle_time")
-        if openmeteo_manifest.source_cycle_time.astimezone(UTC) < baseline_cycle:
-            reasons.append("REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE")
+        if baseline_cycle > computed:
+            reasons.append("REPLACEMENT_MATERIALIZATION_SEED_HAS_FUTURE_DEPENDENCY")
+    carrier_cycle = (
+        _dt(carrier_cycle_time, field_name="carrier_cycle_time")
+        if carrier_cycle_time is not None
+        else baseline_cycle or openmeteo_manifest.source_cycle_time
+    )
+    if carrier_cycle_time is not None and baseline_cycle != carrier_cycle:
+        reasons.append("REPLACEMENT_MATERIALIZATION_ENS_CARRIER_BASELINE_CYCLE_MISMATCH")
     if reasons:
         return ReplacementForecastMaterializationSeedResult(status="BLOCKED", reason_codes=tuple(reasons), seed=None)
 
@@ -256,7 +265,8 @@ def build_replacement_forecast_materialization_seed(
             reason_codes=("REPLACEMENT_MATERIALIZATION_SEED_HAS_FUTURE_DEPENDENCY",),
             seed=None,
         )
-    source_cycle_time = openmeteo_manifest.source_cycle_time
+    # ENS supplies the shape carrier; the deterministic anchor has its own clock.
+    source_cycle_time = carrier_cycle
     expiry = (
         _dt(expires_at, field_name="expires_at")
         if expires_at is not None
@@ -278,6 +288,7 @@ def build_replacement_forecast_materialization_seed(
         "baseline_readiness_status": str(baseline_coverage.get("readiness_status") or ""),
         "baseline_source_available_at": baseline_available.isoformat(),
         "openmeteo_source_run_id": _manifest_source_run_id(openmeteo_manifest, role="openmeteo"),
+        "openmeteo_source_cycle_time": openmeteo_manifest.source_cycle_time.isoformat(),
         "openmeteo_source_available_at": openmeteo_manifest.source_available_at.isoformat(),
         "anchor_weight": float(anchor_weight),
         "anchor_sigma_c": float(anchor_sigma_c),

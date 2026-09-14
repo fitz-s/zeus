@@ -198,6 +198,7 @@ _SEED_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "baseline_data_version",
     "baseline_source_available_at",
     "openmeteo_source_available_at",
+    "openmeteo_source_cycle_time",
     "day0_observed_extreme_source",
     "day0_observed_extreme_observation_time",
     "day0_observed_extreme_unit",
@@ -236,6 +237,7 @@ class MaterializationSeed:
     baseline_data_version: str = ""
     baseline_source_available_at: str = ""
     openmeteo_source_available_at: str = ""
+    openmeteo_source_cycle_time: str = ""
     day0_observed_extreme_source: str = ""
     day0_observed_extreme_observation_time: str = ""
     day0_observed_extreme_unit: str = ""
@@ -328,6 +330,7 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
         baseline_data_version=optional_text["baseline_data_version"],
         baseline_source_available_at=optional_text["baseline_source_available_at"],
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
+        openmeteo_source_cycle_time=optional_text["openmeteo_source_cycle_time"],
         day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],
         day0_observed_extreme_observation_time=optional_text["day0_observed_extreme_observation_time"],
         day0_observed_extreme_unit=optional_text["day0_observed_extreme_unit"],
@@ -388,6 +391,7 @@ _REQUEST_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "baseline_source_available_at",
     "openmeteo_source_run_id",
     "openmeteo_source_available_at",
+    "openmeteo_source_cycle_time",
     "openmeteo_payload_json",
     "precision_metadata_json",
     "day0_observed_extreme_source",
@@ -427,6 +431,7 @@ class MaterializationRequest:
     baseline_source_available_at: str = ""
     openmeteo_source_run_id: str = ""
     openmeteo_source_available_at: str = ""
+    openmeteo_source_cycle_time: str = ""
     openmeteo_payload_json: str = ""
     precision_metadata_json: str = ""
     day0_observed_extreme_source: str = ""
@@ -516,6 +521,7 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
         baseline_source_available_at=optional_text["baseline_source_available_at"],
         openmeteo_source_run_id=optional_text["openmeteo_source_run_id"],
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
+        openmeteo_source_cycle_time=optional_text["openmeteo_source_cycle_time"],
         openmeteo_payload_json=optional_text["openmeteo_payload_json"],
         precision_metadata_json=optional_text["precision_metadata_json"],
         day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],

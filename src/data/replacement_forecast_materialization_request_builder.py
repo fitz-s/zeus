@@ -247,6 +247,7 @@ def build_replacement_forecast_materialization_request(
         "precision_metadata_json": precision_metadata_json,
     }
     for optional_key in (
+        "openmeteo_source_cycle_time",
         "openmeteo_manifest_json",
         "openmeteo_anchor_artifact_id",
         "latitude",
@@ -323,7 +324,10 @@ def build_materialize_request_dataclass(
         openmeteo_payload,
         city_timezone=_required_text(request_json, "city_timezone"),
         target_local_date=target_date,
-        source_cycle_time=source_cycle_time,
+        source_cycle_time=_dt(
+            request_json.get("openmeteo_source_cycle_time", source_cycle_time),
+            field_name="openmeteo_source_cycle_time",
+        ),
     )
     precision_metadata_path = _existing_path(request_json, "precision_metadata_json", base_dir=base_path)
     precision_payload = _json_file(Path(precision_metadata_path))

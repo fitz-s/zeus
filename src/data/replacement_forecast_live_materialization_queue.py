@@ -1562,6 +1562,16 @@ def _seed_source_cycle_boundary(
         and baseline_cycle < latest_ensemble_cycle
     ):
         return "baseline_input_hwm", latest_ensemble_cycle.isoformat()
+    if (
+        latest_ensemble_cycle is not None
+        and baseline_cycle == latest_ensemble_cycle
+        and request_cycle != baseline_cycle
+        and not seed.get("openmeteo_source_cycle_time")
+    ):
+        # SCOPE: a legacy OM-clock seed with an exact current ENS baseline.
+        # DRAIN: terminalize once; the producer rebuilds using that ENS carrier.
+        # RESET: the new seed preserves the independent OM source clock.
+        return "legacy_anchor_clock", latest_ensemble_cycle.isoformat()
     if latest_ensemble_cycle is not None and request_cycle < latest_ensemble_cycle:
         return "current_ensemble_hwm", latest_ensemble_cycle.isoformat()
     if latest_ensemble_cycle is not None and request_cycle > latest_ensemble_cycle:
@@ -5247,6 +5257,8 @@ def _prepare_seed_requests_with_connection(
                     reason_code = (
                         "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_REGRESSION"
                     )
+                elif regression_basis == "legacy_anchor_clock":
+                    reason_code = "REPLACEMENT_MATERIALIZATION_LEGACY_ANCHOR_CLOCK"
                 elif regression_basis in {
                     "current_ensemble_hwm",
                     "baseline_input_hwm",
@@ -6183,6 +6195,8 @@ def _process_claimed_materialization_batch(
                 reason_code = (
                     "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVATION_REGRESSION"
                 )
+            elif regression_basis == "legacy_anchor_clock":
+                reason_code = "REPLACEMENT_MATERIALIZATION_LEGACY_ANCHOR_CLOCK"
             elif regression_basis in {
                 "current_ensemble_hwm",
                 "baseline_input_hwm",

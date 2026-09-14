@@ -1401,6 +1401,7 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
 
 def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
@@ -1481,6 +1482,23 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
     finally:
         conn.close()
 
+    monkeypatch.setattr(
+        "src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: datetime(2026, 6, 6, 0, tzinfo=timezone.utc),
+    )
+    built: dict[str, object] = {}
+    real_build_seed = seed_discovery.build_replacement_forecast_materialization_seed
+
+    def _capture_build_seed(**kwargs):
+        built.update(kwargs)
+        return real_build_seed(**kwargs)
+
+    monkeypatch.setattr(
+        seed_discovery,
+        "build_replacement_forecast_materialization_seed",
+        _capture_build_seed,
+    )
+
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=db_path,
         raw_manifest_dir=raw_dir,
@@ -1493,7 +1511,9 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
     assert report.failed_count == 0
     seed = json.loads(Path(report.written_seed_files[0]).read_text())
     assert seed["baseline_source_run_id"] == "causal-baseline-run"
-    assert seed["source_cycle_time"] == "2026-06-06T06:00:00+00:00"
+    assert seed["source_cycle_time"] == "2026-06-06T00:00:00+00:00"
+    assert seed["openmeteo_source_cycle_time"] == "2026-06-06T06:00:00+00:00"
+    assert built["carrier_cycle_time"] == datetime(2026, 6, 6, 0, tzinfo=timezone.utc)
 
 
 def test_seed_builder_boundary_rejects_future_coverage_computation(
@@ -1558,7 +1578,7 @@ def test_seed_builder_boundary_rejects_future_coverage_computation(
         ),
         (
             {"source_cycle_time": "2026-06-06T06:00:00+00:00"},
-            "REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE",
+            "REPLACEMENT_MATERIALIZATION_SEED_HAS_FUTURE_DEPENDENCY",
         ),
     ),
 )

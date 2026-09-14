@@ -326,3 +326,60 @@ def test_request_builder_cli_writes_queue_request(tmp_path) -> None:
     assert report["status"] == "READY"
     assert queued["baseline_source_run_id"] == "b0-run"
     assert queued["precision_metadata_json"] == str(tmp_path / "precision_metadata.json")
+
+
+def test_request_retains_independent_anchor_and_carrier_clocks(tmp_path) -> None:
+    from datetime import datetime
+
+    for carrier_hour, anchor_hour in ((6, 12), (12, 6), (6, 6)):
+        seed = _write_inputs(tmp_path)
+        seed.update(computed_at="2026-06-06T14:00:00+00:00",
+                    expires_at="2026-06-06T15:00:00+00:00",
+                    baseline_source_available_at="2026-06-06T13:00:00+00:00",
+                    openmeteo_source_available_at="2026-06-06T13:00:00+00:00")
+        carrier = f"2026-06-06T{carrier_hour:02d}:00:00+00:00"
+        anchor = f"2026-06-06T{anchor_hour:02d}:00:00+00:00"
+        seed["source_cycle_time"] = carrier
+        seed["openmeteo_source_cycle_time"] = anchor
+        result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+        assert result.ok, result.reason_codes
+        request = result.request
+        assert request is not None
+        assert request["source_cycle_time"] == carrier
+        assert request["openmeteo_source_cycle_time"] == anchor
+        typed = build_materialize_request_dataclass(request, base_dir=tmp_path)
+        assert typed.source_cycle_time == datetime.fromisoformat(carrier)
+        assert typed.openmeteo_anchor.source_cycle_time == datetime.fromisoformat(anchor)
+
+
+
+def test_seed_requires_the_explicit_current_ens_carrier_without_relabeling_baseline(tmp_path) -> None:
+    from src.data.raw_forecast_artifact_manifest import read_manifest
+    from src.data.replacement_forecast_materialization_seed_builder import build_replacement_forecast_materialization_seed
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+    from tests.test_replacement_forecast_seed_discovery import _write_raw_inputs
+
+    raw = tmp_path / "raw"
+    _write_raw_inputs(raw)
+    coverage = dict(source_run_id="ens06", source_id="ecmwf_open_data",
+                    data_version=expected_replacement_dependency_identity_by_role("high")["baseline_b0"].data_version,
+                    temperature_metric="high", completeness_status="COMPLETE", readiness_status="LIVE_ELIGIBLE",
+                    expires_at="2026-06-07T00:00:00+00:00", computed_at="2026-06-06T13:00:00+00:00",
+                    source_cycle_time="2026-06-06T06:00:00+00:00", source_available_at="2026-06-06T13:00:00+00:00",
+                    city_id="NYC", city_timezone="America/New_York")
+    kwargs = dict(city="NYC", target_date="2026-06-08", temperature_metric="high",
+                  market_bins=({"range_label": "75°F", "range_low": 75.0, "range_high": 75.0},),
+                  baseline_coverage=coverage, openmeteo_manifest=read_manifest(raw / "openmeteo.manifest.json"),
+                  openmeteo_payload_json=raw / "openmeteo.json", precision_metadata_json=raw / "precision_metadata.json",
+                  computed_at="2026-06-06T14:00:00+00:00", base_dir=tmp_path)
+    blocked = build_replacement_forecast_materialization_seed(
+        **kwargs, carrier_cycle_time="2026-06-06T12:00:00+00:00"
+    )
+    assert blocked.seed is None
+    assert "REPLACEMENT_MATERIALIZATION_ENS_CARRIER_BASELINE_CYCLE_MISMATCH" in blocked.reason_codes
+    ready = build_replacement_forecast_materialization_seed(
+        **kwargs, carrier_cycle_time=coverage["source_cycle_time"]
+    )
+    assert ready.ok, ready.reason_codes
+    assert ready.seed["source_cycle_time"] == coverage["source_cycle_time"]
+    assert ready.seed["openmeteo_source_cycle_time"] == "2026-06-06T00:00:00+00:00"

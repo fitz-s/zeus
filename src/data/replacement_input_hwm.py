@@ -2016,13 +2016,34 @@ def _latest_eligible_ensemble_input_mark(
         decision_time.astimezone(UTC).isoformat(),
     ]
     if "authority" in columns:
-        predicates.append("COALESCE(authority, 'VERIFIED') = 'VERIFIED'")
+        predicates.append("authority = 'VERIFIED'")
     if "causality_status" in columns:
-        predicates.append("COALESCE(causality_status, 'OK') = 'OK'")
+        predicates.append("causality_status = 'OK'")
     if "boundary_ambiguous" in columns:
-        predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
+        predicates.append("boundary_ambiguous = 0")
     if "contributes_to_target_extrema" in columns:
         predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+    # Match the materializer's source/product, coordinate and target-window law.
+    for column, expected_value in (
+        ("source_id", "ecmwf_open_data"),
+        ("model_version", "ecmwf_ens"),
+        ("forecast_window_attribution_status", "FULLY_INSIDE_TARGET_LOCAL_DAY"),
+    ):
+        if column in columns:
+            predicates.append(f"{column} = ?")
+            params.append(expected_value)
+    if "dataset_id" in columns:
+        from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
+            expected_replacement_dependency_identity_by_role,
+        )
+
+        expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
+            "baseline_b0"
+        ].data_version
+        if expected_dataset is None:
+            return None
+        predicates.append("dataset_id = ?")
+        params.append(expected_dataset)
     if "source_run_id" in columns:
         source_authority = ensemble_source_authority_predicate(
             conn,

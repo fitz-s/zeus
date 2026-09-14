@@ -297,17 +297,16 @@ def _manifests_through_cycle(
     *,
     target_cycle: datetime,
 ) -> tuple[RawForecastArtifactManifest, ...]:
-    """Exclude deterministic manifests newer than an exact carrier cycle."""
+    """Keep independently-clocked provider manifests for an ENS-carrier reseed.
 
-    return tuple(
-        manifest
-        for manifest in manifests
-        if (
-            (manifest_cycle := _parse_cycle(manifest.source_cycle_time))
-            is not None
-            and manifest_cycle <= target_cycle
-        )
-    )
+    ``target_cycle`` is the posterior's eligible ENS carrier.  It must never
+    trim a deterministic provider's own current manifest: an OM12 artifact is
+    valid current evidence for an ENS06 carrier and its exact cycle is carried
+    separately by the seed.  Callers retain this helper so the Day0 path keeps
+    one explicit carrier boundary without reintroducing a shared-cycle filter.
+    """
+    del target_cycle
+    return manifests
 
 
 def _day0_conditioning_identity(
@@ -595,26 +594,28 @@ def freshest_materializable_cycle(conn: sqlite3.Connection) -> datetime | None:
 
 
 def family_materializable_cycle(
+    conn: sqlite3.Connection,
     manifests,
     *,
     city: str,
     target_date: str,
     metric: str,
+    decision_time: datetime,
     city_timezone: str | None = None,
     expected_identity,
     latest_manifest,
 ) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
     """FINDING 2 (external review 2026-06-12) — the materializable cycle AT FAMILY SCOPE.
 
-    This is the SAME authority, narrowed to a scope: a cycle is materializable for THIS family iff
-    the current live dependency identity's raw artifact leg has a manifest for THIS
-    (city, target_date). After the AIFS removal, that is the OM9 anchor leg. Returns
-    (cycle, missing_legs). cycle is None when the live leg's manifest is absent for the family;
-    missing_legs is the tuple of (role, source_id) legs that were absent.
+    A scope may build only when it has an eligible deterministic anchor manifest,
+    but the returned cycle is its latest eligible ENS carrier.  OM and ENS use
+    independent source clocks; treating the newest OM cycle as a posterior
+    carrier makes valid ENS06 + OM12 inputs queue as carrier12 and fail the
+    current-ENS HWM.  Returns ``(ens_carrier, missing_legs)``.  ``None`` means
+    the anchor is missing or no eligible ENS carrier exists.
     """
     expected = expected_identity(metric)
     legs = (("openmeteo_ifs9_anchor", expected["openmeteo_ifs9_anchor"]),)
-    leg_cycles: list[datetime] = []
     missing: list[tuple[str, str]] = []
     for role, identity in legs:
         man = latest_manifest(
@@ -634,10 +635,20 @@ def family_materializable_cycle(
         if cyc is None:
             missing.append((role, str(identity.source_id)))
             continue
-        leg_cycles.append(cyc.astimezone(UTC) if cyc.tzinfo else cyc.replace(tzinfo=UTC))
-    if missing or not leg_cycles:
+    if missing:
         return None, tuple(missing)
-    return min(leg_cycles), ()
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    carrier = latest_eligible_ensemble_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    return carrier, ()
 
 
 def _latest_posterior_consumed_cycle(
@@ -2000,10 +2011,12 @@ def enqueue_cycle_advance_reseeds(
                 city_cfg = cities_by_name.get(city)
                 city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
                 family_cycle, missing_legs = family_materializable_cycle(
+                    conn,
                     manifests,
                     city=city,
                     target_date=target_date,
                     metric=metric,
+                    decision_time=now,
                     city_timezone=city_timezone,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                     latest_manifest=_latest_manifest,
@@ -2222,6 +2235,7 @@ def enqueue_cycle_advance_reseeds(
                     raw_dir=raw_dir,
                     seed_path=seed_path,
                     computed_at=now,
+                    carrier_cycle_time=target_cycle_iso,
                     build_seed=build_replacement_forecast_materialization_seed,
                     latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
                     market_bins=market_bins_for_replacement_seed,
@@ -2526,10 +2540,12 @@ def enqueue_single_family_cycle_advance_reseed(
         )
         target_cycle_iso = str(verdict["target_cycle"] or freshest.isoformat())
         family_cycle, missing_legs = family_materializable_cycle(
+            conn,
             manifests,
             city=city,
             target_date=target_date,
             metric=metric,
+            decision_time=now,
             expected_identity=lambda _metric: expected,
             latest_manifest=_latest_manifest,
         )
@@ -2705,6 +2721,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         raw_dir=raw_dir,
                         seed_path=seed_path,
                         computed_at=now,
+                        carrier_cycle_time=target_cycle_iso,
                         build_seed=build_replacement_forecast_materialization_seed,
                         latest_baseline_coverage=(
                             latest_baseline_coverage_for_replacement_seed
@@ -2858,6 +2875,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         raw_dir=raw_dir,
                         seed_path=seed_path,
                         computed_at=now,
+                        carrier_cycle_time=target_cycle_iso,
                         build_seed=build_replacement_forecast_materialization_seed,
                         latest_baseline_coverage=(
                             latest_baseline_coverage_for_replacement_seed
@@ -2973,6 +2991,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 raw_dir=raw_dir,
                 seed_path=seed_path,
                 computed_at=now,
+                carrier_cycle_time=target_cycle_iso,
                 build_seed=build_replacement_forecast_materialization_seed,
                 latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
                 market_bins=market_bins_for_replacement_seed,
@@ -3099,6 +3118,7 @@ def enqueue_single_family_cycle_advance_reseed(
             raw_dir=raw_dir,
             seed_path=seed_path,
             computed_at=now,
+            carrier_cycle_time=target_cycle_iso,
             build_seed=build_replacement_forecast_materialization_seed,
             latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
             market_bins=market_bins_for_replacement_seed,
@@ -3694,6 +3714,7 @@ def _build_and_write_advance_seed(
     raw_dir: Path,
     seed_path: Path,
     computed_at: datetime,
+    carrier_cycle_time: datetime | str,
     build_seed,
     latest_baseline_coverage,
     market_bins,
@@ -3719,10 +3740,10 @@ def _build_and_write_advance_seed(
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
     absent (the scope's raw inputs for the fresh cycle are not yet on disk — recorded as
-    manifest_missing, retried next tick once they land). The seed builder pins source_cycle_time to
-    the LATEST manifest cycle, so the re-materialized posterior advances onto the fresh cycle and the
-    materializer's monotone guard admits it (request cycle >= current posterior cycle). Mirrors the
-    fusion-upgrade trigger's _build_and_write_upgrade_seed (single seed-build shape)."""
+    manifest_missing, retried next tick once they land). ``carrier_cycle_time``
+    is the eligible ENS carrier used by the marker and the baseline lookup;
+    the selected OM manifest retains its own exact provider cycle in the seed.
+    Mirrors the fusion-upgrade trigger's _build_and_write_upgrade_seed (single seed-build shape)."""
     def _require_deadline() -> None:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             raise TimeoutError("DAY0_STATION_RESEED_DEADLINE_EXCEEDED")
@@ -3753,7 +3774,7 @@ def _build_and_write_advance_seed(
         city=city,
         target_date=target_date,
         temperature_metric=metric,
-        not_after_source_cycle_time=openmeteo.source_cycle_time,
+        not_after_source_cycle_time=carrier_cycle_time,
         as_of_time=computed_at,
     )
     _require_deadline()
@@ -3773,6 +3794,7 @@ def _build_and_write_advance_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        carrier_cycle_time=carrier_cycle_time,
         day0_observed_extreme_c=day0_observed_extreme_c,
         day0_observed_extreme_source=day0_observed_extreme_source,
         day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,

@@ -6859,3 +6859,83 @@ def test_processed_seed_cache_never_regresses_source_clock(tmp_path) -> None:
     assert retained == latest
     assert retained.stat().st_ino == current.stat().st_ino
     assert json.loads(retained.read_text(encoding="utf-8")) == current_seed
+
+
+
+def test_legacy_anchor_clock_seed_drains_but_current_carrier_keeps_hwm_guards(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT, temperature_metric TEXT,
+            source_cycle_time TEXT, computed_at TEXT, provenance_json TEXT, runtime_layer TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(runtime_layer, city, target_date, temperature_metric, computed_at);
+        CREATE TABLE source_run(source_run_id TEXT, source_cycle_time TEXT, status TEXT);
+        INSERT INTO source_run VALUES('ens06', '2026-09-14T06:00:00+00:00', 'SUCCESS');
+    """)
+    conn.commit()
+    conn.close()
+    current = datetime.fromisoformat("2026-09-14T06:00:00+00:00")
+    monkeypatch.setattr(input_hwm, "latest_eligible_ensemble_input_cycle", lambda *a, **kw: current)
+    legacy = {
+        "city": "Tokyo", "target_date": "2026-09-15", "temperature_metric": "high",
+        "source_cycle_time": "2026-09-14T12:00:00+00:00", "baseline_source_run_id": "ens06",
+    }
+    assert queue_mod._seed_source_cycle_boundary(forecast_db=db_path, seed=legacy) == (
+        "legacy_anchor_clock", current.isoformat()
+    )
+    repaired = {**legacy, "source_cycle_time": current.isoformat(),
+                "openmeteo_source_cycle_time": legacy["source_cycle_time"]}
+    assert queue_mod._seed_source_cycle_boundary(forecast_db=db_path, seed=repaired) is None
+    newer = current + timedelta(hours=6)
+    monkeypatch.setattr(input_hwm, "latest_eligible_ensemble_input_cycle", lambda *a, **kw: newer)
+    assert queue_mod._seed_source_cycle_boundary(forecast_db=db_path, seed=repaired) == (
+        "baseline_input_hwm", newer.isoformat()
+    )
+
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("field,bad_value", [
+    ("source_id", "another_source"), ("model_version", "another_model"),
+    ("dataset_id", "old_coordinate_profile"),
+    ("forecast_window_attribution_status", "PARTIALLY_INSIDE_TARGET_LOCAL_DAY"),
+    ("authority", None), ("causality_status", None), ("boundary_ambiguous", None),
+])
+def test_current_ensemble_hwm_uses_the_materializer_source_and_window_scope(metric, field, bad_value):
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE ensemble_snapshots (
+        snapshot_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
+        source_cycle_time TEXT, source_available_at TEXT, source_id TEXT,
+        model_version TEXT, dataset_id TEXT, forecast_window_attribution_status TEXT,
+        authority TEXT, causality_status TEXT, boundary_ambiguous INTEGER,
+        contributes_to_target_extrema INTEGER
+    )""")
+    values = dict(snapshot_id=1, city="Tokyo", target_date="2026-09-15", temperature_metric=metric,
+                  source_cycle_time="2026-09-14T06:00:00+00:00",
+                  source_available_at="2026-09-14T19:00:00+00:00", source_id="ecmwf_open_data",
+                  model_version="ecmwf_ens",
+                  dataset_id=expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version,
+                  forecast_window_attribution_status="FULLY_INSIDE_TARGET_LOCAL_DAY",
+                  authority="VERIFIED", causality_status="OK", boundary_ambiguous=0,
+                  contributes_to_target_extrema=1)
+    conn.execute("INSERT INTO ensemble_snapshots VALUES (" + ",".join("?" for _ in values) + ")", tuple(values.values()))
+    values.update(snapshot_id=2, source_cycle_time="2026-09-14T12:00:00+00:00")
+    values[field] = bad_value
+    conn.execute("INSERT INTO ensemble_snapshots VALUES (" + ",".join("?" for _ in values) + ")", tuple(values.values()))
+    try:
+        assert latest_eligible_ensemble_input_cycle(
+            conn, city="Tokyo", target_date="2026-09-15", metric=metric,
+            decision_time=datetime.fromisoformat("2026-09-14T21:00:00+00:00"),
+        ) == datetime.fromisoformat("2026-09-14T06:00:00+00:00")
+    finally:
+        conn.close()
