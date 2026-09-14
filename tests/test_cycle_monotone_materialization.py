@@ -1759,6 +1759,110 @@ def test_single_family_reseed_enqueues_when_target_local_day_still_open(
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
+def test_explicit_scopes_skip_target_local_day_ended(tmp_path, monkeypatch) -> None:
+    """The ENS-wake / explicit-scopes lane (enqueue_cycle_advance_reseeds with scopes=[...])
+    has no plan behind it, so it must apply the local-day-end predicate to its own scope
+    directly: London 2026-09-13 at 03:07Z 09-14 (4h into an already-ended local day) must
+    build zero seeds and count exactly one skip, never reaching family_materializable_cycle."""
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: datetime(2026, 9, 13, 6, tzinfo=UTC),
+    )
+
+    def _fail_if_called(*_args, **_kwargs):
+        pytest.fail("target-local-day-ended scope must not reach family_materializable_cycle")
+
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle", _fail_if_called)
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fail_if_called)
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 9, 14, 3, 7, tzinfo=UTC),
+        limit=5,
+        scopes=(("London", "2026-09-13", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+
+    assert report["seeds_enqueued"] == 0
+    assert report[cycle_advance.RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] == 1
+    assert not (tmp_path / "seeds").exists()
+
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT 1 FROM cycle_advance_enqueues
+        WHERE city = 'London' AND target_date = '2026-09-13' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row is None
+
+
+def test_explicit_scopes_enqueues_when_target_local_day_still_open(tmp_path, monkeypatch) -> None:
+    """Same lane, same family, 40 minutes before London's local-day rollover (23:00Z): the day
+    is still open, so the scope must enqueue exactly as before this predicate existed."""
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+
+    target_cycle = datetime(2026, 9, 13, 6, tzinfo=UTC)
+    seed_dir = tmp_path / "seeds"
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: target_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+    # Target date is same-day as computed_at, so the (unrelated) Day0-observed-extreme
+    # requirement would otherwise gate this candidate on evidence this test doesn't supply.
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._day0_observed_extreme_required",
+        lambda **_kwargs: False,
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        seed_file = Path(
+            kwargs.get("output_path") or seed_dir / "London.2026-09-13.high.json"
+        )
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 9, 13, 22, 30, tzinfo=UTC),
+        limit=5,
+        scopes=(("London", "2026-09-13", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+
+    assert report[cycle_advance.RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] == 0
+    assert report["seeds_enqueued"] == 1
+
+
 def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
     tmp_path, monkeypatch
 ) -> None:

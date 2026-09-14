@@ -1761,6 +1761,7 @@ def enqueue_cycle_advance_reseeds(
         "causal_baseline_already_consumed": 0,
         "retry_pending": 0,
         "day0_identity_incomplete": 0,
+        RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED: 0,
         "enqueued": [],
     }
     if not forecast_db.exists():
@@ -1768,9 +1769,12 @@ def enqueue_cycle_advance_reseeds(
         return report
 
     if scopes is None:
+        # No explicit min_target_date: the plan derives its own floor as the earliest
+        # city-local date still open across the roster (_default_min_target_date), not a
+        # single UTC `now.date()` -- that UTC-only floor is exactly what dropped a western
+        # city's still-open local day up to ~14h early.
         plan = build_replacement_forecast_current_target_plan(
             forecast_db,
-            min_target_date=now.date().isoformat(),
             require_raw_artifacts=False,
             now_utc=now,
         )
@@ -1794,6 +1798,29 @@ def enqueue_cycle_advance_reseeds(
         )
 
         timezone_by_city = _city_timezone_by_name()
+        deduped_scopes = dict.fromkeys(
+            (
+                str(city).strip(),
+                str(target_date).strip(),
+                str(metric).strip(),
+            )
+            for city, target_date, metric in scopes
+            if str(city).strip()
+            and str(target_date).strip()
+            and str(metric).strip() in {"high", "low"}
+        )
+        # The ENS-wake / explicit-scopes lane has no plan behind it (no min_target_date floor
+        # ever applies here), so it is the one producer that must apply the local-day-end
+        # predicate to its own scopes directly rather than inherit it from a fetched row set.
+        open_scopes: list[tuple[str, str, str]] = []
+        for city, target_date, metric in deduped_scopes:
+            city_timezone = timezone_by_city.get(city)
+            if city_timezone and has_city_local_day_ended(target_date, city_timezone, now):
+                report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] = (
+                    int(report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED]) + 1
+                )
+                continue
+            open_scopes.append((city, target_date, metric))
         candidates = tuple(
             (
                 city,
@@ -1806,17 +1833,7 @@ def enqueue_cycle_advance_reseeds(
                     now_utc=now,
                 ),
             )
-            for city, target_date, metric in dict.fromkeys(
-                (
-                    str(city).strip(),
-                    str(target_date).strip(),
-                    str(metric).strip(),
-                )
-                for city, target_date, metric in scopes
-                if str(city).strip()
-                and str(target_date).strip()
-                and str(metric).strip() in {"high", "low"}
-            )
+            for city, target_date, metric in open_scopes
         )
 
     manifests = (

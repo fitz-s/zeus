@@ -2123,6 +2123,33 @@ def _city_timezone_by_name() -> dict[str, str]:
     return out
 
 
+def _default_min_target_date(now_utc: datetime) -> str:
+    """Earliest city-local calendar date still open across the whole roster, at ``now_utc``.
+
+    A single UTC `now_utc.date()` floor drops a still-open local day up to ~14h early for a
+    city west of UTC (its local date has not yet rolled to UTC's) -- exactly the under-
+    inclusion `has_city_local_day_ended`'s post-fetch filter cannot repair, since that filter
+    only narrows what the SQL already fetched. Widening the floor to the earliest local date
+    anyone on the roster is still trading admits at most one UTC day of extra rows (city UTC
+    offsets span at most +-14h); the post-fetch filter then drops whichever of those rows have
+    actually ended in their own city-local calendar, so the net effect is: eastern ended days
+    excluded (as before), western still-open days now included.
+    """
+
+    timezones = set(_city_timezone_by_name().values())
+    if not timezones:
+        return now_utc.date().isoformat()
+    earliest = now_utc.date()
+    for tz_name in timezones:
+        try:
+            local_date = now_utc.astimezone(ZoneInfo(tz_name)).date()
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+        if local_date < earliest:
+            earliest = local_date
+    return earliest.isoformat()
+
+
 def _day0_observed_extreme_required(
     *,
     city: str,
@@ -2264,7 +2291,7 @@ def build_replacement_forecast_current_target_plan(
     minimum_target_date = (
         min_target_date.isoformat()
         if isinstance(min_target_date, date)
-        else str(min_target_date or _ref_clock.date().isoformat())
+        else str(min_target_date or _default_min_target_date(_ref_clock))
     )
     required_openmeteo_cycle_iso: str | None = None
     if isinstance(required_openmeteo_source_cycle_time, datetime):

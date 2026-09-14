@@ -3668,12 +3668,11 @@ def test_current_target_plan_keeps_western_city_open_before_its_local_midnight(
     new post-fetch predicate must not ALSO drop this still-open row -- pinning the "still open ->
     keep" direction for a city west of UTC, symmetric with the east-of-UTC exclusion above.
 
-    NOTE: this does NOT pin the under-inclusion claim for the *default* `min_target_date`
-    floor (`now.date().isoformat()`, used by the scopes=None poll-lane caller): that floor is
-    computed upstream of this predicate and is unchanged by this fix. Verified empirically that
-    both parent and fixed code drop SaoPaulo/2026-09-13 from the SQL fetch itself when
-    min_target_date defaults at 02:30Z 09-14 (`target_date >= '2026-09-14'`) -- a separate,
-    pre-existing floor-selection issue this task's two sites do not touch or fix."""
+    This test pins the case with an explicit min_target_date (how the reactor/Day0-bridge/
+    explicit-scopes callers effectively behave). See
+    test_current_target_plan_default_floor_admits_still_open_western_local_day below for the
+    *default* min_target_date floor case (fixed separately, in a follow-up commit, by
+    _default_min_target_date)."""
     db = tmp_path / "forecasts.db"
     _create_ended_day_probe_db(db)
     _ended_day_probe_timezones(monkeypatch)
@@ -3686,3 +3685,28 @@ def test_current_target_plan_keeps_western_city_open_before_its_local_midnight(
     )
 
     assert _scope_present(plan, "SaoPaulo", "2026-09-13")
+
+
+def test_current_target_plan_default_floor_admits_still_open_western_local_day(
+    tmp_path, monkeypatch
+) -> None:
+    """At 02:30Z 09-14 with NO explicit min_target_date (the scopes=None poll-lane caller's own
+    calling convention after this fix): a bare UTC `now.date()` floor ('2026-09-14') would drop
+    SaoPaulo/2026-09-13 from the SQL fetch itself before the local-day-end predicate ever runs
+    -- that is the under-inclusion the previous commit correctly identified but could not fix
+    (a post-fetch filter can only narrow, never widen, what the SQL already returned).
+    `_default_min_target_date` widens the floor to the earliest city-local date still open
+    across the roster (here, SaoPaulo's 09-13), so the row reaches the post-fetch filter and
+    survives it. London's already-ended 09-13 must still be excluded by that same filter."""
+    db = tmp_path / "forecasts.db"
+    _create_ended_day_probe_db(db)
+    _ended_day_probe_timezones(monkeypatch)
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        require_raw_artifacts=False,
+        now_utc=datetime(2026, 9, 14, 2, 30, tzinfo=timezone.utc),
+    )
+
+    assert _scope_present(plan, "SaoPaulo", "2026-09-13")
+    assert not _scope_present(plan, "London", "2026-09-13")
