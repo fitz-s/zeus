@@ -2188,6 +2188,282 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
     ) == 500
 
 
+def _post_local_day0_family_common_setup(monkeypatch, *, fact):
+    """Shared scaffolding for the post-local-day METAR/no-fact finality tests.
+
+    Both tests drive the FRESH (non-pinned) `_prepare_current_global_probability_family`
+    path for a HELD_MONITOR position whose target local day has already ended
+    (`family.target_date` is one day before `decision_time`'s São Paulo local date).
+    `fact` is the mocked `_latest_authorized_day0_fact` return value (a METAR dict,
+    or None for the no-observation/London shape).
+    """
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.qkernel_spine_bridge as qkernel
+    import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+    candidates = (
+        SimpleNamespace(
+            condition_id="condition-30",
+            yes_token_id="yes-30",
+            no_token_id="no-30",
+            bin=SimpleNamespace(low=None, high=30.0, unit="C", label="<30C"),
+        ),
+        SimpleNamespace(
+            condition_id="condition-30plus",
+            yes_token_id="yes-30plus",
+            no_token_id="no-30plus",
+            bin=SimpleNamespace(low=30.0, high=None, unit="C", label="30C+"),
+        ),
+    )
+    family = SimpleNamespace(
+        city="Sao Paulo",
+        target_date="2026-06-08",
+        metric="high",
+        family_id="Sao Paulo|2026-06-08|high",
+        binding_hash="family-binding-sp",
+        candidates=candidates,
+    )
+    event = SimpleNamespace(
+        event_id="event-post-local-sp",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="snapshot-post-local-sp",
+        payload_json=json.dumps(
+            {
+                "city": "Sao Paulo",
+                "target_date": "2026-06-08",
+                "metric": "high",
+            }
+        ),
+    )
+
+    class _Bound:
+        def evaluate(self, _request):
+            return SimpleNamespace(
+                status="CANDIDATE_FAMILY_READY",
+                candidate_family=family,
+            )
+
+    monkeypatch.setattr(era, "EventBoundDecisionEngine", _Bound)
+    monkeypatch.setattr(era, "_event_family_market_topology_rows", lambda *_: [0, 1])
+    monkeypatch.setattr(
+        era,
+        "_topology_candidate_from_market_event",
+        lambda row, *_: candidates[int(row)],
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "market_bin_topology_hash_from_rows",
+        lambda *_args, **_kwargs: "topology-hash",
+    )
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {
+            "Sao Paulo": SimpleNamespace(
+                timezone="America/Sao_Paulo",
+                settlement_unit="C",
+                settlement_source_type="wu",
+                wu_station="SBSP",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit, "_final_daily_observation_extreme", lambda **_: None
+    )
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fact)
+    monkeypatch.setattr(
+        readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        qkernel,
+        "build_forecast_case",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        qkernel,
+        "build_outcome_space",
+        lambda *_a, **_k: SimpleNamespace(
+            resolution=SimpleNamespace(measurement_unit="C"),
+            bins=tuple(
+                SimpleNamespace(
+                    bin_id=candidate.condition_id,
+                    condition_id=candidate.condition_id,
+                    yes_token_id=candidate.yes_token_id,
+                    no_token_id=candidate.no_token_id,
+                )
+                for candidate in candidates
+            ),
+            topology_hash="topology-hash",
+        ),
+    )
+    monkeypatch.setattr(qkernel, "_event_resolution_identity", lambda *_: "resolution")
+    monkeypatch.setattr(era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_: ())
+    monkeypatch.setattr(era, "_day0_payoff_truth_rows", lambda **_: ())
+
+    observation_conn = sqlite3.connect(":memory:")
+    observation_conn.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, running_max REAL, utc_timestamp TEXT, "
+        "local_timestamp TEXT, source TEXT, causality_status TEXT, authority TEXT, "
+        "source_role TEXT, training_allowed INTEGER)"
+    )
+    decision_time = datetime(2026, 6, 10, 2, 0, tzinfo=timezone.utc)
+    return era, event, observation_conn, decision_time
+
+
+def test_day0_post_local_day_metar_monitor_rebuilds_remaining_carrier(monkeypatch):
+    """FIX (X-BB-postday-finality): a METAR-sourced Day0 fact whose local day has
+    already ended must still feed `_edli_day0_provisional_revision_likelihood`
+    into the HELD_MONITOR family, exactly as it already does during the live
+    local day (`_provisional_day0_revision_likelihood` -> METAR branch ->
+    `same_station_preliminary_report_survival_likelihood`). Before the fix, the
+    producer gate at `_prepare_current_global_probability_family` compared
+    `day0_evidence_finality(...)` by strict equality to
+    `DAY0_PROVISIONAL_CURRENT_SNAPSHOT` only; a METAR source always classifies
+    as `DAY0_MONOTONE_SETTLEMENT_BOUND`, so the likelihood was never built and
+    the family raised `DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISSING` on every
+    monitor cycle for a held position whose local day ended (the live symptom
+    on positions 5655b06f-d10 / e8d47201-444). This test FAILS on parent
+    9408a5658 with that exact ValueError and PASSES after broadening the gate
+    to accept both finality values, mirroring the already-correct consumers.
+    """
+    observation_time = "2026-06-08T22:00:00+00:00"
+    fact = {
+        "observation_source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "observation_available_at": observation_time,
+        "observed_extreme_native": 29.5,
+        "unit": "C",
+        "source": "aviationweather_metar",
+        "station_id": "SBSP",
+    }
+    era, event, observation_conn, decision_time = _post_local_day0_family_common_setup(
+        monkeypatch, fact=fact
+    )
+
+    likelihood = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+        "boundary_survival_probability": 0.9,
+        "identity_hash": "fake-metar-likelihood-identity",
+        "station_id": "SBSP",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_sbsp",
+        },
+    }
+    monkeypatch.setattr(
+        era,
+        "_provisional_day0_revision_likelihood",
+        lambda *_a, **_k: dict(likelihood),
+    )
+    monkeypatch.setattr(
+        era, "_assert_day0_post_local_vector_witness", lambda *_a, **_k: None
+    )
+
+    def fake_global_day0_execution_payload(*_args, **_kwargs):
+        return {
+            "_edli_global_day0_binding": {"observation_time": observation_time},
+            "settlement_source": "aviationweather_metar",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "observation_time": observation_time,
+            "observed_extreme_native": 29.5,
+            "rounded_value": 29.5,
+            "settlement_unit": "C",
+            "_edli_day0_remaining_vector_witness": {"vector_id": "vector-sp-1"},
+            "_edli_day0_remaining_capture_times_utc": [observation_time],
+        }
+
+    monkeypatch.setattr(
+        era,
+        "_global_day0_execution_payload",
+        fake_global_day0_execution_payload,
+    )
+
+    def fake_remaining_components(
+        _event,
+        *,
+        forecast_conn,
+        calibration_conn,
+        family,
+        payload,
+        decision_time,
+        snapshot,
+        entry_authority,
+    ):
+        # Reproduces, faithfully, the real `_day0_remaining_global_probability_components`
+        # contract this test pins: it raises the exact live symptom string when the
+        # provisional revision likelihood was never produced, and otherwise builds the
+        # remaining-day carrier's content identity -- exactly what the real function
+        # does via `_day0_remaining_p_raw_vector`'s required-fields check.
+        likelihood_payload = payload.get("_edli_day0_provisional_revision_likelihood")
+        if not isinstance(likelihood_payload, dict) or not str(
+            likelihood_payload.get("identity_hash") or ""
+        ):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISSING")
+        payload["_edli_day0_remaining_content_identity"] = "sp-remaining-content-hash"
+        rng = np.random.default_rng(0)
+        yes_column = np.clip(rng.normal(0.35, 0.05, size=500), 0.01, 0.99)
+        samples = np.stack([yes_column, 1.0 - yes_column], axis=1)
+        point_q = np.array([0.35, 0.65], dtype=np.float64)
+        return samples, point_q, "sp-post-local-band-basis"
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        fake_remaining_components,
+    )
+
+    payload_out: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=observation_conn,
+        topology_conn=observation_conn,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        max_age=timedelta(hours=6),
+        day0_payload_out=payload_out,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+
+    assert prepared.probability_witness is not None
+    assert payload_out["_edli_day0_remaining_content_identity"] == (
+        "sp-remaining-content-hash"
+    )
+    assert payload_out["_edli_day0_provisional_revision_likelihood"][
+        "identity_hash"
+    ] == "fake-metar-likelihood-identity"
+
+
+def test_day0_post_local_day_without_observation_still_waits(monkeypatch):
+    """The DESIGNED terminal state must not regress: a post-local-day family with
+    NO provisional settlement-channel fact at all (the London shape) still raises
+    `POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE` after the finality-gate fix.
+    """
+    import src.engine.event_reactor_adapter as era
+
+    era, event, observation_conn, decision_time = _post_local_day0_family_common_setup(
+        monkeypatch, fact=None
+    )
+
+    with pytest.raises(
+        ValueError, match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=observation_conn,
+            topology_conn=observation_conn,
+            observation_conn=observation_conn,
+            decision_time=decision_time,
+            max_age=timedelta(hours=6),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+
+
 def test_day0_pinned_carrier_rejects_entry_authority():
     import src.engine.event_reactor_adapter as era
 

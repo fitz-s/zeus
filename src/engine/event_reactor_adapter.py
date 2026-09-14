@@ -39589,7 +39589,7 @@ def _prepare_current_global_probability_family(
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
-    provisional_day0_observation = False
+    revisable_day0_observation = False
     post_local_incomplete_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     settlement_day0_fact: Mapping[str, object] | None = None
@@ -39663,6 +39663,7 @@ def _prepare_current_global_probability_family(
                 _latest_authorized_day0_fact,
             )
             from src.events.day0_authority import (
+                DAY0_MONOTONE_SETTLEMENT_BOUND,
                 DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
                 day0_evidence_finality,
             )
@@ -39710,7 +39711,7 @@ def _prepare_current_global_probability_family(
                         settlement_fact=provisional_day0_fact,
                     )
                 )
-            provisional_day0_observation = bool(
+            revisable_day0_observation = bool(
                 provisional_day0_fact is not None
                 and day0_evidence_finality(
                     {
@@ -39719,10 +39720,10 @@ def _prepare_current_global_probability_family(
                         )
                     }
                 )
-                == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+                in {DAY0_PROVISIONAL_CURRENT_SNAPSHOT, DAY0_MONOTONE_SETTLEMENT_BOUND}
             )
             if (
-                provisional_day0_observation
+                revisable_day0_observation
                 and not allow_provisional_day0_replacement
                 and str(
                     (provisional_day0_fact or {}).get("observation_source") or ""
@@ -39828,7 +39829,7 @@ def _prepare_current_global_probability_family(
                 # must therefore carry its empirical/prior-only revision
                 # likelihood for held and reduce-only use; treating the print
                 # as absorbing would understate reversal risk.
-                provisional_day0_observation = True
+                revisable_day0_observation = True
             held_day0_current_bundle_pin_eligible = bool(
                 (provisional_day0_fact is not None or physical_day0_fact is not None)
                 and local_target == local_now.date()
@@ -39842,7 +39843,7 @@ def _prepare_current_global_probability_family(
                 day0_redecision_fact is not None
                 and (
                     physical_only_current_day_redecision
-                    or provisional_day0_observation
+                    or revisable_day0_observation
                     or post_local_incomplete_monitor_authority
                 )
                 and (
@@ -40000,7 +40001,7 @@ def _prepare_current_global_probability_family(
                 if (
                     entry_authority
                     and provisional_day0_fact is not None
-                    and provisional_day0_observation
+                    and revisable_day0_observation
                     and local_target == local_now.date()
                 ):
                     direct_day0_entry_carrier = (
@@ -40109,7 +40110,7 @@ def _prepare_current_global_probability_family(
                     raise ValueError(
                         "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
                     )
-                provisional_day0_observation = True
+                revisable_day0_observation = True
                 provisional_day0_fact = _fast_residual_day0_fact(
                     fast_residual_conditioning
                 )
@@ -40362,7 +40363,7 @@ def _prepare_current_global_probability_family(
                 current_day0_payload[
                     "_edli_day0_redecision_authority_scope"
                 ] = redecision_scope
-            if provisional_day0_observation and bundle is None:
+            if revisable_day0_observation and bundle is None:
                 if (
                     not current_day0_redecision_only
                     and direct_day0_entry_carrier is None
@@ -40463,7 +40464,7 @@ def _prepare_current_global_probability_family(
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
-        if provisional_day0_observation:
+        if revisable_day0_observation:
             try:
                 revision_likelihood = _carried_day0_revision_likelihood(
                     current_day0_payload
@@ -40777,7 +40778,7 @@ def _prepare_current_global_probability_family(
                         "_edli_day0_q_mode": (
                             "post_local_provisional_tail"
                             if post_local_incomplete_monitor_authority
-                            and provisional_day0_observation
+                            and revisable_day0_observation
                             else (
                                 "post_local_incomplete_settlement_tail"
                                 if post_local_incomplete_monitor_authority
@@ -41042,7 +41043,7 @@ def _prepare_current_global_probability_family(
                     "_edli_day0_q_mode": (
                         "post_local_provisional_tail"
                         if post_local_incomplete_monitor_authority
-                        and provisional_day0_observation
+                        and revisable_day0_observation
                         else (
                             "post_local_incomplete_settlement_tail"
                             if post_local_incomplete_monitor_authority
@@ -41270,7 +41271,7 @@ def _prepare_current_global_probability_family(
                         ),
                     }
                 )
-        if not provisional_day0_observation and not current_day0_redecision_only:
+        if not revisable_day0_observation and not current_day0_redecision_only:
             candidate_payoff_q_lcb_caps = current_caps
     if (
         current_day0_payload is not None
@@ -41467,7 +41468,7 @@ def _prepare_current_global_probability_family(
         source_truth_identity = stable_hash(source_truth)
         if pinned_complete_bundle is None and (
             bundle is None
-            or not provisional_day0_observation
+            or not revisable_day0_observation
             or probability_authority
             == "day0_remaining_day_global_probability_v1"
         ):
