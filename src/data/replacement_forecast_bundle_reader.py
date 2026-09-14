@@ -19,6 +19,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     split_coordinate_bound_data_version,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.day0_hourly_vectors import day0_remaining_carrier_samples_row_major
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
@@ -299,13 +300,17 @@ def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
                 "day0_remaining_carrier_content_identity",
                 "day0_remaining_carrier_operator",
                 "day0_remaining_carrier_q",
-                "day0_remaining_carrier_probability_samples",
                 "day0_remaining_carrier_sample_count",
                 "day0_remaining_carrier_future_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_carrier_probability_cutoff_utc",
             )
         )
+        # The array-shaped sample matrix may be persisted directly (old rows,
+        # or fast-residual-mixed rows) or derivable from
+        # q_bootstrap_samples_by_bin (rows where it would be an exact
+        # transpose); either way it must resolve to something.
+        and day0_remaining_carrier_samples_row_major(provenance) is not None
     )
 
 
@@ -410,7 +415,6 @@ def _held_pinned_provenance_reason(
         "day0_remaining_carrier_content_identity",
         "day0_remaining_carrier_operator",
         "day0_remaining_carrier_q",
-        "day0_remaining_carrier_probability_samples",
         "day0_remaining_carrier_sample_count",
         "day0_remaining_carrier_future_extremes_c",
         "day0_remaining_carrier_path_error_sigma_c",
@@ -424,7 +428,12 @@ def _held_pinned_provenance_reason(
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):
         return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
-    samples = provenance.get("day0_remaining_carrier_probability_samples")
+    # Persisted directly (old rows, or fast-residual-mixed rows where it
+    # genuinely diverges from q_bootstrap_samples_by_bin) or derived from
+    # q_bootstrap_samples_by_bin (rows where it would be an exact transpose).
+    samples = day0_remaining_carrier_samples_row_major(provenance)
+    if samples is None:
+        return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
     q = provenance.get("day0_remaining_carrier_q")
     future = provenance.get("day0_remaining_carrier_future_extremes_c")
     if (

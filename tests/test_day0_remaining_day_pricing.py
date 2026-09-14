@@ -50,6 +50,7 @@ from src.data.day0_hourly_vectors import (
     build_day0_remaining_probability_carrier,
     day0_effective_path_sigma_c,
     day0_remaining_carrier_identity_inputs,
+    day0_remaining_carrier_samples_row_major,
     fetch_day0_hourly_vectors,
     parse_openmeteo_hourly_payload,
     persist_day0_hourly_vectors,
@@ -3980,6 +3981,73 @@ def test_day0_redecision_conditioning_copies_shared_carrier_fields():
             decision_time=datetime(2026, 8, 24, 10, 0, tzinfo=UTC),
             entry_authority=False,
         )
+
+
+def test_day0_redecision_conditioning_derives_samples_when_key_omitted():
+    """2026-09 storage fix: rows where no fast-residual mixing ran omit
+    day0_remaining_carrier_probability_samples entirely (it would be an exact
+    duplicate of q_bootstrap_samples_by_bin). The conditioning dict must still
+    surface the same matrix, derived via bin_topology order."""
+    import src.engine.event_reactor_adapter as era
+
+    by_bin = {"bin-1": [1.0, 0.0], "bin-2": [0.0, 1.0]}
+    bundle = SimpleNamespace(
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "metric": "high",
+                "unit": "C",
+            },
+            "day0_remaining_carrier_content_identity": "identity",
+            "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+            "day0_remaining_carrier_sample_count": 2,
+            "day0_remaining_carrier_future_extremes_c": [31.0, 32.0],
+            "day0_remaining_carrier_path_error_sigma_c": 0.25,
+            "day0_remaining_carrier_probability_cutoff_utc": "2026-08-24T09:30:00+00:00",
+            "q_bootstrap_samples_by_bin": by_bin,
+            "bin_topology": [{"bin_id": "bin-1"}, {"bin_id": "bin-2"}],
+        }
+    )
+    conditioning = era._day0_replacement_conditioning(
+        bundle,
+        provisional=True,
+        metric="high",
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 10, 0, tzinfo=UTC),
+        entry_authority=False,
+    )
+    assert conditioning["day0_remaining_carrier_probability_samples"] == [
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ]
+
+
+def test_day0_redecision_conditioning_no_spurious_samples_for_non_carrier_row():
+    """A non-Day0-carrier row (general rho-mix path) also carries
+    q_bootstrap_samples_by_bin -- it must NOT be mistaken for a carrier draw
+    matrix just because that key exists."""
+    import src.engine.event_reactor_adapter as era
+
+    bundle = SimpleNamespace(
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "metric": "high",
+                "unit": "C",
+            },
+            "q_bootstrap_samples_by_bin": {"bin-1": [0.4] * 500, "bin-2": [0.6] * 500},
+            "bin_topology": [{"bin_id": "bin-1"}, {"bin_id": "bin-2"}],
+        }
+    )
+    conditioning = era._day0_replacement_conditioning(
+        bundle,
+        provisional=True,
+        metric="high",
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 10, 0, tzinfo=UTC),
+        entry_authority=False,
+    )
+    assert "day0_remaining_carrier_probability_samples" not in conditioning
 
 
 def test_live_hourly_fetch_persists_real_possession_clock_and_identity(
@@ -11130,3 +11198,100 @@ def test_current_state_same_instant_reaches_remaining_extrema(metric, slope, uni
     expected = max(temperatures[13:]) if metric == "high" else min(temperatures[13:])
     assert extrema == pytest.approx([expected])
     assert innovations == pytest.approx({"ecmwf_ifs": 0.0}, abs=1e-12)
+
+
+def _bin_topology(bin_ids):
+    return [{"bin_id": bin_id} for bin_id in bin_ids]
+
+
+def test_day0_remaining_carrier_samples_row_major_prefers_persisted():
+    """A persisted key (old rows, or fast-residual-mixed rows) wins verbatim,
+    even if it would not match a transpose of q_bootstrap_samples_by_bin --
+    the two genuinely diverge after fast-residual mixing (2026-09 storage
+    fix)."""
+    persisted = [[1.0, 2.0], [3.0, 4.0]]
+    provenance = {
+        "day0_remaining_carrier_content_identity": "carrier-id",
+        "day0_remaining_carrier_probability_samples": persisted,
+        "q_bootstrap_samples_by_bin": {"b1": [9.0, 9.0], "b2": [9.0, 9.0]},
+        "bin_topology": _bin_topology(["b1", "b2"]),
+    }
+    assert day0_remaining_carrier_samples_row_major(provenance) == persisted
+
+
+def test_day0_remaining_carrier_samples_row_major_derives_from_bootstrap_bin_order():
+    """When the dedicated key is omitted (no fast-residual mixing ran), derive
+    the draws x bins matrix by transposing q_bootstrap_samples_by_bin in
+    bin_topology order -- NOT the dict's own (possibly JSON-sorted) key
+    order."""
+    provenance = {
+        "day0_remaining_carrier_content_identity": "carrier-id",
+        # Dict insertion/serialization order is alphabetical (b2 before b10),
+        # which differs from the bin_topology write-time order (b10, b1, b2).
+        "q_bootstrap_samples_by_bin": {
+            "b1": [0.1, 0.4],
+            "b10": [0.9, 0.6],
+            "b2": [0.0, 0.0],
+        },
+        "bin_topology": _bin_topology(["b10", "b1", "b2"]),
+    }
+    result = day0_remaining_carrier_samples_row_major(provenance)
+    assert result == [[0.9, 0.1, 0.0], [0.6, 0.4, 0.0]]
+
+
+def test_day0_remaining_carrier_samples_row_major_round_trips_three_bins():
+    rng = np.random.default_rng(7)
+    bin_ids = ["a", "b", "c"]
+    by_bin = {bin_id: rng.random(500).tolist() for bin_id in bin_ids}
+    provenance = {
+        "day0_remaining_carrier_content_identity": "carrier-id",
+        "q_bootstrap_samples_by_bin": by_bin,
+        "bin_topology": _bin_topology(bin_ids),
+    }
+    derived = day0_remaining_carrier_samples_row_major(provenance)
+    assert len(derived) == 500
+    assert all(len(row) == 3 for row in derived)
+    re_transposed = {
+        bin_id: [row[index] for row in derived]
+        for index, bin_id in enumerate(bin_ids)
+    }
+    assert re_transposed == by_bin
+
+
+def test_day0_remaining_carrier_samples_row_major_rejects_wrong_draw_count():
+    provenance = {
+        "day0_remaining_carrier_content_identity": "carrier-id",
+        "q_bootstrap_samples_by_bin": {"a": [0.1] * 500, "b": [0.2] * 400},
+        "bin_topology": _bin_topology(["a", "b"]),
+    }
+    assert day0_remaining_carrier_samples_row_major(provenance) is None
+
+
+def test_day0_remaining_carrier_samples_row_major_rejects_bin_set_mismatch():
+    provenance = {
+        "day0_remaining_carrier_content_identity": "carrier-id",
+        "q_bootstrap_samples_by_bin": {"a": [0.1] * 500},
+        "bin_topology": _bin_topology(["a", "b"]),
+    }
+    assert day0_remaining_carrier_samples_row_major(provenance) is None
+
+
+def test_day0_remaining_carrier_samples_row_major_none_for_non_carrier_row():
+    """A row that never drew from a shared carrier (the general rho-mix path)
+    also carries q_bootstrap_samples_by_bin -- the absence of the sibling
+    carrier-identity field must block a spurious derivation."""
+    provenance = {
+        "q_bootstrap_samples_by_bin": {"a": [0.1] * 500, "b": [0.2] * 500},
+        "bin_topology": _bin_topology(["a", "b"]),
+    }
+    assert day0_remaining_carrier_samples_row_major(provenance) is None
+
+
+def test_day0_remaining_carrier_samples_row_major_none_when_undecidable():
+    assert day0_remaining_carrier_samples_row_major({}) is None
+    assert (
+        day0_remaining_carrier_samples_row_major(
+            {"day0_remaining_carrier_content_identity": "id"}
+        )
+        is None
+    )

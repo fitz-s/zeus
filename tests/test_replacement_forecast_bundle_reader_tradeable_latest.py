@@ -448,6 +448,52 @@ def test_held_provenance_binds_configured_station_and_source_pair() -> None:
     ) == "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH"
 
 
+def test_held_pinned_reader_accepts_carrier_samples_derived_from_bootstrap_bins() -> None:
+    """2026-09 storage fix: a row that never had fast-residual mixing omits
+    day0_remaining_carrier_probability_samples entirely. The held-pin reader
+    must still accept it by deriving the matrix from q_bootstrap_samples_by_bin
+    in bin_topology order."""
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    provenance = _provenance(
+        q_mode=_FUSED_FULL,
+        strict_day0=True,
+        shape_source_cycle_time=_dt(6, 0),
+    )
+    derived = json.loads(json.dumps(provenance))
+    original_samples = derived.pop("day0_remaining_carrier_probability_samples")
+    assert original_samples == [[0.2, 0.8]] * 500
+    derived["bin_topology"] = [
+        {"bin_id": "carrier-0"},
+        {"bin_id": "carrier-1"},
+    ]
+    derived["q_bootstrap_samples_by_bin"] = {
+        "carrier-0": [0.2] * 500,
+        "carrier-1": [0.8] * 500,
+    }
+    assert reader._held_pinned_carrier_claimed(derived) is True
+    assert reader._held_pinned_provenance_reason(
+        derived,
+        city="Tel Aviv",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) is None
+
+    # A row with neither the persisted key nor a derivable q_bootstrap_samples_by_bin
+    # (identity present but no bootstrap draws at all) is correctly rejected.
+    undecidable = json.loads(json.dumps(provenance))
+    undecidable.pop("day0_remaining_carrier_probability_samples")
+    assert reader._held_pinned_carrier_claimed(undecidable) is False
+    assert reader._held_pinned_provenance_reason(
+        undecidable,
+        city="Tel Aviv",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) == "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
+
+
 def test_noaa_producer_likelihood_persists_and_reader_accepts_exact_identity(
     monkeypatch,
 ) -> None:

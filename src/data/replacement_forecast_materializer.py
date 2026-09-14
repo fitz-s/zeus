@@ -7122,10 +7122,24 @@ def _compute_posterior_payload(
                 "day0_remaining_carrier_sample_count": int(
                     _day0_shared_carrier["sample_count"]
                 ),
-                "day0_remaining_carrier_probability_samples": [
-                    [float(value) for value in row]
-                    for row in _day0_shared_carrier["samples"]
-                ],
+                # Storage fix (2026-09): omit this key when it would be an exact
+                # transpose of q_bootstrap_samples_by_bin (no fast-residual
+                # mixing ran, so the two arrays carry identical information --
+                # readers derive it via
+                # day0_hourly_vectors.day0_remaining_carrier_samples_row_major).
+                # When fast-residual mixing DID run, q_bootstrap_samples_by_bin
+                # is the POST-mixing matrix and genuinely diverges from this
+                # raw pre-mixing carrier, so both copies are kept.
+                **(
+                    {
+                        "day0_remaining_carrier_probability_samples": [
+                            [float(value) for value in row]
+                            for row in _day0_shared_carrier["samples"]
+                        ],
+                    }
+                    if _fast_residual_likelihood_payload is not None
+                    else {}
+                ),
                 "day0_remaining_carrier_future_extremes_c": [
                     float(value) for value in _carrier_future
                 ],

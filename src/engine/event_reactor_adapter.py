@@ -36340,6 +36340,9 @@ def _day0_replacement_conditioning(
         if not causal_bundle_validation.ok:
             raise ValueError("GLOBAL_DAY0_REPLACEMENT_CAUSAL_BUNDLE_INVALID")
 
+    from src.data.day0_hourly_vectors import day0_remaining_carrier_samples_row_major
+
+    _derived_carrier_samples = day0_remaining_carrier_samples_row_major(provenance)
     return {
         **conditioning,
         **{
@@ -36348,7 +36351,6 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_content_identity",
                 "day0_remaining_carrier_operator",
                 "day0_remaining_carrier_q",
-                "day0_remaining_carrier_probability_samples",
                 "day0_remaining_carrier_sample_count",
                 "day0_remaining_carrier_future_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
@@ -36358,6 +36360,15 @@ def _day0_replacement_conditioning(
             )
             if key in provenance
         },
+        # Persisted directly (old rows, or fast-residual-mixed rows where it
+        # genuinely diverges from q_bootstrap_samples_by_bin) or derived from
+        # q_bootstrap_samples_by_bin (rows where it would be an exact
+        # transpose) -- see day0_remaining_carrier_samples_row_major.
+        **(
+            {"day0_remaining_carrier_probability_samples": _derived_carrier_samples}
+            if _derived_carrier_samples is not None
+            else {}
+        ),
         "day0_remaining_carrier_likelihood": provenance.get(
             "day0_preliminary_report_survival_likelihood"
         ),

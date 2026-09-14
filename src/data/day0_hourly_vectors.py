@@ -1091,6 +1091,60 @@ def build_day0_remaining_probability_carrier(
             "operator": "extreme_observed_then_noisy_future_v1", "sample_count": n_samples}
 
 
+def day0_remaining_carrier_samples_row_major(
+    provenance: Mapping[str, object],
+) -> list[list[float]] | None:
+    """Return the Day0 shared-carrier draw matrix (draws x bins, row-major).
+
+    Rows written after the 2026-09 storage fix omit the dedicated
+    ``day0_remaining_carrier_probability_samples`` key whenever it would be an
+    exact transpose of ``q_bootstrap_samples_by_bin`` -- i.e. whenever no
+    fast-residual-likelihood mixing ran after the shared carrier was drawn
+    (``q_shape == "day0_remaining_shared_carrier_v1"``). Derive it from the
+    persisted per-bin draws instead, using ``bin_topology`` for column order
+    (NOT ``q_bootstrap_samples_by_bin``'s own key order, which JSON
+    serialization may reorder).
+
+    Rows where fast-residual mixing DID run (``q_shape ==
+    "fused_day0_fast_residual_likelihood"``) keep the dedicated key, because
+    there the raw carrier and the persisted ``q_bootstrap_samples_by_bin``
+    genuinely diverge (the latter is post-mixing) -- use it verbatim.
+
+    Returns ``None`` when this row never carried a shared Day0 carrier at all
+    (most replacement posteriors -- q_bootstrap_samples_by_bin exists on those
+    too, for the unrelated general rho-mix path, and must not be mistaken for
+    a carrier matrix), or when neither the persisted key nor a valid
+    derivation is available (malformed/partial provenance).
+    """
+    persisted = provenance.get("day0_remaining_carrier_probability_samples")
+    if persisted is not None:
+        return persisted
+    # Only a row that actually drew from a shared carrier ever had this key;
+    # gate on a sibling field written unconditionally whenever
+    # _day0_shared_carrier is not None (regardless of fast-residual mixing).
+    if provenance.get("day0_remaining_carrier_content_identity") in (None, ""):
+        return None
+    by_bin = provenance.get("q_bootstrap_samples_by_bin")
+    bin_topology = provenance.get("bin_topology")
+    if not isinstance(by_bin, Mapping) or not isinstance(bin_topology, (list, tuple)):
+        return None
+    try:
+        bin_order = [str(item["bin_id"]) for item in bin_topology]
+        columns = [by_bin[bin_id] for bin_id in bin_order]
+    except (KeyError, TypeError):
+        return None
+    if not columns or len({len(col) for col in columns}) != 1:
+        return None
+    n_draws = len(columns[0])
+    try:
+        return [
+            [float(columns[c][r]) for c in range(len(columns))]
+            for r in range(n_draws)
+        ]
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class Day0HourlyRefreshStats:
     vectors_written: int = 0
