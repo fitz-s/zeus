@@ -526,6 +526,11 @@ def test_reseed_routes_same_cycle_input_revision_before_cycle_advance(
         ),
     )
     monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+    # Fixture date is not the point under test here (input-revision routing);
+    # stub the target-local-day-ended gate so a fixed past date does not trip
+    # it as real wall-clock time advances (see test_reseed_skips_when_target_
+    # local_day_has_ended for that gate itself).
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *a, **k: False)
 
     report = mr._perform_single_family_belief_reseed_failsoft(
         city="Warsaw",
@@ -587,6 +592,10 @@ def test_reseed_falls_through_to_cycle_advance_without_input_revision(
         enqueue_cycle,
     )
     monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+    # Fixture date is not the point under test here (cycle-advance fallthrough);
+    # stub the target-local-day-ended gate (see test_reseed_skips_when_target_
+    # local_day_has_ended for that gate itself).
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *a, **k: False)
 
     report = mr._perform_single_family_belief_reseed_failsoft(
         city="Warsaw",
@@ -661,6 +670,10 @@ def test_day0_reseed_requires_posterior_newer_than_current_inputs(
             "day0_observed_extreme_unit": "C",
         },
     )
+    # Fixture date is not the point under test here (Day0 posterior-freshness
+    # bound); stub the target-local-day-ended gate (see
+    # test_reseed_skips_when_target_local_day_has_ended for that gate itself).
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *a, **k: False)
     before = datetime.now(timezone.utc)
 
     report = mr._perform_single_family_belief_reseed_failsoft(
@@ -710,6 +723,14 @@ def _day0_reseed_test_setup(monkeypatch, tmp_path):
     # still be able to run against to prove the regression they pin.)
     if hasattr(mr, "_day0_reseed_gap_first_seen_at"):
         monkeypatch.setattr(mr, "_day0_reseed_gap_first_seen_at", {})
+    # These tests use a fixed target_date one calendar day ahead of authoring
+    # time as "still open"; that is not robust across a real local-midnight
+    # rollover during a later test run and is not what this fixture group
+    # tests (same-identity idempotency, not the day-ended gate). Stub the
+    # gate closed so it never depends on wall-clock date (guarded: absent
+    # entirely on the pre-fix parent).
+    if hasattr(mr, "_is_position_after_target_local_day"):
+        monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *a, **k: False)
     return mr
 
 
@@ -950,6 +971,10 @@ def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
         enqueue_cycle,
     )
     monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+    # Fixture date is not the point under test here (input-revision-pending
+    # does not veto cycle-advance); stub the target-local-day-ended gate (see
+    # test_reseed_skips_when_target_local_day_has_ended for that gate itself).
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *a, **k: False)
 
     report = mr._perform_single_family_belief_reseed_failsoft(
         city="Madrid",
@@ -974,6 +999,165 @@ def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
             "held_position": True,
         }
     ]
+
+
+def _frozen_datetime(mr, monkeypatch, fixed_now: datetime):
+    """Pin ``mr.datetime.now()`` so the local-day-ended gate is deterministic."""
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(mr, "datetime", _Frozen)
+
+
+def test_reseed_skips_when_target_local_day_has_ended(monkeypatch, tmp_path):
+    """A held family's target local day having ended must block the enqueue before
+    any DB/file work runs (London 2026-09-13 high, receipt seed_failed/
+    London.2026-09-13.high.20260914T030722Z...json, request_written:false —
+    `_is_position_target_local_day`'s exact-date match already empties the Day0
+    payload past local midnight, so the seed builder fails the request closed
+    with OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE; the enqueue should never even
+    be attempted for an ended local day)."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    def _boom(**_kwargs):
+        raise AssertionError("no DB/file work may run once the local day has ended")
+
+    monkeypatch.setattr(
+        production, "_replacement_forecast_live_materialization_queue_config", _boom
+    )
+    monkeypatch.setattr(fusion, "enqueue_fusion_upgrade_reseeds", _boom)
+    monkeypatch.setattr(cycle, "enqueue_single_family_cycle_advance_reseed", _boom)
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", _boom)
+
+    # London BST (+1): local day 2026-09-13 ends at 2026-09-13T23:00:00Z. Pin
+    # "now" 4h07m after that, matching the real receipt.
+    _frozen_datetime(mr, monkeypatch, datetime(2026, 9, 14, 3, 7, 22, tzinfo=timezone.utc))
+    ledger = {"London|2026-09-13|high": ("some-identity", "2026-09-14T00:00:00+00:00")}
+    monkeypatch.setattr(mr, "_day0_reseed_gap_first_seen_at", ledger)
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="London",
+        target_date="2026-09-13",
+        metric="high",
+    )
+
+    assert report == {
+        "status": "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED",
+        "city": "London",
+        "target_date": "2026-09-13",
+        "metric": "high",
+        "enqueued": False,
+    }
+    assert "London|2026-09-13|high" not in ledger
+
+
+def test_reseed_still_enqueues_when_target_local_day_is_open(monkeypatch, tmp_path):
+    """Parity: an in-progress local day must enqueue exactly as before the gate."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        fusion,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+            "already_enqueued": 0,
+        },
+    )
+    cycle_calls = []
+
+    def enqueue_cycle(**kwargs):
+        cycle_calls.append(kwargs)
+        return {"status": "CYCLE_ADVANCE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(cycle, "enqueue_single_family_cycle_advance_reseed", enqueue_cycle)
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+
+    # Same instant London's local day ends (23:00Z), one hour earlier: still
+    # 2026-09-13 local (BST +1) — the day has NOT ended yet.
+    _frozen_datetime(mr, monkeypatch, datetime(2026, 9, 13, 22, 0, 0, tzinfo=timezone.utc))
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="London",
+        target_date="2026-09-13",
+        metric="high",
+    )
+
+    assert report is not None
+    assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
+    assert report["repair_lane"] == "cycle_advance"
+    cutoff = cycle_calls[0].pop("minimum_posterior_computed_at")
+    assert cutoff.tzinfo is not None and cutoff.utcoffset() is not None
+    assert cycle_calls == [
+        {
+            "forecast_db": forecast_db,
+            "seed_dir": tmp_path / "seeds",
+            "raw_manifest_dir": tmp_path / "raw",
+            "city": "London",
+            "target_date": "2026-09-13",
+            "metric": "high",
+            "held_position": True,
+        }
+    ]
+
+
+def test_reseed_target_local_day_ended_boundary_is_pinned(monkeypatch, tmp_path):
+    """Boundary: `_is_position_after_target_local_day` compares LOCAL DATES, so the
+    exact local-midnight instant already counts as the day having ended, while one
+    microsecond before it does not (pinned per the helper's own docstring: "whether
+    no forecast hours can remain in the contract-local target day")."""
+    import src.data.replacement_forecast_production as production
+    import src.engine.monitor_refresh as mr
+
+    def _boom(**_kwargs):
+        raise AssertionError("no DB/file work may run once the local day has ended")
+
+    monkeypatch.setattr(
+        production, "_replacement_forecast_live_materialization_queue_config", _boom
+    )
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", _boom)
+    monkeypatch.setattr(mr, "_day0_reseed_gap_first_seen_at", {})
+
+    # Exactly London's local midnight (2026-09-14T00:00:00+01:00 == 2026-09-13T23:00:00Z):
+    # local date has already rolled to 2026-09-14 -> ended.
+    _frozen_datetime(mr, monkeypatch, datetime(2026, 9, 13, 23, 0, 0, tzinfo=timezone.utc))
+    ended_report = mr._perform_single_family_belief_reseed_failsoft(
+        city="London", target_date="2026-09-13", metric="high",
+    )
+    assert ended_report is not None
+    assert ended_report["status"] == "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED"
+
+    # One microsecond earlier: still 2026-09-13 local -> NOT ended, so the gate
+    # must not fire (falls through past the boom stubs into real DB/file work,
+    # which is not configured here, so the fail-soft outer except returns None).
+    _frozen_datetime(
+        mr, monkeypatch, datetime(2026, 9, 13, 22, 59, 59, 999999, tzinfo=timezone.utc)
+    )
+    open_report = mr._perform_single_family_belief_reseed_failsoft(
+        city="London", target_date="2026-09-13", metric="high",
+    )
+    assert open_report is None
 
 
 def test_day0_unobserved_prefix_forwards_portfolio_deadline(monkeypatch):

@@ -2001,6 +2001,41 @@ def _perform_single_family_belief_reseed_failsoft(
     a status dict (or None) is returned.
     """
     try:
+        repair_started_at = datetime.now(timezone.utc)
+        # A held family's target local day can end (local midnight rolls past
+        # target_date) while this lane keeps firing every stale-belief detection
+        # cycle. Past that point `_is_position_target_local_day`'s exact-date
+        # match already empties the Day0 payload (`_day0_observed_extreme_reseed_payload`
+        # returns {}), so the seed builder fails the request closed with
+        # OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE before any materialization work
+        # runs (London 2026-09-13 high, receipt
+        # seed_failed/London.2026-09-13.high.20260914T030722Z...json,
+        # request_written:false). Gate on the exact semantic complement of the
+        # "day started" check two call sites over, using the SAME clock read
+        # this function already needs for `minimum_posterior_computed_at` below,
+        # so nothing reaches the DB/file work for an ended local day.
+        city_obj = cities_by_name.get(str(city))
+        try:
+            target_d = date.fromisoformat(str(target_date))
+        except Exception:
+            target_d = None
+        if city_obj is not None and _is_position_after_target_local_day(
+            None, city_obj, target_d, now=repair_started_at
+        ):
+            _clear_day0_reseed_gap(city=city, target_date=target_date, metric=metric)
+            logger.info(
+                "monitor belief reseed skipped (target local day ended): "
+                "city=%s target_date=%s metric=%s",
+                city, target_date, metric,
+            )
+            return {
+                "status": "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED",
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "enqueued": False,
+            }
+
         from pathlib import Path
 
         from src.data.replacement_forecast_production import (
@@ -2069,7 +2104,6 @@ def _perform_single_family_belief_reseed_failsoft(
             input_revision_status = "BELIEF_INPUT_REVISION_RESEED_PENDING"
         from src.engine.position_belief import monitor_belief_max_age_hours
 
-        repair_started_at = datetime.now(timezone.utc)
         # Day0 hourly vectors can advance without changing the observation identity or
         # carrier cycle. Once current-q construction rejects the old vector witness,
         # only a posterior built after the gap was FIRST detected (not "now" recomputed
