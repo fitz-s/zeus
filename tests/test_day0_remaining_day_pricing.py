@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-13
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-13; last_reused=2026-09-13
+# Last reused or audited: 2026-09-14
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-14; last_reused=2026-09-14
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -11837,3 +11837,133 @@ def test_day0_remaining_carrier_samples_row_major_none_when_undecidable():
         )
         is None
     )
+
+
+class TestNativeHourlyGrid:
+    @staticmethod
+    def vector(timezone_name="Asia/Kolkata", *, aware=False, local_hour=False):
+        tz = ZoneInfo(timezone_name)
+        start = datetime(2026, 9, 15, tzinfo=tz).astimezone(UTC)
+        if not local_hour:
+            start = start.replace(minute=0) + timedelta(hours=1)
+        instants = tuple(start + timedelta(hours=i) for i in range(24))
+        times = tuple(
+            t.isoformat() if aware else t.astimezone(tz).replace(tzinfo=None).isoformat()
+            for t in instants
+        )
+        return Day0HourlyVector(
+            model="ecmwf_ifs", city="Lucknow", target_date="2026-09-15",
+            timezone_name=timezone_name, captured_at="2026-09-14T22:55:00+00:00",
+            times=times, temps_c=tuple(20.0 for _ in times),
+            source_run_meta_json=json.dumps({
+                "fetch_started_at": "2026-09-14T22:55:01+00:00",
+                "fetch_finished_at": "2026-09-14T22:55:02+00:00",
+            }),
+        )
+
+    @pytest.mark.parametrize("timezone_name", ["Asia/Kolkata", "Asia/Kathmandu"])
+    @pytest.mark.parametrize("aware", [False, True])
+    @pytest.mark.parametrize("metric,extreme", [("high", 31.0), ("low", 15.0)])
+    def test_native_utc_hours_reach_strict_reader_and_current_state(
+        self, timezone_name, aware, metric, extreme,
+    ):
+        vector = self.vector(timezone_name, aware=aware)
+        temps = list(vector.temps_c)
+        temps[6] = extreme  # 01Z: after observation, before decision; must survive.
+        vector = replace(vector, temps_c=tuple(temps))
+        observed = datetime(2026, 9, 14, 23, tzinfo=UTC)
+        decision = datetime(2026, 9, 15, 1, 10, tzinfo=UTC)
+        selected = select_ready_day0_hourly_vectors(
+            [vector], target_date="2026-09-15", now=decision,
+            expected_models=[vector.model], require_expected=True,
+            remaining_window_start=observed, require_complete_remaining_window=True,
+        )
+        assert selected == [vector]
+        aligned = align_day0_hourly_vectors_on_common_causal_grid(
+            selected, target_date="2026-09-15", window_start=observed,
+        )
+        assert aligned is not None
+        grid, rows = aligned
+        assert grid[0] == observed
+        assert grid[-1] == datetime(2026, 9, 15, 18, tzinfo=UTC)
+        assert rows == (tuple(temps[4:]),)
+        values, innovations = remaining_day_extremes_c_with_current_state(
+            selected, target_date="2026-09-15", decision_time=decision, metric=metric,
+            current_state=Day0CurrentTemperatureState(
+                value_native=20.0, observed_at=observed, source="aviationweather_metar",
+            ), settlement_unit="C", fallback_window_start=observed,
+        )
+        assert values == [extreme]
+        assert innovations == {vector.model: 0.0}
+
+    @pytest.mark.parametrize("fault", [
+        "missing_future", "missing_anchor", "duplicate", "mixed_phase", "invalid_phase",
+        "nonfinite", "mismatched_lengths", "mixed_provider_phase",
+    ])
+    def test_native_grid_preserves_complete_causal_shape(self, fault):
+        vector = self.vector()
+        times, temps = list(vector.times), list(vector.temps_c)
+        if fault == "missing_future":
+            del times[9]
+            del temps[9]
+        elif fault == "missing_anchor":
+            del times[4]
+            del temps[4]
+        elif fault == "duplicate":
+            times[8] = times[7]
+        elif fault == "mixed_phase":
+            times[8] = times[8].replace(":30:", ":00:")
+        elif fault == "invalid_phase":
+            times = [t.replace(":30:", ":15:") for t in times]
+        elif fault == "nonfinite":
+            temps[8] = float("nan")
+        elif fault == "mismatched_lengths":
+            temps.pop()
+        changed = replace(vector, times=tuple(times), temps_c=tuple(temps))
+        bundle = [changed]
+        if fault == "mixed_provider_phase":
+            bundle.append(replace(self.vector(local_hour=True), model="icon_global"))
+        assert select_ready_day0_hourly_vectors(
+            bundle, target_date="2026-09-15", now=datetime(2026, 9, 14, 23, 15, tzinfo=UTC),
+            expected_models=[v.model for v in bundle], require_expected=True,
+            remaining_window_start=datetime(2026, 9, 14, 23, 10, tzinfo=UTC),
+            require_complete_remaining_window=True,
+        ) == []
+        assert align_day0_hourly_vectors_on_common_causal_grid(
+            bundle, target_date="2026-09-15",
+            window_start=datetime(2026, 9, 14, 23, 10, tzinfo=UTC),
+        ) is None
+
+    def test_native_grid_does_not_fabricate_midnight_coverage(self):
+        from src.data.day0_hourly_vectors import day0_hourly_vectors_cover_remaining_window
+        vector = self.vector()
+        midnight = datetime(2026, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+        for boundary in (midnight, midnight + timedelta(minutes=15)):
+            assert not day0_hourly_vectors_cover_remaining_window(
+                [vector], target_date="2026-09-15", window_start=boundary,
+            )
+        assert day0_hourly_vectors_cover_remaining_window(
+            [vector], target_date="2026-09-15",
+            window_start=midnight + timedelta(minutes=30),
+        )
+
+    def test_local_hour_fractional_timezone_remains_exact(self):
+        vector = self.vector(local_hour=True)
+        boundary = datetime(2026, 9, 14, 23, 10, tzinfo=UTC)
+        aligned = align_day0_hourly_vectors_on_common_causal_grid(
+            [vector], target_date="2026-09-15", window_start=boundary,
+        )
+        assert aligned is not None
+        assert aligned[0][0] == datetime(2026, 9, 14, 22, 30, tzinfo=UTC)
+        assert aligned[0][-1] == datetime(2026, 9, 15, 17, 30, tzinfo=UTC)
+
+    def test_native_terminal_tail_preserves_last_actual_anchor(self):
+        vector = self.vector()
+        observed = datetime(2026, 9, 15, 18, 15, tzinfo=UTC)
+        values, _ = remaining_day_extremes_c_with_current_state(
+            [vector], target_date="2026-09-15", decision_time=observed,
+            metric="high", current_state=Day0CurrentTemperatureState(
+                value_native=20.0, observed_at=observed, source="aviationweather_metar",
+            ), settlement_unit="C", fallback_window_start=observed,
+        )
+        assert values == [20.0]

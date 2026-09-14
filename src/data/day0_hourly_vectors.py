@@ -2833,8 +2833,10 @@ def read_freshest_day0_hourly_vectors(
 
 
 @lru_cache(maxsize=256)
-def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, ...]:
-    """UTC instants for every local hourly grid point, including DST folds."""
+def _target_day_hour_grid_utc(
+    *, target: date, tz: ZoneInfo, utc_aligned: bool = False,
+) -> tuple[datetime, ...]:
+    """Exact native hourly instants inside the local settlement day."""
 
     start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
     end = datetime.combine(
@@ -2842,10 +2844,36 @@ def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, 
     ).astimezone(UTC)
     out: list[datetime] = []
     cursor = start
+    if utc_aligned:
+        cursor = start.replace(minute=0, second=0, microsecond=0)
+        if cursor < start:
+            cursor += timedelta(hours=1)
     while cursor < end:
         out.append(cursor)
         cursor += timedelta(hours=1)
     return tuple(out)
+
+
+def _vector_target_day_hour_grid_utc(
+    vector: Day0HourlyVector, *, target: date, tz: ZoneInfo,
+) -> tuple[datetime, ...]:
+    """Recognize local-hour or UTC-hour samples without shifting their times."""
+    for raw_time in vector.times:
+        try:
+            parsed = datetime.fromisoformat(str(raw_time))
+        except (TypeError, ValueError):
+            return ()
+        local = parsed.replace(tzinfo=tz) if parsed.tzinfo is None else parsed.astimezone(tz)
+        if local.date() != target:
+            continue
+        if local.second or local.microsecond:
+            return ()
+        if local.minute == 0:
+            return _target_day_hour_grid_utc(target=target, tz=tz)
+        if local.astimezone(UTC).minute == 0:
+            return _target_day_hour_grid_utc(target=target, tz=tz, utc_aligned=True)
+        return ()
+    return ()
 
 
 def day0_hourly_vector_target_values_utc(
@@ -2856,7 +2884,9 @@ def day0_hourly_vector_target_values_utc(
 ) -> tuple[tuple[datetime, float], ...] | None:
     """Map one provider-local target-day vector to exact UTC instants."""
 
-    grid = _target_day_hour_grid_utc(target=target, tz=tz)
+    grid = _vector_target_day_hour_grid_utc(vector, target=target, tz=tz)
+    if not grid or len(vector.times) != len(vector.temps_c):
+        return None
     by_label: dict[str, list[datetime]] = {}
     for instant in grid:
         label = instant.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
@@ -2879,7 +2909,6 @@ def day0_hourly_vector_target_values_utc(
             continue
         if (
             not math.isfinite(value)
-            or local.minute != 0
             or local.second != 0
             or local.microsecond != 0
         ):
@@ -2949,7 +2978,9 @@ def align_day0_hourly_vectors_on_common_causal_grid(
         if str(vector.timezone_name or "").strip() != timezone_name:
             return None
 
-    target_grid = _target_day_hour_grid_utc(target=target, tz=timezone_obj)
+    target_grid = _vector_target_day_hour_grid_utc(
+        bundle[0], target=target, tz=timezone_obj
+    )
     if not target_grid:
         return None
     boundary_utc = window_start.astimezone(UTC)
@@ -2991,8 +3022,8 @@ def day0_hourly_vectors_cover_remaining_window(
 ) -> bool:
     """Prove every model covers the causal boundary through local-day end.
 
-    Open-Meteo serves a local hourly grid. Expected instants are generated in
-    UTC and provider-local duplicate labels are assigned in chronological order,
+    Native hourly samples may land on fractional local hours. Expected instants
+    retain their phase; duplicate local labels are assigned in chronological order,
     so 23/25-hour DST days remain exact even when timestamps omit offsets. When
     the causal boundary is inside the terminal sub-hour, the final elapsed grid
     point is required as the interval anchor instead of pretending that an empty
@@ -3006,7 +3037,11 @@ def day0_hourly_vectors_cover_remaining_window(
     except ValueError:
         return False
     boundary_utc = window_start.astimezone(UTC)
+    common_grid: tuple[datetime, ...] | None = None
+    timezone_name = vectors[0].timezone_name
     for vector in vectors:
+        if vector.timezone_name != timezone_name:
+            return False
         try:
             tz = ZoneInfo(vector.timezone_name)
         except Exception:
@@ -3014,7 +3049,12 @@ def day0_hourly_vectors_cover_remaining_window(
         boundary_local = boundary_utc.astimezone(tz)
         if boundary_local.date() != target:
             return False
-        grid = _target_day_hour_grid_utc(target=target, tz=tz)
+        grid = _vector_target_day_hour_grid_utc(vector, target=target, tz=tz)
+        if not grid or boundary_utc < grid[0]:
+            return False
+        if common_grid is not None and grid != common_grid:
+            return False
+        common_grid = grid
         values = day0_hourly_vector_target_values_utc(
             vector,
             target=target,
@@ -3023,6 +3063,10 @@ def day0_hourly_vectors_cover_remaining_window(
         if not grid or values is None:
             return False
         counts = Counter(instant for instant, _value in values)
+        if grid != _target_day_hour_grid_utc(target=target, tz=tz):
+            anchor = max(instant for instant in grid if instant <= boundary_utc)
+            if counts[anchor] != 1:
+                return False
         required = tuple(instant for instant in grid if instant >= boundary_utc)
         if required:
             if any(counts[instant] != 1 for instant in required):
