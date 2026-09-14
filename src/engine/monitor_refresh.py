@@ -5504,8 +5504,39 @@ def _day0_absorbing_hard_fact_overlay(
 ) -> tuple[float, Position, bool] | None:
     """Return exact monitor belief when a qualified Day0 hard fact is absorbing."""
 
-    if not _is_position_target_local_day(pos, city, target_d):
+    # Once the position's contract-local target day has ended, the
+    # day0_observation_remaining_window bootstrap this overlay would otherwise
+    # defer to has zero remaining hours to sample: it degenerates to a
+    # maximally-wide but still-finite belief band (e.g. [0,1]) that passes the
+    # held-side evidence_ok check while carrying no real information, and the
+    # exit organ never learns that its belief is meaningless. This overlay is
+    # the durable-evidence lane that can name that gap; extend its window to
+    # cover "day already ended" so a past-local-day position tries the same
+    # hard-fact evidence first. A plain "no verdict" (city not on this lane,
+    # family paused, bin unparseable, or no durable evidence found yet) is
+    # deliberately left to fall through unchanged — evaluate_hard_fact_exit's
+    # return value does not distinguish "not applicable" from "applicable, no
+    # evidence yet", and the downstream global-simplex path already has its
+    # own, more careful post-local-day handling for that ambiguity. Only a
+    # verdict that WAS found but could not be resolved to a belief, or an
+    # unexpected failure while a verdict was in hand, declines by name here
+    # instead of silently falling through.
+    is_after_target_day = _is_position_after_target_local_day(pos, city, target_d)
+    if not (_is_position_target_local_day(pos, city, target_d) or is_after_target_day):
         return None
+
+    def _post_local_day_final_observation_unavailable() -> (
+        tuple[float, Position, bool] | None
+    ):
+        if not is_after_target_day:
+            return None
+        stale = _clone_for_probability_refresh(pos)
+        setattr(stale, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+        _append_monitor_validation(stale, "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+        _set_monitor_probability_fresh(stale, False)
+        _set_day0_zero_probability_exit_authority(stale, False)
+        return float(getattr(pos, "p_posterior", 0.0) or 0.0), stale, False
+
     metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
     if metric not in {"high", "low"}:
         return None
@@ -5543,14 +5574,14 @@ def _day0_absorbing_hard_fact_overlay(
             direction=getattr(pos, "direction", ""),
         )
         if belief is None:
-            return None
+            return _post_local_day_final_observation_unavailable()
     except Exception as exc:  # noqa: BLE001 - hard-fact overlay must fail soft
         logger.warning(
             "monitor_probability_refresh: day0 hard-fact overlay failed for %s: %s",
             getattr(pos, "trade_id", "?"),
             exc,
         )
-        return None
+        return _post_local_day_final_observation_unavailable()
 
     hard_pos = _clone_for_probability_refresh(pos)
     setattr(hard_pos, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)

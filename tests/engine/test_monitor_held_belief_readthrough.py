@@ -3857,3 +3857,135 @@ def test_freshest_seed_caps_pending_queue_enumeration(tmp_path, monkeypatch):
         metric="high",
     ) is None
     assert seen == 3
+
+
+# ---------------------------------------------------------------------------
+# Post-local-day day0 exit routing (XBL: Seattle 440a58af-e7b / 571a7579-002,
+# Chicago 7319687c-842, 2026-09-14). A day0_window position whose contract-
+# local target day has already ended kept getting evaluated on
+# day0_observation_remaining_window: that bootstrap has zero remaining hours
+# to sample and degenerates to a maximally-wide-but-finite belief band that
+# still passes the held-side evidence_ok check, so the exit organ silently
+# went blind while reporting itself fresh (INCOMPLETE_EXIT_CONTEXT
+# (missing=belief)). _day0_absorbing_hard_fact_overlay's target-local-day gate
+# is widened to also try (and, if unavailable, name) the durable hard-fact
+# lane once the local day has ended, before the remaining-window recompute
+# ever runs.
+# ---------------------------------------------------------------------------
+
+
+def _post_day_hard_fact_position():
+    from src.state.portfolio import Position
+
+    return Position(
+        trade_id="t-postday-1",
+        market_id="m-postday-1",
+        city="Seattle",
+        cluster="Seattle",
+        target_date="2026-06-12",
+        bin_label="Will the highest temperature in Seattle be between 60-61°F on June 12?",
+        direction="buy_no",
+        unit="F",
+        temperature_metric="high",
+        entry_method="qkernel_spine",
+        entry_price=0.55,
+        p_posterior=0.46,
+    )
+
+
+def _post_day_hard_fact_verdict_and_belief():
+    verdict = SimpleNamespace(
+        metric="high",
+        rounded_extreme=58.0,
+        source="ogimet_metar_kseattle",
+        evidence=SimpleNamespace(
+            is_complete_for=lambda _city: True,
+            station_id="KSEA",
+            observed_at="2026-06-13T00:00:00+00:00",
+            payload_identity="postday-evidence-1",
+            as_dict=lambda: {"station_id": "KSEA"},
+        ),
+    )
+    belief = SimpleNamespace(
+        yes_verdict="STRUCTURAL_LOSS",
+        held_verdict="STRUCTURAL_WIN",
+        yes_prob=0.0,
+        held_side_prob=1.0,
+    )
+    return verdict, belief
+
+
+def test_post_local_day_selects_hard_fact_when_final_extreme_available(monkeypatch):
+    """(a) local day ended, final extreme available -> hard-fact method, fresh."""
+    import src.engine.monitor_refresh as mr
+    import src.execution.day0_hard_fact_exit as hfe
+
+    position = _post_day_hard_fact_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: True)
+    verdict, belief = _post_day_hard_fact_verdict_and_belief()
+    monkeypatch.setattr(hfe, "evaluate_hard_fact_exit", lambda **_kw: verdict)
+    monkeypatch.setattr(hfe, "hard_fact_monitor_belief", lambda **_kw: belief)
+
+    city = SimpleNamespace(name="Seattle", timezone="America/Los_Angeles", settlement_source_type="noaa")
+    prob, refreshed, is_fresh = mr.monitor_probability_refresh(
+        position, conn=object(), city=city, target_d="2026-06-12",
+    )
+
+    assert is_fresh is True
+    assert prob == pytest.approx(1.0)
+    assert refreshed.selected_method == mr.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert getattr(refreshed, mr._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is True
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" not in refreshed.applied_validations
+    assert any(
+        v.startswith("belief_source=day0_absorbing_hard_fact")
+        for v in refreshed.applied_validations
+    )
+
+
+def test_post_local_day_declines_named_when_final_extreme_unavailable(monkeypatch):
+    """(b) local day ended, no durable evidence resolves a verdict/belief ->
+    the named POST_LOCAL_DAY reason, probability marked not fresh, no
+    placeholder, exit authority not granted."""
+    import src.engine.monitor_refresh as mr
+    import src.execution.day0_hard_fact_exit as hfe
+
+    position = _post_day_hard_fact_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: True)
+    verdict, _belief = _post_day_hard_fact_verdict_and_belief()
+    monkeypatch.setattr(hfe, "evaluate_hard_fact_exit", lambda **_kw: verdict)
+    # A verdict exists but cannot be resolved to a directional belief.
+    monkeypatch.setattr(hfe, "hard_fact_monitor_belief", lambda **_kw: None)
+
+    city = SimpleNamespace(name="Seattle", timezone="America/Los_Angeles", settlement_source_type="noaa")
+    prob, refreshed, is_fresh = mr.monitor_probability_refresh(
+        position, conn=object(), city=city, target_d="2026-06-12",
+    )
+
+    assert is_fresh is False
+    assert prob == pytest.approx(position.p_posterior)
+    assert refreshed.selected_method == mr.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in refreshed.applied_validations
+    assert getattr(refreshed, mr._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is False
+    assert not any("belief=" in v and "belief_source" not in v for v in refreshed.applied_validations)
+
+
+def test_local_day_still_open_hard_fact_overlay_unchanged(monkeypatch):
+    """(c) local day still open -> overlay behaves exactly as parent (verdict
+    None falls through to None; the day-ended branch never engages)."""
+    import src.engine.monitor_refresh as mr
+    import src.execution.day0_hard_fact_exit as hfe
+
+    position = _post_day_hard_fact_position()
+    monkeypatch.setattr(mr, "_is_position_target_local_day", lambda *_a, **_k: True)
+    monkeypatch.setattr(mr, "_is_position_after_target_local_day", lambda *_a, **_k: False)
+    monkeypatch.setattr(hfe, "evaluate_hard_fact_exit", lambda **_kw: None)
+
+    result = mr._day0_absorbing_hard_fact_overlay(
+        pos=position, conn=object(),
+        city=SimpleNamespace(name="Seattle", timezone="America/Los_Angeles", settlement_source_type="noaa"),
+        target_d="2026-06-12",
+    )
+
+    assert result is None
