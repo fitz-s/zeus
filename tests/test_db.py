@@ -7364,6 +7364,130 @@ def test_partial_exit_caused_by_queries_use_partial_index_not_position_scan():
         conn.close()
 
 
+@pytest.mark.parametrize("analyze", [False, True], ids=["no-analyze", "with-analyze"])
+def test_partial_exit_call_sites_use_indexed_by_regardless_of_stats(analyze):
+    """X-BO (2026-09-14, harvester settlement write-lease audit follow-up): the partial index
+    added by R-BM/f0e320c6e (idx_position_events_position_partial_exit_sequence) only wins the
+    query planner's cost-based comparison AFTER `ANALYZE` populates sqlite_stat1. Live's 190 GB
+    trades DB has NEVER been ANALYZEd -- no sqlite_stat1 row exists for position_events -- so
+    the exact query text of all four in-lease call sites (fill_dedup.py's
+    recorded_partial_exit_fill_cursors, partial_exit_realized_pnl_fold,
+    legacy_partial_exit_repair_fills; harvester.py's _canonical_partial_exit_residual_basis)
+    still planned as `SEARCH position_events USING INDEX sqlite_autoindex_position_events_3
+    (position_id=?)` -- the UNIQUE(position_id, sequence_no) autoindex -- then
+    residual-filtered caused_by row-by-row over the position's WHOLE history, so the settlement
+    write lease kept expiring live. A bare non-partial composite index on
+    (position_id, caused_by, sequence_no, event_id) does NOT fix this either: confirmed on a
+    temp DB that SQLite's stats-less cost model still prefers the 1-column autoindex over it for
+    this exact `caused_by IN (...)` predicate shape. `INDEXED BY
+    idx_position_events_position_partial_exit_sequence`, added to all four call sites, is the
+    only shape proven to win in BOTH stats states with no TEMP B-TREE for the ORDER BY. The hard
+    index-name dependency is safe because init_schema_trade_only -- the only DDL path that
+    creates this index, and the live daemon's only trade-DB schema initializer
+    (src/main.py:10732) -- always runs before any harvester cycle in the same boot.
+
+    Traces the real SQL text each function issues via a spy wrapper (not a hand-typed copy) and
+    runs with and without `ANALYZE` via `analyze`. FAILS on 38c319226 in the no-analyze case
+    (autoindex_3, not the partial index) and PASSES on this tip in both cases."""
+    from src.execution.harvester import _canonical_partial_exit_residual_basis
+    from src.state.db import init_schema_trade_only
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        legacy_partial_exit_repair_fills,
+        partial_exit_realized_pnl_fold,
+        recorded_partial_exit_fill_cursors,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        conn = get_connection(Path(td) / f"partial-exit-call-sites-{analyze}.db")
+        conn.row_factory = sqlite3.Row
+        init_schema_trade_only(conn)
+
+        position_id = "pos-decoy-2000-plus-match"
+        decoy_rows = [
+            (
+                f"{position_id}:mr:{seq}", position_id, 1, seq, "MONITOR_REFRESHED",
+                f"2026-09-01T00:{seq % 60:02d}:00Z", "active", "active", "center_buy",
+                None, None, None, None, None, "monitor_refresh", f"{position_id}:idem:{seq}",
+                "src.engine.cycle_runtime", "live", "{}",
+            )
+            for seq in range(1, 2001)
+        ]
+        match_rows = [
+            (
+                f"{position_id}:pe:{seq}", position_id, 1, seq, "MONITOR_REFRESHED",
+                f"2026-09-01T01:{seq % 60:02d}:00Z", "active", "active", "center_buy",
+                None, None, None, None, None,
+                "partial_exit_fill" if i % 2 == 0 else "partial_exit_economics_repair",
+                f"{position_id}:pe-idem:{seq}", "src.execution.harvester", "live",
+                '{"remaining_shares": "1.0", "remaining_cost_basis_usd": "0.5"}',
+            )
+            for i, seq in enumerate(range(5000, 5003))
+        ]
+        conn.executemany(
+            """INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, venue_status,
+                caused_by, idempotency_key, source_module, env, payload_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            decoy_rows + match_rows,
+        )
+        conn.commit()
+        if analyze:
+            conn.execute("ANALYZE")
+
+        class _SqlCapture:
+            """Records every position_events statement the real functions issue, so the plan
+            assertions below trace the actual call sites instead of a hand-typed duplicate."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.captured = []
+
+            def execute(self, sql, params=()):
+                if "FROM position_events" in sql and "caused_by IN" in sql:
+                    self.captured.append((sql, tuple(params)))
+                return self._inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        spy = _SqlCapture(conn)
+        for fn, args in (
+            (recorded_partial_exit_fill_cursors, (spy, position_id)),
+            (partial_exit_realized_pnl_fold, (spy, position_id)),
+            (legacy_partial_exit_repair_fills, (spy, position_id)),
+            (_canonical_partial_exit_residual_basis, (spy, position_id)),
+        ):
+            try:
+                fn(*args)
+            except PartialExitEconomicDebtError:
+                # Only the SELECT's plan is under test here, not downstream economics
+                # validation (test_fill_dedup.py owns that behavior).
+                pass
+
+        assert len(spy.captured) == 4, f"expected 4 position_events statements, got {len(spy.captured)}"
+        for sql, params in spy.captured:
+            plan_rows = conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+            details = [str(row[3]) for row in plan_rows]
+            plan_text = "\n".join(details).upper()
+            assert "SCAN" not in plan_text, f"expected no scan ({analyze=}): {details}\nSQL: {sql}"
+            assert "AUTOINDEX_POSITION_EVENTS_3" not in plan_text, (
+                f"expected the caused_by partial index, not the position_id-only autoindex "
+                f"({analyze=}): {details}"
+            )
+            assert "TEMP B-TREE" not in plan_text, (
+                f"expected the index to satisfy ORDER BY with no sort materialization "
+                f"({analyze=}): {details}"
+            )
+            assert any(
+                "IDX_POSITION_EVENTS_POSITION_PARTIAL_EXIT_SEQUENCE" in d.upper()
+                for d in details
+            ), f"expected the partial index ({analyze=}), got: {details}\nSQL: {sql}"
+        conn.close()
+
+
 def test_sd1_trade_decisions_update_uses_runtime_trade_id_index_not_scan():
     """R-BM (2026-09-14): harvester.py's SD-1 statement
     (`UPDATE trade_decisions ... WHERE runtime_trade_id = ? AND status NOT IN (...)`) runs

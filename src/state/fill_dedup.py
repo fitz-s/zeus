@@ -584,6 +584,7 @@ def recorded_partial_exit_fill_cursors(
             """
             SELECT event_id, caused_by, payload_json
               FROM position_events
+                   INDEXED BY idx_position_events_position_partial_exit_sequence
              WHERE position_id = ?
                AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
              ORDER BY sequence_no, event_id
@@ -662,6 +663,7 @@ def partial_exit_realized_pnl_fold(
             """
             SELECT event_id, caused_by, payload_json
               FROM position_events
+                   INDEXED BY idx_position_events_position_partial_exit_sequence
              WHERE position_id = ?
                AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
              ORDER BY sequence_no, event_id
@@ -812,6 +814,7 @@ def legacy_partial_exit_repair_fills(
             """
             SELECT event_id, order_id, caused_by, payload_json
               FROM position_events
+                   INDEXED BY idx_position_events_position_partial_exit_sequence
              WHERE position_id = ?
                AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
              ORDER BY sequence_no, event_id

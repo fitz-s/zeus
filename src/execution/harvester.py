@@ -396,6 +396,7 @@ def _canonical_partial_exit_residual_basis(
         """
         SELECT event_id, sequence_no, payload_json
           FROM position_events
+               INDEXED BY idx_position_events_position_partial_exit_sequence
          WHERE position_id = ?
            AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
          ORDER BY sequence_no DESC, event_id DESC

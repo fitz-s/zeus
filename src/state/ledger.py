@@ -604,6 +604,23 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
         )
 
     conn.executescript(load_architecture_kernel_sql())
+    # X-BO (2026-09-14): the kernel .sql file does not carry
+    # idx_position_events_position_partial_exit_sequence (added to
+    # _TRADE_CLASS_DDL by f0e320c6e, never migrated into the kernel file --
+    # same divergence precedent as d2101dc6c). fill_dedup.py's three
+    # caused_by-IN(...) readers and harvester.py's
+    # _canonical_partial_exit_residual_basis now pin that index by name via
+    # INDEXED BY (proven the only shape that is stats-independent); a
+    # world-schema connection built through this function must carry the
+    # same index or those statements raise "no such index" the instant a
+    # settlement-close touches a position with any partial-exit history.
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_position_events_position_partial_exit_sequence
+            ON position_events(position_id, sequence_no, event_id)
+            WHERE caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
+        """
+    )
     ensure_token_suppression_reason_schema(conn)
     _ensure_day0_window_entered_event_type(conn)
     _ensure_venue_position_observed_event_type(conn)
