@@ -3937,23 +3937,37 @@ def _record_monitor_hold_decision(
     return canonical_written
 
 
+_REVOCATION_PROB_FIELDS = frozenset({"fresh_prob", "fresh_prob_is_fresh"})
+_REVOCATION_PRICE_FIELDS = frozenset(
+    {"current_market_price", "current_market_price_is_fresh", "best_bid"}
+)
+
+
 def _revoke_monitor_action_authority(
     pos,
     *,
     missing_fields: set[str] | None = None,
 ) -> None:
-    """Revoke only the evidence axes an incomplete monitor attempt did not prove."""
+    """Revoke only the evidence axes an incomplete monitor attempt did not prove.
+
+    A missing-field name this function does not recognise (e.g. current_ci or
+    exit_calibration) means the exit organ found a gap this revocation law has
+    no typed axis for. Silently revoking nothing would let the position keep
+    reporting itself fresh while blind to that gap, so any non-empty,
+    unrecognised missing set revokes BOTH freshness axes — the same fail-closed
+    behavior as the empty/None "revoke all" case — rather than passing through
+    untouched.
+    """
 
     missing = None if missing_fields is None else set(missing_fields)
     revoke_all = missing is None or not missing
-    if revoke_all or missing & {"fresh_prob", "fresh_prob_is_fresh"}:
+    unrecognized = bool(missing) and not missing <= (
+        _REVOCATION_PROB_FIELDS | _REVOCATION_PRICE_FIELDS
+    )
+    if revoke_all or unrecognized or missing & _REVOCATION_PROB_FIELDS:
         pos.last_monitor_prob_is_fresh = False
         pos.last_monitor_edge = None
-    if revoke_all or missing & {
-        "current_market_price",
-        "current_market_price_is_fresh",
-        "best_bid",
-    }:
+    if revoke_all or unrecognized or missing & _REVOCATION_PRICE_FIELDS:
         pos.last_monitor_market_price_is_fresh = False
         pos.last_monitor_edge = None
         pos.last_monitor_market_price = None
@@ -6101,13 +6115,27 @@ def _missing_fields_from_incomplete_exit_reason(exit_reason: str) -> set[str]:
     return {part.strip() for part in text[len(prefix):-1].split(",") if part.strip()}
 
 
-def _incomplete_exit_observability_reason(exit_decision, exit_context) -> str | None:
+_EXIT_Q_NON_FAILURE_SOURCES = frozenset({"raw", "market_anchored"})
+
+
+def _incomplete_exit_observability_reason(exit_decision, exit_context, pos=None) -> str | None:
     """The observability-recorder key for an evidence-incomplete exit verdict.
 
     Recognizes both vocabularies: the legacy INCOMPLETE_EXIT_CONTEXT(missing=…)
     string (in-flight rows) and the one-law EVIDENCE_UNAVAILABLE verdict, whose
     missing fields come from exit_context.missing_authority_fields() plus the
     quote axis (best_bid) rather than reason-string parsing.
+
+    ``pos`` (optional, the Position that produced this cycle's exit_decision)
+    lets this also name a downstream exit_q failure: Position._exit_q_mean_and_source
+    can report evidence_ok=False for a reason distinct from a missing/malformed
+    current_ci (already named via current_ci) — an unavailable/failed
+    market-anchored exit calibration (non-finite/out-of-range best_bid, a bad
+    target_date, or the calibration provider raising or returning an invalid
+    corrected_q). That source is recorded on pos.applied_validations as
+    "exit_q:<source>" before this is called; naming it here as
+    "exit_calibration" keeps the fallback literal 'belief' from firing for a
+    known cause.
     """
     reason = str(getattr(exit_decision, "reason", "") or "")
     if reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
@@ -6120,6 +6148,16 @@ def _incomplete_exit_observability_reason(exit_decision, exit_context) -> str | 
         missing = list(fields())
     if not ExitContext._is_finite(getattr(exit_context, "best_bid", None)):
         missing.append("best_bid")
+    if pos is not None:
+        for validation in getattr(pos, "applied_validations", None) or ():
+            text = str(validation)
+            if not text.startswith("exit_q:"):
+                continue
+            source = text[len("exit_q:"):]
+            if source and source not in _EXIT_Q_NON_FAILURE_SOURCES:
+                if "exit_calibration" not in missing:
+                    missing.append("exit_calibration")
+            break
     return f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing) or 'belief'})"
 
 
@@ -10740,7 +10778,7 @@ def execute_monitoring_phase(
                     should_exit = False
                     exit_reason = gate_reason or "INCOMPLETE_EXIT_EVIDENCE"
             _incomplete_reason = _incomplete_exit_observability_reason(
-                exit_decision, exit_context
+                exit_decision, exit_context, pos=pos
             )
             if red_handoff is not None:
                 # Atomic writer above already persisted the real M/I pair.

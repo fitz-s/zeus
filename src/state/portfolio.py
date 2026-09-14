@@ -303,6 +303,31 @@ class ExitContext:
         except (TypeError, ValueError):
             return False
 
+    def _current_ci_ok(self) -> bool:
+        """Mirror Position._held_side_point_with_confidence's CI validity gate.
+
+        Returns True (nothing to report here) when fresh_prob itself is the
+        problem — that is already named by missing_authority_fields via
+        fresh_prob/fresh_prob_is_fresh — so this reports current_ci only when
+        the CI carrier itself is the actual gap: absent, malformed, or the
+        held belief is flagged degraded (belief_available=False).
+        """
+        if not (self._is_finite(self.fresh_prob) and self.fresh_prob_is_fresh):
+            return True
+        if not self.belief_available:
+            return False
+        ci = self.current_ci
+        if ci is None:
+            return False
+        try:
+            lo, hi = float(ci[0]), float(ci[1])
+            point = float(self.fresh_prob)
+        except (TypeError, ValueError, IndexError):
+            return False
+        if not all(math.isfinite(v) for v in (lo, hi, point)):
+            return False
+        return 0.0 <= lo <= point <= hi <= 1.0
+
     def missing_authority_fields(self) -> list[str]:
         missing: list[str] = []
         if not self._is_finite(self.fresh_prob):
@@ -317,6 +342,8 @@ class ExitContext:
             missing.append("hours_to_settlement")
         if not self.position_state:
             missing.append("position_state")
+        if not self._current_ci_ok():
+            missing.append("current_ci")
         return missing
 
 

@@ -22352,14 +22352,24 @@ def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
     )
 
     assert len(emitted) == 1
+    # current_ci joins the reported gap here (not a new regression): this
+    # fixture also revokes last_monitor_market_price_is_fresh, so the
+    # ExitContext's current_belief_finite gate (cycle_runtime.py) cannot build
+    # a current_ci either — missing_authority_fields() now names that too
+    # instead of only surfacing it as the 'belief' placeholder.
     assert emitted[0]["decision_unavailable_reason"] == (
         "INCOMPLETE_EXIT_CONTEXT "
-        "(missing=current_market_price_is_fresh,hours_to_settlement,best_bid)"
+        "(missing=current_market_price_is_fresh,hours_to_settlement,current_ci,best_bid)"
     )
-    assert position.last_monitor_prob_is_fresh is True
+    # hours_to_settlement/current_ci are fields _revoke_monitor_action_authority
+    # does not have a typed price/prob axis for; an unrecognised, non-empty
+    # missing set now fails closed on BOTH axes rather than passing through
+    # untouched, so the previously-preserved prob axis is revoked here too —
+    # the position must not report itself fresh while this incomplete.
+    assert position.last_monitor_prob_is_fresh is False
     assert position.last_monitor_prob == pytest.approx(0.61)
     assert position.last_monitor_market_price_is_fresh is False
-    assert results[0].fresh_prob == pytest.approx(0.61)
+    assert results[0].fresh_prob is None
     assert results[0].fresh_edge is None
     assert summary["monitor_incomplete_exit_context"] == 1
     assert summary["monitors"] == 1
@@ -22462,6 +22472,101 @@ def test_probability_incomplete_monitor_preserves_current_quote_axis():
     assert position.last_monitor_market_price == pytest.approx(0.49)
     assert position.last_monitor_best_bid == pytest.approx(0.48)
     assert position.last_monitor_best_ask == pytest.approx(0.50)
+
+
+def test_revoke_monitor_action_authority_unrecognized_field_revokes_both():
+    """(d) A missing field this revocation law has no typed axis for (a
+    degraded current-belief CI, or any other name it does not recognise) must
+    fail closed on BOTH freshness axes rather than pass through untouched —
+    a blind exit organ must not keep reporting itself fresh."""
+    from src.engine import cycle_runtime
+
+    for unrecognized in ({"current_ci"}, {"unknown_field"}):
+        position = _make_position(trade_id=f"revoke-unrecognized-{unrecognized}")
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.12
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_best_bid = 0.48
+        position.last_monitor_best_ask = 0.50
+
+        cycle_runtime._revoke_monitor_action_authority(
+            position, missing_fields=unrecognized,
+        )
+
+        assert position.last_monitor_prob_is_fresh is False
+        assert position.last_monitor_market_price_is_fresh is False
+        assert position.last_monitor_best_bid is None
+
+
+def test_missing_authority_fields_names_current_ci_not_belief_placeholder():
+    """ExitContext.missing_authority_fields() must name current_ci when the
+    current-belief CI is absent/malformed — the 'belief' fallback string in
+    _incomplete_exit_observability_reason must never fire for this known
+    cause."""
+    from src.engine.cycle_runtime import _incomplete_exit_observability_reason
+    from src.state.portfolio import ExitContext
+
+    ctx = ExitContext(
+        fresh_prob=0.4558,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.0,
+        current_market_price_is_fresh=True,
+        best_bid=0.0,
+        current_ci=None,
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    assert "current_ci" in ctx.missing_authority_fields()
+
+    decision = ExitDecision(False, "EVIDENCE_UNAVAILABLE", trigger="EVIDENCE_UNAVAILABLE")
+    reason = _incomplete_exit_observability_reason(decision, ctx)
+    assert reason == "INCOMPLETE_EXIT_CONTEXT (missing=current_ci)"
+    assert "belief" not in reason
+
+
+def test_incomplete_exit_observability_reason_names_exit_calibration():
+    """The 440a58af-e7b (2026-09-14) shape: current_ci is valid (fine, ordered,
+    finite band) but Position._exit_q_mean_and_source's downstream
+    market-anchored calibration failed closed (exit_q:entry_calibration_unavailable).
+    That must surface as a named 'exit_calibration' field, never the 'belief'
+    placeholder — the operator's calibration branch itself is untouched here."""
+    from src.engine.cycle_runtime import _incomplete_exit_observability_reason
+    from src.state.portfolio import ExitContext
+
+    pos = _make_position(trade_id="440a58af-e7b-like")
+    pos.applied_validations = [
+        "predicted_bin_exit_law",
+        "exit_q:entry_calibration_unavailable",
+        "evidence_unavailable_third_state",
+    ]
+    ctx = ExitContext(
+        fresh_prob=0.4558,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.0,
+        current_market_price_is_fresh=True,
+        best_bid=0.0,
+        current_ci=(0.0, 1.0),
+        hours_to_settlement=1.0,
+        position_state="day0_window",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    assert "current_ci" not in ctx.missing_authority_fields()
+
+    decision = ExitDecision(False, "EVIDENCE_UNAVAILABLE", trigger="EVIDENCE_UNAVAILABLE")
+    reason = _incomplete_exit_observability_reason(decision, ctx, pos=pos)
+    assert reason == "INCOMPLETE_EXIT_CONTEXT (missing=exit_calibration)"
+    assert "belief" not in reason
+
+    # exit_q:raw and exit_q:market_anchored are non-failure sources and must
+    # not be named as a gap.
+    for non_failure_source in ("raw", "market_anchored"):
+        pos.applied_validations = [f"exit_q:{non_failure_source}"]
+        reason = _incomplete_exit_observability_reason(decision, ctx, pos=pos)
+        assert reason == "INCOMPLETE_EXIT_CONTEXT (missing=belief)"
 
 
 def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
