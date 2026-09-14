@@ -306,7 +306,56 @@ def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str
     return rows
 
 
-def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys):
+def _condition_ids_for_keys(portfolio, keys) -> set[str]:
+    """Condition ids of open positions whose settlement key is in ``keys``."""
+    return {
+        str(getattr(pos, "condition_id", "") or "").strip()
+        for pos in getattr(portfolio, "positions", []) or []
+        if (
+            str(getattr(pos, "city", "") or "").strip(),
+            str(getattr(pos, "target_date", "") or "").strip(),
+            str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
+        ) in keys
+        and str(getattr(pos, "condition_id", "") or "").strip()
+    }
+
+
+def _condition_market_snapshots(trade_conn, condition_ids) -> dict[str, object]:
+    """Latest yes/no token ids and event slug for each condition id.
+
+    Token bindings and event slug are fixed at market creation and do not
+    change for a given condition_id once captured, so this is read once,
+    before any write lease, and the result is reused for every read of it in
+    the same resolver pass instead of re-querying the append-only snapshot
+    table under the bounded write budget.
+    """
+    condition_ids = sorted(condition_ids)
+    if not condition_ids:
+        return {}
+    placeholders = ",".join("?" for _ in condition_ids)
+    rows = trade_conn.execute(
+        f"""
+        WITH latest AS (
+            SELECT condition_id, yes_token_id, no_token_id, event_slug,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY condition_id ORDER BY captured_at DESC
+                   ) AS row_rank
+              FROM executable_market_snapshots
+             WHERE condition_id IN ({placeholders})
+        )
+        SELECT condition_id, yes_token_id, no_token_id, event_slug
+          FROM latest
+         WHERE row_rank = 1
+        """,
+        condition_ids,
+    ).fetchall()
+    return {
+        str(_row_value(row, "condition_id", 0, "") or ""): row
+        for row in rows
+    }
+
+
+def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys, snapshots):
     """Translate complete finalized CTF payouts into condition-scoped closes.
 
     This is economic payout truth only.  It never creates a physical
@@ -320,6 +369,9 @@ def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys):
     facts need not share a block.  Each fact must independently be finalized,
     complete, and terminal; together they must form the strict binary vector
     ``[denominator, 0]`` or ``[0, denominator]``.
+
+    ``snapshots`` is the precomputed result of ``_condition_market_snapshots``
+    for these same condition ids -- read once, outside the write lease.
     """
     positions_by_condition: dict[str, list] = {}
     for pos in getattr(portfolio, "positions", []) or []:
@@ -338,39 +390,19 @@ def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys):
     placeholders = ",".join("?" for _ in condition_ids)
     payout_rows = trade_conn.execute(
         f"""
-        WITH latest AS (
-            SELECT condition_id, outcome_index, payout_numerator,
-                   payout_denominator, state, block_number, block_hash, source,
-                   observed_at,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY condition_id, outcome_index ORDER BY id DESC
-                   ) AS row_rank
+        WITH latest_ids AS (
+            SELECT condition_id, outcome_index, MAX(id) AS id
               FROM payout_observations
              WHERE condition_id IN ({placeholders})
                AND outcome_index IN (0, 1)
+             GROUP BY condition_id, outcome_index
         )
-        SELECT condition_id, outcome_index, payout_numerator,
-               payout_denominator, state, block_number, block_hash, source,
-               observed_at
-          FROM latest
-         WHERE row_rank = 1
-         ORDER BY condition_id, outcome_index
-        """,
-        condition_ids,
-    ).fetchall()
-    snapshot_rows = trade_conn.execute(
-        f"""
-        WITH latest AS (
-            SELECT condition_id, yes_token_id, no_token_id, event_slug,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY condition_id ORDER BY captured_at DESC
-                   ) AS row_rank
-              FROM executable_market_snapshots
-             WHERE condition_id IN ({placeholders})
-        )
-        SELECT condition_id, yes_token_id, no_token_id, event_slug
-          FROM latest
-         WHERE row_rank = 1
+        SELECT po.condition_id, po.outcome_index, po.payout_numerator,
+               po.payout_denominator, po.state, po.block_number,
+               po.block_hash, po.source, po.observed_at
+          FROM latest_ids li
+          JOIN payout_observations po ON po.id = li.id
+         ORDER BY po.condition_id, po.outcome_index
         """,
         condition_ids,
     ).fetchall()
@@ -380,10 +412,6 @@ def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys):
         condition_id = str(_row_value(row, "condition_id", 0, "") or "")
         outcome_index = int(_row_value(row, "outcome_index", 1, -1))
         observations.setdefault(condition_id, {})[outcome_index] = row
-    snapshots = {
-        str(_row_value(row, "condition_id", 0, "") or ""): row
-        for row in snapshot_rows
-    }
 
     resolved = []
     for condition_id, positions in positions_by_condition.items():
@@ -704,10 +732,18 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         )
         for row in verified_rows
     }
+    # Read once, before the lease: token bindings/event slug are immutable
+    # per condition_id, so the same snapshot lookup serves both this pre-lease
+    # discovery pass and the in-lease re-read of payout truth below.
+    unverified_condition_ids = _condition_ids_for_keys(
+        portfolio, settlement_keys - verified_keys
+    )
+    snapshots = _condition_market_snapshots(trade_conn, unverified_condition_ids)
     payout_rows = _read_finalized_payout_settlement_rows(
         trade_conn,
         portfolio,
         settlement_keys - verified_keys,
+        snapshots,
     )
     venue_rows = _read_venue_resolved_settlement_rows(
         trade_conn,
@@ -748,6 +784,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             verified_rows=verified_rows,
             verified_keys=verified_keys,
             venue_rows=venue_rows,
+            snapshots=snapshots,
             canonical=canonical,
             deadline_monotonic=deadline_monotonic,
         )
@@ -784,6 +821,7 @@ def _apply_discovered_settlement_rows(
     verified_rows,
     verified_keys,
     venue_rows,
+    snapshots,
     canonical: bool,
     deadline_monotonic: float | None,
 ) -> tuple[dict, bool, bool, object | None]:
@@ -797,6 +835,7 @@ def _apply_discovered_settlement_rows(
         trade_conn,
         portfolio,
         settlement_keys - verified_keys,
+        snapshots,
     )
     # Re-fingerprint only the keys the discovered rows actually touch, not
     # every open settlement key. `rows` (verified/payout/venue) is already

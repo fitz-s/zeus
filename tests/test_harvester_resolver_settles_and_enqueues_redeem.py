@@ -415,10 +415,12 @@ def test_finalized_payout_rows_bind_tokens_and_allow_independent_blocks(trade_co
         block_hash="0x100",
     )
 
+    snapshots = resolver._condition_market_snapshots(trade_conn, {condition_id})
     rows = resolver._read_finalized_payout_settlement_rows(
         trade_conn,
         portfolio,
         {("NYC", "2026-08-12", "high")},
+        snapshots,
     )
 
     assert rows == [{
@@ -503,10 +505,12 @@ def test_finalized_payout_reader_fails_closed_on_incomplete_authority(
         denominator=(2 if mutation == "unequal_denominator" else 1),
     )
 
+    snapshots = resolver._condition_market_snapshots(trade_conn, {condition_id})
     assert resolver._read_finalized_payout_settlement_rows(
         trade_conn,
         portfolio,
         {("Dallas", "2026-08-12", "high")},
+        snapshots,
     ) == []
 
 
@@ -1064,6 +1068,7 @@ def test_in_lease_reverify_narrows_to_empty_when_no_row_survives_into_the_lease(
     from src.execution import harvester as hv
     from src.execution import harvester_pnl_resolver as resolver
 
+    init_snapshot_schema(trade_conn, include_latest=False)
     portfolio, position = _winning_position()
     trade_conn.execute(
         """INSERT INTO position_current (
@@ -1083,7 +1088,7 @@ def test_in_lease_reverify_narrows_to_empty_when_no_row_survives_into_the_lease(
     # the observation raced out from under it.
     payout_calls = {"n": 0}
 
-    def payout_stub(_conn, _portfolio, _keys):
+    def payout_stub(_conn, _portfolio, _keys, _snapshots):
         payout_calls["n"] += 1
         if payout_calls["n"] == 1:
             return [{
@@ -1144,6 +1149,7 @@ def test_in_lease_reverify_narrows_to_rows_referenced_keys(trade_conn, monkeypat
     from src.execution import harvester as hv
     from src.execution import harvester_pnl_resolver as resolver
 
+    init_snapshot_schema(trade_conn, include_latest=False)
     portfolio, pos_a = _winning_position(
         trade_id="fam-a", city="CityA", target_date="2026-06-01"
     )
@@ -1247,3 +1253,84 @@ def test_in_lease_reverify_narrows_to_rows_referenced_keys(trade_conn, monkeypat
     # rejected as stale even though the re-verify no longer scans CityC/CityD.
     assert settled == [("CityB", "2026-06-01")]
     assert result["positions_settled"] == 1
+
+
+def test_market_snapshot_lookup_runs_once_before_the_write_lease(
+    trade_conn, monkeypatch
+):
+    """Token-id/event-slug snapshot metadata is read once, before the lease
+    is acquired, and reused for the in-lease payout re-read -- it is never
+    re-queried under the bounded write budget."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    init_snapshot_schema(trade_conn, include_latest=False)
+    portfolio, position = _winning_position()
+    trade_conn.execute(
+        """INSERT INTO position_current (
+               position_id, phase, city, target_date, temperature_metric, updated_at
+           ) VALUES (?, 'active', ?, ?, 'high', ?)""",
+        (position.trade_id, position.city, position.target_date, "before-writer"),
+    )
+    trade_conn.commit()
+    forecasts_conn = _empty_settlement_outcomes_conn()
+
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda *a, **kw: portfolio)
+    monkeypatch.setattr(resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [])
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    events = []
+    original_snapshots = resolver._condition_market_snapshots
+
+    def spy_snapshots(conn, condition_ids):
+        events.append("snapshot_lookup")
+        return original_snapshots(conn, condition_ids)
+
+    monkeypatch.setattr(resolver, "_condition_market_snapshots", spy_snapshots)
+
+    # Pre-lease discovery finds one finalized payout (enters the lease); the
+    # in-lease re-read of the same payout query comes back empty. The
+    # snapshot lookup itself must not run a second time for this re-read.
+    payout_calls = {"n": 0}
+
+    def payout_stub(_conn, _portfolio, _keys, _snapshots):
+        payout_calls["n"] += 1
+        if payout_calls["n"] == 1:
+            return [{
+                "city": position.city,
+                "target_date": position.target_date,
+                "market_slug": "slug",
+                "winning_bin": None,
+                "temperature_metric": "high",
+                "authority": "VENUE_RESOLVED",
+                "settlement_source": "polymarket_chain_rpc_finalized_v1",
+                "settlement_value": None,
+                "settlement_scope": "condition",
+                "condition_id": "0x" + "a" * 40,
+                "condition_yes_won": True,
+            }]
+        return []
+
+    monkeypatch.setattr(resolver, "_read_finalized_payout_settlement_rows", payout_stub)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        events.append("lease_enter")
+        trade_conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield time.monotonic() + 5
+        finally:
+            events.append("lease_exit")
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+    settle = MagicMock()
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+
+    resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    # Snapshot lookup happens exactly once, strictly before the lease opens.
+    assert events == ["snapshot_lookup", "lease_enter", "lease_exit"]
+    # The payout observations read is still repeated inside the lease --
+    # only the snapshot lookup was hoisted out, not the truth re-read itself.
+    assert payout_calls["n"] == 2
