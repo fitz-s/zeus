@@ -7242,7 +7242,20 @@ def _compute_posterior_payload(
         "q_lcb_basis": q_lcb_basis,
         # bootstrap_draws is meaningful ONLY for the bootstrap basis; the Wilson member-vote bound
         # is analytic (no draws) -> None.
-        "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_basis == _QLCB_BASIS else None),
+        # Stamp the ACTUAL draw count, not the general-path constant: the Day0
+        # shared-carrier path always draws n_samples=500 (build_day0_remaining_
+        # probability_carrier), while _QLCB_BOOTSTRAP_DRAWS=400 only describes
+        # the unrelated general rho-mix path. A hardcoded 400 here would lie on
+        # every carrier row (this credential feeds a min-draws gate at
+        # src/strategy/live_inference/live_admission.py:REPLACEMENT_BOOTSTRAP_MIN_DRAWS
+        # and a credential-equality check in event_reactor_adapter.py; both
+        # values happen to clear/match today, but the field should describe
+        # what was actually drawn, not a path-agnostic constant).
+        "q_lcb_bootstrap_draws": (
+            len(next(iter(q_bootstrap_samples_by_bin.values())))
+            if q_lcb_basis == _QLCB_BASIS and q_bootstrap_samples_by_bin
+            else None
+        ),
         # Empirical edge-confidence substrate. The live adapter computes
         # p_value = (1 + count(q_side_draw - native_cost <= 0)) / (1 + draws)
         # from these exact draws instead of laundering the robust LCB pass/fail

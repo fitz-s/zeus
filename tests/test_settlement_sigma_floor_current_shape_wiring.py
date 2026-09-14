@@ -353,6 +353,20 @@ def test_current_shape_carrier_branch_floor_provenance_is_neutral(
     assert result_bare.ok is True
     bare = _full_row(conn_bare)
     assert bare["provenance"]["q_shape"] == "day0_remaining_shared_carrier_v1"
+    # 2026-09 storage fix: no fast-residual mixing ran on this carrier branch,
+    # so the transposed sample array is not persisted (readers derive it from
+    # q_bootstrap_samples_by_bin instead), and the bootstrap-draws stamp
+    # reflects the carrier's actual 500 draws, not the general-path constant
+    # (400).
+    assert "day0_remaining_carrier_probability_samples" not in bare["provenance"]
+    assert bare["provenance"]["q_lcb_bootstrap_draws"] == 500
+    assert set(bare["provenance"]["q_bootstrap_samples_by_bin"]) == {
+        item.bin_id for item in _hko_carrier_request().bins
+    }
+    assert all(
+        len(draws) == 500
+        for draws in bare["provenance"]["q_bootstrap_samples_by_bin"].values()
+    )
 
     _patch_floor(monkeypatch, 5.0, None)  # would bind against predictive_sigma_c=2.0 if it reached anything
     conn_floored = _conn()
