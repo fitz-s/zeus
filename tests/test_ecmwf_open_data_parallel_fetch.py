@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-08-14
+# Last reused/audited: 2026-09-14
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.4 + §6
 """Unit tests for ECMWF Open Data parallel SDK fetch (Candidate H).
 
@@ -693,6 +693,190 @@ def test_batch_does_not_abandon_worker_at_duplicate_outer_timeout(tmp_path, monk
     download = next(stage for stage in result["stages"] if "download_parallel" in stage["label"])
     assert download["status"] == "SUCCESS"
     assert download["ok_steps"] == [3]
+
+
+def test_cycle_deadline_stops_new_steps_and_marks_retry_as_failed(tmp_path, monkeypatch):
+    """A bounded continuity run retains started checkpoints but never starts a new step late."""
+    import src.data.ecmwf_open_data as mod
+
+    started: list[tuple[int, float | None]] = []
+
+    def bounded_fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors, _deadline):
+        started.append((step, _deadline))
+        time.sleep(0.10)
+        return ("OK", output_dir / f"step-{step}.grib2")
+
+    monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
+    monkeypatch.setattr(mod, "_DOWNLOAD_MAX_WORKERS", 2)
+    monkeypatch.setattr(mod, "_fetch_one_step", bounded_fetch)
+    deadline = time.monotonic() + 0.05
+    result = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=True,
+        conn=_make_conn(),
+        _paths=_make_paths(mod, tmp_path),
+        now_utc=NOW_UTC,
+        cycle_deadline_monotonic=deadline,
+    )
+
+    assert [step for step, _deadline in started] == [3, 6]
+    assert all(observed_deadline == deadline for _step, observed_deadline in started)
+    assert result["status"] == "download_failed"
+    assert result["reason"] == "CYCLE_DEADLINE_EXCEEDED"
+
+
+def test_cycle_deadline_blocks_unbounded_legacy_sdk_path(tmp_path):
+    """Fallback retries refuse the SDK path that cannot expose request/chunk deadlines."""
+    import requests
+    import src.data.ecmwf_open_data as mod
+
+    class LegacyClient:
+        def retrieve(self, **_kwargs):
+            raise AssertionError("legacy retrieve must not start under a cycle deadline")
+
+    with pytest.raises(requests.Timeout, match="CYCLE_DEADLINE_EXCEEDED"):
+        mod._retrieve_step_with_controlled_ranges(
+            LegacyClient(),
+            target=tmp_path / "legacy.grib2",
+            _deadline=time.monotonic() - 0.001,
+            _cycle_deadline_enforced=True,
+        )
+
+
+def test_cycle_deadline_clamps_metadata_request_timeout(monkeypatch):
+    """The SDK metadata request cannot retain None or a long caller timeout."""
+    import src.data.ecmwf_open_data as mod
+
+    observed: list[float | tuple[float, ...]] = []
+
+    class Response:
+        status_code = 200
+
+    def fake_request(_self, _method, _url, *args, **kwargs):
+        timeout = kwargs["timeout"]
+        observed.append(
+            tuple(float(value) for value in timeout)
+            if isinstance(timeout, tuple)
+            else float(timeout)
+        )
+        return Response()
+
+    monkeypatch.setattr(mod.requests.Session, "request", fake_request)
+    monkeypatch.setattr(
+        mod,
+        "_fetch_bucket",
+        SimpleNamespace(acquire=lambda **_kwargs: None, observe=lambda _status: None),
+    )
+    for requested_timeout in (None, 600, (600, 600)):
+        deadline = time.monotonic() + 5.0
+        session = mod._RateLimitedSession()
+        session._zeus_deadline = deadline
+        session.get(
+            "https://metadata.example.invalid/catalog",
+            timeout=requested_timeout,
+        )
+
+    assert len(observed) == 3
+    assert all(
+        0.0 < value <= 5.0
+        for timeout in observed
+        for value in (timeout if isinstance(timeout, tuple) else (timeout,))
+    )
+
+
+def test_cycle_deadline_recomputes_timeout_after_bucket_wait(monkeypatch):
+    """A limited request clamps timeout after, rather than before, token acquisition."""
+    import src.data.ecmwf_open_data as mod
+
+    events: list[str] = []
+
+    class Response:
+        status_code = 200
+
+    def fake_request(_self, _method, _url, *args, **_kwargs):
+        return Response()
+
+    class Bucket:
+        def acquire(self, **_kwargs):
+            events.append("acquire")
+
+        def observe(self, _status):
+            return None
+
+    original_clamp = mod._clamp_request_timeout
+
+    def record_clamp(timeout, *, deadline):
+        events.append("clamp")
+        return original_clamp(timeout, deadline=deadline)
+
+    monkeypatch.setattr(mod.requests.Session, "request", fake_request)
+    monkeypatch.setattr(mod, "_fetch_bucket", Bucket())
+    monkeypatch.setattr(mod, "_clamp_request_timeout", record_clamp)
+    session = mod._RateLimitedSession()
+    session._zeus_deadline = time.monotonic() + 5.0
+    session.get("https://data.ecmwf.int/forecasts/metadata", timeout=600)
+
+    assert events == ["acquire", "clamp"]
+
+
+def test_cycle_deadline_clamps_extract_timeout(tmp_path, monkeypatch):
+    """Extraction cannot receive more time than the continuity retry has left."""
+    import src.data.ecmwf_open_data as mod
+
+    timeouts: list[float] = []
+
+    def runner(_args, *, label, timeout):
+        timeouts.append(float(timeout))
+        return {"label": label, "ok": False, "returncode": 1, "stderr_tail": "timeout-test"}
+
+    deadline = time.monotonic() + 0.5
+    result = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_download=True,
+        skip_extract=False,
+        conn=_make_conn(),
+        _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
+        now_utc=NOW_UTC,
+        cycle_deadline_monotonic=deadline,
+    )
+
+    assert result["status"] == "extract_failed"
+    assert timeouts and 0.0 < timeouts[0] <= 0.5
+
+
+def test_extract_deadline_expiry_skips_in_process_ingest(tmp_path, monkeypatch):
+    """A successful extract that exhausts budget cannot clear or rewrite authority."""
+    import src.data.ecmwf_open_data as mod
+
+    def runner(_args, *, label, timeout):
+        time.sleep(0.03)
+        return {"label": label, "ok": True, "returncode": 0, "stderr_tail": ""}
+
+    monkeypatch.setattr(
+        mod,
+        "_clear_source_run_authority",
+        lambda *_args, **_kwargs: pytest.fail("deadline-expired extract must not enter ingest"),
+    )
+    result = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_download=True,
+        skip_extract=False,
+        conn=_make_conn(),
+        _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
+        now_utc=NOW_UTC,
+        cycle_deadline_monotonic=time.monotonic() + 0.01,
+    )
+
+    assert result["status"] == "extract_failed"
+    assert result["reason"] == "CYCLE_DEADLINE_EXCEEDED"
 
 
 @pytest.mark.parametrize("track", ["mx2t6_high", "mn2t6_low"])

@@ -1,6 +1,6 @@
 # Created: 2026-05-23
-# Last reused/audited: 2026-08-24
-# Lifecycle: created=2026-05-23; last_reviewed=2026-08-24; last_reused=2026-08-24
+# Last reused/audited: 2026-09-14
+# Lifecycle: created=2026-05-23; last_reviewed=2026-09-14; last_reused=2026-09-14
 # Authority basis: a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md
 # Purpose: Regression antibody — ECMWF OpenData cron triggers must fire after safe_fetch windows for both 00z and 12z cycles.
 # Reuse: Run when forecast_live_daemon.py cron schedule or source_release_calendar.yaml safe_fetch lag changes.
@@ -26,13 +26,66 @@ and MUST pass after the fix.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
+import sqlite3
+import time
 
 import pytest
 
 from src.data.ecmwf_open_data import SOURCE_ID as ECMWF_SOURCE_ID
 from src.data.release_calendar import get_entry, cycle_profile_for_hour
+
+
+def _job_run_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE job_run (
+            job_run_id TEXT,
+            job_name TEXT,
+            source_id TEXT,
+            track TEXT,
+            scheduled_for TEXT,
+            release_calendar_key TEXT,
+            recorded_at TEXT,
+            finished_at TEXT,
+            status TEXT,
+            rows_written INTEGER,
+            source_run_id TEXT
+        )
+        """
+    )
+    return conn
+
+
+def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, recorded_at: datetime, job_run_id: str | None = None) -> None:
+    from src.ingest import forecast_live_daemon as daemon
+
+    conn.execute(
+        """
+        INSERT INTO job_run (
+            job_run_id, job_name, source_id, track, scheduled_for,
+            release_calendar_key, recorded_at, finished_at, status, rows_written, source_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_run_id or daemon._job_run_id(identity),
+            identity["job_name"],
+            identity["source_id"],
+            identity["track"],
+            identity["scheduled_for"].isoformat(),
+            identity["release_calendar_key"],
+            recorded_at.isoformat(),
+            recorded_at.isoformat(),
+            status,
+            0,
+            None,
+        ),
+    )
+    conn.commit()
 
 
 def test_safe_cycle_poll_detects_release_within_one_minute():
@@ -100,6 +153,220 @@ def test_safe_cycle_dispatch_does_not_let_one_track_block_its_sibling():
     }
     assert inflight["mn2t6_low"] is running_low
     assert inflight["mx2t6_high"] is not completed_high
+
+
+def test_not_released_newest_cycle_retries_one_exact_failed_predecessor(monkeypatch, tmp_path):
+    """A newer provider 404 revives one cooled-down exact prior failed cycle."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    older = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 6, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    assert current["scheduled_for"] > prior["scheduled_for"]
+    conn = _job_run_conn()
+    _insert_job_run(conn, prior, status="FAILED", recorded_at=now - timedelta(seconds=61))
+    _insert_job_run(conn, older, status="FAILED", recorded_at=now - timedelta(seconds=61))
+    calls: list[dict] = []
+
+    def run(track, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("_identity") is None:
+            return {"status": "skipped_not_released", "track": track}
+        return {"status": "ok", "track": track, "snapshots_inserted": 7}
+
+    monkeypatch.setattr(daemon, "run_opendata_track", run)
+    lock_dir = tmp_path / "locks"
+    result = daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _job_conn=conn,
+        _locks_dir_override=lock_dir,
+        _now_utc=now,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+
+    assert result["status"] == "ok"
+    assert result["newest_cycle_status"] == "skipped_not_released"
+    assert result["retry_debt"]["failed_job_run_id"] == daemon._job_run_id(prior)
+    assert len(calls) == 2
+    assert "_cycle_deadline_monotonic" not in calls[0]
+    assert calls[1]["_identity"] == prior
+    assert calls[1]["_locks_dir_override"] == lock_dir
+    assert calls[1]["_cycle_deadline_monotonic"] > time.monotonic()
+
+
+@pytest.mark.parametrize(
+    ("status", "age_seconds", "job_run_id"),
+    (
+        ("SUCCESS", 61, None),
+        ("FAILED", 30, None),
+        ("FAILED", 61, "wrong-exact-identity"),
+    ),
+)
+def test_failed_prior_retry_has_no_success_cooldown_or_identity_debt(
+    monkeypatch, status, age_seconds, job_run_id
+):
+    """A success, active cooldown, or non-exact journal row cannot schedule retry debt."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(
+        conn,
+        prior,
+        status=status,
+        recorded_at=now - timedelta(seconds=age_seconds),
+        job_run_id=job_run_id,
+    )
+
+    assert daemon._retry_identity_for_failed_prior_run(
+        conn, current_identity=current, now_utc=now
+    ) is None
+
+
+def test_partial_prior_cycle_remains_retryable_debt_across_polls():
+    """A failed cycle that later becomes PARTIAL still needs its next bounded retry."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(conn, prior, status="FAILED", recorded_at=now - timedelta(seconds=61))
+
+    first = daemon._retry_identity_for_failed_prior_run(
+        conn, current_identity=current, now_utc=now
+    )
+    assert first is not None and first[0] == prior
+
+    conn.execute(
+        "UPDATE job_run SET status = 'PARTIAL', finished_at = ? WHERE job_run_id = ?",
+        ((now - timedelta(seconds=61)).isoformat(), daemon._job_run_id(prior)),
+    )
+    conn.commit()
+    second = daemon._retry_identity_for_failed_prior_run(
+        conn, current_identity=current, now_utc=now
+    )
+
+    assert second is not None and second[0] == prior
+
+
+def test_locked_older_retry_preserves_failed_debt_for_the_next_poll(monkeypatch):
+    """A fallback lock miss is not allowed to replace the older failed journal row."""
+    from src.data import job_lock
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(conn, prior, status="FAILED", recorded_at=now - timedelta(seconds=61))
+
+    @contextmanager
+    def lock_held(*_args, **_kwargs):
+        yield False, "opendata_track:mx2t6_high"
+
+    monkeypatch.setattr(job_lock, "acquire_opendata_track_lock", lock_held)
+    result = daemon.run_opendata_track(
+        "mx2t6_high",
+        _identity=prior,
+        _job_conn=conn,
+        _now_utc=now,
+        _source_paused=lambda _source: False,
+        _collector=lambda **_kwargs: pytest.fail("lock-held fallback must not collect"),
+    )
+
+    assert result["status"] == "skipped_lock_held"
+    assert conn.execute(
+        "SELECT status FROM job_run WHERE job_run_id = ?", (daemon._job_run_id(prior),)
+    ).fetchone()["status"] == "FAILED"
+    assert daemon._retry_identity_for_failed_prior_run(
+        conn, current_identity=current, now_utc=now
+    )[0] == prior
+
+
+def test_production_retry_rechecks_older_calendar_eligibility_after_newest_probe(monkeypatch):
+    """An older cycle that expires during the newest probe is not retried on stale time."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    poll_started = datetime(2026, 8, 25, 17, 59, tzinfo=timezone.utc)
+    after_probe = datetime(2026, 8, 25, 18, 1, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=poll_started)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=poll_started,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(
+        conn,
+        prior,
+        status="FAILED",
+        recorded_at=poll_started - timedelta(seconds=61),
+    )
+    calls: list[dict] = []
+    clock_values = iter((poll_started, after_probe))
+    monkeypatch.setattr(daemon, "_utcnow", lambda: next(clock_values))
+    monkeypatch.setattr(
+        daemon,
+        "run_opendata_track",
+        lambda _track, **kwargs: calls.append(kwargs) or {"status": "skipped_not_released"},
+    )
+
+    result = daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _job_conn=conn,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+
+    assert current["scheduled_for"] > prior["scheduled_for"]
+    assert result["status"] == "skipped_not_released"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("decision", ("STALE_BLOCKED", "HORIZON_OUT_OF_RANGE"))
+def test_failed_prior_retry_rejects_stale_or_unauthorized_calendar_candidate(monkeypatch, decision):
+    """Persisted failure never bypasses current release/authorization evaluation."""
+    from src.data.release_calendar import FetchDecision
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        "mx2t6_high",
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(conn, prior, status="FAILED", recorded_at=now - timedelta(seconds=61))
+    rejected = {**prior, "decision": FetchDecision[decision]}
+    monkeypatch.setattr(daemon, "_forecast_work_identity_for_cycle", lambda *_args, **_kwargs: rejected)
+
+    assert daemon._retry_identity_for_failed_prior_run(
+        conn, current_identity=current, now_utc=now
+    ) is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-08-24
+# Last reused/audited: 2026-09-14
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -166,6 +166,10 @@ FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 # of executable alpha to the market. Source-run journaling keeps repeated polls
 # idempotent after a cycle commits.
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 60
+# The poll invocation must yield before its next cadence slot.  This is a
+# scheduler handoff reserve, derived from the existing one-minute poll rather
+# than a second retry cadence or a new operator setting.
+FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS = 1
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
@@ -467,23 +471,11 @@ def _is_source_paused(source_id: str) -> bool:
 
 
 def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, object]:
-    from src.config import runtime_coordinate_manifest_json
     from src.data.ecmwf_open_data import SOURCE_ID, STEP_HOURS, TRACKS
-    from src.data.forecast_fetch_plan import data_version_for_track
-    from src.data.release_calendar import (
-        cycle_profile_for_hour,
-        get_entry,
-        select_source_run_for_target_horizon,
-    )
+    from src.data.release_calendar import select_source_run_for_target_horizon
 
     if track not in TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
-    coordinate_manifest_json = runtime_coordinate_manifest_json()
-    if not isinstance(coordinate_manifest_json, str) or not coordinate_manifest_json:
-        raise ValueError("runtime coordinate manifest must be a non-empty string")
-    coordinate_manifest_sha = hashlib.sha256(
-        coordinate_manifest_json.encode("utf-8")
-    ).hexdigest()
     decision, metadata = select_source_run_for_target_horizon(
         now_utc=now_utc,
         source_id=SOURCE_ID,
@@ -494,6 +486,64 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
     selected_cycle = metadata.get("selected_cycle_time")
     if not isinstance(selected_cycle, datetime):
         selected_cycle = now_utc
+    return _forecast_work_identity_for_cycle(
+        track,
+        cycle_time=selected_cycle,
+        now_utc=now_utc,
+        decision=decision,
+        metadata=metadata,
+    )
+
+
+def _forecast_work_identity_for_cycle(
+    track: str,
+    *,
+    cycle_time: datetime,
+    now_utc: datetime,
+    decision=None,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build one exact OpenData work identity from a calendar cycle."""
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.ecmwf_open_data import SOURCE_ID, STEP_HOURS, TRACKS
+    from src.data.forecast_fetch_plan import data_version_for_track
+    from src.data.release_calendar import (
+        FetchDecision,
+        cycle_profile_for_hour,
+        evaluate_safe_fetch,
+        get_entry,
+    )
+
+    if track not in TRACKS:
+        raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
+    selected_cycle = cycle_time.astimezone(timezone.utc)
+    if decision is None or metadata is None:
+        decision, metadata = evaluate_safe_fetch(
+            SOURCE_ID,
+            track,
+            selected_cycle,
+            now_utc,
+            required_max_step_hours=max(STEP_HOURS),
+            allow_partial=True,
+        )
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if decision is FetchDecision.FETCH_ALLOWED and not (
+        bool(metadata.get("entry_live_authorization"))
+        and bool(metadata.get("profile_live_authorization"))
+    ):
+        decision = FetchDecision.HORIZON_OUT_OF_RANGE
+        metadata = {
+            **metadata,
+            "reason": "cycle is not live-authorized",
+            "live_authorization": False,
+        }
+    coordinate_manifest_json = runtime_coordinate_manifest_json()
+    if not isinstance(coordinate_manifest_json, str) or not coordinate_manifest_json:
+        raise ValueError("runtime coordinate manifest must be a non-empty string")
+    coordinate_manifest_sha = hashlib.sha256(
+        coordinate_manifest_json.encode("utf-8")
+    ).hexdigest()
     horizon_profile = metadata.get("horizon_profile")
     if not horizon_profile:
         entry = get_entry(SOURCE_ID, track)
@@ -506,13 +556,88 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
         "job_name": FORECAST_LIVE_WORK_JOB_NAME_BY_TRACK[track],
         "source_id": SOURCE_ID,
         "track": track,
-        "scheduled_for": selected_cycle.astimezone(timezone.utc),
+        "scheduled_for": selected_cycle,
         "release_calendar_key": f"{SOURCE_ID}:{track}:{horizon_profile}",
         "safe_fetch_not_before": metadata.get("next_safe_fetch_at"),
         "coordinate_manifest_json": coordinate_manifest_json,
         "coordinate_manifest_sha": coordinate_manifest_sha,
         "data_version": data_version_for_track(track, coordinate_manifest_json),
     }
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _retry_identity_for_failed_prior_run(
+    conn,
+    *,
+    current_identity: dict[str, object],
+    now_utc: datetime,
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Return one exact, cooled-down, still-live failed cycle for this track."""
+    from src.data.release_calendar import FetchDecision
+
+    current_scheduled_for = current_identity.get("scheduled_for")
+    if not isinstance(current_scheduled_for, datetime):
+        return None
+    try:
+        rows = conn.execute(
+            """
+            SELECT job_run_id, scheduled_for, release_calendar_key, finished_at, recorded_at
+              FROM job_run
+             WHERE job_name = ?
+               AND source_id = ?
+               AND track = ?
+               AND status IN ('FAILED', 'PARTIAL')
+             ORDER BY scheduled_for DESC, recorded_at DESC
+            """,
+            (
+                str(current_identity["job_name"]),
+                str(current_identity["source_id"]),
+                str(current_identity["track"]),
+            ),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - journal read failure creates no retry debt
+        logger.warning("forecast-live failed-cycle retry journal read failed: %s", exc)
+        return None
+
+    for row in rows:
+        scheduled_for = _parse_utc_timestamp(row["scheduled_for"])
+        last_attempt_at = _parse_utc_timestamp(row["finished_at"]) or _parse_utc_timestamp(row["recorded_at"])
+        if (
+            scheduled_for is None
+            or last_attempt_at is None
+            or scheduled_for >= current_scheduled_for.astimezone(timezone.utc)
+            or now_utc - last_attempt_at < timedelta(seconds=FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS)
+        ):
+            continue
+        candidate = _forecast_work_identity_for_cycle(
+            str(current_identity["track"]),
+            cycle_time=scheduled_for,
+            now_utc=now_utc,
+        )
+        if candidate["decision"] is not FetchDecision.FETCH_ALLOWED:
+            continue
+        if (
+            row["release_calendar_key"] != str(candidate["release_calendar_key"])
+            or row["job_run_id"] != _job_run_id(candidate)
+        ):
+            continue
+        return candidate, {
+            "failed_job_run_id": row["job_run_id"],
+            "failed_scheduled_for": row["scheduled_for"],
+            "failed_finished_at": row["finished_at"],
+        }
+    return None
 
 
 def _job_run_id(identity: dict[str, object]) -> str:
@@ -623,17 +748,25 @@ def _write_job_run(
     )
 
 
-def _collector_cycle_kwargs(identity: dict[str, object], *, now_utc: datetime) -> dict[str, object]:
+def _collector_cycle_kwargs(
+    identity: dict[str, object],
+    *,
+    now_utc: datetime,
+    cycle_deadline_monotonic: float | None = None,
+) -> dict[str, object]:
     scheduled_for = identity.get("scheduled_for")
     if not isinstance(scheduled_for, datetime):
         raise TypeError("forecast-live identity scheduled_for must be datetime")
     selected_cycle = scheduled_for.astimezone(timezone.utc)
-    return {
+    kwargs: dict[str, object] = {
         "run_date": selected_cycle.date(),
         "run_hour": selected_cycle.hour,
         "now_utc": now_utc,
         "coordinate_manifest_json": identity.get("coordinate_manifest_json"),
     }
+    if cycle_deadline_monotonic is not None:
+        kwargs["cycle_deadline_monotonic"] = cycle_deadline_monotonic
+    return kwargs
 
 
 def _expected_source_run_id(identity: dict[str, object]) -> str:
@@ -726,6 +859,8 @@ def run_opendata_track(
     _source_paused: Callable[[str], bool] | None = None,
     _job_conn=None,
     _now_utc: datetime | None = None,
+    _identity: dict[str, object] | None = None,
+    _cycle_deadline_monotonic: float | None = None,
 ) -> dict:
     from src.data.job_lock import (
         acquire_opendata_track_lock,
@@ -741,7 +876,9 @@ def run_opendata_track(
     from src.data.release_calendar import FetchDecision
 
     now = (_now_utc or _utcnow()).astimezone(timezone.utc)
-    identity = _forecast_work_identity(track, now_utc=now)
+    identity = _identity or _forecast_work_identity(track, now_utc=now)
+    if identity.get("track") != track:
+        raise ValueError("forecast-live identity track mismatch")
     track_lock_key = opendata_track_lock_key(track)
     decision = identity["decision"]
     if _job_conn is not None and decision is not FetchDecision.FETCH_ALLOWED:
@@ -773,7 +910,10 @@ def run_opendata_track(
                 track,
                 held_lock_key,
             )
-            if _job_conn is not None:
+            # The explicit identity is the bounded older-cycle retry path. Its
+            # existing FAILED/PARTIAL row remains the retry debt; a lock miss
+            # is observational and must not overwrite that canonical state.
+            if _job_conn is not None and _identity is None:
                 _write_job_run(
                     _job_conn,
                     identity=identity,
@@ -797,7 +937,11 @@ def run_opendata_track(
                 lock_key=track_lock_key,
             )
             _job_conn.commit()
-        collector_kwargs = _collector_cycle_kwargs(identity, now_utc=now)
+        collector_kwargs = _collector_cycle_kwargs(
+            identity,
+            now_utc=now,
+            cycle_deadline_monotonic=_cycle_deadline_monotonic,
+        )
         try:
             result = collector(track=track, **collector_kwargs)
         except Exception as exc:
@@ -863,10 +1007,17 @@ def _run_opendata_track_if_due(
     _collector: Callable[..., dict] | None = None,
     _source_paused: Callable[[str], bool] | None = None,
     _now_utc: datetime | None = None,
+    _poll_deadline_monotonic: float | None = None,
 ) -> dict:
     from src.data.release_calendar import FetchDecision
 
     now = (_now_utc or _utcnow()).astimezone(timezone.utc)
+    poll_deadline_monotonic = (
+        _poll_deadline_monotonic
+        if _poll_deadline_monotonic is not None
+        else time.monotonic()
+        + max(0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS)
+    )
     identity = _forecast_work_identity(track, now_utc=now)
     if identity["decision"] is FetchDecision.FETCH_ALLOWED:
         is_current, current_metadata = _latest_job_run_current_for_identity(_job_conn, identity)
@@ -887,7 +1038,7 @@ def _run_opendata_track_if_due(
                 "journal": current_metadata,
             }
 
-    return run_opendata_track(
+    newest_result = run_opendata_track(
         track,
         _locks_dir_override=_locks_dir_override,
         _collector=_collector,
@@ -895,6 +1046,37 @@ def _run_opendata_track_if_due(
         _job_conn=_job_conn,
         _now_utc=now,
     )
+    if (
+        identity["decision"] is not FetchDecision.FETCH_ALLOWED
+        or str(newest_result.get("status") or "").lower() != "skipped_not_released"
+        or time.monotonic() >= poll_deadline_monotonic
+    ):
+        return newest_result
+    retry_now = now if _now_utc is not None else _utcnow().astimezone(timezone.utc)
+    retry = _retry_identity_for_failed_prior_run(
+        _job_conn,
+        current_identity=identity,
+        now_utc=retry_now,
+    )
+    if retry is None or time.monotonic() >= poll_deadline_monotonic:
+        return newest_result
+    retry_identity, retry_debt = retry
+    retry_result = run_opendata_track(
+        track,
+        _locks_dir_override=_locks_dir_override,
+        _collector=_collector,
+        _source_paused=_source_paused,
+        _job_conn=_job_conn,
+        _now_utc=retry_now,
+        _identity=retry_identity,
+        _cycle_deadline_monotonic=poll_deadline_monotonic,
+    )
+    return {
+        **retry_result,
+        "newest_cycle_status": "skipped_not_released",
+        "newest_cycle_scheduled_for": identity["scheduled_for"].isoformat(),
+        "retry_debt": retry_debt,
+    }
 
 
 def _enqueue_committed_opendata_cycle_advance_reseeds(

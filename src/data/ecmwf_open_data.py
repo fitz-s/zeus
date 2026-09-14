@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-09-09
+# Last reused or audited: 2026-09-14
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -493,15 +493,19 @@ class _TokenBucket:
         self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
         self._last_refill = now
 
-    def acquire(self) -> None:
+    def acquire(self, *, deadline: float | None = None) -> None:
         """Block until one token is available, then consume it."""
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise requests.Timeout("STEP_DEADLINE_EXCEEDED")
             with self._lock:
                 self._refill_locked(time.monotonic())
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return
                 wait = (1.0 - self._tokens) / self._rate
+            if deadline is not None:
+                wait = min(wait, max(0.0, deadline - time.monotonic()))
             time.sleep(wait)
 
     def observe(self, status_code: int) -> None:
@@ -558,6 +562,28 @@ def _sleep_step_retry(deadline: float) -> bool:
     return time.monotonic() < deadline
 
 
+def _deadline_failure_reason(*, cycle_deadline: float | None) -> str:
+    if cycle_deadline is not None and time.monotonic() >= cycle_deadline:
+        return "CYCLE_DEADLINE_EXCEEDED"
+    return "STEP_DEADLINE_EXCEEDED"
+
+
+def _clamp_request_timeout(timeout: Any, *, deadline: float) -> float | tuple[float, ...]:
+    """Apply the remaining cycle budget to every requests timeout shape."""
+    remaining = _remaining_step_timeout(deadline)
+    if timeout is None:
+        return remaining
+    if isinstance(timeout, tuple):
+        return tuple(
+            remaining if value is None else min(float(value), remaining)
+            for value in timeout
+        )
+    try:
+        return min(float(timeout), remaining)
+    except (TypeError, ValueError):
+        return remaining
+
+
 def _is_ecmwf_download_url(url: str) -> bool:
     return (
         "ecmwf-forecasts" in url
@@ -571,8 +597,15 @@ class _RateLimitedSession(requests.Session):
 
     def request(self, method: str, url: str, *args, **kwargs):  # type: ignore[override]
         limited = method.upper() in {"GET", "HEAD"} and _is_ecmwf_download_url(str(url))
+        deadline = getattr(self, "_zeus_deadline", None)
         if limited:
-            _fetch_bucket.acquire()
+            _fetch_bucket.acquire(deadline=deadline)
+        if deadline is not None:
+            # Do this after a token wait: a caller-supplied None/long timeout
+            # cannot outlive the same absolute continuity budget.
+            kwargs["timeout"] = _clamp_request_timeout(
+                kwargs.get("timeout"), deadline=deadline
+            )
         response = super().request(method, url, *args, **kwargs)
         if limited:
             _fetch_bucket.observe(response.status_code)
@@ -858,6 +891,7 @@ def _retrieve_step_with_controlled_ranges(
     *,
     target: Path,
     _deadline: float | None = None,
+    _cycle_deadline_enforced: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Retrieve one indexed OpenData step with Zeus-owned single Range GETs.
@@ -871,11 +905,17 @@ def _retrieve_step_with_controlled_ranges(
     """
 
     if not hasattr(client, "_get_urls"):
-        _fetch_bucket.acquire()
+        if _cycle_deadline_enforced:
+            # The legacy SDK path does not expose request timeouts or chunk
+            # boundaries, so it cannot honor a bounded continuity retry.
+            raise requests.Timeout("CYCLE_DEADLINE_EXCEEDED")
+        _fetch_bucket.acquire(deadline=_deadline)
         return client.retrieve(target=str(target), **kwargs)
 
     client.session = _RateLimitedSession()
+    client.session._zeus_deadline = _deadline
     result = client._get_urls(target=str(target), use_index=False, **kwargs)
+    _remaining_step_timeout(_deadline)
     indexed_parts = _resolve_index_parts(client, result, deadline=_deadline)
     if indexed_parts:
         result.urls = indexed_parts
@@ -1833,6 +1873,7 @@ def _fetch_one_step(
     step: int,
     output_dir: Path,
     mirrors: tuple[str, ...],
+    _deadline: float | None = None,
 ) -> tuple[str, Any]:
     """Fetch a single step for one param into a per-step canonical file.
 
@@ -1849,6 +1890,12 @@ def _fetch_one_step(
     Single-writer antibody: NO SQLite writes in this function — HTTP only.
     All DB writes occur on the main thread after all futures complete.
     """
+    deadline = min(
+        time.monotonic() + float(_PER_STEP_TIMEOUT_SECONDS),
+        _deadline if _deadline is not None else float("inf"),
+    )
+    if time.monotonic() >= deadline:
+        return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
     canonical = _step_cache_path(
         output_dir,
         run_date=cycle_date,
@@ -1863,11 +1910,10 @@ def _fetch_one_step(
     from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
 
     last_err: str | None = None
-    deadline = time.monotonic() + float(_PER_STEP_TIMEOUT_SECONDS)
     for mirror in mirrors:
         for attempt in range(_PER_STEP_MAX_RETRIES):
             if time.monotonic() >= deadline:
-                return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
             try:
                 client = Client(source=mirror)
                 pf_partial = partial.with_suffix(".pf.partial")
@@ -1882,6 +1928,7 @@ def _fetch_one_step(
                     param=[param],
                     target=pf_partial,
                     _deadline=deadline,
+                    _cycle_deadline_enforced=_deadline is not None,
                 )
                 try:
                     _retrieve_step_with_controlled_ranges(
@@ -1894,6 +1941,7 @@ def _fetch_one_step(
                         param=[param],
                         target=cf_partial,
                         _deadline=deadline,
+                        _cycle_deadline_enforced=_deadline is not None,
                     )
                 except ValueError as exc:
                     if "Cannot find index entries matching" not in str(exc):
@@ -1908,6 +1956,7 @@ def _fetch_one_step(
                         param=[param],
                         target=cf_partial,
                         _deadline=deadline,
+                        _cycle_deadline_enforced=_deadline is not None,
                     )
                 with partial.open("wb") as out:
                     out.write(cf_partial.read_bytes())
@@ -1926,16 +1975,16 @@ def _fetch_one_step(
                 if code in _RETRYABLE_HTTP:
                     last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
                     if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
-                        return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                        return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
                     continue
                 last_err = f"HTTP_{code}_mirror_{mirror}"
                 break   # non-retryable; try next mirror
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
                 if time.monotonic() >= deadline:
-                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                    return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
                 if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
-                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                    return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
                 continue
             except OSError as exc:
                 # disk/path errors during atomic rename or partial-file write
@@ -2069,6 +2118,7 @@ def collect_open_ens_cycle(
     _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
     coordinate_manifest_json: str | None = None,
+    cycle_deadline_monotonic: float | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
 
@@ -2216,6 +2266,7 @@ def collect_open_ens_cycle(
         # result before any SQLite write, without a second timeout.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
+        deadline_exceeded = False
         # M5-COLLECTION-CLOCK: fetch_started = the real wall-clock immediately before the first
         # HTTP GET is dispatched (the batch loop below submits fetch_fn → session.get).
         _fetch_started_at = datetime.now(timezone.utc)
@@ -2223,22 +2274,43 @@ def collect_open_ens_cycle(
         with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as ex:
             def submit_step(task):
                 step, param = task
+                if cycle_deadline_monotonic is not None and time.monotonic() >= cycle_deadline_monotonic:
+                    return None
+                kwargs = {
+                    "cycle_date": cycle_date,
+                    "cycle_hour": cycle_hour,
+                    "param": param,
+                    "step": step,
+                    "output_dir": output_dir,
+                    "mirrors": _DOWNLOAD_SOURCES,
+                }
+                if _fetch_impl is None:
+                    kwargs["_deadline"] = cycle_deadline_monotonic
                 return ex.submit(
                     fetch_fn,
-                    cycle_date=cycle_date,
-                    cycle_hour=cycle_hour,
-                    param=param,
-                    step=step,
-                    output_dir=output_dir,
-                    mirrors=_DOWNLOAD_SOURCES,
+                    **kwargs,
                 )
 
             pending = {}
             for _ in range(min(_DOWNLOAD_MAX_WORKERS, len(tasks))):
                 task = next(remaining_tasks)
-                pending[submit_step(task)] = task[0]
+                future = submit_step(task)
+                if future is None:
+                    deadline_exceeded = True
+                    results[task[0]] = ("FAILED", "CYCLE_DEADLINE_EXCEEDED")
+                else:
+                    pending[future] = task[0]
             while pending:
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                timeout = None
+                if cycle_deadline_monotonic is not None:
+                    timeout = max(0.0, cycle_deadline_monotonic - time.monotonic())
+                completed, _ = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                if not completed:
+                    deadline_exceeded = True
+                    for future, step in pending.items():
+                        future.cancel()
+                        results[step] = ("FAILED", "CYCLE_DEADLINE_EXCEEDED")
+                    break
                 for fut in completed:
                     step = pending.pop(fut)
                     try:
@@ -2247,7 +2319,16 @@ def collect_open_ens_cycle(
                         results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
                     task = next(remaining_tasks, None)
                     if task is not None:
-                        pending[submit_step(task)] = task[0]
+                        future = submit_step(task)
+                        if future is None:
+                            deadline_exceeded = True
+                            results[task[0]] = ("FAILED", "CYCLE_DEADLINE_EXCEEDED")
+                        else:
+                            pending[future] = task[0]
+
+            if deadline_exceeded:
+                for task in remaining_tasks:
+                    results[task[0]] = ("FAILED", "CYCLE_DEADLINE_EXCEEDED")
 
         # M5-COLLECTION-CLOCK: fetch_finished = the real wall-clock once every batch future has
         # resolved (bytes received, timed out, or failed) — the moment the download phase ends.
@@ -2337,6 +2418,7 @@ def collect_open_ens_cycle(
                 "status": "download_failed",
                 "track": track,
                 "data_version": cfg["data_version"],
+                "reason": "CYCLE_DEADLINE_EXCEEDED" if deadline_exceeded else reason,
                 "stages": stages,
                 "snapshots_inserted": 0,
             }
@@ -2418,6 +2500,23 @@ def collect_open_ens_cycle(
         download_observed_steps = ok_steps
 
         # Concat per-step files into the canonical output_path for the extractor.
+        if (
+            cycle_deadline_monotonic is not None
+            and time.monotonic() >= cycle_deadline_monotonic
+        ):
+            stages.append({
+                "label": f"concat_{track}",
+                "ok": False,
+                "status": "CYCLE_DEADLINE_EXCEEDED",
+            })
+            return {
+                "status": "download_failed",
+                "track": track,
+                "data_version": cfg["data_version"],
+                "reason": "CYCLE_DEADLINE_EXCEEDED",
+                "stages": stages,
+                "snapshots_inserted": 0,
+            }
         _concat_steps(
             ok_steps,
             cfg["open_data_param"],
@@ -2437,6 +2536,18 @@ def collect_open_ens_cycle(
         })
 
     if not skip_extract:
+        if cycle_deadline_monotonic is not None:
+            remaining = cycle_deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "status": "extract_failed",
+                    "track": track,
+                    "data_version": cfg["data_version"],
+                    "reason": "CYCLE_DEADLINE_EXCEEDED",
+                    "stages": stages,
+                    "snapshots_inserted": 0,
+                }
+            extract_timeout_seconds = min(float(extract_timeout_seconds), remaining)
         extract = runner(
             [
                 _conda_python(),
@@ -2468,6 +2579,18 @@ def collect_open_ens_cycle(
     # Ingest stage — import in-process, share a single connection so the
     # caller's test fixture (in-memory sqlite) is honored. Production
     # caller passes ``conn=None`` and we open the forecasts DB (K1 split).
+    if (
+        cycle_deadline_monotonic is not None
+        and time.monotonic() >= cycle_deadline_monotonic
+    ):
+        return {
+            "status": "extract_failed",
+            "track": track,
+            "data_version": cfg["data_version"],
+            "reason": "CYCLE_DEADLINE_EXCEEDED",
+            "stages": stages,
+            "snapshots_inserted": 0,
+        }
     own_conn = conn is None
     if own_conn:
         _lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK)
