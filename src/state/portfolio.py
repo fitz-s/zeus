@@ -960,14 +960,14 @@ class Position:
         if provider is None:
             return q_raw, evidence_ok, "raw"
 
-        p0: Optional[float] = None
-        if ExitContext._is_finite(exit_context.current_market_price):
-            p0 = float(exit_context.current_market_price)
-        elif ExitContext._is_finite(exit_context.best_bid) and ExitContext._is_finite(
-            exit_context.best_ask
-        ):
-            p0 = (float(exit_context.best_bid) + float(exit_context.best_ask)) / 2.0
-        if p0 is None:
+        # This stop compares immediate SELL proceeds, so use the held token's
+        # gross bid, as the global TAKER SELL correction does. An ask-weighted
+        # market price can otherwise hide a reversal merely by widening spread.
+        # SCOPE: this statistical stop; DRAIN/RESET: the next valid held bid.
+        if not ExitContext._is_finite(exit_context.best_bid):
+            return q_raw, False, "entry_calibration_unavailable"
+        p0 = float(exit_context.best_bid)
+        if not 0.0 < p0 < 1.0:
             return q_raw, False, "entry_calibration_unavailable"
 
         try:

@@ -1,5 +1,5 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-08
+# Last reused or audited: 2026-09-14
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   (market-anchored calibrator, item 9) + this task's fix — the exit stop was
 #   comparing against the RAW posterior-predictive point (measured +0.170
@@ -8,15 +8,15 @@
 #   Position._exit_q_mean_and_source / Position.evaluate_exit;
 #   src/calibration/market_anchored_live_fit.py register_active_provider /
 #   get_active_provider / corrected_probability.
-"""Proof that Position.evaluate_exit's stop acts on the market-anchored
-corrected probability when a provider is registered, and fails open to the
-raw point (identical to pre-fix behavior) whenever the correction cannot be
-applied — never opening a DB connection of its own in the process.
+"""The immediate stop shares the global TAKER SELL bid calibration anchor.
+Missing live entry proof fails closed; an absent provider is offline-only
+compatibility. Evaluating the stop never opens a DB connection of its own.
 """
 from __future__ import annotations
 
 import math
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -147,9 +147,8 @@ def test_buy_yes_exit_uses_market_anchored_corrected_q():
 
     assert evidence_ok is True
     assert source == "market_anchored"
-    expected = 1.0 / (1.0 + math.exp(-(math.log(0.2 / 0.8) + 0.09)))
+    expected = 1.0 / (1.0 + math.exp(-(math.log(0.15 / 0.85) + 0.09)))
     assert float(q_mean) == pytest.approx(expected, abs=1e-9)
-    assert float(q_mean) == pytest.approx(0.2148, abs=1e-3)
 
     decision = pos.evaluate_exit(ctx)
     assert "exit_q:market_anchored" in decision.applied_validations
@@ -169,9 +168,8 @@ def test_buy_no_exit_applies_the_complement_law():
 
     assert evidence_ok is True
     assert source == "market_anchored"
-    expected = 1.0 - 1.0 / (1.0 + math.exp(-(math.log(0.8 / 0.2) + 0.09)))
+    expected = 1.0 - 1.0 / (1.0 + math.exp(-(math.log(0.85 / 0.15) + 0.09)))
     assert float(q_mean) == pytest.approx(expected, abs=1e-9)
-    assert float(q_mean) == pytest.approx(0.1860, abs=1e-3)
 
     decision = pos.evaluate_exit(ctx)
     assert "exit_q:market_anchored" in decision.applied_validations
@@ -246,3 +244,34 @@ def test_evaluate_exit_never_opens_its_own_db_connection(monkeypatch):
     assert decision.trigger in {"HOLD", "SELL_REVERSAL", "EVIDENCE_UNAVAILABLE"}
     applied = set(decision.applied_validations)
     assert "exit_q:market_anchored" in applied
+
+
+@pytest.mark.parametrize("direction,alpha", [("buy_yes", -0.30), ("buy_no", 0.30)])
+@pytest.mark.parametrize("ask,market_price", [(0.62, 0.61), (0.95, 0.775)])
+def test_spread_cannot_hide_immediate_sell_reversal(direction, alpha, ask, market_price):
+    register_active_provider(_StubProvider(_stub_artifact(alpha_day0=alpha)))
+    pos = _held_position(direction, target_date=datetime.now(timezone.utc).date().isoformat())
+    ctx = _exit_context(
+        fresh_prob=0.70, current_market_price=market_price, best_bid=0.60, best_ask=ask,
+    )
+    ctx = replace(ctx, bid_ladder=((0.60, 40.0),))
+
+    q, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
+    # Same gross bid and held-side residual as the canonical TAKER SELL.
+    expected_q = 1.0 / (1.0 + math.exp(-(math.log(0.60 / 0.40) - 0.30)))
+    assert evidence_ok and source == "market_anchored"
+    assert float(q) == pytest.approx(expected_q)
+    assert pos.evaluate_exit(ctx).trigger == "SELL_REVERSAL"
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("bid", [None, float("nan"), float("inf"), -0.1, 0.0, 1.0, 1.1])
+def test_live_sell_anchor_never_falls_back_to_midpoint(direction, bid):
+    register_active_provider(_StubProvider(_stub_artifact()))
+    pos = _held_position(direction, target_date=datetime.now(timezone.utc).date().isoformat())
+    ctx = _exit_context(fresh_prob=0.5, current_market_price=0.6, best_bid=0.5, best_ask=0.7)
+    ctx = replace(ctx, best_bid=bid)
+
+    _, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
+    assert evidence_ok is False
+    assert source == "entry_calibration_unavailable"
