@@ -14274,23 +14274,30 @@ def _query_transitional_position_hints(
         if not ids:
             return {}
         id_placeholders = ", ".join("?" for _ in ids)
+        # Rank on columns the index already covers (position_id, event_type,
+        # sequence_no) so the ranking scan never touches a table row --
+        # projecting payload_json/occurred_at directly inside a ROW_NUMBER()
+        # partition would force SQLite to materialize that blob for every
+        # candidate row before it can even tell which ones survive rn<=N, not
+        # just the winners. Join back to position_events by the
+        # UNIQUE(position_id, sequence_no) key to fetch the blob only for the
+        # rows that actually win.
         rows = conn.execute(
             f"""
-            SELECT trade_key, event_type, payload, occurred_at
+            SELECT r.position_id AS trade_key, r.event_type, pe.payload_json AS payload, pe.occurred_at
               FROM (
-                    SELECT position_id AS trade_key,
-                           event_type,
-                           payload_json AS payload,
-                           occurred_at,
+                    SELECT position_id, event_type, sequence_no,
                            ROW_NUMBER() OVER (
                                PARTITION BY position_id ORDER BY sequence_no DESC
                            ) AS rn
                       FROM position_events{index_clause}
                      WHERE position_id IN ({id_placeholders})
                        AND event_type IN ({event_placeholders})
-                   )
-             WHERE rn <= ?
-             ORDER BY trade_key, rn
+                   ) r
+              JOIN position_events pe
+                ON pe.position_id = r.position_id AND pe.sequence_no = r.sequence_no
+             WHERE r.rn <= ?
+             ORDER BY r.position_id, r.rn
             """,
             (*ids, *_TRANSITIONAL_HINT_EVENT_TYPES, _TRANSITIONAL_HINT_ROWS_PER_POSITION),
         ).fetchall()
@@ -14366,19 +14373,26 @@ def _hydrate_unbounded_day0_hints(
     id_placeholders = ", ".join("?" for _ in ids)
     rows = []
     try:
+        # Rank on (position_id, sequence_no) only -- covered by
+        # idx_position_events_position_type_sequence via the (position_id,
+        # event_type) equality prefix -- then join back for payload_json so
+        # the blob is fetched only for each position's single winning row,
+        # not for every DAY0_WINDOW_ENTERED row in its history.
         rows = conn.execute(
             f"""
-            SELECT position_id, payload_json, occurred_at
+            SELECT r.position_id AS position_id, pe.payload_json, pe.occurred_at
               FROM (
-                    SELECT position_id, payload_json, occurred_at,
+                    SELECT position_id, sequence_no,
                            ROW_NUMBER() OVER (
                                PARTITION BY position_id ORDER BY sequence_no DESC
                            ) AS rn
                       FROM position_events
                      WHERE position_id IN ({id_placeholders})
                        AND event_type = 'DAY0_WINDOW_ENTERED'
-                   )
-             WHERE rn = 1
+                   ) r
+              JOIN position_events pe
+                ON pe.position_id = r.position_id AND pe.sequence_no = r.sequence_no
+             WHERE r.rn = 1
             """,
             ids,
         ).fetchall()
