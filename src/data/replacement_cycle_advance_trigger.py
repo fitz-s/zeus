@@ -52,6 +52,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfoNotFoundError
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.replacement_pipeline_files import (
@@ -1815,7 +1816,24 @@ def enqueue_cycle_advance_reseeds(
         open_scopes: list[tuple[str, str, str]] = []
         for city, target_date, metric in deduped_scopes:
             city_timezone = timezone_by_city.get(city)
-            if city_timezone and has_city_local_day_ended(target_date, city_timezone, now):
+            target_local_day_ended = False
+            if city_timezone:
+                try:
+                    target_local_day_ended = has_city_local_day_ended(
+                        target_date, city_timezone, now
+                    )
+                except (ValueError, ZoneInfoNotFoundError) as exc:
+                    # Fail-soft per this function's own contract: an unresolvable timezone or
+                    # malformed target_date must degrade to "not ended", never raise into the
+                    # poll for one bad scope among many.
+                    _LOG.warning(
+                        "cycle-advance explicit-scope local-day-end check failed city=%s "
+                        "target_date=%s exception=%s; treating as not ended",
+                        city,
+                        target_date,
+                        type(exc).__name__,
+                    )
+            if target_local_day_ended:
                 report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] = (
                     int(report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED]) + 1
                 )
@@ -2411,7 +2429,22 @@ def enqueue_single_family_cycle_advance_reseed(
     )
 
     _city_timezone = _city_timezone_by_name().get(city)
-    if _city_timezone and has_city_local_day_ended(target_date, _city_timezone, now):
+    _target_local_day_ended = False
+    if _city_timezone:
+        try:
+            _target_local_day_ended = has_city_local_day_ended(target_date, _city_timezone, now)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            # ALWAYS-DECIDABLE / fail-soft contract: an unresolvable timezone or malformed
+            # target_date must degrade to "not ended" (today's pre-gate behaviour), never
+            # raise into the reactor cycle.
+            _LOG.warning(
+                "cycle-advance single-family local-day-end check failed city=%s "
+                "target_date=%s exception=%s; treating as not ended",
+                city,
+                target_date,
+                type(exc).__name__,
+            )
+    if _target_local_day_ended:
         report["status"] = RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED
         _LOG.info(
             "cycle-advance single-family reseed skipped, target local day ended city=%s "

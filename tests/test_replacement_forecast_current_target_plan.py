@@ -3710,3 +3710,22 @@ def test_current_target_plan_default_floor_admits_still_open_western_local_day(
 
     assert _scope_present(plan, "SaoPaulo", "2026-09-13")
     assert not _scope_present(plan, "London", "2026-09-13")
+
+
+def test_default_min_target_date_survives_unresolvable_roster_timezone(monkeypatch) -> None:
+    """One bad timezone string in the city roster must not take the whole plan down: skip
+    that city's contribution to the floor computation and still return the earliest date
+    from the cities that DO resolve, never raise ZoneInfoNotFoundError."""
+    monkeypatch.setattr(
+        current_target_plan,
+        "_city_timezone_by_name",
+        lambda: {"London": "Europe/London", "Nowhere": "Not/ARealZone"},
+    )
+
+    result = current_target_plan._default_min_target_date(
+        datetime(2026, 9, 14, 2, 30, tzinfo=timezone.utc)
+    )
+
+    # London's local date at 02:30Z 09-14 (BST, UTC+1) is 09-14 -- the only resolvable
+    # timezone, so it alone determines the floor; the bad "Nowhere" entry is skipped.
+    assert result == "2026-09-14"

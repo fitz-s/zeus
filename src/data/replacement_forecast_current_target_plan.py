@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from src.data.replacement_forecast_source_run_identity import expected_replaceme
 from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 from src.state.db import _connect_read_only
 
+_LOG = logging.getLogger("zeus.replacement_forecast_current_target_plan")
 
 SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
@@ -2143,7 +2145,15 @@ def _default_min_target_date(now_utc: datetime) -> str:
     for tz_name in timezones:
         try:
             local_date = now_utc.astimezone(ZoneInfo(tz_name)).date()
-        except (ValueError, ZoneInfoNotFoundError):
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            # One bad timezone in the roster must not take the whole plan down (or even
+            # silently under-widen the floor without a trace): skip it, log it, keep going.
+            _LOG.warning(
+                "current-target-plan default floor skipped unresolvable timezone=%r "
+                "exception=%s",
+                tz_name,
+                type(exc).__name__,
+            )
             continue
         if local_date < earliest:
             earliest = local_date

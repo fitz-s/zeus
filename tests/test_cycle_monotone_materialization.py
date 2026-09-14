@@ -1688,7 +1688,7 @@ def test_single_family_reseed_skips_when_target_local_day_has_ended(
 def test_single_family_reseed_enqueues_when_target_local_day_still_open(
     tmp_path, monkeypatch
 ) -> None:
-    """Same family, 40 minutes before London's local-day rollover (23:00Z): the day is still
+    """Same family, 30 minutes before London's local-day rollover (23:00Z): the day is still
     open, so the reseed must proceed exactly as it did before the local-day-end guard existed."""
     db_path = tmp_path / "forecasts.db"
     conn = sqlite3.connect(db_path)
@@ -1759,6 +1759,61 @@ def test_single_family_reseed_enqueues_when_target_local_day_still_open(
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
+def test_single_family_reseed_survives_invalid_timezone(tmp_path, monkeypatch) -> None:
+    """ALWAYS-DECIDABLE / fail-soft contract: an unresolvable timezone in city config must
+    degrade the local-day-end check to "not ended", never raise ZoneInfoNotFoundError into
+    the reactor cycle. Same scenario as the still-open case above, but the config carries a
+    bogus timezone string instead of a real one -- the family must still enqueue."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = datetime(2026, 9, 13, 12, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._city_timezone_by_name",
+        lambda: {"London": "Not/ARealZone"},
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+
+    def _fake_build_seed(_conn_arg, **kwargs):
+        path = Path(
+            kwargs.get("output_path")
+            or Path(kwargs["seed_path"]) / "London.2026-09-13.high.seed.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="London",
+        target_date="2026-09-13",
+        metric="high",
+        computed_at=datetime(2026, 9, 14, 3, 7, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+    assert report["enqueued"] is True
+
+
 def test_explicit_scopes_skip_target_local_day_ended(tmp_path, monkeypatch) -> None:
     """The ENS-wake / explicit-scopes lane (enqueue_cycle_advance_reseeds with scopes=[...])
     has no plan behind it, so it must apply the local-day-end predicate to its own scope
@@ -1810,7 +1865,7 @@ def test_explicit_scopes_skip_target_local_day_ended(tmp_path, monkeypatch) -> N
 
 
 def test_explicit_scopes_enqueues_when_target_local_day_still_open(tmp_path, monkeypatch) -> None:
-    """Same lane, same family, 40 minutes before London's local-day rollover (23:00Z): the day
+    """Same lane, same family, 30 minutes before London's local-day rollover (23:00Z): the day
     is still open, so the scope must enqueue exactly as before this predicate existed."""
     db_path = tmp_path / "forecast.db"
     conn = sqlite3.connect(db_path)
@@ -1853,6 +1908,65 @@ def test_explicit_scopes_enqueues_when_target_local_day_still_open(tmp_path, mon
         seed_dir=seed_dir,
         raw_manifest_dir=tmp_path / "raw",
         computed_at=datetime(2026, 9, 13, 22, 30, tzinfo=UTC),
+        limit=5,
+        scopes=(("London", "2026-09-13", "high"),),
+        manifests=(),
+        include_missing_posterior=True,
+    )
+
+    assert report[cycle_advance.RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] == 0
+    assert report["seeds_enqueued"] == 1
+
+
+def test_explicit_scopes_survive_invalid_timezone(tmp_path, monkeypatch) -> None:
+    """Fail-soft per this function's own contract ("any per-scope error is logged and
+    skipped; the function never raises into the poll"): a bogus timezone string in city
+    config must degrade the local-day-end check to "not ended" for that one scope, never
+    raise ZoneInfoNotFoundError out of the batch. Same 03:07Z-09-14 scenario that would
+    otherwise be excluded, but with an unresolvable timezone -- the scope must still enqueue."""
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+
+    target_cycle = datetime(2026, 9, 13, 6, tzinfo=UTC)
+    seed_dir = tmp_path / "seeds"
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._city_timezone_by_name",
+        lambda: {"London": "Not/ARealZone"},
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: target_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan._day0_observed_extreme_required",
+        lambda **_kwargs: False,
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        seed_file = Path(
+            kwargs.get("output_path") or seed_dir / "London.2026-09-13.json"
+        )
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 9, 14, 3, 7, tzinfo=UTC),
         limit=5,
         scopes=(("London", "2026-09-13", "high"),),
         manifests=(),
