@@ -13237,31 +13237,25 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     ).fetchall()
     chain_terminal: list = []
     if _table_exists(conn, "position_current"):
-        # X-BJ (2026-09-14): the OR-join on (token_id, no_token_id) had no
-        # supporting index and forced SQLite onto idx_position_current_phase_quote's
-        # phase-partition SEARCH, filtering the OR in memory over every terminal-
-        # phase row (EXPLAIN QUERY PLAN confirmed against this DDL). Split into two
-        # EXISTS branches (equivalent by "exists (P or Q) == exists P or exists Q")
-        # so each can use its own single-column index
-        # (idx_position_current_token_id / idx_position_current_no_token_id).
+        # X-BJ (2026-09-14): idx_position_current_token_id / idx_position_current_no_token_id
+        # (added alongside this query) are sufficient on their own -- SQLite's MULTI-INDEX OR
+        # optimization plans this exact OR-join as two per-branch index seeks (EXPLAIN QUERY
+        # PLAN confirmed against this DDL: no SCAN, no TEMP B-TREE, no fallback to
+        # idx_position_current_phase_quote) with the query unchanged from before the indexes
+        # existed. An earlier version of this fix rewrote the OR into two EXISTS branches on
+        # the theory that neither index could be used while the OR stayed inside one EXISTS --
+        # R-BJ2 review disproved that with the same EXPLAIN this comment cites: the rewrite
+        # was unnecessary machinery for a case SQLite already handles.
         chain_terminal = conn.execute(
             """
             SELECT ts.token_id
             FROM token_suppression ts
             WHERE ts.suppression_reason = 'chain_only_quarantined'
-              AND (
-                  EXISTS (
-                      SELECT 1 FROM position_current pc
-                      WHERE pc.token_id = ts.token_id
-                        AND pc.phase IN ('settled', 'voided', 'admin_closed',
-                                         'economically_closed')
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM position_current pc
-                      WHERE pc.no_token_id = ts.token_id
-                        AND pc.phase IN ('settled', 'voided', 'admin_closed',
-                                         'economically_closed')
-                  )
+              AND EXISTS (
+                  SELECT 1 FROM position_current pc
+                  WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+                    AND pc.phase IN ('settled', 'voided', 'admin_closed',
+                                     'economically_closed')
               )
             ORDER BY ts.created_at ASC, ts.token_id ASC
             """
@@ -13460,12 +13454,12 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
             """
         ).fetchall()
         return _with_chain_only_entry_block_scopes(conn, rows)
-    # X-BJ (2026-09-14): same OR-join-against-unindexed-columns defect and fix as
-    # query_token_suppression_tokens's chain_terminal statement above -- split via
-    # "not exists (P or Q) == not exists P and not exists Q" so each branch uses
-    # its own single-column index (idx_position_current_token_id /
-    # idx_position_current_no_token_id) instead of the phase-partition SEARCH
-    # filtered in memory by the unindexed OR (EXPLAIN QUERY PLAN confirmed).
+    # X-BJ (2026-09-14): same indexes as query_token_suppression_tokens's chain_terminal
+    # statement above (idx_position_current_token_id / idx_position_current_no_token_id)
+    # are sufficient on their own -- SQLite's MULTI-INDEX OR optimization plans this
+    # exact OR-join as two per-branch index seeks, query unchanged (EXPLAIN QUERY PLAN
+    # confirmed against this DDL; see that function's comment for the corrected-vs-
+    # R-BJ2-disproved rationale).
     rows = conn.execute(
         """
         SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
@@ -13473,12 +13467,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
         WHERE ts.suppression_reason = 'chain_only_quarantined'
           AND NOT EXISTS (
               SELECT 1 FROM position_current pc
-              WHERE pc.token_id = ts.token_id
-                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed')
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM position_current pc
-              WHERE pc.no_token_id = ts.token_id
+              WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
                 AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed')
           )
         ORDER BY ts.created_at ASC, ts.token_id ASC

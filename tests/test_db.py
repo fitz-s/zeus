@@ -7040,69 +7040,22 @@ def test_unbounded_load_portfolio_skips_settlement_window_scan_when_recent_exits
         conn.close()
 
 
-def test_token_suppression_and_quarantine_queries_match_both_or_branches_after_index_rewrite():
-    """X-BJ (2026-09-14): query_token_suppression_tokens's chain_terminal statement and
-    query_chain_only_quarantine_rows were rewritten from a single OR-join EXISTS/NOT EXISTS
-    against unindexed position_current(token_id, no_token_id) into two single-column-indexed
-    EXISTS branches (idx_position_current_token_id / idx_position_current_no_token_id).
-    "exists (P or Q) == exists P or exists Q" makes this a pure query-shape change, not a
-    semantics change -- this test proves both OR branches (match via token_id, match via
-    no_token_id) and the no-match case still produce the same result as the original OR."""
-    from src.state.db import (
-        init_schema_trade_only,
-        query_chain_only_quarantine_rows,
-        query_token_suppression_tokens,
-        record_token_suppression,
-    )
-
-    with tempfile.TemporaryDirectory() as td:
-        conn = get_connection(Path(td) / "or-join-rewrite.db")
-        init_schema_trade_only(conn)
-        # p-by-token: chain-terminal phase, matches via pc.token_id = ts.token_id.
-        conn.execute(
-            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
-            "updated_at, temperature_metric, strategy_key) VALUES "
-            "('p-by-token','settled','p-by-token','tok-A','no-A-x','2026-01-01','high','s')"
-        )
-        # p-by-no-token: chain-terminal phase, matches via pc.no_token_id = ts.token_id.
-        conn.execute(
-            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
-            "updated_at, temperature_metric, strategy_key) VALUES "
-            "('p-by-no-token','settled','p-by-no-token','tok-B-x','tok-B','2026-01-01','high','s')"
-        )
-        # p-open: matches neither the terminal-phase filter (still active) -- suppression
-        # for its token must NOT be classified as chain-terminal-resolved.
-        conn.execute(
-            "INSERT INTO position_current (position_id, phase, trade_id, token_id, no_token_id, "
-            "updated_at, temperature_metric, strategy_key) VALUES "
-            "('p-open','active','p-open','tok-C','tok-C-no','2026-01-01','high','s')"
-        )
-        conn.commit()
-        for token_id in ("tok-A", "tok-B", "tok-C"):
-            record_token_suppression(
-                conn, token_id=token_id, suppression_reason="chain_only_quarantined", source_module="test"
-            )
-        conn.commit()
-
-        ignored = set(query_token_suppression_tokens(conn))
-        assert {"tok-A", "tok-B"} <= ignored, "both OR branches must resurrect-block via chain-terminal match"
-        assert "tok-C" not in ignored, "an open (non-terminal) position must not chain-terminal-suppress its token"
-
-        quarantine_tokens = {row["token_id"] for row in query_chain_only_quarantine_rows(conn)}
-        assert quarantine_tokens == {"tok-C"}, (
-            "only the still-open token's quarantine fact should remain unresolved; "
-            "chain-terminal matches via EITHER column must be excluded"
-        )
-        conn.close()
-
-
 def test_venue_commands_and_position_current_lookups_use_index_seeks_not_scans():
     """X-BJ (2026-09-14): EXPLAIN QUERY PLAN assertions, run against a temp DB built by
-    init_schema_trade_only (never the live DB), that the four T_proofreview-identified
+    init_schema_trade_only (never the live DB), that the T_proofreview-identified
     SCAN / TEMP-B-TREE / phase-partition-then-filter-in-memory shapes are gone after
     adding idx_venue_commands_venue_order_intent, idx_venue_commands_token_intent,
-    idx_position_current_token_id, and idx_position_current_no_token_id, plus the
-    OR-join -> two-single-column-EXISTS-branches rewrite."""
+    idx_position_current_token_id, and idx_position_current_no_token_id.
+
+    R-BJ2 review (2026-09-14): an earlier version of this test exercised a rewritten
+    OR-join (two EXISTS branches) on the theory that SQLite could not use either new
+    single-column index while the OR stayed inside one EXISTS. That was disproved by
+    this exact test, run against the query as query_token_suppression_tokens /
+    query_chain_only_quarantine_rows actually wrote it (unchanged, original OR form):
+    with only the two new indexes present, SQLite's MULTI-INDEX OR optimization plans
+    it as the identical two per-branch index seeks, no query rewrite needed. The
+    production code was reverted to match; this test now asserts on the original
+    query text SQLite really runs."""
     from src.state.db import init_schema_trade_only
 
     with tempfile.TemporaryDirectory() as td:
@@ -7126,19 +7079,40 @@ def test_venue_commands_and_position_current_lookups_use_index_seeks_not_scans()
             assert not any("TEMP B-TREE" in step for step in p), f"{name}: still sorting: {p}"
             assert any("SEARCH venue_commands USING INDEX" in step for step in p), f"{name}: not an index seek: {p}"
 
+        # Original OR-join text (query_token_suppression_tokens's chain_terminal
+        # statement), unchanged from before either new index existed.
         or_join_plan = plan(
             "SELECT ts.token_id FROM token_suppression ts WHERE ts.suppression_reason = 'chain_only_quarantined' "
-            "AND (EXISTS (SELECT 1 FROM position_current pc WHERE pc.token_id = ts.token_id "
-            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed')) "
-            "OR EXISTS (SELECT 1 FROM position_current pc WHERE pc.no_token_id = ts.token_id "
-            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed')))"
+            "AND EXISTS (SELECT 1 FROM position_current pc "
+            "WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id) "
+            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed'))"
         )
         assert not any("SCAN ts" in step and "COVERING" not in step for step in or_join_plan), or_join_plan
         assert not any(
             "idx_position_current_phase_quote" in step for step in or_join_plan
-        ), f"must no longer fall back to the phase-partition index: {or_join_plan}"
+        ), f"must not fall back to the phase-partition index: {or_join_plan}"
+        assert any("MULTI-INDEX OR" in step for step in or_join_plan), (
+            f"expected SQLite's MULTI-INDEX OR optimization on the unmodified OR-join: {or_join_plan}"
+        )
         assert sum(1 for step in or_join_plan if "idx_position_current_token_id" in step) == 1
         assert sum(1 for step in or_join_plan if "idx_position_current_no_token_id" in step) == 1
+
+        # NOT EXISTS form (query_chain_only_quarantine_rows), same claim.
+        not_exists_plan = plan(
+            "SELECT ts.token_id FROM token_suppression ts WHERE ts.suppression_reason = 'chain_only_quarantined' "
+            "AND NOT EXISTS (SELECT 1 FROM position_current pc "
+            "WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id) "
+            "AND pc.phase IN ('settled','voided','admin_closed','economically_closed'))"
+        )
+        assert not any("SCAN ts" in step and "COVERING" not in step for step in not_exists_plan), not_exists_plan
+        assert not any(
+            "idx_position_current_phase_quote" in step for step in not_exists_plan
+        ), f"must not fall back to the phase-partition index: {not_exists_plan}"
+        assert any("MULTI-INDEX OR" in step for step in not_exists_plan), (
+            f"expected SQLite's MULTI-INDEX OR optimization on the unmodified NOT EXISTS OR-join: {not_exists_plan}"
+        )
+        assert sum(1 for step in not_exists_plan if "idx_position_current_token_id" in step) == 1
+        assert sum(1 for step in not_exists_plan if "idx_position_current_no_token_id" in step) == 1
         conn.close()
 
 
