@@ -2473,6 +2473,123 @@ def test_batched_position_event_hints_match_naive_per_position_reference(tmp_pat
     }
 
 
+def test_loader_skips_event_hint_hydration_for_terminal_positions(tmp_path):
+    """query_portfolio_loader_view must not hydrate transitional/env hints for
+    terminal (non-OPEN_EXPOSURE_PHASES) positions -- STEP 1 audit (see the
+    perf(state) commit hydrating hints only for open-exposure rows) found no
+    live reader of these fields for a terminal position:
+    _position_from_projection_row only keeps day0_entered_at when
+    state=='day0_window' and only keeps exit_state when phase=='pending_exit';
+    admin_exit_reason's only reader (Position.is_admin_exit) has zero callers;
+    entry_fill_verified/entered_at are read only by open-position flows
+    (chain_reconciliation's INACTIVE_RUNTIME_STATES-excluded auto-resolve,
+    fill_tracker, monitor_refresh, command_recovery). This test proves the
+    settled position genuinely HAS hydratable history (so this isn't a
+    vacuous "nothing to hydrate anyway" fixture), that the loader's raw
+    output now defaults those fields for it, and that the resulting Position
+    objects are byte-identical to what the OLD unrestricted hydration would
+    have produced.
+    """
+    from dataclasses import replace as _dc_replace
+
+    from src.state.db import (
+        _latest_position_event_envs,
+        _query_transitional_position_hints,
+        init_schema,
+        query_portfolio_loader_view,
+    )
+    from src.state.portfolio import _position_from_projection_row
+
+    conn = get_connection(tmp_path / "terminal-hint-skip.db")
+    init_schema(conn)
+
+    # A settled (terminal) position with a full transitional event history --
+    # exactly the shape that used to cost a payload_json fetch per event.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="terminal-settled", phase="settled"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="terminal-settled", event_type="ENTRY_ORDER_FILLED",
+        status="filled", occurred_at="2026-04-01T00:00:03+00:00", sequence_no=1,
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="terminal-settled", event_type="DAY0_WINDOW_ENTERED",
+        status="entered", occurred_at="2026-04-01T00:05:00+00:00", sequence_no=2,
+        payload={"day0_entered_at": "2026-04-01T00:05:00+00:00"},
+    )
+
+    # An open position with the same history, as a regression control.
+    _insert_current_position_for_fill_authority_view_test(
+        conn, position_id="open-active", phase="active"
+    )
+    _insert_status_position_event_for_view_test(
+        conn, position_id="open-active", event_type="ENTRY_ORDER_FILLED",
+        status="filled", occurred_at="2026-04-01T00:00:03+00:00", sequence_no=1,
+    )
+    conn.commit()
+
+    # Prove the settled position genuinely has hydratable history: calling the
+    # hint functions directly (bypassing the loader's phase filter) on it
+    # must produce non-empty values.
+    unrestricted_hints = _query_transitional_position_hints(conn, ["terminal-settled"])
+    unrestricted_envs = _latest_position_event_envs(conn, ["terminal-settled"])
+    assert unrestricted_hints["terminal-settled"]["entered_at"] == "2026-04-01T00:00:03+00:00"
+    assert unrestricted_hints["terminal-settled"]["day0_entered_at"] == "2026-04-01T00:05:00+00:00"
+    assert unrestricted_envs["terminal-settled"] == "test"
+
+    view = query_portfolio_loader_view(conn)
+    positions_by_id = {row["position_id"]: row for row in view["positions"]}
+    terminal_row = positions_by_id["terminal-settled"]
+    open_row = positions_by_id["open-active"]
+
+    # The raw loader output must now show DEFAULTS for the terminal row --
+    # this is the field-level difference the audit requires surfacing.
+    assert terminal_row["entered_at"] == ""
+    assert terminal_row["day0_entered_at"] == ""
+    assert terminal_row["exit_state"] == ""
+    assert terminal_row["admin_exit_reason"] == ""
+    # The open position is unaffected (regression control).
+    assert open_row["entered_at"] == "2026-04-01T00:00:03+00:00"
+
+    # Reconstruct what the OLD unrestricted hydration would have put in the
+    # terminal row's raw dict, then run BOTH through the same projection
+    # (_position_from_projection_row) the loader itself uses, and check which
+    # fields actually differ at the Position level (not just the raw dict).
+    hydrated_terminal_row = dict(terminal_row)
+    hydrated_terminal_row["entered_at"] = unrestricted_hints["terminal-settled"]["entered_at"]
+    hydrated_terminal_row["day0_entered_at"] = unrestricted_hints["terminal-settled"]["day0_entered_at"]
+    hydrated_terminal_row["env"] = unrestricted_envs["terminal-settled"]
+
+    restricted_position = _position_from_projection_row(dict(terminal_row), current_mode="test")
+    hydrated_position = _position_from_projection_row(hydrated_terminal_row, current_mode="test")
+
+    # day0_entered_at and exit_state ARE gated to state=='day0_window' /
+    # phase=='pending_exit' inside _position_from_projection_row (and, for
+    # exit_state, already forced to "" one level up in the loader's own dict
+    # for any non-pending_exit phase) -- these are provably identical for a
+    # terminal position regardless of hint hydration.
+    assert restricted_position.day0_entered_at == hydrated_position.day0_entered_at == ""
+    assert restricted_position.exit_state == hydrated_position.exit_state == ""
+    assert restricted_position.admin_exit_reason == hydrated_position.admin_exit_reason == ""
+
+    # entered_at is NOT state-gated in _position_from_projection_row (only
+    # state=='pending_tracked' is excluded) -- it DOES change value for a
+    # terminal position between the hydrated and restricted paths. This is
+    # the one field STEP 1 had to certify by reader audit rather than by
+    # phase-gating: no live consumer reads Position.entered_at for a
+    # terminal-state position (chain_reconciliation's only entered_at-reading
+    # flow, _auto_resolve_chain_only_exact_match's rescue branch, explicitly
+    # excludes INACTIVE_RUNTIME_STATES before it ever sees a position;
+    # fill_tracker / monitor_refresh / command_recovery only ever process
+    # open or pending positions). Document the difference explicitly rather
+    # than asserting a false equality.
+    assert hydrated_position.entered_at == "2026-04-01T00:00:03+00:00"
+    assert restricted_position.entered_at == ""
+    assert restricted_position.entered_at != hydrated_position.entered_at
+
+    conn.close()
+
+
 def test_portfolio_loader_open_only_filters_target_families_in_sql(tmp_path):
     from src.state.db import query_portfolio_loader_view
 

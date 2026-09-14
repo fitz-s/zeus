@@ -12727,11 +12727,34 @@ def query_portfolio_loader_view(
         event_envs: dict[str, str] = {}
         transitional_hints: dict[str, dict] = {}
     else:
-        event_envs = _latest_position_event_envs(conn, position_ids)
+        # Terminal positions (settled/voided/admin_closed/economically_closed)
+        # never surface these hints downstream: _position_from_projection_row
+        # only keeps day0_entered_at when state=='day0_window' and only keeps
+        # exit_state when phase=='pending_exit', pre_exit_state is consumed
+        # only by exit_lifecycle's pending-exit machinery, admin_exit_reason
+        # has position_current's own durable column as its primary source
+        # (the hint is a fallback with no live reader of Position.admin_exit_reason
+        # -- is_admin_exit has none), and env likewise falls back to the hint
+        # only when position_current.env (a NOT NULL column) is empty. Same
+        # precedent as query_position_current_status_view's `WHERE phase IN
+        # OPEN_EXPOSURE_PHASES` scoping above. Restricting the event-hint
+        # fanout to open-exposure rows only skips work whose result was
+        # already discarded for terminal rows.
+        open_trade_ids = [
+            str(row["trade_id"] or row["position_id"] or "")
+            for row in rows
+            if str(row["phase"] or "") in OPEN_EXPOSURE_PHASES
+        ]
+        open_position_ids = [
+            str(row["position_id"] or row["trade_id"] or "")
+            for row in rows
+            if str(row["phase"] or "") in OPEN_EXPOSURE_PHASES
+        ]
+        event_envs = _latest_position_event_envs(conn, open_position_ids)
         transitional_hints = (
             _query_held_monitor_transition_hints(conn, rows, fill_hints)
             if monitor_bootstrap_only
-            else _query_transitional_position_hints(conn, trade_ids)
+            else _query_transitional_position_hints(conn, open_trade_ids)
         )
 
     positions: list[dict] = []
