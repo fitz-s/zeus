@@ -183,7 +183,38 @@ def _open_position_settlement_keys(trade_conn, portfolio) -> set[tuple[str, str,
 
 
 def _canonical_position_versions(trade_conn, keys) -> dict[str, dict]:
-    """Fingerprint the complete canonical exposure set for settlement keys."""
+    """Fingerprint the complete canonical exposure set for settlement keys.
+
+    position_events is append-only (trg_position_events_no_update /
+    trg_position_events_no_delete, src/state/db.py, RAISE FAIL on any UPDATE
+    or DELETE) and every writer assigns sequence_no as
+    COALESCE(MAX(sequence_no), 0) + 1 under UNIQUE(position_id, sequence_no).
+    So for a given position_id, sequence_no is exactly {1..N} with N the
+    event count, and MAX(sequence_no) alone is a complete change detector:
+    any append strictly increases it, and nothing else can change it. Two
+    aggregates the prior fingerprint carried are therefore dropped, not
+    computed differently:
+      - event_count: always == max_event_sequence given the above -- pure
+        redundancy, and computing it costs a full index-range walk over the
+        position's entire event history (O(events), not O(1)).
+      - max_event_time (MAX(occurred_at)): occurred_at has no ordering
+        invariant against sequence_no. Recovery/reconciliation paths stamp
+        it from a source-of-truth timestamp discovered after the fact
+        (e.g. src/execution/command_recovery.py:6671-6726 appends
+        ENTRY_ORDER_FILLED at sequence_no=latest+1 with
+        occurred_at=candidate["fill_observed_at"], the venue's true fill
+        time, with no check that it is >= the occurred_at already stored at
+        sequence_no=latest; same pattern at command_recovery.py:6304-6310,
+        6805, 7482, 8907). A value that can move independently of whether
+        the canonical exposure actually changed adds no discriminating
+        power to this comparison -- it would only add false negatives/
+        positives -- so it is excluded rather than re-sourced from the
+        tail row.
+    The single retained subquery is a genuine index seek: ORDER BY
+    sequence_no DESC LIMIT 1 walks to the tail of the
+    UNIQUE(position_id, sequence_no) index for that position_id and stops,
+    independent of how many events the position carries.
+    """
     key_list = sorted(keys)
     if not key_list:
         return {}
@@ -194,12 +225,9 @@ def _canonical_position_versions(trade_conn, keys) -> dict[str, dict]:
                     VALUES {placeholders}
                 )
                 SELECT pc.*,
-                    (SELECT COUNT(*) FROM position_events pe
-                      WHERE pe.position_id = pc.position_id) AS event_count,
-                    (SELECT MAX(pe.sequence_no) FROM position_events pe
-                      WHERE pe.position_id = pc.position_id) AS max_event_sequence,
-                    (SELECT MAX(pe.occurred_at) FROM position_events pe
-                      WHERE pe.position_id = pc.position_id) AS max_event_time
+                    (SELECT pe.sequence_no FROM position_events pe
+                      WHERE pe.position_id = pc.position_id
+                      ORDER BY pe.sequence_no DESC LIMIT 1) AS max_event_sequence
                   FROM position_current pc
                   JOIN requested r
                     ON r.city = pc.city
@@ -265,6 +293,17 @@ def _canonical_row_position_ids(row, versions) -> set[str]:
 
 
 def _canonical_row_is_stable(row, before_versions, current_versions) -> bool:
+    """True iff no canonical exposure for `row`'s positions moved between
+    `before_versions` (pre-lease) and `current_versions` (in-lease).
+
+    The fingerprint compared here is position_current's columns plus
+    max_event_sequence (see _canonical_position_versions) -- deliberately
+    not occurred_at. sequence_no is the complete change detector for a
+    position's event history; occurred_at is excluded rather than added
+    back because it carries no discriminating power over sequence_no and
+    can be back-dated by recovery paths (see _canonical_position_versions
+    docstring), which would make it noise here, not signal.
+    """
     before_ids = _canonical_row_position_ids(row, before_versions)
     current_ids = _canonical_row_position_ids(row, current_versions)
     return (

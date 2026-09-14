@@ -1709,3 +1709,254 @@ def test_in_lease_payout_reread_still_catches_retraction_between_reads(
     assert store_calls == [] or all(len(c) == 0 for c in store_calls)
     assert result["positions_settled"] == 0
     assert result["status"] == "awaiting_truth_writer"
+
+
+# --- X-BK: _canonical_position_versions fingerprint reduction -------------
+#
+# The write lease is a 5s budget. _canonical_position_versions used to
+# fingerprint each applied position with THREE correlated subqueries over
+# position_events (COUNT(*), MAX(sequence_no), MAX(occurred_at)) -- COUNT(*)
+# and MAX(occurred_at) are full index-range walks over the position's whole
+# event history (positions can carry hundreds of MONITOR_REFRESHED rows),
+# not index seeks. The tests below prove the reduced fingerprint (position_
+# current columns + MAX(sequence_no) only, read via a single tail seek) has
+# the same discriminating power as the original for the TOCTOU guard in
+# _canonical_row_is_stable, including in the presence of back-dated
+# occurred_at values (see _canonical_position_versions docstring for the
+# command_recovery.py sites that back-date occurred_at).
+
+
+def _old_canonical_position_versions(trade_conn, keys):
+    """Reference copy of the pre-fix (3-correlated-subquery) fingerprint
+    query, kept ONLY so test_canonical_fingerprint_equivalence_across_event_
+    volumes can assert the reduced fingerprint's change/no-change verdict
+    matches this one's, across positions with 1/40/400 events. Do not use
+    this in production code -- it is the O(events) query the fix replaces.
+    """
+    from src.execution.harvester_pnl_resolver import _row_value
+
+    key_list = sorted(keys)
+    if not key_list:
+        return {}
+    placeholders = ",".join("(?, ?, ?)" for _ in key_list)
+    params = [part for key in key_list for part in key]
+    rows = trade_conn.execute(
+        f"""WITH requested(city, target_date, temperature_metric) AS (
+                    VALUES {placeholders}
+                )
+                SELECT pc.*,
+                    (SELECT COUNT(*) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS event_count,
+                    (SELECT MAX(pe.sequence_no) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS max_event_sequence,
+                    (SELECT MAX(pe.occurred_at) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS max_event_time
+                  FROM position_current pc
+                  JOIN requested r
+                    ON r.city = pc.city
+                   AND r.target_date = pc.target_date
+                   AND r.temperature_metric = COALESCE(pc.temperature_metric, 'high')
+                 WHERE pc.phase IN ('active', 'day0_window', 'pending_exit',
+                                    'economically_closed')""",
+        params,
+    ).fetchall()
+    return {
+        str(_row_value(row, "position_id", 0, "") or ""): tuple(row)
+        for row in rows
+    }
+
+
+def _insert_position_event(trade_conn, position_id, sequence_no, occurred_at, event_id=None):
+    trade_conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, source_module,
+               payload_json, caused_by, env
+           ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                     'tests.harvester_resolver', '{}', 'monitor_refresh', 'live')""",
+        (event_id or f"{position_id}-ev{sequence_no}", position_id, sequence_no, occurred_at),
+    )
+
+
+def test_canonical_fingerprint_equivalence_across_event_volumes(trade_conn):
+    """The reduced fingerprint changes iff the reference (pre-fix) fingerprint
+    would have, for positions carrying 1, 40 and 400 events -- an append
+    changes both, no append changes neither, and a same-sequence event
+    cannot exist (UNIQUE(position_id, sequence_no))."""
+    from src.execution import harvester_pnl_resolver as resolver
+
+    city, target_date, metric = "CityA", "2026-06-01", "high"
+    sizes = {"small": 1, "mid": 40, "large": 400}
+    for suffix, n_events in sizes.items():
+        position_id = f"pos-{suffix}"
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric, updated_at
+               ) VALUES (?, 'active', ?, ?, ?, 't')""",
+            (position_id, city, target_date, metric),
+        )
+        for seq in range(1, n_events + 1):
+            _insert_position_event(
+                trade_conn, position_id, seq, f"2026-06-01T00:{seq % 60:02d}:00Z"
+            )
+    trade_conn.commit()
+
+    keys = {(city, target_date, metric)}
+    old_before = _old_canonical_position_versions(trade_conn, keys)
+    new_before = resolver._canonical_position_versions(trade_conn, keys)
+
+    # Append one more event to every position -> both fingerprints must change.
+    for suffix, n_events in sizes.items():
+        position_id = f"pos-{suffix}"
+        _insert_position_event(
+            trade_conn, position_id, n_events + 1, "2026-06-01T23:59:00Z",
+            event_id=f"{position_id}-appended",
+        )
+    trade_conn.commit()
+
+    old_after = _old_canonical_position_versions(trade_conn, keys)
+    new_after = resolver._canonical_position_versions(trade_conn, keys)
+
+    for suffix in sizes:
+        position_id = f"pos-{suffix}"
+        old_changed = old_before[position_id] != old_after[position_id]
+        new_changed = (
+            new_before[position_id]["fingerprint"]
+            != new_after[position_id]["fingerprint"]
+        )
+        assert old_changed is True, f"{position_id}: reference fingerprint did not move"
+        assert new_changed is True, f"{position_id}: reduced fingerprint did not move"
+        assert old_changed == new_changed
+
+    # No further change -> both fingerprints identical on a second read.
+    old_again = _old_canonical_position_versions(trade_conn, keys)
+    new_again = resolver._canonical_position_versions(trade_conn, keys)
+    for suffix in sizes:
+        position_id = f"pos-{suffix}"
+        assert old_after[position_id] == old_again[position_id]
+        assert (
+            new_after[position_id]["fingerprint"]
+            == new_again[position_id]["fingerprint"]
+        )
+
+    # A same-sequence event cannot exist by UNIQUE(position_id, sequence_no).
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_position_event(
+            trade_conn, "pos-small", 1, "2026-06-01T00:00:00Z", event_id="pos-small-dup-seq"
+        )
+
+
+def test_backdated_occurred_at_still_detected(trade_conn):
+    """A recovered event whose occurred_at is EARLIER than the previous
+    event's occurred_at for that position -- the back-dating pattern in
+    command_recovery.py's filled-entry repair, where occurred_at is sourced
+    from a venue timestamp (fill_observed_at) discovered after the fact --
+    still changes the fingerprint and still fails
+    _canonical_row_is_stable's TOCTOU check. This is the test that proves
+    the design: sequence_no, not occurred_at, is the change detector."""
+    from src.execution import harvester_pnl_resolver as resolver
+
+    city, target_date, metric = "CityB", "2026-06-02", "high"
+    trade_conn.execute(
+        """INSERT INTO position_current (
+               position_id, phase, city, target_date, temperature_metric, updated_at
+           ) VALUES ('pos-backdate', 'active', ?, ?, ?, 't')""",
+        (city, target_date, metric),
+    )
+    _insert_position_event(trade_conn, "pos-backdate", 1, "2026-06-02T12:00:00Z")
+    trade_conn.commit()
+
+    keys = {(city, target_date, metric)}
+    before = resolver._canonical_position_versions(trade_conn, keys)
+
+    # sequence_no=2 carries occurred_at EARLIER than sequence_no=1's --
+    # command_recovery.py:6671-6726 appends ENTRY_ORDER_FILLED this way,
+    # with occurred_at=candidate["fill_observed_at"] (the venue's true fill
+    # time) and no check against the previous row's occurred_at.
+    _insert_position_event(trade_conn, "pos-backdate", 2, "2026-06-02T05:00:00Z")
+    trade_conn.commit()
+
+    after = resolver._canonical_position_versions(trade_conn, keys)
+
+    assert (
+        before["pos-backdate"]["fingerprint"] != after["pos-backdate"]["fingerprint"]
+    ), "back-dated append must still change the fingerprint"
+    assert after["pos-backdate"]["fingerprint"][-1] == 2, "max_event_sequence must advance to 2"
+
+    row = trade_conn.execute(
+        "SELECT ? AS city, ? AS target_date, ? AS temperature_metric, "
+        "'family' AS settlement_scope, '' AS condition_id",
+        (city, target_date, metric),
+    ).fetchone()
+    assert resolver._canonical_row_is_stable(row, before, after) is False, (
+        "TOCTOU guard must still reject a row whose position changed, "
+        "even when the change is back-dated"
+    )
+
+
+class _SqlCapture:
+    """Wraps a sqlite3 connection to record the last SQL text and params
+    passed to .execute(), so a test can re-run it under EXPLAIN QUERY PLAN."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.last_sql = None
+        self.last_params = None
+
+    def execute(self, sql, params=()):
+        self.last_sql = sql
+        self.last_params = tuple(params)
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_canonical_position_versions_query_plan_is_one_seek_no_count(trade_conn):
+    """For a 3-key request (the applied_keys shape at
+    harvester_pnl_resolver.py's in-lease re-fingerprint call), the fingerprint
+    query must contain no COUNT aggregate, no TEMP B-TREE, exactly one
+    correlated subquery against position_events, and that subquery must be a
+    SEARCH (index seek), never a SCAN."""
+    from src.execution import harvester_pnl_resolver as resolver
+
+    keys = {
+        ("CityA", "2026-06-01", "high"),
+        ("CityB", "2026-06-02", "high"),
+        ("CityC", "2026-06-03", "low"),
+    }
+    for i, (city, target_date, metric) in enumerate(sorted(keys)):
+        position_id = f"pos-plan-{i}"
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric, updated_at
+               ) VALUES (?, 'active', ?, ?, ?, 't')""",
+            (position_id, city, target_date, metric),
+        )
+        for seq in range(1, 6):
+            _insert_position_event(
+                trade_conn, position_id, seq, f"2026-06-0{i + 1}T00:{seq:02d}:00Z"
+            )
+    trade_conn.commit()
+
+    spy = _SqlCapture(trade_conn)
+    resolver._canonical_position_versions(spy, keys)
+    assert spy.last_sql is not None
+
+    compact_sql = spy.last_sql.upper().replace(" ", "").replace("\n", "")
+    assert "COUNT(" not in compact_sql, "fingerprint query must not aggregate COUNT(*)"
+
+    plan_rows = trade_conn.execute(
+        f"EXPLAIN QUERY PLAN {spy.last_sql}", spy.last_params
+    ).fetchall()
+    details = [str(row["detail"]) for row in plan_rows]
+    plan_text = "\n".join(details).upper()
+
+    assert "TEMP B-TREE" not in plan_text
+    correlated = [d for d in details if "CORRELATED SCALAR SUBQUERY" in d.upper()]
+    assert len(correlated) == 1, f"expected exactly one position_events subquery: {details}"
+
+    pe_search_lines = [d for d in details if d.upper().startswith("SEARCH PE ")]
+    assert pe_search_lines, f"expected a SEARCH on position_events (pe): {details}"
+    for line in pe_search_lines:
+        assert "SCAN" not in line.upper(), f"position_events access is not a seek: {line}"
