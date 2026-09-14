@@ -599,6 +599,214 @@ def _http_error_for_response(response: requests.Response, message: str) -> reque
     return err
 
 
+_RANGE_RESUME_VERSION = 1
+# An index entry can represent a whole field collection, so its natural length
+# is not a safe progress unit for the 180-second per-step deadline.
+_RANGE_RESUME_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _range_resume_manifest_path(target: Path) -> Path:
+    """Return the sidecar that proves which byte-range prefix is reusable."""
+
+    return target.with_name(f"{target.name}.ranges.json")
+
+
+def _is_strong_etag(value: Any) -> bool:
+    """Return whether an HTTP ETag can identify byte-for-byte entity content."""
+
+    return isinstance(value, str) and bool(value) and not value.lstrip().startswith("W/")
+
+
+def _range_resume_plan(urls: Any) -> tuple[tuple[str, int, int], ...] | None:
+    """Flatten indexed URLs into the exact ordered range identity we assemble."""
+
+    plan: list[tuple[str, int, int]] = []
+    for item in urls:
+        if not (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and not isinstance(item[1], (str, bytes))
+        ):
+            return None
+        url, parts = item
+        for part in parts:
+            offset, length = _part_offset_length(part)
+            if offset < 0 or length <= 0:
+                raise ValueError(f"Invalid indexed range offset={offset} length={length}")
+            remaining = length
+            chunk_offset = offset
+            while remaining:
+                chunk_length = min(remaining, _RANGE_RESUME_CHUNK_BYTES)
+                plan.append((str(url), chunk_offset, chunk_length))
+                chunk_offset += chunk_length
+                remaining -= chunk_length
+    return tuple(plan) if plan else None
+
+
+def _reset_range_resume(target: Path) -> None:
+    """Discard an unverified partial prefix; it must never reach canonical GRIB."""
+
+    target.unlink(missing_ok=True)
+    _range_resume_manifest_path(target).unlink(missing_ok=True)
+
+
+def _write_range_resume_manifest(
+    target: Path,
+    *,
+    plan: tuple[tuple[str, int, int], ...],
+    completed_ranges: int,
+    entity_tags: Mapping[str, str],
+) -> None:
+    """Atomically checkpoint only a fully received, fsync'd range prefix."""
+
+    completed_bytes = sum(length for _, _, length in plan[:completed_ranges])
+    payload = {
+        "version": _RANGE_RESUME_VERSION,
+        "ranges": [list(part) for part in plan],
+        "completed_ranges": completed_ranges,
+        "completed_bytes": completed_bytes,
+        "entity_tags": dict(entity_tags),
+    }
+    manifest = _range_resume_manifest_path(target)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=manifest.parent,
+        prefix=f".{manifest.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as out:
+        temp_path = Path(out.name)
+        json.dump(payload, out, sort_keys=True, separators=(",", ":"))
+        out.flush()
+        os.fsync(out.fileno())
+    try:
+        os.replace(temp_path, manifest)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _load_range_resume(
+    target: Path,
+    *,
+    plan: tuple[tuple[str, int, int], ...],
+    session: Any,
+    verify: Any,
+    deadline: float | None,
+) -> tuple[int, dict[str, str]]:
+    """Return a verified reusable prefix, resetting malformed or changed cache.
+
+    A partial body is not a completed range.  The sidecar is written only after
+    the range bytes have been fsync'd, and an existing prefix is accepted only
+    when the current index plan and the source entity ETags still agree.
+    """
+
+    manifest = _range_resume_manifest_path(target)
+    if not target.exists() and not manifest.exists():
+        return 0, {}
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        completed = payload["completed_ranges"]
+        completed_bytes = payload["completed_bytes"]
+        entity_tags = payload["entity_tags"]
+        expected_ranges = [list(part) for part in plan]
+        if (
+            payload.get("version") != _RANGE_RESUME_VERSION
+            or payload.get("ranges") != expected_ranges
+            or not isinstance(completed, int)
+            or not 0 <= completed <= len(plan)
+            or not isinstance(completed_bytes, int)
+            or completed_bytes != sum(length for _, _, length in plan[:completed])
+            or not isinstance(entity_tags, dict)
+            or target.stat().st_size < completed_bytes
+        ):
+            raise ValueError("range resume sidecar does not match current source identity")
+        expected_urls = {url for url, _, _ in plan[:completed]}
+        if set(entity_tags) != expected_urls or any(
+            not _is_strong_etag(tag) for tag in entity_tags.values()
+        ):
+            raise ValueError("range resume sidecar has incomplete entity identity")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, KeyError):
+        logger.warning("Discarding invalid ECMWF range resume cache for %s", target)
+        _reset_range_resume(target)
+        return 0, {}
+
+    for url in sorted(expected_urls):
+        response = session.head(
+            url,
+            timeout=_remaining_step_timeout(deadline),
+            verify=verify,
+        )
+        try:
+            if response.status_code != 200:
+                logger.info(
+                    "ECMWF resume entity validation is unavailable (HTTP %s) for %s; restarting full partial",
+                    response.status_code,
+                    url,
+                )
+                _reset_range_resume(target)
+                return 0, {}
+            entity_tag = getattr(response, "headers", {}).get("ETag")
+            if not _is_strong_etag(entity_tag):
+                logger.info(
+                    "ECMWF resume entity validation has no strong ETag for %s; restarting full partial",
+                    url,
+                )
+                _reset_range_resume(target)
+                return 0, {}
+            if entity_tag != entity_tags[url]:
+                logger.warning("Discarding ECMWF range resume cache after entity change for %s", url)
+                _reset_range_resume(target)
+                return 0, {}
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+    with target.open("r+b") as out:
+        out.truncate(completed_bytes)
+    return completed, dict(entity_tags)
+
+
+def _validate_range_response(
+    response: Any,
+    *,
+    offset: int,
+    length: int,
+) -> str | None:
+    """Prove a range response is exactly the requested bytes before checkpointing."""
+
+    end = offset + length - 1
+    if response.status_code != 206:
+        if response.status_code >= 400:
+            response.raise_for_status()
+        raise _http_error_for_response(
+            response,
+            f"Expected HTTP 206 for range GET, got {response.status_code}",
+        )
+    headers = getattr(response, "headers", {})
+    content_range = headers.get("Content-Range")
+    if content_range is None:
+        raise _http_error_for_response(response, "Range GET omitted Content-Range")
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(?:\d+|\*)", content_range.strip())
+    if not match or (int(match.group(1)), int(match.group(2))) != (offset, end):
+        raise _http_error_for_response(
+            response,
+            f"Range GET Content-Range {content_range!r} does not match bytes={offset}-{end}",
+        )
+    content_length = headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) != length:
+                raise ValueError
+        except ValueError:
+            raise _http_error_for_response(
+                response,
+                f"Range GET Content-Length {content_length!r} does not match {length}",
+            )
+    return headers.get("ETag")
+
+
 def _resolve_index_parts(
     client: Any,
     result: Any,
@@ -674,42 +882,16 @@ def _retrieve_step_with_controlled_ranges(
 
     target_path = Path(result.target)
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    bytes_written = 0
     verify = getattr(client, "verify", True)
     session = client.session
-
-    with target_path.open("wb") as out:
-        for item in result.urls:
-            if isinstance(item, tuple) and len(item) == 2 and not isinstance(item[1], (str, bytes)):
-                url, parts = item
-                for part in parts:
-                    offset, length = _part_offset_length(part)
-                    end = offset + length - 1
-                    response = session.get(
-                        url,
-                        stream=True,
-                        headers={"Range": f"bytes={offset}-{end}"},
-                        timeout=_remaining_step_timeout(_deadline),
-                        verify=verify,
-                    )
-                    try:
-                        if response.status_code != 206:
-                            if response.status_code >= 400:
-                                response.raise_for_status()
-                            raise _http_error_for_response(
-                                response,
-                                f"Expected HTTP 206 for range GET, got {response.status_code}",
-                            )
-                        for chunk in response.iter_content(chunk_size=1024 * 1024):
-                            _remaining_step_timeout(_deadline)
-                            if chunk:
-                                out.write(chunk)
-                                bytes_written += len(chunk)
-                    finally:
-                        close = getattr(response, "close", None)
-                        if callable(close):
-                            close()
-            else:
+    plan = _range_resume_plan(result.urls)
+    if plan is None:
+        # Plain-object downloads have no byte-range identity to prove.  Do not
+        # reuse a stale indexed prefix if an upstream response shape changes.
+        _reset_range_resume(target_path)
+        bytes_written = 0
+        with target_path.open("wb") as out:
+            for item in result.urls:
                 response = session.get(
                     item,
                     stream=True,
@@ -728,8 +910,78 @@ def _retrieve_step_with_controlled_ranges(
                     close = getattr(response, "close", None)
                     if callable(close):
                         close()
+        result.size = bytes_written
+        return result
 
-    result.size = bytes_written
+    completed_ranges, entity_tags = _load_range_resume(
+        target_path,
+        plan=plan,
+        session=session,
+        verify=verify,
+        deadline=_deadline,
+    )
+    resumable = True
+    with target_path.open("ab") as out:
+        for range_index, (url, offset, length) in enumerate(plan[completed_ranges:], completed_ranges):
+            end = offset + length - 1
+            response = session.get(
+                url,
+                stream=True,
+                headers={"Range": f"bytes={offset}-{end}"},
+                timeout=_remaining_step_timeout(_deadline),
+                verify=verify,
+            )
+            try:
+                entity_tag = _validate_range_response(response, offset=offset, length=length)
+                if not _is_strong_etag(entity_tag):
+                    # A fresh transfer can still complete without a resume
+                    # identity.  A reused prefix cannot: discard it and use
+                    # the existing retry loop to restart from byte zero.
+                    resumable = False
+                    _range_resume_manifest_path(target_path).unlink(missing_ok=True)
+                    if completed_ranges:
+                        raise requests.ConnectionError(
+                            "ECMWF range response lacks a strong ETag after resuming a prefix"
+                        )
+                known_tag = entity_tags.get(url)
+                if _is_strong_etag(entity_tag) and known_tag is not None and entity_tag != known_tag:
+                    raise _http_error_for_response(
+                        response,
+                        f"Range GET entity changed while downloading {url}",
+                    )
+                range_bytes = 0
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    _remaining_step_timeout(_deadline)
+                    if chunk:
+                        if range_bytes + len(chunk) > length:
+                            raise _http_error_for_response(
+                                response,
+                                f"Range GET body exceeds requested length {length}",
+                            )
+                        out.write(chunk)
+                        range_bytes += len(chunk)
+                if range_bytes != length:
+                    raise _http_error_for_response(
+                        response,
+                        f"Range GET body length {range_bytes} does not match {length}",
+                    )
+                if _is_strong_etag(entity_tag):
+                    entity_tags[url] = entity_tag
+                out.flush()
+                os.fsync(out.fileno())
+                if resumable:
+                    _write_range_resume_manifest(
+                        target_path,
+                        plan=plan,
+                        completed_ranges=range_index + 1,
+                        entity_tags=entity_tags,
+                    )
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+
+    result.size = sum(length for _, _, length in plan)
     return result
 
 

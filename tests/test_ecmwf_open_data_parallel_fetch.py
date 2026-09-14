@@ -889,10 +889,18 @@ def test_controlled_range_downloader_writes_single_ranges_in_index_order(tmp_pat
     calls: list[dict[str, Any]] = []
 
     class _FakeResponse:
-        def __init__(self, status_code: int, payload: bytes, *, lines: list[bytes] | None = None):
+        def __init__(
+            self,
+            status_code: int,
+            payload: bytes,
+            *,
+            lines: list[bytes] | None = None,
+            headers: dict[str, str] | None = None,
+        ):
             self.status_code = status_code
             self._payload = payload
             self._lines = lines or []
+            self.headers = headers or {}
 
         def iter_content(self, chunk_size: int):
             yield self._payload
@@ -929,7 +937,16 @@ def test_controlled_range_downloader_writes_single_ranges_in_index_order(tmp_pat
                 "bytes=10-12": b"abc",
                 "bytes=20-21": b"de",
             }[headers["Range"]]
-            return _FakeResponse(206, payload)
+            start, end = headers["Range"].removeprefix("bytes=").split("-")
+            return _FakeResponse(
+                206,
+                payload,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/100",
+                    "Content-Length": str(len(payload)),
+                    "ETag": "index-order-entity",
+                },
+            )
 
     class _FakeClient:
         verify = False
@@ -964,6 +981,434 @@ def test_controlled_range_downloader_writes_single_ranges_in_index_order(tmp_pat
     assert [call["headers"].get("Range") for call in calls[1:]] == ["bytes=10-12", "bytes=20-21"]
     assert all(call["stream"] is True for call in calls)
     assert all(call["verify"] is False for call in calls)
+
+
+def test_controlled_range_downloader_resumes_only_verified_missing_range(tmp_path, monkeypatch):
+    """An interrupted body resumes at the next fully checkpointed range only."""
+    import json
+
+    import src.data.ecmwf_open_data as mod
+
+    phase = 1
+    calls: list[tuple[str, str | None]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: bytes, headers: dict[str, str]):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = headers
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":6}'
+
+        def raise_for_status(self):
+            raise AssertionError("unexpected HTTP error")
+
+        def close(self):
+            pass
+
+    def _range_response(range_header: str, payload: bytes) -> _Response:
+        start, end = range_header.removeprefix("bytes=").split("-")
+        return _Response(
+            206,
+            payload,
+            {
+                "Content-Range": f"bytes {start}-{end}/6",
+                "Content-Length": str(int(end) - int(start) + 1),
+                "ETag": "immutable-entity-v1",
+            },
+        )
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            range_header = (headers or {}).get("Range")
+            calls.append(("GET", range_header))
+            if str(url).endswith(".index"):
+                return _Response(200, b"", {"ETag": "index-v1"})
+            payload = {
+                "bytes=0-1": b"ab",
+                "bytes=2-3": b"cd",
+                "bytes=4-5": b"e" if phase == 1 else b"ef",
+            }[range_header]
+            return _range_response(range_header, payload)
+
+        def head(self, url, *, timeout=None, verify=None):
+            calls.append(("HEAD", None))
+            return _Response(200, b"", {"ETag": "immutable-entity-v1"})
+
+    class _Client:
+        verify = True
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=["https://example.invalid/step.grib2"],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+    monkeypatch.setattr(mod, "_RANGE_RESUME_CHUNK_BYTES", 2)
+    target = tmp_path / "step.pf.partial"
+    with pytest.raises(Exception, match="body length 1 does not match 2"):
+        mod._retrieve_step_with_controlled_ranges(
+            _Client(), target=target, date=20260515, time=0,
+            stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+        )
+
+    sidecar = json.loads(mod._range_resume_manifest_path(target).read_text())
+    assert sidecar["completed_ranges"] == 2
+    assert target.read_bytes() == b"abcde"  # trailing short body is not checkpointed
+
+    phase = 2
+    retry_start = len(calls)
+    result = mod._retrieve_step_with_controlled_ranges(
+        _Client(), target=target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"abcdef"
+    assert result.size == 6
+    assert calls[retry_start:] == [("GET", None), ("HEAD", None), ("GET", "bytes=4-5")]
+
+
+def test_controlled_range_downloader_completes_fresh_transfer_after_strong_then_missing_etag(
+    tmp_path, monkeypatch
+):
+    """A later missing ETag disables checkpointing without aborting fresh bytes."""
+    import src.data.ecmwf_open_data as mod
+
+    class _Response:
+        def __init__(self, status_code: int, payload: bytes, headers: dict[str, str]):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = headers
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":2}'
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":2,"_length":2}'
+
+        def raise_for_status(self):
+            raise AssertionError("unexpected HTTP error")
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            if str(url).endswith(".index"):
+                return _Response(200, b"", {})
+            range_header = headers["Range"]
+            start, end = range_header.removeprefix("bytes=").split("-")
+            response_headers = {
+                "Content-Range": f"bytes {start}-{end}/4",
+                "Content-Length": "2",
+            }
+            if range_header == "bytes=0-1":
+                response_headers["ETag"] = '"strong-v1"'
+            return _Response(
+                206,
+                {"bytes=0-1": b"ab", "bytes=2-3": b"cd"}[range_header],
+                response_headers,
+            )
+
+    class _Client:
+        verify = True
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=["https://example.invalid/step.grib2"],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+    target = tmp_path / "step.pf.partial"
+    result = mod._retrieve_step_with_controlled_ranges(
+        _Client(), target=target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"abcd"
+    assert result.size == 4
+    assert not mod._range_resume_manifest_path(target).exists()
+
+
+def test_controlled_range_downloader_drops_resume_cache_when_head_is_unsupported(tmp_path):
+    """HEAD 405 restarts safely instead of making a cached partial unrecoverable."""
+    import src.data.ecmwf_open_data as mod
+
+    target = tmp_path / "step.pf.partial"
+    target.write_bytes(b"abc")
+    plan = (("https://example.invalid/step.grib2", 0, 3),)
+    mod._write_range_resume_manifest(
+        target, plan=plan, completed_ranges=1, entity_tags={plan[0][0]: "entity-v1"}
+    )
+
+    class _Response:
+        status_code = 405
+        headers: dict[str, str] = {}
+
+        def close(self):
+            pass
+
+    class _Session:
+        def head(self, url, *, timeout=None, verify=None):
+            return _Response()
+
+    completed, tags = mod._load_range_resume(
+        target, plan=plan, session=_Session(), verify=True, deadline=None
+    )
+
+    assert (completed, tags) == (0, {})
+    assert not target.exists()
+    assert not mod._range_resume_manifest_path(target).exists()
+
+
+def test_controlled_range_downloader_restarts_after_resumed_prefix_loses_etag(tmp_path, monkeypatch):
+    """A resumed prefix plus missing ETag retries from byte zero, not forever."""
+    import requests
+
+    import src.data.ecmwf_open_data as mod
+
+    target = tmp_path / "step.pf.partial"
+    target.write_bytes(b"ab")
+    plan = (
+        ("https://example.invalid/step.grib2", 0, 2),
+        ("https://example.invalid/step.grib2", 2, 2),
+    )
+    mod._write_range_resume_manifest(
+        target, plan=plan, completed_ranges=1, entity_tags={plan[0][0]: '"strong-v1"'}
+    )
+    phase = 1
+    range_calls: list[str] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: bytes, headers: dict[str, str]):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = headers
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":2}'
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":2,"_length":2}'
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            range_header = (headers or {}).get("Range")
+            if str(url).endswith(".index"):
+                return _Response(200, b"", {})
+            range_calls.append(range_header)
+            start, end = range_header.removeprefix("bytes=").split("-")
+            response_headers = {
+                "Content-Range": f"bytes {start}-{end}/4",
+                "Content-Length": "2",
+            }
+            if phase == 2:
+                response_headers["ETag"] = '"strong-v2"'
+            return _Response(
+                206,
+                {"bytes=0-1": b"ab", "bytes=2-3": b"cd"}[range_header],
+                response_headers,
+            )
+
+        def head(self, url, *, timeout=None, verify=None):
+            return _Response(200, b"", {"ETag": '"strong-v1"'})
+
+    class _Client:
+        verify = True
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=[plan[0][0]],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+    with pytest.raises(requests.ConnectionError, match="lacks a strong ETag"):
+        mod._retrieve_step_with_controlled_ranges(
+            _Client(), target=target, date=20260515, time=0,
+            stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+        )
+    assert not mod._range_resume_manifest_path(target).exists()
+
+    phase = 2
+    retry_start = len(range_calls)
+    mod._retrieve_step_with_controlled_ranges(
+        _Client(), target=target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"abcd"
+    assert range_calls[retry_start:] == ["bytes=0-1", "bytes=2-3"]
+
+
+def test_controlled_range_downloader_does_not_reuse_weak_etag_prefix(tmp_path, monkeypatch):
+    """An interrupted old weak-ETag checkpoint restarts from its first range."""
+    import src.data.ecmwf_open_data as mod
+
+    target = tmp_path / "step.pf.partial"
+    target.write_bytes(b"ab")
+    plan = (
+        ("https://example.invalid/step.grib2", 0, 2),
+        ("https://example.invalid/step.grib2", 2, 2),
+    )
+    mod._write_range_resume_manifest(
+        target, plan=plan, completed_ranges=1, entity_tags={plan[0][0]: 'W/"v1"'}
+    )
+    range_calls: list[str] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: bytes, headers: dict[str, str]):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = headers
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":2}'
+            yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":2,"_length":2}'
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            range_header = (headers or {}).get("Range")
+            if str(url).endswith(".index"):
+                return _Response(200, b"", {})
+            range_calls.append(range_header)
+            start, end = range_header.removeprefix("bytes=").split("-")
+            return _Response(
+                206,
+                {"bytes=0-1": b"ab", "bytes=2-3": b"cd"}[range_header],
+                {
+                    "Content-Range": f"bytes {start}-{end}/4",
+                    "Content-Length": "2",
+                    "ETag": '"strong-v2"',
+                },
+            )
+
+        def head(self, url, *, timeout=None, verify=None):
+            raise AssertionError("weak sidecar must be rejected before HEAD validation")
+
+    class _Client:
+        verify = True
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=[plan[0][0]],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+    mod._retrieve_step_with_controlled_ranges(
+        _Client(), target=target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"abcd"
+    assert range_calls == ["bytes=0-1", "bytes=2-3"]
+
+
+def test_controlled_range_downloader_discards_prefix_when_index_ranges_change(tmp_path, monkeypatch):
+    """A new index range identity cannot be assembled with an old partial prefix."""
+    import src.data.ecmwf_open_data as mod
+
+    phase = 1
+    range_calls: list[str] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: bytes, headers: dict[str, str]):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = headers
+
+        def iter_content(self, chunk_size: int):
+            yield self._payload
+
+        def iter_lines(self):
+            if phase == 1:
+                yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":3}'
+                yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":3,"_length":3}'
+            else:
+                yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":0,"_length":2}'
+                yield b'{"type":"pf","step":3,"param":"mx2t3","_offset":2,"_length":4}'
+
+        def raise_for_status(self):
+            raise AssertionError("unexpected HTTP error")
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            range_header = (headers or {}).get("Range")
+            if str(url).endswith(".index"):
+                return _Response(200, b"", {"ETag": "index"})
+            range_calls.append(range_header)
+            payload = {
+                "bytes=0-2": b"abc",
+                "bytes=3-5": b"x" if phase == 1 else b"unused",
+                "bytes=0-1": b"XY",
+                "bytes=2-5": b"Z123",
+            }[range_header]
+            start, end = range_header.removeprefix("bytes=").split("-")
+            return _Response(
+                206,
+                payload,
+                {
+                    "Content-Range": f"bytes {start}-{end}/6",
+                    "Content-Length": str(int(end) - int(start) + 1),
+                    "ETag": "entity-v1",
+                },
+            )
+
+        def head(self, url, *, timeout=None, verify=None):
+            raise AssertionError("changed index must invalidate before entity reuse")
+
+    class _Client:
+        verify = True
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=["https://example.invalid/step.grib2"],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+    target = tmp_path / "step.pf.partial"
+    with pytest.raises(Exception, match="body length 1 does not match 3"):
+        mod._retrieve_step_with_controlled_ranges(
+            _Client(), target=target, date=20260515, time=0,
+            stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+        )
+
+    phase = 2
+    retry_start = len(range_calls)
+    mod._retrieve_step_with_controlled_ranges(
+        _Client(), target=target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+
+    assert target.read_bytes() == b"XYZ123"
+    assert range_calls[retry_start:] == ["bytes=0-1", "bytes=2-5"]
 
 
 # ---------------------------------------------------------------------------
