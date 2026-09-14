@@ -265,7 +265,7 @@ def test_spread_cannot_hide_immediate_sell_reversal(direction, alpha, ask, marke
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-@pytest.mark.parametrize("bid", [None, float("nan"), float("inf"), -0.1, 0.0, 1.0, 1.1])
+@pytest.mark.parametrize("bid", [None, float("nan"), float("inf"), -0.1, 1.1])
 def test_live_sell_anchor_never_falls_back_to_midpoint(direction, bid):
     register_active_provider(_StubProvider(_stub_artifact()))
     pos = _held_position(direction, target_date=datetime.now(timezone.utc).date().isoformat())
@@ -275,3 +275,18 @@ def test_live_sell_anchor_never_falls_back_to_midpoint(direction, bid):
     _, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
     assert evidence_ok is False
     assert source == "entry_calibration_unavailable"
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("bid", [0.0, 1.0])
+def test_endpoint_bid_preserves_calibrated_no_action_monitor(direction, bid):
+    register_active_provider(_StubProvider(_stub_artifact(alpha_day0=0.0)))
+    pos = _held_position(direction, target_date=datetime.now(timezone.utc).date().isoformat())
+    ctx = _exit_context(fresh_prob=0.5, current_market_price=bid, best_bid=bid)
+    q, evidence_ok, source = pos._exit_q_mean_and_source(ctx)
+    # Endpoints remain diagnostic inputs to the existing clipped calibrator;
+    # they do not become an executable quote or a statistical SELL intent.
+    assert evidence_ok is True
+    assert source == "market_anchored"
+    assert float(q) == pytest.approx(0.005 if bid == 0.0 else 0.995)
+    assert pos.evaluate_exit(ctx).should_exit is False

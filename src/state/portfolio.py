@@ -967,7 +967,7 @@ class Position:
         if not ExitContext._is_finite(exit_context.best_bid):
             return q_raw, False, "entry_calibration_unavailable"
         p0 = float(exit_context.best_bid)
-        if not 0.0 < p0 < 1.0:
+        if not 0.0 <= p0 <= 1.0:
             return q_raw, False, "entry_calibration_unavailable"
 
         try:
