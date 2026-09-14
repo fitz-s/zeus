@@ -1334,3 +1334,39 @@ def test_market_snapshot_lookup_runs_once_before_the_write_lease(
     # The payout observations read is still repeated inside the lease --
     # only the snapshot lookup was hoisted out, not the truth re-read itself.
     assert payout_calls["n"] == 2
+
+
+def test_condition_ids_for_keys_matches_payout_reader_grouping(monkeypatch):
+    """`_condition_ids_for_keys` and `_read_finalized_payout_settlement_rows`
+    must never silently diverge on which positions a key set admits -- both
+    now delegate to the one shared filter, `_positions_by_condition_for_keys`."""
+    from src.execution import harvester_pnl_resolver as resolver
+
+    _, pos_a_yes = _winning_position(trade_id="a-yes", city="CityA", target_date="2026-06-01")
+    _, pos_a_no = _winning_position(trade_id="a-no", city="CityA", target_date="2026-06-01")
+    pos_a_yes.condition_id = pos_a_no.condition_id = "cond-a"
+    _, pos_b = _winning_position(trade_id="b", city="CityB", target_date="2026-06-01")
+    pos_b.condition_id = "cond-b"
+    # Open key, but no condition_id -- must be excluded by both callers.
+    _, pos_c = _winning_position(trade_id="c", city="CityC", target_date="2026-06-01")
+    pos_c.condition_id = ""
+    # Has a condition_id, but its key is not in the admitted set -- excluded.
+    _, pos_d = _winning_position(trade_id="d", city="CityD", target_date="2026-06-01")
+    pos_d.condition_id = "cond-d"
+
+    portfolio = MagicMock()
+    portfolio.positions = [pos_a_yes, pos_a_no, pos_b, pos_c, pos_d]
+    keys = {
+        ("CityA", "2026-06-01", "high"),
+        ("CityB", "2026-06-01", "high"),
+        ("CityC", "2026-06-01", "high"),
+    }
+
+    grouped = resolver._positions_by_condition_for_keys(portfolio, keys)
+    condition_ids = resolver._condition_ids_for_keys(portfolio, keys)
+
+    assert grouped == {
+        "cond-a": [pos_a_yes, pos_a_no],
+        "cond-b": [pos_b],
+    }
+    assert condition_ids == set(grouped) == {"cond-a", "cond-b"}

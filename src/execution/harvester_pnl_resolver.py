@@ -306,18 +306,30 @@ def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str
     return rows
 
 
-def _condition_ids_for_keys(portfolio, keys) -> set[str]:
-    """Condition ids of open positions whose settlement key is in ``keys``."""
-    return {
-        str(getattr(pos, "condition_id", "") or "").strip()
-        for pos in getattr(portfolio, "positions", []) or []
-        if (
+def _positions_by_condition_for_keys(portfolio, keys) -> dict[str, list]:
+    """Open positions, grouped by condition_id, whose settlement key is in ``keys``.
+
+    The single filter both ``_condition_ids_for_keys`` and
+    ``_read_finalized_payout_settlement_rows`` need: same key match, same
+    condition_id-must-be-set requirement. One implementation so a future edit
+    to the filter can't silently diverge between the two callers.
+    """
+    positions_by_condition: dict[str, list] = {}
+    for pos in getattr(portfolio, "positions", []) or []:
+        key = (
             str(getattr(pos, "city", "") or "").strip(),
             str(getattr(pos, "target_date", "") or "").strip(),
             str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
-        ) in keys
-        and str(getattr(pos, "condition_id", "") or "").strip()
-    }
+        )
+        condition_id = str(getattr(pos, "condition_id", "") or "").strip()
+        if key in keys and condition_id:
+            positions_by_condition.setdefault(condition_id, []).append(pos)
+    return positions_by_condition
+
+
+def _condition_ids_for_keys(portfolio, keys) -> set[str]:
+    """Condition ids of open positions whose settlement key is in ``keys``."""
+    return set(_positions_by_condition_for_keys(portfolio, keys))
 
 
 def _condition_market_snapshots(trade_conn, condition_ids) -> dict[str, object]:
@@ -373,16 +385,7 @@ def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys, snapshot
     ``snapshots`` is the precomputed result of ``_condition_market_snapshots``
     for these same condition ids -- read once, outside the write lease.
     """
-    positions_by_condition: dict[str, list] = {}
-    for pos in getattr(portfolio, "positions", []) or []:
-        key = (
-            str(getattr(pos, "city", "") or "").strip(),
-            str(getattr(pos, "target_date", "") or "").strip(),
-            str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
-        )
-        condition_id = str(getattr(pos, "condition_id", "") or "").strip()
-        if key in keys and condition_id:
-            positions_by_condition.setdefault(condition_id, []).append(pos)
+    positions_by_condition = _positions_by_condition_for_keys(portfolio, keys)
     if not positions_by_condition:
         return []
 
