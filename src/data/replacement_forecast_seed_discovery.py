@@ -1048,9 +1048,11 @@ def discover_replacement_forecast_materialization_seeds(
                 skipped_count=0,
                 failed_count=0,
             )
+        # No explicit min_target_date: inherit the plan's own default floor (the earliest
+        # city-local date still open across the roster), not a single UTC computed.date() --
+        # that UTC-only floor drops a western city's still-open local day up to ~14h early.
         target_plan = build_replacement_forecast_current_target_plan(
             forecast_db,
-            min_target_date=computed.date().isoformat(),
             require_raw_artifacts=False,
             now_utc=computed,
         )

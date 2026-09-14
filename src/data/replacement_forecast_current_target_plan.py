@@ -2671,14 +2671,29 @@ def build_replacement_forecast_current_target_plan(
         # `target_local_date`/`target_date >= today` in UTC). `_ref_clock` is this
         # function's single decision clock (never a second wall-clock read). A city with
         # no known timezone is left in scope (fail open) rather than silently excluded.
-        rows = [
-            row
-            for row in rows
-            if not (
-                (tz := timezone_by_city.get(str(row["city"])))
-                and has_city_local_day_ended(str(row["target_date"]), tz, _ref_clock)
-            )
-        ]
+        # This function has no fail-soft contract of its own, but its caller
+        # (enqueue_cycle_advance_reseeds) does ("never raises into the poll"), so one bad
+        # timezone/date on one row must not raise out of the whole plan either.
+        _open_rows = []
+        for row in rows:
+            row_city = str(row["city"])
+            row_target_date = str(row["target_date"])
+            tz = timezone_by_city.get(row_city)
+            ended = False
+            if tz:
+                try:
+                    ended = has_city_local_day_ended(row_target_date, tz, _ref_clock)
+                except (ValueError, ZoneInfoNotFoundError) as exc:
+                    _LOG.warning(
+                        "current-target-plan local-day-end check failed city=%s "
+                        "target_date=%s exception=%s; treating as not ended",
+                        row_city,
+                        row_target_date,
+                        type(exc).__name__,
+                    )
+            if not ended:
+                _open_rows.append(row)
+        rows = _open_rows
         expected_by_metric = {
             metric: expected_replacement_dependency_identity_by_role(metric)
             for metric in {str(row["temperature_metric"]) for row in rows}

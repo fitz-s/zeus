@@ -3729,3 +3729,34 @@ def test_default_min_target_date_survives_unresolvable_roster_timezone(monkeypat
     # London's local date at 02:30Z 09-14 (BST, UTC+1) is 09-14 -- the only resolvable
     # timezone, so it alone determines the floor; the bad "Nowhere" entry is skipped.
     assert result == "2026-09-14"
+
+
+def test_current_target_plan_post_fetch_filter_survives_invalid_timezone(
+    tmp_path, monkeypatch
+) -> None:
+    """The 4th has_city_local_day_ended call site (the post-fetch row filter inside
+    build_replacement_forecast_current_target_plan itself) has no fail-soft contract of its
+    own, but its caller enqueue_cycle_advance_reseeds documents "never raises into the
+    poll" -- one row with an unresolvable timezone must not raise ZoneInfoNotFoundError out
+    of the whole plan, and every OTHER family must still come back."""
+    db = tmp_path / "forecasts.db"
+    _create_ended_day_probe_db(db)
+    monkeypatch.setattr(
+        current_target_plan,
+        "_city_timezone_by_name",
+        lambda: {"London": "Not/ARealZone", "SaoPaulo": "America/Sao_Paulo"},
+    )
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        min_target_date="2026-09-13",
+        require_raw_artifacts=False,
+        now_utc=datetime(2026, 9, 14, 3, 30, tzinfo=timezone.utc),
+    )
+
+    # London's bad timezone degrades to "not ended" (fail open), so both its rows survive;
+    # SaoPaulo's real timezone still excludes its already-ended 09-13.
+    assert _scope_present(plan, "London", "2026-09-13")
+    assert _scope_present(plan, "London", "2026-09-14")
+    assert not _scope_present(plan, "SaoPaulo", "2026-09-13")
+    assert _scope_present(plan, "SaoPaulo", "2026-09-14")

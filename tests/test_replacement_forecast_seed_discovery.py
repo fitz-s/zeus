@@ -2204,3 +2204,45 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
     assert report.reason_codes == (
         "REPLACEMENT_SEED_DISCOVERY_CURRENT_TARGET_PLAN_REPLACEMENT_CURRENT_TARGET_PLAN_POSTERIOR_SCHEMA_MISSING",
     )
+
+
+def test_seed_discovery_does_not_pass_explicit_utc_only_min_target_date(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """discover_replacement_forecast_materialization_seeds must not pass an explicit
+    min_target_date=computed.date().isoformat() to the plan -- that UTC-only floor would
+    bypass the plan's own _default_min_target_date and reproduce the western-city
+    under-inclusion (a still-open local day dropped from the SQL fetch itself up to ~14h
+    early). Spy on the exact call the caller makes."""
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE source_run_coverage (
+            source_run_id TEXT, source_id TEXT, city TEXT, target_local_date TEXT,
+            temperature_metric TEXT, data_version TEXT, completeness_status TEXT,
+            readiness_status TEXT, computed_at TEXT, expires_at TEXT, recorded_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    captured: dict[str, object] = {}
+
+    def _fake_plan(forecast_db_arg, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(status="BLOCKED", reason_codes=())
+
+    monkeypatch.setattr(
+        seed_discovery, "build_replacement_forecast_current_target_plan", _fake_plan
+    )
+
+    discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=tmp_path / "raw",
+        seed_dir=tmp_path / "seeds",
+        computed_at=datetime(2026, 9, 14, 2, 30, tzinfo=timezone.utc),
+    )
+
+    assert "min_target_date" not in captured

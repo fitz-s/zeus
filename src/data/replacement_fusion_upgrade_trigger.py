@@ -1384,9 +1384,11 @@ def enqueue_fusion_upgrade_reseeds(
     if scopes is None:
         # Periodic catch-up retains the full current-target authority. Source-clock
         # commits pass exact durable scopes below and avoid this global DB plan.
+        # No explicit min_target_date: inherit the plan's own default floor (the earliest
+        # city-local date still open across the roster), not a single UTC now.date() -- that
+        # UTC-only floor drops a western city's still-open local day up to ~14h early.
         plan = build_replacement_forecast_current_target_plan(
             forecast_db,
-            min_target_date=now.date().isoformat(),
             require_raw_artifacts=False,
             now_utc=now,
         )

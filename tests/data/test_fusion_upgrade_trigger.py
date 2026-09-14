@@ -2448,3 +2448,36 @@ def test_provider_family_mapping_excludes_anchor_and_dropped_models() -> None:
     assert decorrelated_provider_families_of(
         {_NCEP, _DWD, _CMC, _UKMO}
     ) == frozenset({"NCEP", "DWD", "CMC", "UKMO"})
+
+
+def test_enqueue_fusion_upgrade_reseeds_does_not_pass_explicit_utc_only_min_target_date(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """enqueue_fusion_upgrade_reseeds's scopes=None periodic-catch-up call must not pass an
+    explicit min_target_date=now.date().isoformat() to the plan -- that UTC-only floor would
+    bypass the plan's own _default_min_target_date and reproduce the western-city
+    under-inclusion. Spy on the exact call the caller makes."""
+    forecast_db = tmp_path / "forecast.db"
+    forecast_db.touch()
+    seed_dir = tmp_path / "seeds"
+
+    captured: dict[str, object] = {}
+
+    def _fake_plan(forecast_db_arg, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(status="BLOCKED", reason_codes=())
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
+        _fake_plan,
+    )
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(
+        forecast_db=forecast_db,
+        seed_dir=seed_dir,
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 9, 14, 2, 30, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "FUSION_UPGRADE_PLAN_BLOCKED"
+    assert "min_target_date" not in captured
