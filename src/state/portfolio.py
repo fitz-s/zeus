@@ -2236,6 +2236,56 @@ def load_portfolio(
     connection: sqlite3.Connection | None = None,
     deadline_monotonic: float | None = None,
 ) -> PortfolioState:
+    """Load canonical portfolio truth; emit one timing log line per call.
+
+    X-BF (2026-09-13): thin wrapper around `_load_portfolio_impl` so every
+    call -- success, degraded return, or raised TimeoutError/ValueError --
+    logs one INFO line naming the elapsed cost of each SQL-executing helper
+    it touched this call. Telemetry only: no change to the returned
+    PortfolioState or to which helpers are invoked. See
+    src.state.db._timed_portfolio_query / _LOAD_PORTFOLIO_TIMING.
+    """
+    from src.state.db import _LOAD_PORTFOLIO_TIMING
+
+    timings: dict[str, float] = {}
+    reset_token = _LOAD_PORTFOLIO_TIMING.set(timings)
+    start = time.perf_counter()
+    result: PortfolioState | None = None
+    try:
+        result = _load_portfolio_impl(
+            path,
+            open_positions_only=open_positions_only,
+            settlement_cohort_only=settlement_cohort_only,
+            target_families=target_families,
+            monitor_bootstrap_only=monitor_bootstrap_only,
+            connection=connection,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return result
+    finally:
+        _LOAD_PORTFOLIO_TIMING.reset(reset_token)
+        total_s = time.perf_counter() - start
+        positions_n = len(result.positions) if result is not None else 0
+        ranked = sorted(timings.items(), key=lambda kv: kv[1], reverse=True)
+        breakdown = " ".join(f"{name}={elapsed:.3f}" for name, elapsed in ranked)
+        logger.info(
+            "load_portfolio timings total_s=%.3f positions=%d %s",
+            total_s,
+            positions_n,
+            breakdown,
+        )
+
+
+def _load_portfolio_impl(
+    path: Optional[Path] = None,
+    *,
+    open_positions_only: bool = False,
+    settlement_cohort_only: bool = False,
+    target_families: Collection[tuple[str, str, str]] | None = None,
+    monitor_bootstrap_only: bool = False,
+    connection: sqlite3.Connection | None = None,
+    deadline_monotonic: float | None = None,
+) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     if settlement_cohort_only:
         if open_positions_only or monitor_bootstrap_only:
@@ -2272,6 +2322,7 @@ def load_portfolio(
         query_authoritative_settlement_rows,
         query_portfolio_loader_view,
         query_token_suppression_tokens,
+        _timed_portfolio_query,
     )
 
     mode_override = None
@@ -2337,27 +2388,32 @@ def load_portfolio(
                     "load_portfolio could not attach world DB for EDLI entry-proof audit",
                     exc_info=True,
                 )
-        snapshot = query_portfolio_loader_view(
-            conn,
-            open_positions_only=open_positions_only,
-            settlement_cohort_only=settlement_cohort_only,
-            target_families=target_families,
-            monitor_bootstrap_only=monitor_bootstrap_only,
-        )
-        if not bounded_load:
-            entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
+        with _timed_portfolio_query("query_portfolio_loader_view"):
+            snapshot = query_portfolio_loader_view(
                 conn,
-                list(snapshot.get("positions", [])),
+                open_positions_only=open_positions_only,
+                settlement_cohort_only=settlement_cohort_only,
+                target_families=target_families,
+                monitor_bootstrap_only=monitor_bootstrap_only,
             )
-            ignored_tokens = query_token_suppression_tokens(conn)
-            chain_only_quarantines = query_chain_only_quarantine_rows(conn)
+        if not bounded_load:
+            with _timed_portfolio_query("_query_edli_entry_proof_review_reasons"):
+                entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
+                    conn,
+                    list(snapshot.get("positions", [])),
+                )
+            with _timed_portfolio_query("query_token_suppression_tokens"):
+                ignored_tokens = query_token_suppression_tokens(conn)
+            with _timed_portfolio_query("query_chain_only_quarantine_rows"):
+                chain_only_quarantines = query_chain_only_quarantine_rows(conn)
         if not bounded_load and snapshot.get("status") in ("ok", "partial_stale", "empty"):
             try:
-                settlement_rows = query_authoritative_settlement_rows(
-                    conn,
-                    limit=None,
-                    env="live",
-                )
+                with _timed_portfolio_query("query_authoritative_settlement_rows"):
+                    settlement_rows = query_authoritative_settlement_rows(
+                        conn,
+                        limit=None,
+                        env="live",
+                    )
             except Exception:
                 logger.warning(
                     "load_portfolio could not load canonical recent exits; using empty DB-first recent_exits",

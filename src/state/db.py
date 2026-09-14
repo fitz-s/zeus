@@ -22,6 +22,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -1671,6 +1672,33 @@ def trade_connection_with_world_flocked(
 
 
 logger = logging.getLogger(__name__)
+
+
+# X-BF (2026-09-13): per-helper cost breakdown for load_portfolio. Under
+# co-tenant host load, chain_sync_read's `phase=load_portfolio` elapsed swung
+# from ~3s to 41s (logs/zeus-post-trade-capital.log) with no visibility into
+# which query the page-read cost fell on. src.state.portfolio.load_portfolio
+# sets this ContextVar to a fresh dict for the duration of its call; the
+# helpers below accumulate their own elapsed seconds into it under their own
+# name (keyed additively, since some helpers are called more than once per
+# load_portfolio). Outside an active load_portfolio call this stays None and
+# _timed_portfolio_query is a plain no-op passthrough.
+_LOAD_PORTFOLIO_TIMING: "contextvars.ContextVar[dict[str, float] | None]" = (
+    contextvars.ContextVar("_load_portfolio_timing", default=None)
+)
+
+
+@contextlib.contextmanager
+def _timed_portfolio_query(name: str):
+    bucket = _LOAD_PORTFOLIO_TIMING.get()
+    if bucket is None:
+        yield
+        return
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        bucket[name] = bucket.get(name, 0.0) + (time.perf_counter() - start)
 
 
 def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
@@ -11752,10 +11780,11 @@ def query_settlement_events(
         params.append(limit)
     rows = conn.execute(query, params).fetchall()
     events = _decode_position_event_rows(rows)
-    fill_hints = _query_entry_execution_fill_hints(
-        conn,
-        [str(event.get("runtime_trade_id") or "") for event in events],
-    )
+    with _timed_portfolio_query("_query_entry_execution_fill_hints"):
+        fill_hints = _query_entry_execution_fill_hints(
+            conn,
+            [str(event.get("runtime_trade_id") or "") for event in events],
+        )
     for event in events:
         event["entry_economics_source"] = "position_current_projection"
         fill_hint = fill_hints.get(str(event.get("runtime_trade_id") or ""))
@@ -11787,14 +11816,15 @@ def query_authoritative_settlement_rows(
     """
     stage_events = []
     if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
-        stage_events = query_settlement_events(
-            conn,
-            limit=limit,
-            city=city,
-            target_date=target_date,
-            env=env,
-            not_before=not_before,
-        )
+        with _timed_portfolio_query("query_settlement_events"):
+            stage_events = query_settlement_events(
+                conn,
+                limit=limit,
+                city=city,
+                target_date=target_date,
+                env=env,
+                not_before=not_before,
+            )
     normalized_stage = [
         normalized
         for event in stage_events
@@ -12688,20 +12718,21 @@ def query_portfolio_loader_view(
         for c, default in _runtime_cols_defaults.items()
     )
 
-    rows = conn.execute(
-        f"""
-        SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
-               direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
-               last_monitor_prob, last_monitor_edge, last_monitor_market_price,
-               decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-               chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric, {position_current_env_expr}, {authority_select_expr},
-               {runtime_select_expr}
-        FROM position_current {where_clause}
-        ORDER BY updated_at DESC, position_id
-        """,
-        tuple(params),
-    ).fetchall()
+    with _timed_portfolio_query("position_current_select"):
+        rows = conn.execute(
+            f"""
+            SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+                   direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+                   last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+                   decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+                   chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
+                   temperature_metric, {position_current_env_expr}, {authority_select_expr},
+                   {runtime_select_expr}
+            FROM position_current {where_clause}
+            ORDER BY updated_at DESC, position_id
+            """,
+            tuple(params),
+        ).fetchall()
     if not rows:
         return {
             "status": "empty",
@@ -12716,11 +12747,12 @@ def query_portfolio_loader_view(
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     position_ids = [str(row["position_id"] or row["trade_id"] or "") for row in rows]
-    fill_hints = _query_entry_execution_fill_hints(
-        conn,
-        trade_ids,
-        strict=runtime_exposure_only,
-    )
+    with _timed_portfolio_query("_query_entry_execution_fill_hints"):
+        fill_hints = _query_entry_execution_fill_hints(
+            conn,
+            trade_ids,
+            strict=runtime_exposure_only,
+        )
     # Sizing consumes current exposure and fill economics only. Entry/Day0/exit
     # timestamps and event-derived env are recovery/monitoring concerns; avoid
     # their per-position event seeks on the reactor's runtime-open hot path.
@@ -12766,12 +12798,14 @@ def query_portfolio_loader_view(
             for row, needs_hints in zip(rows, needs_event_hints)
             if needs_hints
         ]
-        event_envs = _latest_position_event_envs(conn, open_position_ids)
-        transitional_hints = (
-            _query_held_monitor_transition_hints(conn, rows, fill_hints)
-            if monitor_bootstrap_only
-            else _query_transitional_position_hints(conn, open_trade_ids)
-        )
+        with _timed_portfolio_query("_latest_position_event_envs"):
+            event_envs = _latest_position_event_envs(conn, open_position_ids)
+        if monitor_bootstrap_only:
+            with _timed_portfolio_query("_query_held_monitor_transition_hints"):
+                transitional_hints = _query_held_monitor_transition_hints(conn, rows, fill_hints)
+        else:
+            with _timed_portfolio_query("_query_transitional_position_hints"):
+                transitional_hints = _query_transitional_position_hints(conn, open_trade_ids)
 
     positions: list[dict] = []
     for row in rows:
@@ -14385,8 +14419,10 @@ def _query_transitional_position_hints(
             if exit_state:
                 bucket["exit_state"] = exit_state
         # Non-settlement lifecycle hints are env-filtered by their caller scope.
-    _hydrate_unbounded_day0_hints(conn, trade_ids, hints)
-    _hydrate_pending_exit_pre_state_hints(conn, trade_ids, hints)
+    with _timed_portfolio_query("_hydrate_unbounded_day0_hints"):
+        _hydrate_unbounded_day0_hints(conn, trade_ids, hints)
+    with _timed_portfolio_query("_hydrate_pending_exit_pre_state_hints"):
+        _hydrate_pending_exit_pre_state_hints(conn, trade_ids, hints)
     return hints
 
 

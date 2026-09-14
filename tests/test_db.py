@@ -7,6 +7,7 @@
 """Tests for database schema initialization."""
 
 import json
+import re
 import sqlite3
 import tempfile
 import types
@@ -1810,6 +1811,63 @@ def test_load_portfolio_bare_path_opens_trade_connection_read_only(tmp_path, mon
 
     assert len(state_via_connection.positions) == 1
     assert state_via_connection.positions[0].trade_id == "t1"
+
+
+def test_load_portfolio_emits_per_helper_timing_line(tmp_path, caplog):
+    """X-BF (2026-09-13): every load_portfolio call must log one INFO line
+    naming the elapsed cost of each SQL-executing helper it touched, so a
+    slow chain_sync_read cycle names the query rather than only the
+    whole-call elapsed already logged by post_trade_capital._log_phase."""
+    from src.state.db import get_connection, init_schema
+    from src.state.portfolio import load_portfolio
+
+    db = get_connection(tmp_path / "zeus.db")
+    init_schema(db)
+    db.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+         direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+         entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+         order_id, order_status, updated_at, temperature_metric)
+        VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-04-01','39-40°F',
+                'buy_yes','F',8.0,20.0,8.0,0.4,0.6,'ens_member_counting','center_buy',
+                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z', 'high')
+        """
+    )
+    db.commit()
+    db.close()
+
+    with caplog.at_level("INFO", logger="src.state.portfolio"):
+        state = load_portfolio(tmp_path / "missing.json")
+
+    assert len(state.positions) == 1
+
+    timing_records = [
+        r for r in caplog.records
+        if r.getMessage().startswith("load_portfolio timings total_s=")
+    ]
+    assert len(timing_records) == 1
+    message = timing_records[0].getMessage()
+
+    expected_helpers = (
+        "query_portfolio_loader_view",
+        "position_current_select",
+        "_query_entry_execution_fill_hints",
+        "_latest_position_event_envs",
+        "_query_transitional_position_hints",
+        "_hydrate_unbounded_day0_hints",
+        "_hydrate_pending_exit_pre_state_hints",
+        "_query_edli_entry_proof_review_reasons",
+        "query_token_suppression_tokens",
+        "query_chain_only_quarantine_rows",
+        "query_authoritative_settlement_rows",
+        "query_settlement_events",
+    )
+    for helper in expected_helpers:
+        match = re.search(rf"(?<![\w]){re.escape(helper)}=([0-9.]+)", message)
+        assert match is not None, f"missing helper {helper!r} in: {message}"
+        assert float(match.group(1)) >= 0.0
 
 
 def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
