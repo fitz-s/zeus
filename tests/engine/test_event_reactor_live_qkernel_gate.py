@@ -2689,6 +2689,77 @@ def test_global_current_entry_feasibility_enforces_live_band_symmetrically(side)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("ask", ("0.96", "0.999"))
+def test_global_maker_band_uses_passive_limit_not_opposite_ask(side, ask):
+    from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+    from src.decision_kernel.certificates.execution import _branch_limit_price
+    from src.solve.solver import passive_buy_proposal_curve
+    from tests.solve.test_solver_properties import _current_maker_witness, _global_candidate
+
+    taker = _global_candidate(
+        candidate_id="maker-band", family="maker-band", side=side, q=0.98,
+        levels=((ask, "100"),), min_order="5",
+    )
+    bids = (BookLevel(price=Decimal("0.94"), size=Decimal("100")),)
+    proposal = passive_buy_proposal_curve(
+        taker.executable_cost_curve, native_bid_levels=bids,
+    )
+    assert proposal is not None
+    witness = _current_maker_witness(
+        taker, proposal=proposal, asset_epoch="maker-band-epoch",
+        outcomes=(MakerFillOutcome(
+            probability=Decimal("1"), fill_fraction=Decimal("1"),
+            proceeds_per_share_usd=-proposal.levels[0].price,
+        ),),
+    )
+    maker = dataclass_replace(
+        taker, execution_mode="MAKER_REST", native_bid_levels=bids,
+        proposal_cost_curve=proposal, maker_fill_witness=witness,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        rest_deadline_minutes=witness.rest_deadline_minutes,
+        asset_epoch_identity="maker-band-epoch",
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(maker) is None
+    assert era._global_current_entry_feasibility_rejection_reason(taker).startswith(
+        "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"
+    )
+    limit = _branch_limit_price(
+        side="BUY", order_mode="MAKER", reservation=float(proposal.levels[0].price),
+        best_bid=float(bids[0].price), best_ask=float(ask),
+        tick_size=float(proposal.min_tick), passive_maker_context=None,
+    )
+    assert assert_live_order_unit_price(limit) == proposal.levels[0].price
+    assert Decimal(str(limit)) < Decimal(ask)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    "mode,ask,proposal,reason",
+    (
+        ("TAKER_LIMIT", "0.96", "0.95", "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"),
+        ("MAKER_REST", "0.99", "0.96", "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"),
+        ("MAKER_REST", "0.96", "0.049", "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"),
+        ("MAKER_REST", "0.95", "0.95", "GLOBAL_ENTRY_MAKER_NOT_PASSIVE"),
+        ("MAKER_REST", "0.94", "0.95", "GLOBAL_ENTRY_MAKER_NOT_PASSIVE"),
+        ("MAKER_REST", "NaN", "0.95", "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"),
+        ("MAKER_REST", "0", "0.95", "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"),
+        ("MAKER_REST", "1", "0.95", "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"),
+    ),
+)
+def test_global_maker_band_preserves_authorizing_price_and_passivity(
+    side, mode, ask, proposal, reason,
+):
+    candidate = SimpleNamespace(
+        action="BUY", side=side, execution_mode=mode,
+        executable_cost_curve=SimpleNamespace(levels=(SimpleNamespace(price=Decimal(ask)),)),
+        economic_cost_curve=SimpleNamespace(levels=(SimpleNamespace(price=Decimal(proposal)),)),
+        native_bid_levels=(SimpleNamespace(price=Decimal("0.94")),),
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(candidate).startswith(reason)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
     def candidate(price):
         return SimpleNamespace(

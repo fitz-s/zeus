@@ -6540,10 +6540,6 @@ def _global_current_entry_feasibility_rejection_reason(
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
-    try:
-        assert_live_order_unit_price(best_ask)
-    except (TypeError, ValueError) as exc:
-        return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
     proposal_curve = getattr(candidate, "economic_cost_curve", None)
     proposal_price = (
         Decimal(proposal_curve.levels[0].price)
@@ -6551,6 +6547,10 @@ def _global_current_entry_feasibility_rejection_reason(
         else best_ask
     )
     if execution_mode == "TAKER_LIMIT":
+        try:
+            assert_live_order_unit_price(best_ask)
+        except (TypeError, ValueError) as exc:
+            return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
         # The selector independently re-proves this exact winning payoff.
         # Its settlement-held objective does not depend on a resale bid.
         if getattr(candidate, "settlement_locked_exact_payoff", False) is not True:
