@@ -890,15 +890,25 @@ def prove_day0_causal_capture_equivalence(
             ) != (
                 current_row["model"], current_row["city"], current_row["target_date"], current_row["timezone_name"]
             )
-            # The underlying capture for non-single_runs endpoints is a
-            # wall-clock-rolling window (past_hours/forecast_hours, no pinned
-            # date range), so two recaptures of the same provider cycle are
-            # index-shifted even when every shared hour agrees exactly. Align
-            # by timestamp label and require exact value equality on the
-            # intersection; an empty intersection stays a mismatch (fail
-            # closed) rather than being treated as vacuously equivalent.
-            expected_series = dict(zip(expected_row["times"], expected_row["temps_c"]))
-            current_series = dict(zip(current_row["times"], current_row["temps_c"]))
+            # Rolling captures can shift their elapsed prefix. Compare shared
+            # target-day instants, including elapsed anchors, exactly; other
+            # local dates never enter this target's probability calculation.
+            target = date.fromisoformat(target_date)
+            tz = ZoneInfo(timezone_name)
+            series = []
+            for row in (expected_row, current_row):
+                vector = Day0HourlyVector(
+                    model=row["model"], city=row["city"],
+                    target_date=row["target_date"],
+                    timezone_name=row["timezone_name"],
+                    captured_at=row["capture"],
+                    times=tuple(row["times"]), temps_c=tuple(row["temps_c"]),
+                )
+                values = day0_hourly_vector_target_values_utc(
+                    vector, target=target, tz=tz,
+                )
+                series.append(dict(values or ()))
+            expected_series, current_series = series
             shared_times = sorted(expected_series.keys() & current_series.keys())
             first_disagreement = next(
                 (t for t in shared_times if expected_series[t] != current_series[t]),
@@ -911,7 +921,10 @@ def prove_day0_causal_capture_equivalence(
                     "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH",
                     "model": model,
                     "shared_timestamp_count": len(shared_times),
-                    "first_disagreeing_timestamp": first_disagreement,
+                    "first_disagreeing_timestamp": (
+                        first_disagreement.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+                        if first_disagreement is not None else None
+                    ),
                 }
             if _day0_json_hash(expected_row["semantic_meta"]) != _day0_json_hash(current_row["semantic_meta"]):
                 return {"ok": False, "reason": "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH", "model": model}

@@ -198,7 +198,7 @@ def _capture_equivalence_fixture(
         else:
             hours = range(window_shift_hours, window_shift_hours + 24)
         return (
-            [f"2026-06-10T{hour:02d}:00" for hour in hours],
+            [(datetime(2026, 6, 10) + timedelta(hours=hour)).isoformat(timespec="minutes") for hour in hours],
             [18.0 + hour * 0.1 for hour in hours],
         )
 
@@ -489,6 +489,46 @@ def test_day0_v1_capture_equivalence_rejects_disagreement_on_a_shared_timestamp(
     # changed_payload) to hour 2+8=10, which is still inside the expected
     # row's shared hour range (0-23).
     assert proof["first_disagreeing_timestamp"] == "2026-06-10T10:00"
+
+
+@pytest.mark.parametrize("outside_time", [
+    "2026-06-09T23:00", "2026-06-11T00:00",
+    "2026-06-09T21:00+00:00", "2026-06-10T22:00+00:00",
+])
+@pytest.mark.parametrize("changed_target_hour", [None, 0, 8, 10, 18])
+def test_day0_v1_capture_equivalence_ignores_only_other_local_dates(
+    outside_time, changed_target_hour,
+):
+    import src.data.day0_hourly_vectors as hourly
+
+    conn, expected, actual, witness, vectors, window = _capture_equivalence_fixture()
+    for vector_id, outside_value in (("old-vector", -50.0), ("new-vector", 50.0)):
+        row = conn.execute(
+            "SELECT times_json, temps_c_json FROM day0_hourly_vectors WHERE vector_id = ?",
+            (vector_id,),
+        ).fetchone()
+        times, temps = json.loads(row[0]), json.loads(row[1])
+        if vector_id == "new-vector" and changed_target_hour is not None:
+            temps[changed_target_hour] += 1.0
+        times.append(outside_time)
+        temps.append(outside_value)
+        conn.execute(
+            "UPDATE day0_hourly_vectors SET times_json = ?, temps_c_json = ? WHERE vector_id = ?",
+            (json.dumps(times), json.dumps(temps), vector_id),
+        )
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected, actual=actual, current_witness=witness, conn=conn,
+        city="Paris", target_date="2026-06-10", timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=vectors, remaining_window_start_utc=window,
+    )
+    assert proof["ok"] is (changed_target_hour is None)
+    if changed_target_hour is None:
+        assert proof["original_cutoff_utc"] == expected["cutoff_utc"]
+    else:
+        assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"
+        assert proof["first_disagreeing_timestamp"] == f"2026-06-10T{changed_target_hour:02d}:00"
+    conn.close()
 
 
 def test_day0_v1_capture_equivalence_rejects_disjoint_timestamps_fail_closed():
