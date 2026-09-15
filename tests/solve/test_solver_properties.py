@@ -380,6 +380,70 @@ def _global_score(
     )
 
 
+def _native_maker_candidates(*, side, current_token_shares):
+    seed = _global_candidate(
+        candidate_id=f"native-maker-{side}-{current_token_shares}",
+        family="native-maker-builder-family",
+        side=side,
+        q=0.90,
+        levels=(("0.40", "100"),),
+        min_order="5",
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=seed.executable_cost_curve,
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        condition_id=seed.condition_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        hypothesis_id="native-maker-builder-hypothesis",
+    )
+    asset_epoch = f"native-maker-builder-epoch-{current_token_shares}"
+    placeholder = SimpleNamespace(
+        fill_probability=1.0,
+        fill_probability_source="placeholder",
+        rest_deadline_minutes=20.0,
+        witness_identity="placeholder",
+    )
+    provisional_taker, provisional_maker = S.global_candidates_from_native(
+        native,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.39"), size=Decimal("100")),
+        ),
+        include_maker=True,
+        maker_fill_witness=placeholder,
+        asset_epoch_identity=asset_epoch,
+        current_token_shares=current_token_shares,
+    )
+    witness = _current_maker_witness(
+        provisional_maker,
+        proposal=provisional_maker.proposal_cost_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.391")),
+        ),
+    )
+    return S.global_candidates_from_native(
+        native,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.39"), size=Decimal("100")),
+        ),
+        include_maker=True,
+        maker_fill_witness=witness,
+        asset_epoch_identity=asset_epoch,
+        current_token_shares=current_token_shares,
+    )
+
+
 def _global_exact_oracle(
     candidate,
     *,
@@ -2897,6 +2961,156 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
     assert len(proposals) == 1
     assert proposals[0].execution_mode == "TAKER_LIMIT"
     assert proposals[0].eligibility_reason is None
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("current_token_shares", (Decimal("0"), Decimal("0.009")))
+def test_native_maker_builder_dust_is_selector_eligible_on_calibrated_mean(
+    side, current_token_shares,
+):
+    candidates = _native_maker_candidates(
+        side=side, current_token_shares=current_token_shares,
+    )
+    taker, maker = candidates
+    assert maker.execution_mode == "MAKER_REST"
+    assert maker.eligibility_reason is None
+
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("100"),
+        win_wealth_floor_usd=Decimal("100"),
+        current_token_shares=current_token_shares,
+        ledger_snapshot_id="ledger-current",
+    )
+    corrections = {
+        candidate.candidate_id: _correction_for(
+            candidate,
+            raw_q=0.90,
+            corrected_q=0.80,
+            p0=float(candidate.economic_cost_curve.levels[0].price),
+        )
+        for candidate in candidates
+    }
+
+    def correction_resolver(candidate, raw_q, p0, _decision_at):
+        assert raw_q == pytest.approx(0.90)
+        assert p0 == pytest.approx(
+            float(candidate.economic_cost_curve.levels[0].price)
+        )
+        return corrections[candidate.candidate_id]
+
+    decision = _global_select(
+        (taker, maker),
+        cap="10",
+        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
+        family_portfolio_endowment_resolver=lambda _family: _family_endowment(
+            taker,
+            spendable_cash="2",
+            portfolio_capital="10",
+            committed_capital="8",
+        ),
+        payoff_q_correction_resolver=correction_resolver,
+    )
+
+    assert decision.candidate is maker
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_BUY"
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    assert decision.expected_growth.expected_delta_log_wealth > 0.0
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_buy_prefix_endpoint_proof_uses_selected_certificate_without_fill_floor(side):
+    candidates = _native_maker_candidates(
+        side=side, current_token_shares=Decimal("0"),
+    )
+    taker, maker = candidates
+    correction = {
+        candidate.candidate_id: _correction_for(
+            candidate,
+            raw_q=0.90,
+            corrected_q=0.80,
+            p0=float(candidate.economic_cost_curve.levels[0].price),
+        )
+        for candidate in candidates
+    }
+
+    def correction_resolver(candidate, raw_q, p0, _decision_at):
+        assert raw_q == pytest.approx(0.90)
+        assert p0 == pytest.approx(
+            float(candidate.economic_cost_curve.levels[0].price)
+        )
+        return correction[candidate.candidate_id]
+
+    decision = _global_select(
+        (taker, maker),
+        cap="10",
+        payoff_q_correction_resolver=correction_resolver,
+    )
+    assert decision.candidate is maker
+    terminal = decision.expected_terminal_wealth
+    assert terminal is not None
+    assert terminal.win_probability_mean == pytest.approx(0.80)
+    limit_price = maker.economic_cost_curve.levels[0].price
+    unit_cost = S._global_buy_risk_reference_unit_cost(maker, limit_price)
+    loss_baseline = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    win_baseline = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    tiny_shares = Decimal("0.000001")
+    full_shares = decision.shares
+    tiny_du, tiny_ev = S._global_buy_rounding_safe_prefix_metrics(
+        q=terminal.win_probability_mean,
+        loss_q=terminal.loss_probability_mean,
+        shares=tiny_shares,
+        unit_cost=unit_cost,
+        loss_baseline=loss_baseline,
+        win_baseline=win_baseline,
+    )
+    full_du, full_ev = S._global_buy_rounding_safe_prefix_metrics(
+        q=terminal.win_probability_mean,
+        loss_q=terminal.loss_probability_mean,
+        shares=full_shares,
+        unit_cost=unit_cost,
+        loss_baseline=loss_baseline,
+        win_baseline=win_baseline,
+    )
+    assert tiny_shares < maker.economic_cost_curve.min_order_size
+    assert tiny_du > 0.0
+    assert full_du > 0.0
+    assert tiny_du >= float(tiny_shares / full_shares) * full_du
+    assert tiny_ev == pytest.approx(float(tiny_shares / full_shares) * full_ev)
+
+
+def test_native_maker_builder_rejects_high_raw_q_when_calibrated_mean_is_negative():
+    candidates = _native_maker_candidates(
+        side="YES", current_token_shares=Decimal("0"),
+    )
+    taker, maker = candidates
+    corrections = {
+        candidate.candidate_id: _correction_for(
+            candidate,
+            raw_q=0.90,
+            corrected_q=0.35,
+            p0=float(candidate.economic_cost_curve.levels[0].price),
+        )
+        for candidate in candidates
+    }
+
+    def correction_resolver(candidate, raw_q, p0, _decision_at):
+        assert raw_q == pytest.approx(0.90)
+        assert p0 == pytest.approx(
+            float(candidate.economic_cost_curve.levels[0].price)
+        )
+        return corrections[candidate.candidate_id]
+
+    decision = _global_select(
+        (taker, maker),
+        cap="10",
+        payoff_q_correction_resolver=correction_resolver,
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    )
 
 
 @pytest.mark.parametrize("bid_price", ("0.01", "0.04", "0.05"))

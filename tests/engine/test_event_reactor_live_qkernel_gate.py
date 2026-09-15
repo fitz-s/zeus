@@ -2792,13 +2792,13 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
     ]
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("mode", ("TAKER_LIMIT", "MAKER_REST"))
 def test_global_current_entry_feasibility_proof_observes_through_only_automated_gate(
-    monkeypatch,
+    monkeypatch, side, mode,
 ):
     candidate = SimpleNamespace(
-        action="BUY",
-        side="YES",
-        execution_mode="TAKER_LIMIT",
+        action="BUY", side=side, execution_mode=mode,
         executable_cost_curve=SimpleNamespace(
             levels=(SimpleNamespace(price=Decimal("0.30")),)
         ),
@@ -2807,75 +2807,42 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         ),
         native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
     )
-    reason = [
-        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
-        "sources=manual_override:gate,risk_action:gate"
-    ]
-
+    reason = [""]
     monkeypatch.setattr(
-        era,
-        "_entry_strategy_policy_blocks_live_submit",
+        era, "_entry_strategy_policy_blocks_live_submit",
         lambda *_args, **_kwargs: reason[0],
     )
-    market_alpha_only = [False]
+    # Exact alpha-only debt must still gate live NO maker proposals.
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE risk_actions (action_id TEXT, reason TEXT)")
+    conn.execute("INSERT INTO risk_actions VALUES (?, ?)", (
+        "alpha-debt", "market_relative_alpha_unproven(status=no_evidence)",
+    ))
+    from src.riskguard import policy
     monkeypatch.setattr(
-        era,
-        "_risk_action_gate_is_market_alpha_only",
-        lambda *_args, **_kwargs: market_alpha_only[0],
+        policy, "active_probability_revision_capital_gate_action_ids",
+        lambda *_args, **_kwargs: ("alpha-debt",),
     )
-
     kwargs = {
         "strategy_key": "forecast_qkernel_entry",
-        "probability_semantics_revision": "stale-v2",
-        "strategy_policy_conn": object(),
+        "probability_semantics_revision": "current-v4",
+        "strategy_policy_conn": conn,
     }
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) == reason[0]
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate,
-        **kwargs,
-        observe_through_automated_risk_gate=True,
-    ) is None
-    candidate.execution_mode = "MAKER_REST"
-    candidate.side = "NO"
-    market_alpha_only[0] = True
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) is None
-
-    candidate.execution_mode = "TAKER_LIMIT"
-    candidate.side = "YES"
-    market_alpha_only[0] = False
-    reason[0] = (
-        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
-        "sources=risk_action:gate"
-    )
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) == reason[0]
-    candidate.execution_mode = "MAKER_REST"
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) == reason[0]
-    market_alpha_only[0] = True
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) == reason[0]
-    candidate.side = "NO"
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate, **kwargs
-    ) is None
-
-    reason[0] = (
-        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
-        "sources=manual_override:gate"
-    )
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate,
-        **kwargs,
-        observe_through_automated_risk_gate=True,
-    ) == reason[0]
+    try:
+        for sources in ("manual_override:gate,risk_action:gate", "risk_action:gate"):
+            reason[0] = "STRATEGY_POLICY_GATED:forecast_qkernel_entry:sources=" + sources
+            assert era._global_current_entry_feasibility_rejection_reason(
+                candidate, **kwargs,
+            ) == reason[0]
+            assert era._global_current_entry_feasibility_rejection_reason(
+                candidate, **kwargs, observe_through_automated_risk_gate=True,
+            ) is None
+        reason[0] = "STRATEGY_POLICY_GATED:forecast_qkernel_entry:sources=manual_override:gate"
+        assert era._global_current_entry_feasibility_rejection_reason(
+            candidate, **kwargs, observe_through_automated_risk_gate=True,
+        ) == reason[0]
+    finally:
+        conn.close()
 
 
 def test_prepared_global_probability_revision_is_bound_to_exact_posterior():

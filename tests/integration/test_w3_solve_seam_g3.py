@@ -4297,9 +4297,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         for candidate in unseeded_candidates
         if candidate.execution_mode == "MAKER_REST"
     )
-    assert unseeded_maker.eligibility_reason == (
-        "MAKER_REST_EXITABILITY_SEED_REQUIRED"
-    )
+    assert unseeded_maker.eligibility_reason is None
 
     exact_fields = {
         "family_key": "family",
@@ -4446,7 +4444,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         current_token_shares=Decimal("0"),
         neg_risk=False,
     )
-    assert losing_yes_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+    assert losing_yes_maker.eligibility_reason is None
 
     unwitnessed_candidates = global_candidates_from_native(
         native,
@@ -4513,7 +4511,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
             asset_epoch_identity=epoch.witness_identity,
             current_token_shares=dust_seed, neg_risk=False,
         )
-        assert dust_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+        assert dust_maker.eligibility_reason is None
     assert maker.fill_probability == pytest.approx(0.05)
     assert maker.maker_fill_witness.expected_fill_fraction == pytest.approx(0.0375)
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
@@ -25688,6 +25686,259 @@ def test_verified_fill_cost_consumes_family_budget_before_chain_balance_catches_
     assert snapshot.holdings[0].shares == Decimal("39.1")
     assert wealth.native_commitments_micro == (("no-a", 21_896_000),)
     assert family.committed_capital_usd == Decimal("21.896")
+
+
+def test_canonical_subcent_maker_holding_reaches_endowment_and_has_no_sell_candidate():
+    from src.engine.native_holdings import native_holdings_snapshot_from_positions
+    from src.events.edli_position_bridge import (
+        edli_bridge_position_id,
+        materialize_position_current_from_edli_fill,
+    )
+    from src.contracts.venue_submission_envelope import assert_live_order_size
+    from src.solve.solver import global_sell_candidate_from_holding
+    from src.state.db import init_schema
+    from src.state.portfolio import FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    from tests.events.test_edli_position_bridge import _insert_edli_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    aggregate_id = "aggregate-subcent-maker"
+    condition_id = "condition-subcent-maker"
+    token_id = "token-subcent-maker"
+    intent_id = "intent-subcent-maker"
+    command_id = "command-subcent-maker"
+    order_id = "order-subcent-maker"
+    trade_id = "trade-subcent-maker"
+    event_id = "event-subcent-maker"
+
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="PreSubmitRevalidated",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": intent_id,
+            "execution_command_id": command_id,
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "side": "BUY",
+            "direction": "buy_yes",
+            "native_token_side": "YES",
+            "outcome_label": "YES",
+            "execution_mode": "MAKER_REST",
+            "order_type": "GTC",
+            "post_only": True,
+            "maker_intent": True,
+            "city": "Ankara",
+            "target_date": "2026-09-15",
+            "bin_label": "10C",
+            "metric": "low",
+            "unit": "C",
+            "market_id": condition_id,
+            "q_live": 0.9,
+            "executable_snapshot_id": "snapshot-subcent-maker",
+            "strategy_key": "opening_inertia",
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": intent_id,
+            "execution_command_id": command_id,
+            "venue_order_id": order_id,
+        },
+    )
+    conn.execute(
+        """INSERT INTO venue_commands
+        (command_id, snapshot_id, envelope_id, position_id, decision_id,
+         idempotency_key, intent_kind, market_id, token_id, side, size, price,
+         venue_order_id, state, created_at, updated_at, q_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            command_id,
+            "snapshot-subcent-maker",
+            "envelope-subcent-maker",
+            "pending-position",
+            intent_id,
+            "idempotency-subcent-maker",
+            "ENTRY",
+            condition_id,
+            token_id,
+            "BUY",
+            5,
+            0.40,
+            order_id,
+            "PARTIAL",
+            "2026-09-15T02:59:00+00:00",
+            "2026-09-15T03:00:01+00:00",
+            "q-subcent-maker",
+        ),
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": intent_id,
+            "execution_command_id": command_id,
+            "trade_id": trade_id,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": order_id,
+            "filled_size": "0.005",
+            "avg_fill_price": "0.40",
+            "fees": "0",
+            "asset_id": token_id,
+            "side": "BUY",
+        },
+    )
+    conn.commit()
+    command_row = conn.execute(
+        "SELECT size, state FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert command_row is not None
+    assert Decimal(str(command_row["size"])) == Decimal("5")
+    assert command_row["state"] == "PARTIAL"
+    assert assert_live_order_size(
+        Decimal("5"), Decimal("5"), order_type="GTC", post_only=True
+    ) == Decimal("5")
+
+    materialize_position_current_from_edli_fill(
+        conn,
+        aggregate_id,
+        now=_dt.datetime(2026, 9, 15, 3, 1, tzinfo=_dt.timezone.utc),
+    )
+    row = conn.execute(
+        "SELECT position_id, phase, condition_id, direction, token_id, "
+        "no_token_id, shares, fill_authority FROM position_current "
+        "WHERE position_id = ?",
+        (edli_bridge_position_id(aggregate_id),),
+    ).fetchone()
+    assert row is not None
+    assert row["phase"] == "active"
+    row_shares = Decimal(str(row["shares"]))
+    assert row_shares == Decimal("0.005")
+    # FULL means every share in this position is confirmed, while the order remains partial.
+    assert row["fill_authority"] == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    command_after_materialize = conn.execute(
+        "SELECT size, state FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert command_after_materialize is not None
+    assert Decimal(str(command_after_materialize["size"])) == Decimal("5")
+    assert command_after_materialize["state"] == "PARTIAL"
+
+    position = SimpleNamespace(
+        trade_id=row["position_id"],
+        position_id=row["position_id"],
+        condition_id=condition_id,
+        direction="buy_yes",
+        token_id=token_id,
+        no_token_id=None,
+        chain_shares=None,
+    )
+    omega = SimpleNamespace(
+        bins=(
+            SimpleNamespace(
+                bin_id="bin-a",
+                condition_id=condition_id,
+                yes_token_id=token_id,
+                no_token_id="token-subcent-no",
+            ),
+        )
+    )
+    holdings = native_holdings_snapshot_from_positions(
+        family_key="family-subcent-maker",
+        omega=omega,
+        positions=(position,),
+        ledger_snapshot_id="ledger-subcent-maker",
+        token_shares_by_id={token_id: row_shares},
+        required_token_ids=frozenset({token_id}),
+    )
+    assert holdings.holdings[0].shares == row_shares
+    wealth = SimpleNamespace(
+        ledger_snapshot_id="ledger-subcent-maker",
+        strategy_capital_allocation=SimpleNamespace(
+            utility_liquid_cash_usd=Decimal("10")
+        ),
+    )
+    probability = SimpleNamespace(
+        family_key="family-subcent-maker",
+        bin_ids=("bin-a", "bin-b"),
+        bindings=(
+            OutcomeTokenBinding(
+                bin_id="bin-a",
+                condition_id=condition_id,
+                yes_token_id=token_id,
+                no_token_id="token-subcent-no",
+            ),
+            OutcomeTokenBinding(
+                bin_id="bin-b",
+                condition_id="condition-subcent-other",
+                yes_token_id="yes-subcent-other",
+                no_token_id="no-subcent-other",
+            ),
+        ),
+    )
+    candidate = SimpleNamespace(
+        family_key=probability.family_key,
+        bin_id="bin-a",
+        side="YES",
+        token_id=token_id,
+    )
+    endowment = _candidate_portfolio_endowment(
+        candidate,
+        probability_witness=probability,
+        holdings_snapshot=holdings,
+        wealth_witness=wealth,
+    )
+    assert endowment.current_token_shares == row_shares
+
+    sell_curve = ExecutableSellCurve(
+        token_id=token_id,
+        side="YES",
+        snapshot_id="sell-subcent-maker",
+        book_hash="sell-subcent-maker-hash",
+        levels=(BookLevel(price=Decimal("0.60"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    assert global_sell_candidate_from_holding(
+        SimpleNamespace(
+            family_key=probability.family_key,
+            bin_id="bin-a",
+            side="YES",
+            token_id=token_id,
+            position_id=row["position_id"],
+            shares=row_shares,
+        ),
+        probability_witness=probability,
+        ledger_snapshot_id="ledger-subcent-maker",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_dt.datetime(
+            2026, 9, 15, 3, 1, tzinfo=_dt.timezone.utc
+        ),
+        neg_risk=False,
+    ) is None
+    sell_floor = (
+        row_shares / Decimal("0.01")
+    ).to_integral_value(rounding="ROUND_FLOOR") * Decimal("0.01")
+    assert sell_floor == Decimal("0")
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (row["position_id"],),
+    ).fetchone()[0] == "active"
 
 
 def test_verified_partial_exit_ignores_stale_full_lot_chain_cost():

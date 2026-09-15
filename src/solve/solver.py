@@ -2306,15 +2306,6 @@ def global_candidates_from_native(
                 maker_eligibility_reason = (
                     "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
                 )
-            elif (
-                witnessed_token_shares < _SIZE_QUANTUM
-                and not settlement_locked_exact_payoff
-            ):
-                # Statistical partial fills need an existing immediate-SELL
-                # lot. FAK exits use the share grid, not the resting BUY floor.
-                # A typed absorbing winner can retain any prefix to settlement;
-                # its maker proposal still requires current liquidation capacity.
-                maker_eligibility_reason = "MAKER_REST_EXITABILITY_SEED_REQUIRED"
         maker = GlobalSingleOrderCandidate(
             candidate_id=_global_native_candidate_id(
                 probability_witness=probability_witness,
@@ -5977,21 +5968,25 @@ def _score_global_single_order(
         # EV boundary was not one of the stationary probes.
         if robust_ev <= _ROBUST_EV_EPS_USD:
             continue
-        # SCOPE: this fixed taker size. DRAIN: consider the other legal sizes
-        # and the next fresh epoch. RESET: positive current prefix economics.
-        if candidate.execution_mode == "TAKER_LIMIT":
-            try:
-                prefix_du, prefix_ev = _global_buy_rounding_safe_prefix_metrics(
-                    q=robust_q,
-                    shares=shares,
-                    unit_cost=risk_unit_cost,
-                    loss_baseline=wealth_floor_usd,
-                    win_baseline=wealth_ceiling_usd,
-                )
-            except (ArithmeticError, ValueError):
-                continue
-            if prefix_du <= 0.0 or prefix_ev <= _ROBUST_EV_EPS_USD:
-                continue
+        # F(0)=0, F(s) is concave in the BUY size, and full F(S)>0 imply
+        # F(fS) >= fF(S) > 0 for every 0 < f <= 1. EV is linear in size.
+        # The same terminal certificate, size, and wealth bindings therefore
+        # prove every maker or taker positive prefix without a historical
+        # minimum-fill fraction. Taker risk_unit_cost keeps its existing
+        # fragment-rounding bound; maker risk_unit_cost is its zero-fee unit
+        # price.
+        try:
+            prefix_du, prefix_ev = _global_buy_rounding_safe_prefix_metrics(
+                q=robust_q,
+                shares=shares,
+                unit_cost=risk_unit_cost,
+                loss_baseline=wealth_floor_usd,
+                win_baseline=wealth_ceiling_usd,
+            )
+        except (ArithmeticError, ValueError):
+            continue
+        if prefix_du <= 0.0 or prefix_ev <= _ROBUST_EV_EPS_USD:
+            continue
         if not (
             _live_unit_price_in_band(limit_price)
             and _live_unit_price_in_band(expected_fill_price)
@@ -8209,7 +8204,13 @@ def select_global_single_order(
                         continue
                     score = replace(score, payoff_q_correction=correction)
                     score, horizon_reason = bind_capital_horizon(
-                        score, family_key=family_key, action_mode="SETTLEMENT_LOCKED_BUY",
+                        score,
+                        family_key=family_key,
+                        action_mode=(
+                            "CONTINGENT_MAKER_REST_BUY"
+                            if candidate.execution_mode == "MAKER_REST"
+                            else "SETTLEMENT_LOCKED_BUY"
+                        ),
                     )
                     if score is None:
                         return superseded_decision(candidate_id, str(horizon_reason))

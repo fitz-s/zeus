@@ -6496,52 +6496,6 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
-def _risk_action_gate_is_market_alpha_only(
-    conn: sqlite3.Connection | None,
-    strategy_key: str,
-    probability_semantics_revision: str,
-) -> bool:
-    """Identify the revision gate that measures alpha, not data/risk failure."""
-
-    if conn is None:
-        return False
-    try:
-        from src.riskguard.policy import (
-            active_probability_revision_capital_gate_action_ids,
-        )
-
-        action_ids = active_probability_revision_capital_gate_action_ids(
-            conn,
-            strategy_key,
-            datetime.now(timezone.utc),
-            probability_semantics_revision=probability_semantics_revision,
-        )
-        reasons = []
-        for action_id in action_ids:
-            row = conn.execute(
-                "SELECT reason FROM risk_actions WHERE action_id=? LIMIT 1",
-                (action_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            try:
-                reasons.append(str(row["reason"] or ""))
-            except (IndexError, KeyError, TypeError):
-                reasons.append(str(row[0] or ""))
-    except Exception:  # noqa: BLE001 - ambiguity preserves the gate
-        return False
-    components = tuple(
-        component.strip()
-        for reason in reasons
-        for component in reason.split("|")
-        if component.strip()
-    )
-    return bool(action_ids and components) and all(
-        component.startswith("market_relative_alpha_unproven(")
-        for component in components
-    )
-
-
 def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
@@ -6651,34 +6605,10 @@ def _global_current_entry_feasibility_rejection_reason(
                 and strategy_block.startswith("STRATEGY_POLICY_GATED:")
                 and "risk_action:gate" in risk_gate_sources
             )
-            maker_gate_is_atomic = (
-                execution_mode == "MAKER_REST"
-                and side == "NO"
-                and "risk_action:gate" in risk_gate_sources
-                and risk_gate_sources
-                <= {"manual_override:gate", "risk_action:gate"}
-                and _risk_action_gate_is_market_alpha_only(
-                    strategy_policy_conn,
-                    normalized_strategy,
-                    candidate_revision,
-                )
-            )
-            if automated_gate_visible and (
-                observe_through_automated_risk_gate or maker_gate_is_atomic
-            ):
-                # The proof solve is side-effect-free and shares the exact live
-                # q/book/wealth cut, so it may expose the economic frontier hidden
-                # by an automated performance gate. Live NO maker-rest proposals
-                # are also atomic: they remain contingent on a fill, already
-                # require an exitable seed, and the submit-time JIT gate requires
-                # full selected-share pre-cliff liquidation capacity. SCOPE: only
-                # this NO maker proposal escapes an automated revision gate. A
-                # permissive manual gate remains in StrategyPolicy.sources as
-                # provenance but cannot lock the deny field; a restrictive manual
-                # gate locks it and prevents the risk-action source from appearing.
-                # YES, taker, and restrictive manual gates stay. DRAIN: RiskGuard
-                # keeps grading the exact revision. RESET: a validated/expired gate
-                # restores ordinary strategy admission.
+            if automated_gate_visible and observe_through_automated_risk_gate:
+                # The side-effect-free proof solve may expose economics behind
+                # an automated gate. Live BUYs of either side retain the gate;
+                # positive local utility cannot prove market-relative alpha.
                 strategy_block = None
             if strategy_block is not None:
                 return strategy_block
