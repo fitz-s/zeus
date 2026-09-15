@@ -6559,8 +6559,9 @@ def _global_current_entry_feasibility_rejection_reason(
     floor is not part of that strategy's feasible set. Taker and passive-rest
     proposals are distinct auction assets: the former carries exact executable
     ask/depth/fee economics, while the latter carries its own non-crossing price
-    and fill/no-fill economics. A measurable taker bid is required for exact
-    liquidation capacity, but relative spread is not an eligibility wall: the
+    and fill/no-fill economics. Statistical takers require a measurable bid
+    for liquidation capacity; proved settlement winners do not. Relative
+    spread is not an eligibility wall: the
     solver already compares the exact executable ask, fees, q, FDR, Kelly, and
     expected log growth. SELL compares against HOLD and does not consume BUY
     authority.
@@ -6596,13 +6597,16 @@ def _global_current_entry_feasibility_rejection_reason(
         else best_ask
     )
     if execution_mode == "TAKER_LIMIT":
-        bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
-        try:
-            best_bid = max(Decimal(level.price) for level in bid_levels)
-        except (ArithmeticError, AttributeError, TypeError, ValueError):
-            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-        if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
-            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+        # The selector independently re-proves this exact winning payoff.
+        # Its settlement-held objective does not depend on a resale bid.
+        if getattr(candidate, "settlement_locked_exact_payoff", False) is not True:
+            bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
+            try:
+                best_bid = max(Decimal(level.price) for level in bid_levels)
+            except (ArithmeticError, AttributeError, TypeError, ValueError):
+                return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+            if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
+                return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
     elif execution_mode == "MAKER_REST":
         try:
             assert_live_order_unit_price(proposal_price)

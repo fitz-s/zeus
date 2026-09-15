@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-14
+# Last reused/audited: 2026-09-15
 # Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
@@ -3123,24 +3123,32 @@ def test_statistical_taker_buy_retains_liquidation_capped_legal_size():
     assert decision.expected_growth.expected_ev_usd > 0.0
 
 
-def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock(side):
     candidate = _global_candidate(
         candidate_id="forged-exact-lock",
         family="forged-exact-lock-family",
-        side="YES",
+        side=side,
         q=0.80,
         levels=(("0.50", "100"),),
         min_order="5",
     )
     candidate = replace(
         candidate,
-        native_bid_levels=(
-            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
-        ),
+        native_bid_levels=(),
         settlement_locked_exact_payoff=True,
     )
 
-    decision = _global_select((candidate,), cap="5")
+    from src.engine.event_reactor_adapter import (
+        _global_current_entry_feasibility_rejection_reason,
+    )
+
+    decision = _global_select(
+        (candidate,), cap="5",
+        candidate_policy_rejection_resolver=(
+            _global_current_entry_feasibility_rejection_reason
+        ),
+    )
 
     assert decision.candidate is None
     assert decision.rejection_reasons[candidate.candidate_id] == (
@@ -3213,14 +3221,19 @@ def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
         neg_risk=False,
-        native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
-        ),
+        native_bid_levels=(),
     )
+    from src.engine.event_reactor_adapter import (
+        _global_current_entry_feasibility_rejection_reason,
+    )
+
     decision = _global_select(
         (candidate,),
         probability_witnesses={family: witness},
         cap="5",
+        candidate_policy_rejection_resolver=(
+            _global_current_entry_feasibility_rejection_reason
+        ),
     )
 
     assert candidate.settlement_locked_exact_payoff is True

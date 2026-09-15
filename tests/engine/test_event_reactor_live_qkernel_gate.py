@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-09-15
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2978,6 +2978,34 @@ def test_global_taker_candidate_requires_measurable_bid_not_tight_spread(side):
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate(("NaN",))
     ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("exact_lock", (False, True, 1, "true", None))
+def test_exact_settlement_entry_only_skips_resale_quote(side, exact_lock, monkeypatch):
+    candidate = SimpleNamespace(
+        action="BUY", side=side, execution_mode="TAKER_LIMIT",
+        settlement_locked_exact_payoff=exact_lock,
+        executable_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.80")),)
+        ),
+        native_bid_levels=(),
+    )
+    reason = era._global_current_entry_feasibility_rejection_reason(candidate)
+    assert reason == (None if exact_lock is True else "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID")
+    if exact_lock is not True:
+        return
+    monkeypatch.setattr(
+        era, "_entry_strategy_policy_blocks_live_submit",
+        lambda *_args, **_kwargs: "STRATEGY_POLICY_GATED:test",
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, strategy_key="settlement_capture", strategy_policy_conn=object(),
+    ) == "STRATEGY_POLICY_GATED:test"
+    candidate.executable_cost_curve.levels[0].price = Decimal("0.96")
+    assert era._global_current_entry_feasibility_rejection_reason(candidate).startswith(
+        "GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:"
+    )
 
 
 @pytest.mark.parametrize(
