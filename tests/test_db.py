@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-09-08
+# Last reused/audited: 2026-09-14
 # Lifecycle: created=2026-03-30; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
@@ -19,6 +19,7 @@ import pytest
 from src.state.db import (
     get_connection,
     get_forecasts_connection_read_only,
+    get_world_connection_read_only,
     init_schema,
     init_schema_forecasts,
 )
@@ -137,6 +138,50 @@ def test_forecasts_read_only_connection_does_not_create_missing_db(tmp_path, mon
     with pytest.raises(sqlite3.OperationalError):
         get_forecasts_connection_read_only()
     assert not db_path.exists()
+
+
+def test_world_read_only_forwards_optional_deadline(monkeypatch):
+    import src.state.db as db_module
+
+    captured = {}
+    sentinel = object()
+
+    def connect(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(db_module, "_connect_read_only", connect)
+
+    assert get_world_connection_read_only(deadline_monotonic=12.5) is sentinel
+    assert captured == {
+        "path": db_module.ZEUS_WORLD_DB_PATH,
+        "deadline_monotonic": 12.5,
+    }
+    captured.clear()
+    assert get_world_connection_read_only() is sentinel
+    assert captured == {
+        "path": db_module.ZEUS_WORLD_DB_PATH,
+        "deadline_monotonic": None,
+    }
+
+
+def test_world_read_only_noarg_is_real_query_only_connection(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    db_path = tmp_path / "zeus-world.db"
+    with sqlite3.connect(db_path) as seed:
+        seed.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+        seed.commit()
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", db_path)
+
+    conn = get_world_connection_read_only()
+    try:
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO probe (id) VALUES (1)")
+    finally:
+        conn.close()
 
 
 def test_held_monitor_read_connection_is_query_only_with_world_and_forecasts(

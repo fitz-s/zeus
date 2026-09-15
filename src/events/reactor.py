@@ -6196,8 +6196,12 @@ def _edli_day0_hourly_refresh_due_families(
         return errors
 
     try:
-        fact_conn = get_world_connection_read_only()
-        vector_conn = get_forecasts_connection_read_only()
+        fact_conn = get_world_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+        vector_conn = get_forecasts_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
         install_deadline(fact_conn)
         install_deadline(vector_conn)
     except Exception as exc:  # noqa: BLE001 -- no authority proof means no priority borrow.
@@ -6683,6 +6687,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             1,
         )
         cursor_advance = 0
+
+        def advance_cursor() -> None:
+            global _DAY0_HOURLY_REFRESH_CURSOR
+            if cursor_advance > 0 and cursor_span > 0:
+                _DAY0_HOURLY_REFRESH_CURSOR = (
+                    _DAY0_HOURLY_REFRESH_CURSOR + cursor_advance
+                ) % cursor_span
+
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
@@ -6755,6 +6767,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 refresh_budget_seconds,
                 max(0.0, remaining_budget_seconds),
             )
+            advance_cursor()
             return
         # Causal run-selection boundary: the same latest-same-station-print
         # predicate the materializer and the live-materialization-queue
@@ -6777,9 +6790,11 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         causal_run_boundaries: dict[tuple[str, str], datetime] = {}
         boundary_read_failures: list[str] = []
         try:
-            with get_forecasts_connection_with_world_read_only() as boundary_conn:
+            with get_forecasts_connection_with_world_read_only(
+                deadline_monotonic=preflight_deadline_monotonic,
+            ) as boundary_conn:
                 for boundary_city in ordered_cities:
-                    if time.monotonic() >= refresh_deadline_monotonic:
+                    if time.monotonic() >= preflight_deadline_monotonic:
                         break
                     boundary_city_name = str(
                         getattr(boundary_city, "name", "") or ""
@@ -6828,6 +6843,18 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 len(boundary_read_failures),
                 ", ".join(boundary_read_failures[:20]),
             )
+        remaining_budget_seconds = (
+            refresh_deadline_monotonic - time.monotonic()
+        )
+        if remaining_budget_seconds < 1.0:
+            _log.warning(
+                "edli_day0_hourly_refresh deferred: causal boundary probe exhausted "
+                "cycle budget budget_s=%.3f remaining_s=%.3f",
+                refresh_budget_seconds,
+                max(0.0, remaining_budget_seconds),
+            )
+            advance_cursor()
+            return
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
@@ -6871,10 +6898,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         # Fairness is about which segment page was OFFERED a slot, not whether
         # its fetch escaped throttle/provider failure. A unit advance is
         # coprime to every segment length, so no city can be skipped forever.
-        if cursor_advance > 0 and cursor_span > 0:
-            _DAY0_HOURLY_REFRESH_CURSOR = (
-                _DAY0_HOURLY_REFRESH_CURSOR + cursor_advance
-            ) % cursor_span
+        advance_cursor()
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "

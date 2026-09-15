@@ -726,12 +726,18 @@ def get_family_book_evidence_connection_read_only() -> sqlite3.Connection:
     return _connect_read_only(ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH)
 
 
-def get_world_connection_read_only() -> sqlite3.Connection:
+def get_world_connection_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Read-only world DB connection (write_class=None).
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return _connect_read_only(ZEUS_WORLD_DB_PATH)
+    return _connect_read_only(
+        ZEUS_WORLD_DB_PATH,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def get_forecasts_connection_read_only(

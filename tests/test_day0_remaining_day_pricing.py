@@ -10785,12 +10785,12 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(
             db_module,
             "get_world_connection_read_only",
-            lambda: world_conn,
+            lambda **_kwargs: world_conn,
         )
         monkeypatch.setattr(
             db_module,
             "get_forecasts_connection_read_only",
-            lambda: forecast_conn,
+            lambda **_kwargs: forecast_conn,
         )
 
         def latest_fact(conn, *, temperature_metric, **_kw):
@@ -10854,8 +10854,12 @@ class TestRequestHashProvenance:
             "runtime_cities_by_name",
             lambda: {"Paris": city},
         )
-        monkeypatch.setattr(db_module, "get_world_connection_read_only", _Conn)
-        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", _Conn)
+        monkeypatch.setattr(
+            db_module, "get_world_connection_read_only", lambda **_kwargs: _Conn()
+        )
+        monkeypatch.setattr(
+            db_module, "get_forecasts_connection_read_only", lambda **_kwargs: _Conn()
+        )
         monkeypatch.setattr(
             target_plan,
             "_latest_authorized_day0_fact",
@@ -10920,11 +10924,13 @@ class TestRequestHashProvenance:
         world_conn = Connection("world")
         forecast_conn = Connection("forecasts")
         monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
-        monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr(
+            db_module, "get_world_connection_read_only", lambda **_kwargs: world_conn
+        )
         monkeypatch.setattr(
             db_module,
             "get_forecasts_connection_read_only",
-            lambda: forecast_conn,
+            lambda **_kwargs: forecast_conn,
         )
         monkeypatch.setattr(
             target_plan,
@@ -10967,6 +10973,7 @@ class TestRequestHashProvenance:
         now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         clock = {"now": 0.0}
         closed = []
+        deadlines = {"world": [], "forecasts": []}
 
         class Connection:
             def __init__(self, role):
@@ -10986,12 +10993,14 @@ class TestRequestHashProvenance:
             config_module, "runtime_cities_by_name", lambda: {"Paris": city}
         )
         monkeypatch.setattr(
-            db_module, "get_world_connection_read_only", lambda: world_conn
+            db_module,
+            "get_world_connection_read_only",
+            lambda **kwargs: (deadlines["world"].append(kwargs["deadline_monotonic"]), world_conn)[1],
         )
         monkeypatch.setattr(
             db_module,
             "get_forecasts_connection_read_only",
-            lambda: forecast_conn,
+            lambda **kwargs: (deadlines["forecasts"].append(kwargs["deadline_monotonic"]), forecast_conn)[1],
         )
         monkeypatch.setattr(
             vectors_module,
@@ -11018,8 +11027,68 @@ class TestRequestHashProvenance:
         )
 
         assert probe.proved is False
+        assert deadlines == {"world": [1.0], "forecasts": [1.0]}
         assert forecast_conn.progress is not None
         assert closed == ["world", "forecasts"]
+
+    @pytest.mark.parametrize("failure", ["world", "forecasts"])
+    def test_priority_probe_setup_deadline_failure_is_fail_closed_and_closes_partial(
+        self, monkeypatch, failure
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        opened = []
+        closed = []
+        deadlines = {"world": [], "forecasts": []}
+
+        class Connection:
+            def __init__(self, role):
+                self.role = role
+
+            def set_progress_handler(self, *_args):
+                raise AssertionError("expired setup must not install a handler")
+
+            def close(self):
+                closed.append(self.role)
+
+        def world_factory(**kwargs):
+            deadlines["world"].append(kwargs["deadline_monotonic"])
+            if failure == "world":
+                raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+            conn = Connection("world")
+            opened.append("world")
+            return conn
+
+        def forecasts_factory(**kwargs):
+            deadlines["forecasts"].append(kwargs["deadline_monotonic"])
+            if failure == "forecasts":
+                raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+            conn = Connection("forecasts")
+            opened.append("forecasts")
+            return conn
+
+        monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
+        monkeypatch.setattr(db_module, "get_world_connection_read_only", world_factory)
+        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", forecasts_factory)
+        monkeypatch.setattr(vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+
+        probe = reactor._edli_day0_hourly_refresh_due_families(
+            cities=[city], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            deadline_monotonic=7.0,
+        )
+
+        assert probe.proved is False
+        assert deadlines == (
+            {"world": [7.0], "forecasts": []}
+            if failure == "world"
+            else {"world": [7.0], "forecasts": [7.0]}
+        )
+        assert opened == ([] if failure == "world" else ["world"])
+        assert closed == ([] if failure == "world" else ["world"])
 
     def test_priority_probe_preserves_due_held_hints_before_deadline(self, monkeypatch):
         import src.config as config_module
@@ -11048,10 +11117,14 @@ class TestRequestHashProvenance:
             lambda: {"Paris": paris, "Wellington": wellington},
         )
         monkeypatch.setattr(
-            db_module, "get_world_connection_read_only", Connection
+            db_module,
+            "get_world_connection_read_only",
+            lambda **_kwargs: Connection(),
         )
         monkeypatch.setattr(
-            db_module, "get_forecasts_connection_read_only", Connection
+            db_module,
+            "get_forecasts_connection_read_only",
+            lambda **_kwargs: Connection(),
         )
         monkeypatch.setattr(
             vectors_module,
@@ -11204,7 +11277,7 @@ class TestRequestHashProvenance:
             return {"ecmwf_ifs": "release_hint"}
 
         @contextmanager
-        def read_connection():
+        def read_connection(**_kwargs):
             yield object()
 
         monkeypatch.setattr(config_module, "runtime_cities", lambda: [held, pending])
@@ -11362,6 +11435,98 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 1
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
+
+    @pytest.mark.parametrize(
+        ("boundary_now", "expected_timeout"),
+        [(4.5, 1.5), (5.5, None)],
+    )
+    def test_scheduler_boundary_read_recomputes_budget_before_fetch(
+        self, monkeypatch, boundary_now, expected_timeout
+    ):
+        import contextlib
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        second_city = _wellington()
+        clock = {"now": 0.0}
+        captured = {}
+        fetch_calls = []
+
+        monkeypatch.setattr(reactor.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [city, second_city])
+        monkeypatch.setattr(reactor, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setattr(
+            reactor, "_edli_current_held_position_family_keys", lambda: set()
+        )
+        monkeypatch.setattr(reactor, "_day0_hourly_refresh_budget_seconds", lambda: 6.0)
+        monkeypatch.setattr(reactor, "_day0_hourly_fetch_timeout_seconds", lambda: 4.0)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor._Day0HourlyPriorityProbe(proved=True),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_order_day0_hourly_refresh_cities",
+            lambda cities, **_kwargs: (list(cities), 0),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_rotate_day0_hourly_refresh_order",
+            lambda cities, **_kwargs: list(cities),
+        )
+        monkeypatch.setattr(reactor, "_day0_hourly_refresh_max_cities", lambda **_kwargs: 1)
+        monkeypatch.setattr(
+            vectors_module,
+            "day0_hourly_target_dates_for_refresh",
+            lambda **_kwargs: ("2026-06-10",),
+        )
+
+        @contextlib.contextmanager
+        def read_connection(**kwargs):
+            captured["boundary_deadline"] = kwargs["deadline_monotonic"]
+            yield object()
+
+        monkeypatch.setattr(
+            db_module,
+            "get_forecasts_connection_with_world_read_only",
+            read_connection,
+        )
+
+        def read_state(**_kwargs):
+            clock["now"] = boundary_now
+            return None
+
+        monkeypatch.setattr(
+            vectors_module, "read_day0_current_temperature_state", read_state
+        )
+
+        def refresh(*_args, **_kwargs):
+            fetch_calls.append(True)
+            captured.update(_kwargs)
+            return SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=1,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                priority_reserve_exhausted=False,
+                budget_exhausted=False,
+            )
+
+        monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=False)
+
+        assert captured["boundary_deadline"] == 2.0
+        assert reactor._DAY0_HOURLY_REFRESH_CURSOR == 1
+        if expected_timeout is None:
+            assert fetch_calls == []
+        else:
+            assert fetch_calls == [True]
+            assert captured["timeout_s"] == pytest.approx(expected_timeout)
 
     def test_provider_release_edge_gives_two_held_slots_and_one_priority_slot(
         self, monkeypatch
