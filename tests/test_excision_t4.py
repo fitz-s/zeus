@@ -590,3 +590,88 @@ class TestDueWorkScheduler:
         due = due_work(conn, limit=10)
         conn.close()
         assert any(item.subject_id == pos.trade_id for item in due)
+
+
+class TestCanonicalEntryFillEmission:
+    """fill_tracker._maybe_emit_canonical_entry_fill is the only writer of the
+    ENTRY_ORDER_FILLED canonical event on the live fill path (_mark_entry_filled).
+    Assert its DB emission directly: the event lands at the next sequence_no
+    and position_current advances pending_entry -> active; a failed write
+    returns False and leaves the ledger untouched; no connection provider is
+    a no-op success."""
+
+    def _ledger(self, db_path):
+        from src.state.db import get_connection
+
+        conn = get_connection(db_path)
+        try:
+            events = conn.execute(
+                "SELECT sequence_no, event_type, phase_before, phase_after, "
+                "occurred_at, order_id, source_module FROM position_events "
+                "WHERE position_id = ? ORDER BY sequence_no",
+                ("t4-pos-fill-emit",),
+            ).fetchall()
+            current = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                ("t4-pos-fill-emit",),
+            ).fetchone()
+            return [tuple(row) for row in events], (current[0] if current else None)
+        finally:
+            conn.close()
+
+    def test_emits_entry_order_filled_and_advances_projection(self, tmp_path) -> None:
+        from src.execution.fill_tracker import _maybe_emit_canonical_entry_fill
+
+        db_path = tmp_path / "zeus.db"
+        _init_trade_db(db_path)
+        pos = _make_position(
+            trade_id="t4-pos-fill-emit",
+            entered_at="2026-08-01T00:05:00+00:00",
+        )
+        _seed_canonical_entry_baseline(db_path, pos)
+        before, phase_before = self._ledger(db_path)
+        assert [row[1] for row in before] == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"]
+        assert phase_before == "pending_entry"
+
+        assert _maybe_emit_canonical_entry_fill(pos, deps=_make_deps(db_path)) is True
+
+        after, phase_after = self._ledger(db_path)
+        assert after[:2] == before
+        assert len(after) == 3
+        seq, event_type, ev_phase_before, ev_phase_after, occurred_at, order_id, source = after[2]
+        assert seq == 3
+        assert event_type == "ENTRY_ORDER_FILLED"
+        assert (ev_phase_before, ev_phase_after) == ("pending_entry", "active")
+        assert occurred_at == "2026-08-01T00:05:00+00:00"
+        assert order_id == "order-t4-1"
+        assert source == "src.execution.fill_tracker"
+        assert phase_after == "active"
+
+    def test_write_failure_returns_false_and_leaves_ledger_unchanged(self, tmp_path) -> None:
+        import sqlite3
+
+        from src.execution.fill_tracker import _maybe_emit_canonical_entry_fill
+
+        db_path = tmp_path / "zeus.db"
+        _init_trade_db(db_path)
+        pos = _make_position(
+            trade_id="t4-pos-fill-emit",
+            entered_at="2026-08-01T00:05:00+00:00",
+        )
+        _seed_canonical_entry_baseline(db_path, pos)
+        before = self._ledger(db_path)
+
+        class ReadOnlyDeps:
+            @staticmethod
+            def get_connection():
+                return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+        assert _maybe_emit_canonical_entry_fill(pos, deps=ReadOnlyDeps) is False
+        assert self._ledger(db_path) == before
+
+    def test_no_connection_provider_is_a_no_op(self) -> None:
+        from src.execution.fill_tracker import _maybe_emit_canonical_entry_fill
+
+        pos = _make_position(trade_id="t4-pos-fill-emit")
+        assert _maybe_emit_canonical_entry_fill(pos, deps=None) is True
+        assert _maybe_emit_canonical_entry_fill(pos, deps=object()) is True
