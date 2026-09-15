@@ -326,13 +326,14 @@ def _multiprocess_forecast_materialization_owner(
     materialization_queue._run_materialization_batch(pending)
 
 
-def _fetch_enqueue_row(db_path: Path) -> sqlite3.Row:
+def _fetch_enqueue_row(db_path: Path, metric: str = "high") -> sqlite3.Row:
     check = sqlite3.connect(db_path)
     check.row_factory = sqlite3.Row
     row = check.execute(
         "SELECT day0_observed_extreme_observation_time, day0_conditioning_identity_json, seed_file "
         "FROM cycle_advance_enqueues WHERE city='Shanghai' AND target_date='2026-07-19' "
-        "AND metric='high'"
+        "AND metric=?",
+        (metric,),
     ).fetchone()
     check.close()
     return row
@@ -564,8 +565,20 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         lambda: cfg,
     )
     monkeypatch.setattr(cycle_advance, "family_materializable_cycle", lambda *a, **k: (cycle, ()))
+    payload = _day0_payload("2026-07-19T00:15:00+00:00")
+    payload["day0_observed_extreme_c"] = 21.0 if metric == "high" else 12.0
+    captured = []
+    monkeypatch.setattr(
+        seed_discovery, "_day0_observed_extreme_seed_payload",
+        lambda **kwargs: captured.append(kwargs) or payload,
+    )
+    seed_inputs = []
     fake_build_seed, calls = _fake_build_seed_factory()
-    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_build_seed)
+    def capture_seed(conn, **kwargs):
+        seed_inputs.append(kwargs)
+        return fake_build_seed(conn, **kwargs)
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", capture_seed)
 
     decision_time = datetime(2026, 7, 19, 0, 20, tzinfo=UTC)
     report_1 = cycle_advance.enqueue_single_family_cycle_advance_reseed(
@@ -579,9 +592,21 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         held_position=True,
         minimum_posterior_computed_at=decision_time,
     )
-    assert report_1["status"] == "SAME_CYCLE_RECOMPUTE_ENQUEUED"
+    assert report_1["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
     assert report_1["enqueued"] is True
     assert calls["count"] == 1, "exactly one seed built for the genuine divergence"
+    assert captured == [{"city": "Shanghai", "target_date": "2026-07-19", "metric": metric, "computed_at": decision_time}]
+    assert all(seed_inputs[0][key] == value for key, value in payload.items())
+    assert seed_inputs[0]["upgrade_trigger"] == "held_belief_computed_age_expired"
+    assert seed_inputs[0]["computed_at"] == decision_time
+    row = _fetch_enqueue_row(db_path, metric)
+    assert json.loads(row["day0_conditioning_identity_json"]) == {
+        "source": payload["day0_observed_extreme_source"],
+        "observation_time": payload["day0_observed_extreme_observation_time"],
+        "observed_extreme_c": payload["day0_observed_extreme_c"],
+        "unit": payload["day0_observed_extreme_unit"],
+    }
+
 
     # A second request for the SAME family before the successor lands (still
     # queued) must not build a second seed.
@@ -596,7 +621,8 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         held_position=True,
         minimum_posterior_computed_at=decision_time,
     )
-    assert report_2["status"] == "SAME_CYCLE_RECOMPUTE_PENDING"
+    assert report_2["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
+    assert report_2["day0_posterior_matched"] is False
     assert not report_2.get("enqueued")
     assert calls["count"] == 1, "repeat request while queued must not build a second seed"
 
@@ -6081,3 +6107,47 @@ def test_near_dated_lead_does_not_collide_with_an_existing_tier(tmp_path) -> Non
     # still yields to every held-position rung.
     assert min(near_dated_tiers) > max(held_tiers)
     assert max(near_dated_tiers) < max(generic_tiers)
+
+
+@pytest.mark.parametrize("case, expected, capture_count", [
+    ("missing", "SAME_CYCLE_RECOMPUTE_DAY0_EVIDENCE_UNAVAILABLE", 1),
+    ("zero", "DAY0_CONDITIONING_IDENTITY_INCOMPLETE", 1),
+    ("future", "CYCLE_ADVANCE_FORECAST_DB_MISSING", 0),
+    ("explicit", "CYCLE_ADVANCE_FORECAST_DB_MISSING", 0),
+    ("partial", "DAY0_CONDITIONING_IDENTITY_INCOMPLETE", 0),
+    ("capture_deadline", "DAY0_STATION_RESEED_DEADLINE_EXCEEDED", 1),
+])
+def test_same_cycle_day0_capture_preserves_source_scope_and_deadline(
+    tmp_path, monkeypatch, case, expected, capture_count,
+):
+    cfg = _queue_config(tmp_path)
+    now = datetime(2026, 7, 19, 0, 20, tzinfo=UTC)
+    clock = [49.0]
+    monkeypatch.setattr(cycle_advance.time, "monotonic", lambda: clock[0])
+    captures = []
+
+    def capture(**kwargs):
+        captures.append(kwargs)
+        if case == "capture_deadline":
+            clock[0] = 51.0
+            return _day0_payload("2026-07-19T00:15:00+00:00")
+        if case == "zero":
+            return {"day0_observation_state": "ZERO_TARGET_DATE_OBSERVATIONS"}
+        return None
+
+    monkeypatch.setattr(seed_discovery, "_day0_observed_extreme_seed_payload", capture)
+    explicit = _day0_payload("2026-07-19T00:15:00+00:00") if case == "explicit" else {}
+    if case == "partial":
+        explicit = {"day0_observed_extreme_source": "aviationweather_metar"}
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=cfg["forecast_db"], seed_dir=cfg["seed_dir"],
+        raw_manifest_dir=cfg["raw_manifest_dir"], city="Shanghai",
+        target_date="2026-07-20" if case == "future" else "2026-07-19",
+        metric="high", computed_at=now, held_position=True,
+        minimum_posterior_computed_at=now, deadline_monotonic=50.0, **explicit,
+    )
+    assert report["status"] == expected
+    assert len(captures) == capture_count
+    assert report["enqueued"] is False
+    assert not Path(cfg["forecast_db"]).exists()
+    assert not Path(cfg["seed_dir"]).exists()

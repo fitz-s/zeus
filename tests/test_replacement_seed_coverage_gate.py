@@ -1017,6 +1017,7 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
     assert all("SOURCE_CYCLE_TIME <=" in statement for statement in payload_queries)
 
 
+@pytest.mark.parametrize("conditioned", [False, True])
 @pytest.mark.parametrize("metric", ["high", "low"])
 @pytest.mark.parametrize("posterior_time, expected", [
     ("2026-06-06T01:30:00+00:00", False),
@@ -1024,7 +1025,7 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
     ("2026-06-06T02:30:00+00:00", True),
 ])
 def test_recompute_seed_requires_posterior_at_or_after_requested_clock(
-    tmp_path, metric, posterior_time, expected,
+    tmp_path, metric, posterior_time, expected, conditioned,
 ):
     db_path = _db(tmp_path)
     _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
@@ -1035,6 +1036,24 @@ def test_recompute_seed_requires_posterior_at_or_after_requested_clock(
         conn.execute("UPDATE readiness_state SET provenance_json=json_set(provenance_json, '$.temperature_metric', ?)",
                      (metric,))
     seed = {**_seed(), "temperature_metric": metric}
+    if conditioned:
+        seed.update({
+            "day0_observed_extreme_c": 31.0 if metric == "high" else 12.0,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-06-06T01:00:00+00:00",
+            "day0_observed_extreme_unit": "C",
+        })
+        conditioning = {
+            "metric": metric, "source": seed["day0_observed_extreme_source"],
+            "observed_extreme_c": seed["day0_observed_extreme_c"],
+            "observation_time": seed["day0_observed_extreme_observation_time"], "unit": "C",
+        }
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE forecast_posteriors SET provenance_json=json_set(provenance_json, '$.day0_conditioning', json(?))",
+                         (json.dumps(conditioning),))
     assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
     seed["upgrade_trigger"] = "held_belief_computed_age_expired"
     assert _seed_already_covered(forecast_db=db_path, seed=seed) is expected
+    if conditioned:
+        seed["day0_observed_extreme_c"] += 1.0
+        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False

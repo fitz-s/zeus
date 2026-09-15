@@ -61,7 +61,7 @@ from src.contracts.replacement_pipeline_files import (
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
-from src.engine.time_context import has_city_local_day_ended
+from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 
@@ -2424,9 +2424,11 @@ def enqueue_single_family_cycle_advance_reseed(
     city = str(city)
     target_date = str(target_date)
     metric = str(metric)
-    has_day0_evidence = (
-        day0_observed_extreme_c is not None or day0_observation_state is not None
-    )
+    has_day0_evidence = any(value is not None for value in (
+        day0_observed_extreme_c, day0_observed_extreme_source,
+        day0_observed_extreme_observation_time, day0_observed_extreme_sample_count,
+        day0_observed_extreme_unit, day0_observation_state,
+    ))
     report: dict[str, object] = {
         "status": "SINGLE_FAMILY_CYCLE_ADVANCE",
         "city": city,
@@ -2481,15 +2483,6 @@ def enqueue_single_family_cycle_advance_reseed(
     except TimeoutError:
         report["status"] = "DAY0_STATION_RESEED_DEADLINE_EXCEEDED"
         return report
-    day0_identity = _day0_conditioning_identity(
-        source=day0_observed_extreme_source,
-        observation_time=day0_observed_extreme_observation_time,
-        observed_extreme_c=day0_observed_extreme_c,
-        unit=day0_observed_extreme_unit,
-    )
-    if has_day0_evidence and day0_identity is None:
-        report["status"] = "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
-        return report
     if minimum_posterior_computed_at is not None:
         if (
             minimum_posterior_computed_at.tzinfo is None
@@ -2501,6 +2494,45 @@ def enqueue_single_family_cycle_advance_reseed(
         if not held_position:
             report["status"] = "SAME_CYCLE_RECOMPUTE_REQUIRES_HELD_POSITION"
             return report
+    if minimum_posterior_computed_at is not None and not has_day0_evidence and _city_timezone:
+        try:
+            if has_city_local_day_started(target_date, _city_timezone, now):
+                from src.data.replacement_forecast_seed_discovery import (
+                    _day0_observed_extreme_seed_payload,
+                )
+
+                _require_deadline()
+                payload = _day0_observed_extreme_seed_payload(
+                    city=city, target_date=target_date, metric=metric, computed_at=now,
+                )
+                _require_deadline()
+                if payload is None:
+                    # SCOPE: this family. DRAIN: next canonical observation/cycle
+                    # rereads its evidence. RESET: a complete current Day0 identity.
+                    report["status"] = "SAME_CYCLE_RECOMPUTE_DAY0_EVIDENCE_UNAVAILABLE"
+                    return report
+                day0_observed_extreme_c = payload.get("day0_observed_extreme_c")
+                day0_observed_extreme_source = payload.get("day0_observed_extreme_source")
+                day0_observed_extreme_observation_time = payload.get("day0_observed_extreme_observation_time")
+                day0_observed_extreme_sample_count = payload.get("day0_observed_extreme_sample_count")
+                day0_observed_extreme_unit = payload.get("day0_observed_extreme_unit")
+                day0_observation_state = payload.get("day0_observation_state")
+                has_day0_evidence = True
+        except TimeoutError:
+            report["status"] = "DAY0_STATION_RESEED_DEADLINE_EXCEEDED"
+            return report
+        except (ValueError, ZoneInfoNotFoundError):
+            report["status"] = "SAME_CYCLE_RECOMPUTE_DAY0_EVIDENCE_UNAVAILABLE"
+            return report
+    day0_identity = _day0_conditioning_identity(
+        source=day0_observed_extreme_source,
+        observation_time=day0_observed_extreme_observation_time,
+        observed_extreme_c=day0_observed_extreme_c,
+        unit=day0_observed_extreme_unit,
+    )
+    if has_day0_evidence and day0_identity is None:
+        report["status"] = "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+        return report
     if not forecast_db.exists():
         report["status"] = "CYCLE_ADVANCE_FORECAST_DB_MISSING"
         return report
@@ -2746,7 +2778,11 @@ def enqueue_single_family_cycle_advance_reseed(
                         expected_identity=(
                             expected_replacement_dependency_identity_by_role
                         ),
-                        upgrade_trigger="day0_observation_advanced",
+                        upgrade_trigger=(
+                            "held_belief_computed_age_expired"
+                            if minimum_posterior_computed_at is not None
+                            else "day0_observation_advanced"
+                        ),
                         day0_observed_extreme_c=day0_observed_extreme_c,
                         day0_observed_extreme_source=day0_observed_extreme_source,
                         day0_observed_extreme_observation_time=(

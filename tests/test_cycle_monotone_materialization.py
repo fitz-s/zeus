@@ -2362,7 +2362,7 @@ def test_single_family_day0_monitor_recomputes_matching_but_older_posterior(
     assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
     assert report["enqueued"] is True
     assert json.loads(Path(str(report["seed_file"])).read_text()) == {
-        "upgrade_trigger": "day0_observation_advanced",
+        "upgrade_trigger": "held_belief_computed_age_expired",
     }
 
 
