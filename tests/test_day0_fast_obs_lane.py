@@ -4569,6 +4569,105 @@ class TestAnomalyFreshnessGates:
         conn.set_trace_callback(None)
         assert not traced
 
+    @pytest.mark.parametrize("old_temp,new_temp,metric", [(27.0, 24.0, "high"), (21.0, 24.0, "low")])
+    def test_startup_retains_day_extreme_through_first_partial_history(self, old_temp, new_temp, metric):
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        old_time = datetime(2026, 6, 9, 22, tzinfo=UTC)
+        new_time = datetime(2026, 6, 10, 0, 30, tzinfo=UTC)
+        old = _report("RJTT", old_time, old_temp, t_group=False)
+        new = _report("RJTT", new_time, new_temp, t_group=False)
+        conn = _world_conn()
+        ensure_table(conn)
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc=old.receipt_time.isoformat(), value_native=old_temp,
+            unit="C", fetched_at_utc=old.receipt_time.isoformat(), raw_report=old.raw,
+        )
+        conn.commit()
+        emitter = Day0FastObsEmitter(fetcher=lambda *_args, **_kwargs: [new], min_fetch_interval_s=0.0)
+        key = ("Tokyo", "2026-06-10", metric)
+        emitter._last_live_emitted_rounded[key] = int(old_temp)
+        emitter._last_live_emitted_observation_time[key] = old_time.isoformat()
+        as_of = new.receipt_time + timedelta(minutes=1)
+
+        assert emitter.sync_ledger_report_keys(conn, [_tokyo()], as_of=as_of) == 1
+        assert emitter._cached_reports == [old]
+        assert emitter._cache_fetched_monotonic == 0.0
+        assert emitter._station_cache_fetched_monotonic == {}
+        assert emitter._last_attempt_monotonic == 0.0
+        assert emitter._full_window_loaded is False
+        prefetch = emitter.prefetch(cities=[_tokyo()], decision_time=as_of)
+        extremes = running_extremes_for_local_day(
+            list(prefetch.reports), city=_tokyo(), target_date="2026-06-10", as_of=as_of,
+        )
+        assert getattr(extremes, f"{metric}_so_far") == old_temp
+        assert extremes.current_temp == new_temp
+        assert extremes.last_obs_time == new_time
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=prefetch, received_at=as_of.isoformat(), persist_ledger=False,
+        ) >= 1
+        assert emitter._last_live_emitted_rounded[key] == int(old_temp)
+        assert emitter._last_live_emitted_observation_time[key] == new_time.isoformat()
+
+    @pytest.mark.parametrize("defect", ["raw_station", "station", "raw_empty", "raw_time", "future_observation", "future_publication", "future_fetch", "naive", "unit", "nonfinite", "source"])
+    def test_startup_ledger_window_rejects_unqualified_reports(self, defect):
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        now = datetime(2026, 9, 15, 0, 40, tzinfo=UTC)
+        row = dict(
+            city="Tokyo", station_id="RJTT", source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc="2026-09-15T00:38:00+00:00", value_native=24.0, unit="C",
+            fetched_at_utc="2026-09-15T00:39:00+00:00", raw_report="RJTT 150030Z 24/23 Q1014",
+        )
+        changes = {
+            "raw_station": {"raw_report": "RKSI 150030Z 24/23 Q1014"},
+            "station": {"station_id": "RKSI"},
+            "raw_empty": {"raw_report": ""},
+            "raw_time": {"raw_report": "RJTT 159999Z 24/23 Q1014"},
+            "future_observation": {"raw_report": "RJTT 150045Z 24/23 Q1014"},
+            "future_publication": {"publish_ts_utc": "2026-09-15T00:41:00+00:00"},
+            "future_fetch": {"fetched_at_utc": "2026-09-15T00:41:00+00:00"},
+            "naive": {"publish_ts_utc": "2026-09-15T00:38:00"},
+            "unit": {"unit": "F"},
+            "nonfinite": {"value_native": float("inf")},
+            "source": {"source_channel": "unrelated_feed"},
+        }
+        row.update(changes[defect])
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        append_print(conn, **row)
+        conn.commit()
+        emitter = Day0FastObsEmitter()
+        emitter.sync_ledger_report_keys(conn, [_tokyo()], as_of=now)
+        assert emitter._cached_reports == []
+        assert emitter._station_cache_fetched_monotonic == {}
+        assert emitter._cache_fetched_monotonic == 0.0
+        assert emitter._full_window_loaded is False
+
+    def test_startup_recovers_valid_time_across_month_and_local_day(self):
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc="2026-10-01T00:05:00+00:00", value_native=24.0, unit="C",
+            fetched_at_utc="2026-10-01T00:06:00+00:00", raw_report="RJTT 302330Z 24/23 Q1014",
+        )
+        conn.commit()
+        now = datetime(2026, 10, 1, 0, 10, tzinfo=UTC)
+        emitter = Day0FastObsEmitter()
+        emitter.sync_ledger_report_keys(conn, [_tokyo()], as_of=now)
+        report, = emitter._cached_reports
+        assert report.obs_time == datetime(2026, 9, 30, 23, 30, tzinfo=UTC)
+        assert report.receipt_time == datetime(2026, 10, 1, 0, 5, tzinfo=UTC)
+        extremes = running_extremes_for_local_day(
+            emitter._cached_reports, city=_tokyo(), target_date="2026-10-01", as_of=now,
+        )
+        assert extremes.sample_count == 1
+        assert extremes.last_obs_time == report.obs_time
+
     def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
         """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —
         comparing a 2h-stale METAR window vs current WU is NOT divergence."""

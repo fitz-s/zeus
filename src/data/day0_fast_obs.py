@@ -2379,12 +2379,12 @@ class Day0FastObsEmitter:
         *,
         as_of: datetime | None = None,
     ) -> int:
-        """Seed publication identities without replacing the live report cache.
+        """Seed publication identities and their retained observation window.
 
         The source-clock uses this once on process start before its first HTTP
-        fetch. It prevents the fetched 36-hour history from being mistaken for
-        an unpersisted delta while preserving the source's observation-time
-        semantics for extreme calculation.
+        fetch. A short first response must not erase earlier daily extremes.
+        Ledger reports retain their METAR valid time and publication time;
+        loading them does not refresh transport or station authority.
         """
         with self._lock:
             if self._ledger_report_keys_loaded:
@@ -2401,14 +2401,18 @@ class Day0FastObsEmitter:
             with self._lock:
                 self._ledger_report_keys_loaded = True
             return 0
+        city_stations = {
+            (str(getattr(city, "name", "")), str(source.station_id).strip().upper())
+            for city in cities
+            if (source := fast_obs_source_for_city(city)) is not None
+        }
         placeholders = ",".join("?" for _ in city_names)
-        cutoff = (
-            (as_of or datetime.now(UTC)).astimezone(UTC)
-            - timedelta(hours=METAR_FULL_FETCH_HOURS)
-        ).isoformat()
+        decision_time = (as_of or datetime.now(UTC)).astimezone(UTC)
+        cutoff = (decision_time - timedelta(hours=METAR_FULL_FETCH_HOURS)).isoformat()
         rows = world_conn.execute(
             f"""
-            SELECT station_id, publish_ts_utc, value_native
+            SELECT city, station_id, publish_ts_utc, value_native, raw_report, unit,
+                   fetched_at_utc
               FROM observation_prints INDEXED BY idx_observation_prints_city_publish
              WHERE city IN ({placeholders})
                AND publish_ts_utc >= ?
@@ -2417,7 +2421,8 @@ class Day0FastObsEmitter:
             (*city_names, cutoff, FAST_OBS_SOURCE_ID),
         ).fetchall()
         keys: set[tuple[str, str, float]] = set()
-        for station_id, publish_ts, value_native in rows:
+        reports: list[MetarReport] = []
+        for city_name, station_id, publish_ts, value_native, raw_report, unit, fetched_at in rows:
             try:
                 keys.add(
                     (
@@ -2428,7 +2433,47 @@ class Day0FastObsEmitter:
                 )
             except (TypeError, ValueError, OSError, OverflowError):
                 continue
+            try:
+                station = str(station_id).strip().upper()
+                header = str(raw_report or "").strip().upper().split()
+                if header and header[0] in {"METAR", "SPECI"}:
+                    header = header[1:]
+                if (
+                    (str(city_name), station) not in city_stations
+                    or len(header) < 2
+                    or header[0] != station
+                    or _METAR_VALID_TIME_RE.fullmatch(header[1]) is None
+                ):
+                    continue
+                published = datetime.fromisoformat(str(publish_ts).replace("Z", "+00:00"))
+                fetched = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+                observed = metar_observation_time_from_raw(
+                    str(raw_report or ""), published_at=published,
+                )
+                value = float(value_native)
+                if (
+                    str(unit).upper() != "C"
+                    or published.tzinfo is None
+                    or fetched.tzinfo is None
+                    or observed is None
+                    or observed > published
+                    or published > decision_time
+                    or fetched > decision_time
+                    or not math.isfinite(value)
+                ):
+                    continue
+                reports.append(MetarReport(
+                    station_id=station,
+                    obs_time=observed,
+                    receipt_time=published.astimezone(UTC),
+                    temp_c=value,
+                    metar_type="METAR",
+                    raw=str(raw_report or ""),
+                ))
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
         with self._lock:
+            self._cached_reports = _merge_report_windows(self._cached_reports, reports)
             self._ledgered_report_keys.update(keys)
             for key in keys:
                 self._pending_ledger_reports.pop(key, None)
@@ -2893,11 +2938,17 @@ class Day0FastObsEmitter:
                     _report_observation_key(report): report
                     for report in self._cached_reports
                 }
-                base = (
-                    []
-                    if history_loaded and not self._full_window_loaded
-                    else self._cached_reports
-                )
+                base = self._cached_reports
+                if history_loaded and not self._full_window_loaded:
+                    # Recovery can correct an already represented observation,
+                    # but omission from its window cannot erase an earlier one.
+                    recovered_instants = {
+                        (report.station_id, report.obs_time) for report in reports
+                    }
+                    base = [
+                        report for report in base
+                        if (report.station_id, report.obs_time) not in recovered_instants
+                    ]
                 base_set = set(base)
                 merged = (
                     list(base)
