@@ -1247,6 +1247,15 @@ def _seed_already_covered(
         ).fetchone()
         if posterior is None:
             return False
+        if str(seed.get("upgrade_trigger") or "").strip() == "held_belief_computed_age_expired":
+            required_computed_at = _parse_utc_iso(seed.get("computed_at"))
+            posterior_computed_at = _parse_utc_iso(posterior["computed_at"])
+            if (
+                required_computed_at is None
+                or posterior_computed_at is None
+                or posterior_computed_at < required_computed_at
+            ):
+                return False
         if replacement_live_input_lag_reason(
             conn,
             city=city,

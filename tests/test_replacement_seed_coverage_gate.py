@@ -1,5 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-12
+# Last reused or audited: 2026-09-15
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -29,6 +30,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -1012,3 +1015,26 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
     )
     assert payload_queries
     assert all("SOURCE_CYCLE_TIME <=" in statement for statement in payload_queries)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("posterior_time, expected", [
+    ("2026-06-06T01:30:00+00:00", False),
+    ("2026-06-06T02:00:00+00:00", True),
+    ("2026-06-06T02:30:00+00:00", True),
+])
+def test_recompute_seed_requires_posterior_at_or_after_requested_clock(
+    tmp_path, metric, posterior_time, expected,
+):
+    db_path = _db(tmp_path)
+    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
+    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE forecast_posteriors SET computed_at=?, temperature_metric=?",
+                     (posterior_time, metric))
+        conn.execute("UPDATE readiness_state SET provenance_json=json_set(provenance_json, '$.temperature_metric', ?)",
+                     (metric,))
+    seed = {**_seed(), "temperature_metric": metric}
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+    seed["upgrade_trigger"] = "held_belief_computed_age_expired"
+    assert _seed_already_covered(forecast_db=db_path, seed=seed) is expected

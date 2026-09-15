@@ -1287,7 +1287,7 @@ def _enqueue_decision(
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
-                identity=None,
+                identity=recorded_identity,
                 queue_lock_wait_seconds=owner_lock_wait_seconds,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
@@ -1313,14 +1313,17 @@ def _enqueue_decision(
             minimum_computed_at=minimum_posterior_computed_at,
         ):
             return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
-        _delete_missing_owned_cycle_advance_marker(
+        if not _delete_missing_owned_cycle_advance_marker(
             conn,
             city=city,
             target_date=target_date,
             metric=metric,
             target_cycle_iso=target_cycle_iso,
             seed_file=seed_file,
-        )
+            identity=recorded_identity,
+            exact_identity=True,
+        ):
+            return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         return _CycleAdvanceEnqueueDecision.ADMIT
     # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held (money-at-risk) marker whose seed
     # was built then processed/moved out of the live queue but produced NO posterior — the

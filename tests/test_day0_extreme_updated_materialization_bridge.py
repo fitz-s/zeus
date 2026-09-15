@@ -4553,8 +4553,10 @@ def test_cycle_poll_keeps_later_claimed_owner_past_batch_timeout_until_terminal(
     assert Path(marker["seed_file"]).is_file()
 
 
+@pytest.mark.parametrize("repair_kind", ["observation", "computed_age"])
+@pytest.mark.parametrize("owner_location", ["pending", "inflight"])
 def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, repair_kind, owner_location
 ) -> None:
     """A newer observation cannot invalidate the request currently materializing."""
     db_path = _prepare_forecast_db(tmp_path)
@@ -4576,6 +4578,8 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
             "day0_observed_extreme_unit",
         )
     }
+    if repair_kind == "computed_age":
+        new_conditioning = {"minimum_posterior_computed_at": datetime(2026, 7, 19, 5, 5, tzinfo=UTC)}
     owned_seed = Path(cfg["seed_dir"]) / "old-revision.enqueue-owner.json"
     old_identity = cycle_advance._day0_conditioning_identity(
         source=old_payload["day0_observed_extreme_source"],
@@ -4605,7 +4609,10 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     )
     conn.commit()
 
-    claim_dir = Path(cfg["inflight_dir"]) / "claimed-old-revision"
+    claim_dir = (
+        Path(cfg["request_dir"]) if owner_location == "pending"
+        else Path(cfg["inflight_dir"]) / "claimed-old-revision"
+    )
     claim_dir.mkdir(parents=True)
     claimed_request = claim_dir / owned_seed.name
     claimed_request.write_text(
@@ -4632,7 +4639,12 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
         target_cycle_iso=cycle,
         **new_conditioning,
     )
-    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
+    expected = (
+        cycle_advance._CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+        if repair_kind == "computed_age"
+        else cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
+    )
+    assert decision is expected
     marker = conn.execute(
         "SELECT seed_file, day0_conditioning_identity_json "
         "FROM cycle_advance_enqueues"
@@ -4640,7 +4652,35 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     assert marker["seed_file"] == str(owned_seed)
     assert marker["day0_conditioning_identity_json"] == old_identity
 
+    from src.data.replacement_forecast_materializer import _day0_enqueue_owner_witness_is_current
+
+    witness = json.loads(claimed_request.read_text())["day0_enqueue_owner_witness"]
+    request = SimpleNamespace(
+        day0_enqueue_owner_witness=SimpleNamespace(**witness),
+        city="Shanghai", target_date="2026-07-19",
+        source_cycle_time=datetime.fromisoformat(cycle), **old_payload,
+    )
+    assert _day0_enqueue_owner_witness_is_current(conn, request, metric="high")
+
+    if repair_kind == "computed_age":
+        claimed_request.write_text("invalid json", encoding="utf-8")
+        assert cycle_advance._enqueue_decision(
+            conn, city="Shanghai", target_date="2026-07-19", metric="high",
+            target_cycle_iso=cycle, **new_conditioning,
+        ) is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
+        assert _day0_enqueue_owner_witness_is_current(conn, request, metric="high")
+
     claimed_request.unlink()
+    if repair_kind == "computed_age":
+        delete_owner = cycle_advance._delete_missing_owned_cycle_advance_marker
+        with monkeypatch.context() as patch:
+            patch.setattr(cycle_advance, "_delete_missing_owned_cycle_advance_marker", lambda *_args, **_kwargs: False)
+            assert cycle_advance._enqueue_decision(
+                conn, city="Shanghai", target_date="2026-07-19", metric="high",
+                target_cycle_iso=cycle, **new_conditioning,
+            ) is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
+        assert cycle_advance._delete_missing_owned_cycle_advance_marker is delete_owner
+        assert _day0_enqueue_owner_witness_is_current(conn, request, metric="high")
     assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
@@ -4718,8 +4758,9 @@ def test_held_day0_owner_verification_waits_for_queue_window(
     conn.close()
 
 
+@pytest.mark.parametrize("repair_kind", ["observation", "computed_age"])
 def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, repair_kind
 ) -> None:
     """A witnessless legacy request retains its exact seed owner until terminal."""
     db_path = _prepare_forecast_db(tmp_path)
@@ -4778,6 +4819,8 @@ def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
             "day0_observed_extreme_unit",
         )
     }
+    if repair_kind == "computed_age":
+        new_conditioning = {"minimum_posterior_computed_at": datetime(2026, 7, 19, 5, 5, tzinfo=UTC)}
     owner_check = cycle_advance._day0_enqueue_owner_request_check(
         city="Shanghai",
         target_date="2026-07-19",
