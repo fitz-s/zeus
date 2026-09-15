@@ -17021,6 +17021,7 @@ def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities)
         capture_batches=[],
         metadata_by_family={},
         gamma_fails=False,
+        gamma_probabilities={},
     )
     prebook_binds = {"current_metadata", "current_metadata_fallback"}
 
@@ -17031,6 +17032,10 @@ def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities)
         metadata_sink=None,
         **_,
     ):
+        probability_witnesses = {
+            family: record.gamma_probabilities.get(family, witness)
+            for family, witness in probability_witnesses.items()
+        }
         condition_ids = tuple(
             binding.condition_id
             for witness in probability_witnesses.values()
@@ -17194,6 +17199,89 @@ def test_expired_topology_reuse_fetches_gamma_only_for_the_new_family(
             assert binding.no_token_id == f"no-{family_key}"
             assert h.condition_of(city) not in h.prebook_batches[0]
         assert {row[0] for row in epoch.asset_states} == set(h.batch)
+
+
+def _remove_new_family_token_hint(harness, side):
+    family = harness.family_of("Austin")
+    current = harness.batch[family]
+    harness.gamma_probabilities[family] = current
+    harness.batch[family] = SimpleNamespace(
+        **{
+            **vars(current),
+            "bindings": (SimpleNamespace(
+                **{**vars(current.bindings[0]), f"{side}_token_id": ""},
+            ),),
+        },
+    )
+    return family
+
+
+@pytest.mark.parametrize("missing_side", ("yes", "no"))
+@pytest.mark.parametrize("changed", (None, "condition", "token", "invalidated"))
+def test_partial_topology_reuses_only_unchanged_family_identities(
+    monkeypatch, missing_side, changed,
+):
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami", "Phoenix"),
+        batch_cities=("Dallas", "Miami", "Phoenix", "Austin"),
+    ) as h:
+        austin = _remove_new_family_token_hint(h, missing_side)
+        dallas = h.family_of("Dallas")
+        expected = {h.condition_of("Austin")}
+        if changed in {"condition", "token"}:
+            binding = h.batch[dallas].bindings[0]
+            field = "condition_id" if changed == "condition" else "yes_token_id"
+            setattr(binding, field, getattr(binding, field) + "-changed")
+            expected.add(binding.condition_id)
+        elif changed == "invalidated":
+            monkeypatch.setattr(
+                era, "_global_book_metadata_refresh_family_keys",
+                lambda *_args, **_kwargs: frozenset({dallas}),
+            )
+            expected.add(h.condition_of("Dallas"))
+        assert era._global_book_topology_signature(h.batch) is None
+        bound, epoch = h.provider(h.batch, h.clock.current)
+        assert len(h.prebook_batches) == 1
+        assert set(h.prebook_batches[0]) == expected
+        assert set(bound) == set(h.batch)
+        assert bound[austin] is h.gamma_probabilities[austin]
+        for city in ("Miami", "Phoenix"):
+            family = h.family_of(city)
+            assert bound[family] is h.batch[family]
+            assert bound[family].witness_identity.endswith("-current")
+            assert bound[family].bindings[0].no_token_id == f"no-{family}"
+        assert epoch.captured_at_utc == h.clock.current
+        assert {row[0] for row in epoch.asset_states} == set(h.batch)
+
+
+@pytest.mark.parametrize("cache_state", ("missing", "foreign_namespace", "gamma_failure"))
+def test_partial_topology_preserves_cache_and_gamma_authority(monkeypatch, cache_state):
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami"),
+        batch_cities=("Dallas", "Miami", "Austin"),
+    ) as h:
+        _remove_new_family_token_hint(h, "no")
+        if cache_state == "gamma_failure":
+            h.gamma_fails = True
+            with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"):
+                h.provider(h.batch, h.clock.current)
+            assert h.prebook_batches == [(h.condition_of("Austin"),)]
+            return
+        if cache_state == "missing":
+            monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+        else:
+            monkeypatch.setattr(
+                era, "_GLOBAL_BOOK_EPOCH_CACHE",
+                replace(era._GLOBAL_BOOK_EPOCH_CACHE, namespace="foreign"),
+            )
+        bound, epoch = h.provider(h.batch, h.clock.current)
+        assert len(h.prebook_batches) == 1
+        assert set(h.prebook_batches[0]) == {
+            h.condition_of(city) for city in ("Dallas", "Miami", "Austin")
+        }
+        assert set(bound) == {row[0] for row in epoch.asset_states} == set(h.batch)
 
 
 def test_expired_topology_reuse_drops_a_removed_family_without_fetching_it(

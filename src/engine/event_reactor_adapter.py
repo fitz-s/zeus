@@ -10625,12 +10625,15 @@ def event_bound_live_adapter_from_trade_conn(
                 and cached_before_bind is None
                 and superset_bound_probabilities is None
                 and (
-                    cache_before_reason.startswith("topology_changed")
+                    cache_before_reason == "topology_unavailable"
+                    or cache_before_reason.startswith("topology_changed")
                     or cache_before_reason.startswith(
                         "reduce_only_seed_expanded"
                     )
                 )
             ):
+                # Missing token hints also prevent a complete topology probe;
+                # per-family reuse below still proves each retained identity.
                 # A family that appeared, disappeared, or rolled moves the
                 # universe-wide topology signature, so the epoch probe reports
                 # topology_changed and today's code rebinds EVERY family through
