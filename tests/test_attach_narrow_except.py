@@ -1,6 +1,6 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-21
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Last reused or audited: 2026-09-15
+# Lifecycle: created=2026-05-05; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Guard narrow ATTACH exception handling in trade/world connection helpers.
 # Reuse: Run when connection helper signatures or ATTACH behavior changes.
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/phase.json; K1 typed connection API accepts write_class.
@@ -194,3 +194,66 @@ def test_db_py_attach_non_oe_propagates(exc_class, monkeypatch):
 
     with pytest.raises(exc_class):
         db_module.get_trade_connection_with_world()
+
+
+@pytest.mark.parametrize("timeout_ms", [0, 2345])
+@pytest.mark.parametrize("already_attached", [(), ("world",), ("forecasts",)])
+def test_cycle_connection_preserves_default_wait_budget(
+    monkeypatch, tmp_path, timeout_ms, already_attached,
+):
+    """Adding either authority schema must not erase the factory's wait policy."""
+    world = tmp_path / "world.db"
+    forecasts = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(":memory:")
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+    for schema in already_attached:
+        conn.execute(f"ATTACH DATABASE ? AS {schema}", (str(tmp_path / f"{schema}.db"),))
+    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda *_args, **_kwargs: conn)
+    monkeypatch.setattr(cr_module, "ZEUS_WORLD_DB_PATH", world)
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts)
+    try:
+        assert cr_module.get_connection() is conn
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == timeout_ms
+        assert {row[1] for row in conn.execute("PRAGMA database_list")} == {
+            "main", "world", "forecasts",
+        }
+    finally:
+        conn.close()
+
+
+def test_cycle_connection_can_write_after_transient_contention(monkeypatch, tmp_path):
+    """A real competing writer can drain within the inherited connection budget."""
+    import threading
+
+    path = tmp_path / "trade.db"
+    blocker = sqlite3.connect(path, check_same_thread=False)
+    blocker.execute("PRAGMA journal_mode = WAL")
+    blocker.execute("CREATE TABLE decision (value INTEGER)")
+    blocker.commit()
+    conn = sqlite3.connect(path, timeout=2.0)
+    monkeypatch.setattr(cr_module, "connect_or_degrade", lambda *_args, **_kwargs: conn)
+    monkeypatch.setattr(cr_module, "ZEUS_WORLD_DB_PATH", tmp_path / "world.db")
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", tmp_path / "forecasts.db")
+    writing = threading.Event()
+
+    def release_writer():
+        if writing.wait(2.0):
+            # Keep the competing write alive until after the INSERT is issued.
+            threading.Event().wait(0.05)
+        blocker.rollback()
+
+    worker = threading.Thread(target=release_writer)
+    try:
+        assert cr_module.get_connection() is conn
+        blocker.execute("BEGIN IMMEDIATE")
+        conn.set_trace_callback(lambda sql: writing.set() if sql.startswith("INSERT") else None)
+        worker.start()
+        conn.execute("INSERT INTO decision VALUES (1)")
+        conn.commit()
+        assert conn.execute("SELECT value FROM decision").fetchall() == [(1,)]
+    finally:
+        writing.set()
+        if worker.ident is not None:
+            worker.join(3.0)
+        conn.close()
+        blocker.close()

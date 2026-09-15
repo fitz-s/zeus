@@ -116,13 +116,15 @@ def get_connection(*, deadline_monotonic: float | None = None):
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
             remaining_ms = _remaining_deadline_ms()
-            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            if remaining_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
         # K1 (2026-05-11): ATTACH forecasts DB so evaluator cross-DB joins work.
         if "forecasts" not in attached:
             from src.state.db import ZEUS_FORECASTS_DB_PATH
             remaining_ms = _remaining_deadline_ms()
-            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            if remaining_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
         _remaining_deadline_ms()
     except TimeoutError:
