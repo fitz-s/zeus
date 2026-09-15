@@ -1819,13 +1819,15 @@ def fetch_current_gamma_markets(
     total_timeout: float | None = None,
     chunk_size: int = 100,
     max_workers: int = 16,
+    work_context: WorkContext | None = None,
 ) -> tuple[tuple[Mapping[str, object], ...], int]:
     """Fetch one complete current Gamma market batch or fail closed."""
 
     from concurrent.futures import (
+        FIRST_COMPLETED,
         ThreadPoolExecutor,
         TimeoutError as FuturesTimeoutError,
-        as_completed,
+        wait,
     )
 
     conditions = tuple(
@@ -1851,12 +1853,17 @@ def fetch_current_gamma_markets(
         raise ValueError("GLOBAL_CURRENT_GAMMA_MARKETS_TIMEOUT_INVALID")
 
     def remaining_timeout() -> float:
+        request_timeout = (
+            float(timeout)
+            if work_context is None
+            else work_context.clipped_timeout(timeout, stage="gamma_fetch:request_start")
+        )
         if deadline is None:
-            return float(timeout)
+            return request_timeout
         remaining = deadline - _time.monotonic()
         if remaining <= 0.0:
             raise ValueError("GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED")
-        return min(float(timeout), remaining)
+        return min(request_timeout, remaining)
 
     def _fetch(chunk: Sequence[str]) -> tuple[Mapping[str, object], ...]:
         response = gamma_get(
@@ -1876,7 +1883,7 @@ def fetch_current_gamma_markets(
             raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
         return tuple(payload)
 
-    if len(chunks) == 1 and deadline is None:
+    if len(chunks) == 1 and deadline is None and work_context is None:
         return _fetch(chunks[0]), 1
     markets: list[Mapping[str, object]] = []
     workers = max(1, min(int(max_workers), len(chunks)))
@@ -1887,13 +1894,24 @@ def fetch_current_gamma_markets(
     futures = ()
     try:
         futures = tuple(pool.submit(_fetch, chunk) for chunk in chunks)
-        completion_timeout = (
-            max(0.0, deadline - _time.monotonic())
-            if deadline is not None
-            else None
-        )
-        for future in as_completed(futures, timeout=completion_timeout):
-            markets.extend(future.result())
+        pending = set(futures)
+        while pending:
+            wait_timeout = deadline - _time.monotonic() if deadline is not None else None
+            if wait_timeout is not None and wait_timeout <= 0.0:
+                raise FuturesTimeoutError()
+            if work_context is not None:
+                wait_timeout = min(
+                    0.025,
+                    work_context.checkpoint("gamma_fetch:before_wait"),
+                    wait_timeout if wait_timeout is not None else float("inf"),
+                )
+            done, pending = wait(
+                pending, timeout=wait_timeout, return_when=FIRST_COMPLETED,
+            )
+            for future in done:
+                if work_context is not None:
+                    work_context.checkpoint("gamma_fetch:before_completion")
+                markets.extend(future.result())
     except FuturesTimeoutError as exc:
         raise ValueError(
             "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"

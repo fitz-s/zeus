@@ -4664,13 +4664,14 @@ def test_current_gamma_market_fetch_returns_before_late_workers_at_total_deadlin
         SimpleNamespace(monotonic=lambda: clock[0]),
     )
 
-    def controlled_as_completed(_futures, *, timeout):
-        assert timeout == pytest.approx(1.0)
+    def controlled_wait(_futures, *, timeout, return_when):
+        assert timeout == pytest.approx(0.025)
+        assert return_when is concurrent.futures.FIRST_COMPLETED
         completion_wait_entered.set()
         assert deadline_triggered.wait(2.0)
-        raise concurrent.futures.TimeoutError
+        return set(), set(_futures)
 
-    monkeypatch.setattr(concurrent.futures, "as_completed", controlled_as_completed)
+    monkeypatch.setattr(concurrent.futures, "wait", controlled_wait)
 
     def slow_gamma_get(_path, *, params, timeout):
         assert timeout == pytest.approx(1.0)
@@ -4704,6 +4705,10 @@ def test_current_gamma_market_fetch_returns_before_late_workers_at_total_deadlin
                 timeout=4.0,
                 total_timeout=1.0,
                 max_workers=2,
+                work_context=universe.WorkContext(
+                    deadline_monotonic=1.0,
+                    monotonic=lambda: clock[0],
+                ),
             )
         except BaseException as exc:  # noqa: BLE001 - thread result assertion below
             outcome.append(exc)
@@ -16920,7 +16925,13 @@ def test_global_book_token_reuse_for_batch_missing_family_raises_keyerror():
 
 
 @contextmanager
-def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities):
+def _expired_topology_reuse_harness(
+    monkeypatch,
+    *,
+    cached_cities,
+    batch_cities,
+    gamma_condition_ids=(),
+):
     """Drive the real book-epoch provider through an expired-price cache miss.
 
     The cached epoch is stored with a 1s max_age and then advanced past it, so
@@ -17022,6 +17033,7 @@ def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities)
         metadata_by_family={},
         gamma_fails=False,
         gamma_probabilities={},
+        gamma_condition_ids=tuple(gamma_condition_ids),
     )
     prebook_binds = {"current_metadata", "current_metadata_fallback"}
 
@@ -17030,8 +17042,10 @@ def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities)
         *,
         probability_witnesses,
         metadata_sink=None,
-        **_,
+        **kwargs,
     ):
+        if record.gamma_condition_ids:
+            kwargs["get_gamma_markets"](record.gamma_condition_ids)
         probability_witnesses = {
             family: record.gamma_probabilities.get(family, witness)
             for family, witness in probability_witnesses.items()
@@ -17172,6 +17186,159 @@ def _expired_topology_reuse_harness(monkeypatch, *, cached_cities, batch_cities)
         forecast.close()
         topology.close()
         world.close()
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected_total_timeout"),
+    ((42.0, 42.0), (0.5, 0.5), (None, None)),
+    ids=("bounded_cut", "near_deadline", "unbounded"),
+)
+def test_adapter_gamma_batch_budget_uses_cut_not_request_cap(
+    monkeypatch, remaining, expected_total_timeout
+):
+    """Nested adapter Gamma callback receives the full cut budget, not 6s."""
+    condition_ids = tuple(f"condition-{index}" for index in range(2800))
+    calls = []
+
+    def fake_gamma_fetch(condition_ids, *, timeout, total_timeout, **kwargs):
+        calls.append(
+            {
+                "condition_count": len(condition_ids),
+                "timeout": timeout,
+                "total_timeout": total_timeout,
+                "work_context": kwargs.get("work_context"),
+            }
+        )
+        return tuple({"conditionId": condition_id} for condition_id in condition_ids), 28
+
+    monkeypatch.setattr(universe, "fetch_current_gamma_markets", fake_gamma_fetch)
+    with _expired_topology_reuse_harness(
+        monkeypatch,
+        cached_cities=("Dallas", "Miami", "Phoenix"),
+        batch_cities=("Dallas", "Miami", "Phoenix", "Austin"),
+        gamma_condition_ids=condition_ids,
+    ) as harness:
+        context = universe.WorkContext(
+            deadline_monotonic=remaining,
+            monotonic=lambda: 0.0,
+        )
+        bound, epoch = harness.provider(
+            harness.batch,
+            harness.clock.current,
+            context,
+        )
+
+    assert set(bound) == set(harness.batch)
+    assert epoch is not None
+    assert calls
+    assert all(call["condition_count"] == 2800 for call in calls)
+    assert all(call["work_context"] is context for call in calls)
+    assert all(call["timeout"] == pytest.approx(6.0) for call in calls)
+    if expected_total_timeout is None:
+        assert all(call["total_timeout"] is None for call in calls)
+    else:
+        assert all(
+            call["total_timeout"] == pytest.approx(expected_total_timeout)
+            for call in calls
+        )
+
+
+def test_gamma_market_fetch_28_chunks_runs_two_waves_under_request_cap():
+    """Each request stays under 1s while 28 chunks take two 16-worker waves."""
+    condition_ids = tuple(f"condition-{index}" for index in range(2800))
+    spans = []
+    lock = threading.Lock()
+
+    def gamma_get(path, *, params, timeout):
+        assert path == "/markets"
+        assert 0.0 < timeout <= 1.0
+        started = time.monotonic()
+        time.sleep(0.65)
+        finished = time.monotonic()
+        with lock:
+            spans.append((started, finished, tuple(params["condition_ids"])))
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {"conditionId": condition_id}
+                for condition_id in params["condition_ids"]
+            ],
+        )
+
+    markets, request_count = universe.fetch_current_gamma_markets(
+        condition_ids,
+        gamma_get=gamma_get,
+        timeout=1.0,
+        total_timeout=3.0,
+        chunk_size=100,
+        max_workers=16,
+    )
+
+    assert request_count == 28
+    assert len(markets) == 2800
+    assert len(spans) == 28
+    assert max(finished for _started, finished, _chunk in spans) - min(
+        started for started, _finished, _chunk in spans
+    ) >= 1.10
+    assert all(len(chunk) == 100 for _started, _finished, chunk in spans)
+
+
+@pytest.mark.parametrize("condition_count,worker_count", [(100, 1), (300, 1), (200, 2)])
+def test_gamma_market_fetch_cancel_preempts_without_waiting_for_workers(
+    condition_count, worker_count
+):
+    """A cancelled work context returns promptly while blocked workers unwind."""
+    cancel = [False]
+    started = threading.Event()
+    release = threading.Event()
+    outcome = []
+    started_chunks = []
+
+    def gamma_get(_path, *, params, timeout):
+        assert timeout == pytest.approx(1.0)
+        started_chunks.append(tuple(params["condition_ids"]))
+        started.set()
+        assert release.wait(2.0)
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {"conditionId": condition_id}
+                for condition_id in params["condition_ids"]
+            ],
+        )
+
+    context = universe.WorkContext(
+        deadline_monotonic=None,
+        cancel_requested=lambda: cancel[0],
+    )
+
+    def invoke():
+        try:
+            universe.fetch_current_gamma_markets(
+                tuple(f"condition-{index}" for index in range(condition_count)),
+                gamma_get=gamma_get,
+                timeout=1.0,
+                chunk_size=100,
+                max_workers=worker_count,
+                work_context=context,
+            )
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            outcome.append(exc)
+
+    caller = threading.Thread(target=invoke, daemon=True)
+    caller.start()
+    try:
+        assert started.wait(2.0)
+        cancel[0] = True
+        caller.join(1.0)
+        assert not caller.is_alive()
+        assert len(started_chunks) <= worker_count
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], universe.WorkDeferred)
+        assert outcome[0].code is universe.WorkDeferredCode.PREEMPTED
+    finally:
+        release.set()
+        caller.join(2.0)
 
 
 def test_expired_topology_reuse_fetches_gamma_only_for_the_new_family(

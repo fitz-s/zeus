@@ -9997,11 +9997,13 @@ def event_bound_live_adapter_from_trade_conn(
                     def _gamma_markets(condition_ids):
                         nonlocal gamma_batch_requests
                         try:
+                            batch_budget = work_context.checkpoint("book_metadata:gamma_batch")
                             markets, batch_requests = fetch_current_gamma_markets(
                                 condition_ids,
                                 gamma_get=_gamma_get_once,
                                 timeout=gamma_timeout,
-                                total_timeout=_remaining_gamma_timeout(),
+                                total_timeout=(batch_budget if math.isfinite(batch_budget) else None),
+                                work_context=work_context,
                             )
                         except ValueError as exc:
                             if (
