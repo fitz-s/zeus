@@ -2632,10 +2632,17 @@ def enqueue_single_family_cycle_advance_reseed(
                 newer_ensemble_cycle.isoformat(),
             )
             return report
-        # Day0 observation time is an independent source clock. A newer global
-        # forecast cycle carried by another family must not divert this family
-        # around the monotone observation-time re-materialization path below.
-        if not verdict["needs_advance"] or has_day0_evidence:
+        # Observation and required computation clocks are family-local. Another
+        # family's newer cycle cannot suppress same-cycle recomputation here.
+        if (
+            not verdict["needs_advance"]
+            or has_day0_evidence
+            or (
+                minimum_posterior_computed_at is not None
+                and verdict.get("consumed_cycle") is not None
+                and family_cycle <= consumed_cycle_dt(consumed_cycle_iso)
+            )
+        ):
             if verdict.get("consumed_cycle") is not None:
                 if has_day0_evidence:
                     if (

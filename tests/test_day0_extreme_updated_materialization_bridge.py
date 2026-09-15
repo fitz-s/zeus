@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-09-05
-# Lifecycle: created=2026-07-19; last_reviewed=2026-09-05; last_reused=2026-09-05
+# Last reused/audited: 2026-09-15
+# Lifecycle: created=2026-07-19; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -35,10 +35,12 @@ import sqlite3
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Mapping
+
+import pytest
 
 import src.data.replacement_cycle_advance_trigger as cycle_advance
 import src.data.replacement_forecast_live_materialization_queue as materialization_queue
@@ -516,8 +518,10 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
     assert row_after["seed_file"] == first_seed_file
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("other_family_advanced", [False, True])
 def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, metric, other_family_advanced
 ) -> None:
     """T-successor.md: an ENTRY family's genuine PAYLOAD_MISMATCH must request
     exactly one rematerialization for its current cycle through the SAME
@@ -529,6 +533,8 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
     seed, matching every other reseed caller's idempotency."""
     db_path = _prepare_forecast_db(tmp_path)
     cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    if other_family_advanced:
+        cycle -= timedelta(hours=6)
     # A stale posterior already exists at the current family cycle (the state
     # a real PAYLOAD_MISMATCH implies: the last materializer write predates
     # this decision, so it doesn't yet reflect the short-cadence roll).
@@ -543,7 +549,7 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         """,
         (
             cycle_advance.SOURCE_ID, "test_product", "v1", "Shanghai",
-            "2026-07-19", "high", cycle.isoformat(),
+            "2026-07-19", metric, cycle.isoformat(),
             "2026-07-19T00:05:00+00:00", "2026-07-19T00:10:00+00:00",
             "{}", "test",
         ),
@@ -568,7 +574,7 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         raw_manifest_dir=cfg["raw_manifest_dir"],
         city="Shanghai",
         target_date="2026-07-19",
-        metric="high",
+        metric=metric,
         computed_at=decision_time,
         held_position=True,
         minimum_posterior_computed_at=decision_time,
@@ -585,7 +591,7 @@ def test_entry_payload_mismatch_reseed_enqueues_once_and_dedups_repeat_request(
         raw_manifest_dir=cfg["raw_manifest_dir"],
         city="Shanghai",
         target_date="2026-07-19",
-        metric="high",
+        metric=metric,
         computed_at=decision_time,
         held_position=True,
         minimum_posterior_computed_at=decision_time,

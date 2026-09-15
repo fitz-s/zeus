@@ -1,8 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-09-02 (causal baseline completion witness;
+# Last reused or audited: 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -2037,8 +2037,10 @@ def test_explicit_scopes_survive_invalid_timezone(tmp_path, monkeypatch) -> None
     assert report["seeds_enqueued"] == 1
 
 
+@pytest.mark.parametrize("family_cycle_lag_hours", [0, 6])
+@pytest.mark.parametrize("other_family_advanced", [False, True])
 def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, other_family_advanced, family_cycle_lag_hours
 ) -> None:
     """A held posterior's expired computation clock must not wait for a new source cycle."""
     db_path = tmp_path / "forecasts.db"
@@ -2049,7 +2051,7 @@ def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
     _insert_artifact(
         conn,
         source_id="openmeteo_ecmwf_ifs_9km",
-        cycle_iso=cycle.isoformat(),
+        cycle_iso=(cycle + timedelta(hours=6) if other_family_advanced else cycle).isoformat(),
     )
     _insert_posterior(
         conn,
@@ -2064,10 +2066,11 @@ def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
     monkeypatch.setattr(
         cycle_advance,
         "family_materializable_cycle",
-        lambda *args, **kwargs: (cycle, ()),
+        lambda *args, **kwargs: (cycle - timedelta(hours=family_cycle_lag_hours), ()),
     )
 
     def _fake_build_seed(_conn_arg, **kwargs):
+        assert family_cycle_lag_hours == 0, "older carrier must not build a seed"
         path = Path(kwargs["output_path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -2089,6 +2092,12 @@ def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
         held_position=True,
         minimum_posterior_computed_at=datetime(2026, 8, 12, 10, tzinfo=UTC),
     )
+
+    if family_cycle_lag_hours:
+        assert report["status"] == "SAME_CYCLE_RECOMPUTE_MANIFEST_MISSING"
+        assert report["enqueued"] is False
+        assert not (tmp_path / "seeds").exists()
+        return
 
     assert report["status"] == "SAME_CYCLE_RECOMPUTE_ENQUEUED"
     assert report["enqueued"] is True
@@ -2186,8 +2195,9 @@ def test_single_family_day0_does_not_enqueue_anchor_behind_eligible_ensemble(
     assert not (tmp_path / "seeds").exists()
 
 
+@pytest.mark.parametrize("other_family_advanced", [False, True])
 def test_single_family_monitor_does_not_recompute_fresh_same_cycle_posterior(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, other_family_advanced
 ) -> None:
     """A same-cycle posterior newer than the monitor cutoff remains completion proof."""
     db_path = tmp_path / "forecasts.db"
@@ -2198,7 +2208,7 @@ def test_single_family_monitor_does_not_recompute_fresh_same_cycle_posterior(
     _insert_artifact(
         conn,
         source_id="openmeteo_ecmwf_ifs_9km",
-        cycle_iso=cycle.isoformat(),
+        cycle_iso=(cycle + timedelta(hours=6) if other_family_advanced else cycle).isoformat(),
     )
     _insert_posterior(
         conn,
