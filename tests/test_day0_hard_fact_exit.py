@@ -2310,6 +2310,9 @@ class TestDay0ExposureCap:
 # R20 — hard-fact exit survives monitor canonical-write failure (PR#404 P0-4)
 # ===========================================================================
 
+from src.data.polymarket_client import HeldOrderbookReadResult, PolymarketClient
+
+
 def _production_monitor_topology(tmp_path, monkeypatch, position, *, phase):
     """The topology exit_lifecycle passes into execute_monitoring_phase: tmp
     trade+world+forecasts DBs, the write-capable conn, the held-monitor
@@ -2332,20 +2335,26 @@ def _production_monitor_topology(tmp_path, monkeypatch, position, *, phase):
     trade_path = tmp_path / "zeus_trades.db"
     world_path = tmp_path / "zeus-world.db"
     forecasts_path = tmp_path / "zeus-forecasts.db"
+    # Paths first: init_schema_forecasts ATTACHes ZEUS_WORLD_DB_PATH when it
+    # exists, so the local world DB must be the one it sees, built before it.
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_path)
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
     for path, init in (
-        (trade_path, init_schema_trade_only),
         (world_path, init_schema_world_only),
         (forecasts_path, init_schema_forecasts),
+        (trade_path, init_schema_trade_only),
     ):
         with sqlite3.connect(path) as bootstrap:
             init(bootstrap)
             bootstrap.commit()
-    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
-    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_path)
-    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
     conn = sqlite3.connect(trade_path)
     conn.row_factory = sqlite3.Row
-    entry_phase = "active" if phase == "pending_exit" else phase
+    # A pending_exit position is seeded at the phase it left (pre_exit_state),
+    # the way _mark_pending_exit records it before the exit organ's transition.
+    entry_phase = (
+        str(position.pre_exit_state or "active") if phase == "pending_exit" else phase
+    )
     events, projection = build_entry_canonical_write(
         position,
         phase_after=entry_phase,
@@ -2371,26 +2380,46 @@ def _production_monitor_topology(tmp_path, monkeypatch, position, *, phase):
     return conn, read_conn
 
 
-class _DeepBookClob:
-    """Executable sell book on every token: the held monitor derives its quote
-    and full-depth action authority from get_orderbook, not get_best_bid_ask."""
+class _DeepBookClob(PolymarketClient):
+    """Production-shaped venue client with an executable sell book on every
+    token. The held monitor's bounded prefetch takes the PolymarketClient
+    branch and receives a typed HeldOrderbookReadResult; the quote and its
+    full-depth action authority come from that book. No transport is built,
+    and any other venue read fails the test rather than reaching the network."""
 
     def __init__(self, bid, ask):
         self._bid, self._ask = bid, ask
 
-    def get_best_bid_ask(self, token_id):
-        return self._bid, self._ask, 100.0, 100.0
-
-    def get_orderbook(self, token_id):
+    def _book(self, token_id):
         return {
+            "asset_id": str(token_id),
             "bids": [{"price": f"{self._bid:.2f}", "size": "100"}],
             "asks": [{"price": f"{self._ask:.2f}", "size": "100"}],
         }
 
+    def get_orderbook(self, token_id):
+        return self._book(token_id)
+
+    def get_orderbook_snapshots(self, token_ids, *, timeout=None):
+        return {str(token_id): self._book(token_id) for token_id in token_ids}
+
     def get_held_orderbook_snapshots_hard_deadline(self, token_ids, *, timeout_seconds):
-        # Under a held-monitor deadline the quote refresh reads books only
-        # through the bounded reader (monitor_quote_refresh).
-        return {token_id: self.get_orderbook(token_id) for token_id in token_ids}
+        wanted = [str(token_id) for token_id in token_ids]
+        return HeldOrderbookReadResult(
+            {token_id: self._book(token_id) for token_id in wanted},
+            attempted_token_ids=wanted,
+            terminal_reason="complete",
+            captured_at=datetime.now(UTC),
+        )
+
+    def __getattribute__(self, name):
+        if name.startswith("get_") and name not in {
+            "get_orderbook",
+            "get_orderbook_snapshots",
+            "get_held_orderbook_snapshots_hard_deadline",
+        }:
+            raise AssertionError(f"venue read outside the held-book topology: {name}")
+        return super().__getattribute__(name)
 
 
 class TestHardFactExitDespiteCanonicalWriteFailure:
@@ -2806,6 +2835,8 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(tm
         shares=14.3,
         cost_basis_usd=10.0,
         state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-06-09T15:00:00Z",
         token_id="tok_no_pending",
         no_token_id="tok_no_pending",
         unit="C",
@@ -2936,7 +2967,10 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(tm
     assert summary.get("monitor_released_pending_exit_without_order") is None
     assert summary.get("monitor_pending_exit_phase_evaluated") is None
     assert summary.get("pending_exit_exit_signal_already_in_flight") is None
+    # The release restores the state the position left (pre_exit_state), not
+    # a fresh Day0 entry.
     assert pos.state == "day0_window"
+    assert pos.pre_exit_state == ""
     assert calls["refresh"] == 1
     assert summary["monitors"] == 1
     # A statistical monitor SELL is the global auction's decision, not a local
