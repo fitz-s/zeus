@@ -3176,11 +3176,13 @@ def test_reduce_only_deterministic_child_rehydrates_parent_then_revalidates(
         "_current_probability_use_for_global_candidate",
         lambda _candidate: era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
     )
-    monkeypatch.setattr(
-        era,
-        "_rebind_current_actuation_probability_tokens",
-        lambda witness, _selected: witness,
-    )
+    rebound_token_ids = []
+
+    def rebind(witness, _selected, *, required_token_id=None):
+        rebound_token_ids.append(required_token_id)
+        return witness
+
+    monkeypatch.setattr(era, "_rebind_current_actuation_probability_tokens", rebind)
     prepared_parent = {}
 
     def prepare(*_args, **kwargs):
@@ -3197,7 +3199,9 @@ def test_reduce_only_deterministic_child_rehydrates_parent_then_revalidates(
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
     actuation = SimpleNamespace(
         probability_witness=selected,
-        decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="condition-33")),
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(condition_id="condition-33", token_id="yes-33")
+        ),
     )
     event = SimpleNamespace(
         event_type="DAY0_EXTREME_UPDATED",
@@ -3224,6 +3228,7 @@ def test_reduce_only_deterministic_child_rehydrates_parent_then_revalidates(
         rebound, _payload = call()
         assert rebound.probability_witness is selected
     assert prepared_parent["bundle"] is parent_bundle
+    assert rebound_token_ids == ["yes-33"]
 
 
 def test_reduce_only_statistical_child_keeps_original_parent_identity_gate(
@@ -3262,11 +3267,13 @@ def test_reduce_only_statistical_child_keeps_original_parent_identity_gate(
         "_current_probability_use_for_global_candidate",
         lambda _candidate: era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
     )
-    monkeypatch.setattr(
-        era,
-        "_rebind_current_actuation_probability_tokens",
-        lambda witness, _selected: witness,
-    )
+    rebound_token_ids = []
+
+    def rebind(witness, _selected, *, required_token_id=None):
+        rebound_token_ids.append(required_token_id)
+        return witness
+
+    monkeypatch.setattr(era, "_rebind_current_actuation_probability_tokens", rebind)
     prepared_parent = {}
 
     def prepare(*_args, **kwargs):
@@ -3291,7 +3298,9 @@ def test_reduce_only_statistical_child_keeps_original_parent_identity_gate(
         ),
         global_actuation=SimpleNamespace(
             probability_witness=selected,
-            decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="condition-33")),
+            decision=SimpleNamespace(
+            candidate=SimpleNamespace(condition_id="condition-33", token_id="yes-33")
+        ),
         ),
         forecast_conn=sqlite3.connect(":memory:"),
         topology_conn=sqlite3.connect(":memory:"),
@@ -3301,6 +3310,7 @@ def test_reduce_only_statistical_child_keeps_original_parent_identity_gate(
 
     assert rebound.probability_witness is selected
     assert prepared_parent["bundle"] is parent_bundle
+    assert rebound_token_ids == ["yes-33"]
 
 
 def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(

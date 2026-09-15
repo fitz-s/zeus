@@ -501,7 +501,7 @@ class TestLoadReplacementBelief:
             conn,
             city="Shenzhen",
             station_id="ZGSZ",
-            source_channel="wu_icao_history",
+            source_channel="ogimet_metar_zgsz",
             publish_ts_utc="2026-08-09T08:00:00+00:00",
             value_native=37.0,
             unit="C",
@@ -511,7 +511,7 @@ class TestLoadReplacementBelief:
             conn,
             city="Shenzhen",
             station_id="ZGSZ",
-            source_channel="wu_icao_history",
+            source_channel="ogimet_metar_zgsz",
             publish_ts_utc="2026-08-09T08:00:00+00:00",
             value_native=36.0,
             unit="C",
@@ -1544,7 +1544,7 @@ class TestMonitorPrimaryAuthority:
                 best_ask=0.22,
                 bid_size=100.0,
                 ask_size=100.0,
-                diagnostic_market_price=0.21,
+                mark_price=0.21,
                 source_timestamp=NOW.isoformat(),
             ),
         )
@@ -1786,64 +1786,59 @@ class TestMonitorPrimaryAuthority:
         import src.engine.monitor_refresh as mr
 
         conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
         conn.execute(
             """
             CREATE TABLE observation_instants (
+                id INTEGER PRIMARY KEY,
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
                 source TEXT NOT NULL,
+                station_id TEXT NOT NULL,
+                temp_unit TEXT NOT NULL,
                 timezone_name TEXT NOT NULL,
                 utc_timestamp TEXT NOT NULL,
+                local_timestamp TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
                 temp_current REAL,
                 running_max REAL,
                 running_min REAL,
                 authority TEXT NOT NULL,
                 causality_status TEXT NOT NULL,
                 source_role TEXT NOT NULL,
-                training_allowed INTEGER NOT NULL
+                training_allowed INTEGER NOT NULL,
+                data_version TEXT NOT NULL,
+                provenance_json TEXT NOT NULL,
+                raw_response TEXT
             )
             """
         )
+        rows = []
+        for index, (utc, high, low) in enumerate(
+            (("00:00", 16.0, 14.0), ("01:00", 18.0, 13.0), ("02:00", 17.0, 13.5)),
+            1,
+        ):
+            rows.append(
+                (
+                    index, "Moscow", "2026-06-25", "ogimet_metar_uuww", "UUWW", "C",
+                    "Europe/Moscow", f"2026-06-25T{utc}:00+00:00",
+                    f"2026-06-25T{int(utc[:2])+3:02d}:00:00+03:00",
+                    f"2026-06-25T{int(utc[:2]):02d}:05:00+00:00", None, high, low,
+                    "VERIFIED", "OK", "historical_hourly", 1, "ogimet-v1",
+                    json.dumps({"latest_raw_ts": f"2026-06-25T{utc}:00+00:00"}),
+                    "raw-ogimet",
+                )
+            )
         conn.executemany(
-            """
-            INSERT INTO observation_instants (
-                city, target_date, source, timezone_name, utc_timestamp,
-                temp_current, running_max, running_min, authority,
-                causality_status, source_role, training_allowed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
-                    "Europe/Moscow", "2026-06-25T00:00:00+00:00",
-                    None, 16.0, 14.0, "VERIFIED", "OK", "runtime_monitoring", 0,
-                ),
-                (
-                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
-                    "Europe/Moscow", "2026-06-25T01:00:00+00:00",
-                    None, 18.0, 13.0, "VERIFIED", "OK", "runtime_monitoring", 0,
-                ),
-                (
-                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
-                    "Europe/Moscow", "2026-06-25T02:00:00+00:00",
-                    None, 17.0, 13.5, "VERIFIED", "OK", "runtime_monitoring", 0,
-                ),
-            ],
+            """INSERT INTO observation_instants VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
         )
         conn.commit()
-        monkeypatch.setattr(
-            "src.state.db.get_world_connection_read_only",
-            lambda: conn,
-        )
+        monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: conn)
         city = type(
-            "City",
-            (),
-            {
-                "name": "Moscow",
-                "timezone": "Europe/Moscow",
-                "settlement_unit": "C",
-                "settlement_source_type": "noaa",
-            },
+            "City", (), {"name": "Moscow", "timezone": "Europe/Moscow",
+            "settlement_unit": "C", "settlement_source_type": "noaa", "wu_station": "UUWW"},
         )()
 
         class FixedDateTime(datetime):
@@ -1853,24 +1848,19 @@ class TestMonitorPrimaryAuthority:
                 return fixed if tz is None else fixed.astimezone(tz)
 
         monkeypatch.setattr(mr, "datetime", FixedDateTime)
-
         obs = mr._fetch_day0_observation(city, date(2026, 6, 25))
 
         assert obs.source == "ogimet_metar_uuww"
         assert obs.high_so_far == pytest.approx(18.0)
         assert obs.low_so_far == pytest.approx(13.0)
-        assert obs.current_temp != obs.current_temp
+        assert obs.current_temp == pytest.approx(15.25)
         assert obs.observation_time == "2026-06-25T02:00:00+00:00"
-        assert obs.coverage_status == "LOW_COVERAGE"
+        assert obs.coverage_status == "GAP_SUSPECT"
         assert mr._day0_observation_source_rejection_reason(
-            city,
-            obs,
-            consumer_label="held-position monitor refresh",
+            city, obs, consumer_label="held-position monitor refresh"
         ) is None
         assert mr._day0_observation_quality_rejection_reason(
-            city,
-            obs,
-            MetricIdentity.from_raw("high"),
+            city, obs, MetricIdentity.from_raw("high"),
             decision_time=datetime(2026, 6, 25, 2, 10, tzinfo=timezone.utc),
             allow_incomplete_window_bound=True,
         ) is None
@@ -2205,10 +2195,12 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
             mr, "_refresh_ens_member_counting",
             lambda **kw: legacy_called.append("ens") or (0.5, []),
         )
-        monkeypatch.setattr(
-            mr, "_refresh_day0_observation",
-            lambda **kw: legacy_called.append("day0") or (0.5, []),
-        )
+        def fake_day0_refresh(**kwargs):
+            legacy_called.append("day0")
+            mr._set_monitor_probability_fresh(kwargs["position"], False)
+            return 0.5, []
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
         reseeds = []
         monkeypatch.setattr(
             mr, "_enqueue_single_family_belief_reseed_failsoft",
@@ -2217,13 +2209,16 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
 
         pos = self._edli_pos(trade_id="legacy-trade-78")  # NON-edli
         pos.entry_method = "day0_observation"  # routes _would_use_day0_lane True
-        mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
+        _, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None
+        )
 
         # The day0-exempt branch was taken: NOT suppressed and no legacy fault,
         # but the unavailable day0 authority triggers the BPF repair lane.
-        assert "legacy_belief_substitution_suppressed" not in pos.applied_validations
-        assert "BELIEF_AUTHORITY_FAULT" not in pos.applied_validations
-        assert "day0_observation_unavailable:replacement_belief_reseed" in pos.applied_validations
+        assert "legacy_belief_substitution_suppressed" not in refresh_pos.applied_validations
+        assert "BELIEF_AUTHORITY_FAULT" not in refresh_pos.applied_validations
+        assert is_fresh is False
+        assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
         assert reseeds == [
             {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
         ]
@@ -2408,15 +2403,42 @@ class TestLiveEnumDirectionIntegration:
     the loader fail-closed to 'replacement_posterior_missing'."""
 
     def test_enum_direction_position_gets_fresh_belief(self, forecasts_db, monkeypatch):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
         from src.state.portfolio import Position
 
-        _insert(forecasts_db, posterior_id="p-live",
-                computed_at=datetime.now(timezone.utc).isoformat(),
-                q={BIN: 0.242})
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW if tz is None else NOW.astimezone(tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
+        monkeypatch.setattr(pb, "datetime", FixedDateTime)
+        cycle = NOW - timedelta(minutes=5)
+        _insert(
+            forecasts_db,
+            posterior_id="p-live",
+            computed_at=cycle.isoformat(),
+            source_cycle_time=cycle.isoformat(),
+            shape_source_cycle_time=cycle,
+            q={BIN: 0.242},
+            q_lcb={BIN: 0.20},
+            q_ucb={BIN: 0.30},
+        )
+        _insert_raw(
+            forecasts_db,
+            source_cycle_time=cycle.isoformat(),
+            captured_at=cycle.isoformat(),
+            source_available_at=cycle.isoformat(),
+        )
+        _insert_raw_artifact(
+            forecasts_db,
+            source_cycle_time=cycle.isoformat(),
+            captured_at=cycle.isoformat(),
+            source_available_at=cycle.isoformat(),
+        )
         real_loader = pb.load_replacement_belief
         monkeypatch.setattr(
             pb, "load_replacement_belief",
