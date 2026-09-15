@@ -2341,6 +2341,43 @@ class TestBeliefDeadWatchdog:
         assert line[0].endswith("reasons=POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
         assert "belief_stale_cycles=3" in pos.applied_validations
 
+    def test_failed_refresh_cycle_does_not_carry_last_cycles_reasons(self, monkeypatch, caplog):
+        """A cycle whose refresh raised owns only its own tag; last cycle's
+        hydrated tags must not be reported as this cycle's reasons (R-BR)."""
+        import src.engine.monitor_refresh as mr
+
+        mr._belief_stale_cycles.clear()
+        pos = self._pos(trade_id="t-watchdog-carry")
+        pos.applied_validations = ["POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"]
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("refresh exploded")
+
+        monkeypatch.setattr(mr, "monitor_probability_refresh", _boom)
+        monkeypatch.setattr(
+            mr,
+            "monitor_quote_refresh",
+            lambda *_args, **_kwargs: mr.HeldTokenMonitorQuote(
+                token_id="held-token",
+                best_bid=0.20,
+                best_ask=0.22,
+                bid_size=100.0,
+                ask_size=100.0,
+                mark_price=0.21,
+                source_timestamp="2026-06-12T00:00:00+00:00",
+            ),
+        )
+        caplog.set_level("ERROR", logger=mr.__name__)
+        mr._belief_stale_cycles["t-watchdog-carry"] = 2
+        mr.refresh_position(None, object(), pos)
+        assert pos.applied_validations[:3] == [
+            "monitor_probability_refresh_failed", "belief_stale_cycles=3", "BELIEF_AUTHORITY_FAULT",
+        ]
+        assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" not in pos.applied_validations
+        line = [r.getMessage() for r in caplog.records if "BELIEF_AUTHORITY_FAULT" in r.getMessage()]
+        assert len(line) == 1
+        assert line[0].endswith("reasons=monitor_probability_refresh_failed")
+
     def test_fresh_belief_resets_counter(self):
         import src.engine.monitor_refresh as mr
 

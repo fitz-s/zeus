@@ -7738,7 +7738,10 @@ def refresh_position(
         pos.last_monitor_prob_is_fresh = False
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
-        _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+        # This cycle produced no refresh, so it owns no carried tags: the list
+        # hydrated from last cycle's monitor event must not read as this
+        # cycle's reasons (the success path replaces it wholesale above).
+        pos.applied_validations = ["monitor_probability_refresh_failed"]
     finally:
         release_hwm_snapshot()
 
