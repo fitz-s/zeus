@@ -22468,6 +22468,8 @@ def test_probability_incomplete_monitor_preserves_current_quote_axis():
     position.last_monitor_market_price_is_fresh = True
     position.last_monitor_best_bid = 0.48
     position.last_monitor_best_ask = 0.50
+    position.last_monitor_min_tick = 0.01
+    position.last_monitor_market_vig = 1.0
 
     cycle_runtime._revoke_monitor_action_authority(
         position,
@@ -22480,16 +22482,130 @@ def test_probability_incomplete_monitor_preserves_current_quote_axis():
     assert position.last_monitor_market_price == pytest.approx(0.49)
     assert position.last_monitor_best_bid == pytest.approx(0.48)
     assert position.last_monitor_best_ask == pytest.approx(0.50)
+    assert position.last_monitor_min_tick == pytest.approx(0.01)
+    assert position.last_monitor_market_vig == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("missing_field", ["current_ci", "exit_calibration"])
+def test_known_probability_authority_failure_preserves_current_quote(
+    direction, missing_field
+):
+    """Known probability gaps revoke q while preserving the same-cycle book."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id=f"revoke-known-prob-{direction}-{missing_field}",
+        direction=direction,
+    )
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.12
+    position.last_monitor_market_price = 0.49
+    position.last_monitor_market_price_is_fresh = True
+    position.last_monitor_best_bid = 0.48
+    position.last_monitor_best_ask = 0.50
+    position.last_monitor_min_tick = 0.01
+    position.last_monitor_market_vig = 1.0
+
+    cycle_runtime._revoke_monitor_action_authority(
+        position, missing_fields={missing_field},
+    )
+
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_edge is None
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_market_price == pytest.approx(0.49)
+    assert position.last_monitor_best_bid == pytest.approx(0.48)
+    assert position.last_monitor_best_ask == pytest.approx(0.50)
+    assert position.last_monitor_min_tick == pytest.approx(0.01)
+    assert position.last_monitor_market_vig == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("missing_field", ["current_ci", "exit_calibration"])
+def test_probability_revocation_does_not_promote_stale_quote_axis(
+    direction, missing_field
+):
+    """A probability-only revoke never turns an already-stale quote fresh."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id=f"revoke-stale-quote-{direction}-{missing_field}",
+        direction=direction,
+    )
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.12
+    position.last_monitor_market_price = 0.49
+    position.last_monitor_market_price_is_fresh = False
+    position.last_monitor_best_bid = 0.48
+    position.last_monitor_best_ask = 0.50
+    position.last_monitor_min_tick = 0.01
+    position.last_monitor_market_vig = 1.0
+
+    cycle_runtime._revoke_monitor_action_authority(
+        position, missing_fields={missing_field},
+    )
+
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_edge is None
+    assert position.last_monitor_market_price_is_fresh is False
+    assert position.last_monitor_market_price == pytest.approx(0.49)
+    assert position.last_monitor_best_bid == pytest.approx(0.48)
+    assert position.last_monitor_best_ask == pytest.approx(0.50)
+    assert position.last_monitor_min_tick == pytest.approx(0.01)
+    assert position.last_monitor_market_vig == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize(
+    "missing_fields",
+    [
+        {"current_ci", "current_market_price_is_fresh"},
+        {"unknown_field", "current_market_price_is_fresh"},
+        {"unknown_field"},
+        set(),
+        None,
+    ],
+    ids=["mixed", "mixed_unknown", "unknown", "empty", "none"],
+)
+def test_mixed_or_untyped_monitor_failure_revokes_both_axes(
+    direction, missing_fields
+):
+    """Mixed, unknown, empty, and absent inputs clear every quote witness."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id=f"revoke-both-{direction}-{missing_fields}",
+        direction=direction,
+    )
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.12
+    position.last_monitor_market_price = 0.49
+    position.last_monitor_market_price_is_fresh = True
+    position.last_monitor_best_bid = 0.48
+    position.last_monitor_best_ask = 0.50
+    position.last_monitor_min_tick = 0.01
+    position.last_monitor_market_vig = 1.0
+
+    cycle_runtime._revoke_monitor_action_authority(
+        position, missing_fields=missing_fields,
+    )
+
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_edge is None
+    assert position.last_monitor_market_price_is_fresh is False
+    assert position.last_monitor_market_price is None
+    assert position.last_monitor_best_bid is None
+    assert position.last_monitor_best_ask is None
+    assert position.last_monitor_min_tick is None
+    assert position.last_monitor_market_vig is None
 
 
 def test_revoke_monitor_action_authority_unrecognized_field_revokes_both():
-    """(d) A missing field this revocation law has no typed axis for (a
-    degraded current-belief CI, or any other name it does not recognise) must
-    fail closed on BOTH freshness axes rather than pass through untouched —
-    a blind exit organ must not keep reporting itself fresh."""
+    """An unknown field must fail closed on BOTH freshness axes."""
     from src.engine import cycle_runtime
 
-    for unrecognized in ({"current_ci"}, {"unknown_field"}):
+    for unrecognized in ({"unknown_field"},):
         position = _make_position(trade_id=f"revoke-unrecognized-{unrecognized}")
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = 0.12

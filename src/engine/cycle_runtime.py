@@ -3937,7 +3937,9 @@ def _record_monitor_hold_decision(
     return canonical_written
 
 
-_REVOCATION_PROB_FIELDS = frozenset({"fresh_prob", "fresh_prob_is_fresh"})
+_REVOCATION_PROB_FIELDS = frozenset(
+    {"fresh_prob", "fresh_prob_is_fresh", "current_ci", "exit_calibration"}
+)
 _REVOCATION_PRICE_FIELDS = frozenset(
     {"current_market_price", "current_market_price_is_fresh", "best_bid"}
 )
@@ -3950,13 +3952,11 @@ def _revoke_monitor_action_authority(
 ) -> None:
     """Revoke only the evidence axes an incomplete monitor attempt did not prove.
 
-    A missing-field name this function does not recognise (e.g. current_ci or
-    exit_calibration) means the exit organ found a gap this revocation law has
-    no typed axis for. Silently revoking nothing would let the position keep
-    reporting itself fresh while blind to that gap, so any non-empty,
-    unrecognised missing set revokes BOTH freshness axes — the same fail-closed
-    behavior as the empty/None "revoke all" case — rather than passing through
-    untouched.
+    current_ci and exit_calibration are known probability-authority failures,
+    so they revoke only the probability axis and preserve an independently
+    proven current quote. Unrecognised missing-field names have no typed axis;
+    non-empty unrecognised sets, like empty/None "revoke all" input, revoke
+    BOTH axes rather than passing through untouched.
     """
 
     missing = None if missing_fields is None else set(missing_fields)
