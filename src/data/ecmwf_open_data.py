@@ -649,6 +649,151 @@ def _range_resume_manifest_path(target: Path) -> Path:
     return target.with_name(f"{target.name}.ranges.json")
 
 
+def _resume_source_namespace(source: str) -> str:
+    """Return a short, deterministic namespace for one configured source."""
+
+    return hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:16]
+
+
+def _source_partial_path(legacy_target: Path, *, kind: str, source: str) -> Path:
+    """Return the source-specific PF/CF partial path.
+
+    ``legacy_target`` is the pre-namespace ``*.grib2.partial`` path. Keeping
+    the source suffix before ``.partial`` leaves the canonical step filename
+    unchanged while preventing mirror rotation from sharing range sidecars.
+    """
+
+    if kind not in {"pf", "cf"}:
+        raise ValueError(f"Unknown ECMWF partial kind {kind!r}")
+    return legacy_target.with_name(
+        f"{legacy_target.stem}.{kind}.{_resume_source_namespace(source)}"
+        f"{legacy_target.suffix}"
+    )
+
+
+def _path_present(path: Path) -> bool:
+    """Treat broken symlinks as existing destinations during adoption."""
+
+    return path.exists() or path.is_symlink()
+
+
+def _url_is_under_source(url: object, source_base: object) -> bool:
+    """Return whether a persisted URL belongs to one exact source prefix."""
+
+    if not isinstance(url, str) or not url:
+        return False
+    base = str(source_base or "").strip().rstrip("/")
+    if not base:
+        return False
+    return url == base or url.startswith(f"{base}/")
+
+
+def _legacy_checkpoint_matches_source(target: Path, *, source_base: object) -> bool:
+    """Validate enough legacy metadata to move it without cross-source reuse."""
+
+    manifest = _range_resume_manifest_path(target)
+    if (
+        not target.is_file()
+        or target.is_symlink()
+        or not manifest.is_file()
+        or manifest.is_symlink()
+    ):
+        return False
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        ranges = payload.get("ranges")
+        entity_tags = payload.get("entity_tags")
+        completed = payload.get("completed_ranges")
+        completed_bytes = payload.get("completed_bytes")
+        if (
+            payload.get("version") != _RANGE_RESUME_VERSION
+            or not isinstance(ranges, list)
+            or not ranges
+            or not isinstance(entity_tags, dict)
+            or not isinstance(completed, int)
+            or completed < 0
+            or completed > len(ranges)
+            or not isinstance(completed_bytes, int)
+            or completed_bytes < 0
+            or target.stat().st_size < completed_bytes
+        ):
+            return False
+        for item in ranges:
+            if not isinstance(item, list) or len(item) != 3:
+                return False
+            if (
+                not _url_is_under_source(item[0], source_base)
+                or isinstance(item[1], bool)
+                or not isinstance(item[1], int)
+                or item[1] < 0
+                or isinstance(item[2], bool)
+                or not isinstance(item[2], int)
+                or item[2] <= 0
+            ):
+                return False
+        if any(
+            not _url_is_under_source(url, source_base)
+            or not _is_strong_etag(tag)
+            for url, tag in entity_tags.items()
+        ):
+            return False
+        expected_bytes = sum(item[2] for item in ranges[:completed])
+        expected_urls = {item[0] for item in ranges[:completed]}
+        if completed_bytes != expected_bytes or set(entity_tags) != expected_urls:
+            return False
+    except (OSError, TypeError, ValueError, AttributeError, json.JSONDecodeError, KeyError):
+        return False
+    return True
+
+
+def _adopt_legacy_checkpoint(
+    legacy_target: Path,
+    destination: Path,
+    *,
+    source_base: object,
+) -> bool:
+    """Move one proven legacy body+sidecar pair into a vacant source namespace.
+
+    Hardlinks followed by source unlink provide a same-directory, pair-safe
+    move: an interruption before both links exist leaves the legacy pair
+    intact, while a partially-created destination is never accepted without
+    the existing loader's full plan/ETag validation.
+    """
+
+    legacy_manifest = _range_resume_manifest_path(legacy_target)
+    destination_manifest = _range_resume_manifest_path(destination)
+    if _path_present(destination) or _path_present(destination_manifest):
+        return False
+    if not _legacy_checkpoint_matches_source(legacy_target, source_base=source_base):
+        return False
+
+    created: list[Path] = []
+    try:
+        os.link(str(legacy_manifest), str(destination_manifest))
+        created.append(destination_manifest)
+        os.link(str(legacy_target), str(destination))
+        created.append(destination)
+    except FileExistsError:
+        for path in created:
+            path.unlink(missing_ok=True)
+        return False
+    except OSError:
+        for path in created:
+            path.unlink(missing_ok=True)
+        return False
+
+    try:
+        legacy_manifest.unlink()
+        legacy_target.unlink()
+    except OSError:
+        # The destination is complete and remains valid; leaving a duplicate
+        # legacy pair is safer than deleting a checkpoint after partial cleanup.
+        logger.warning("ECMWF legacy range checkpoint cleanup incomplete for %s", legacy_target)
+    return True
+
+
 def _is_strong_etag(value: Any) -> bool:
     """Return whether an HTTP ETag can identify byte-for-byte entity content."""
 
@@ -777,6 +922,15 @@ def _load_range_resume(
         )
         try:
             if response.status_code != 200:
+                if response.status_code == 429 or response.status_code >= 500:
+                    # A transient validation failure says nothing about the
+                    # entity. Preserve the verified prefix so the caller's
+                    # retry/failover loop can resume it later.
+                    raise _http_error_for_response(
+                        response,
+                        f"ECMWF resume entity validation transiently unavailable "
+                        f"(HTTP {response.status_code}) for {url}",
+                    )
                 logger.info(
                     "ECMWF resume entity validation is unavailable (HTTP %s) for %s; restarting full partial",
                     response.status_code,
@@ -2070,8 +2224,19 @@ def _fetch_one_step(
                 return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
             try:
                 client = Client(source=mirror)
-                pf_partial = partial.with_suffix(".pf.partial")
-                cf_partial = partial.with_suffix(".cf.partial")
+                source_base = getattr(client, "url", None)
+                pf_partial = _source_partial_path(partial, kind="pf", source=mirror)
+                cf_partial = _source_partial_path(partial, kind="cf", source=mirror)
+                _adopt_legacy_checkpoint(
+                    partial.with_suffix(".pf.partial"),
+                    pf_partial,
+                    source_base=source_base,
+                )
+                _adopt_legacy_checkpoint(
+                    partial.with_suffix(".cf.partial"),
+                    cf_partial,
+                    source_base=source_base,
+                )
                 _retrieve_step_with_controlled_ranges(
                     client,
                     date=int(cycle_date.strftime("%Y%m%d")),

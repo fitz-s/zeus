@@ -414,6 +414,260 @@ def test_step_cache_identity_includes_cycle_hour(tmp_path, monkeypatch):
     assert prior_cycle_file.read_bytes() == b"00Z"
 
 
+def test_resume_partials_are_isolated_by_mirror_and_resume_only_missing_ranges(
+    tmp_path, monkeypatch
+):
+    """A failed AWS plan cannot consume or invalidate a verified Google prefix."""
+    import requests
+
+    import src.data.ecmwf_open_data as mod
+
+    phase = "google_initial"
+    range_calls: list[tuple[str, str | None]] = []
+
+    class _Response:
+        def __init__(self, payload=b"", headers=None, lines=(), status_code=None):
+            self.status_code = status_code if status_code is not None else (200 if lines else 206)
+            self._payload = payload
+            self.headers = dict(headers or {})
+            self._lines = tuple(lines)
+
+        def iter_content(self, chunk_size):
+            yield self._payload
+
+        def iter_lines(self):
+            yield from self._lines
+
+        def raise_for_status(self):
+            raise AssertionError(f"unexpected HTTP {self.status_code}")
+
+        def close(self):
+            pass
+
+    class _Session:
+        def get(self, url, *, stream, headers=None, timeout=None, verify=None):
+            url = str(url)
+            source = "google" if "google.example" in url else "aws"
+            if url.endswith(".index"):
+                ranges = (
+                    (0, 2),
+                    (2, 2),
+                ) if source == "google" else ((0, 3), (3, 1))
+                return _Response(
+                    lines=[
+                        json_line
+                        for json_line in (
+                            f'{{"type":"pf","step":3,"param":"mx2t3","_offset":{offset},"_length":{length}}}'.encode()
+                            for offset, length in ranges
+                        )
+                    ]
+                )
+            range_header = (headers or {}).get("Range")
+            range_calls.append((source, range_header))
+            if source == "google" and phase == "google_initial" and range_header == "bytes=2-3":
+                raise requests.Timeout("google interrupted")
+            if source == "aws":
+                raise requests.Timeout("aws changed plan interrupted")
+            payload = {"bytes=0-1": b"ab", "bytes=2-3": b"cd"}[range_header]
+            start, end = range_header.removeprefix("bytes=").split("-")
+            return _Response(
+                payload,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/4",
+                    "Content-Length": str(len(payload)),
+                    "ETag": '"google-v1"',
+                },
+            )
+
+        def head(self, url, *, timeout=None, verify=None):
+            assert "google.example" in str(url)
+            return _Response(
+                payload=b"", headers={"ETag": '"google-v1"'}, status_code=200
+            )
+
+    class _Client:
+        verify = True
+
+        def __init__(self, source=None):
+            self.source = source
+            self.url = f"https://{source}.example/base"
+
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(
+                urls=[f"{self.url}/step.grib2"],
+                target=kwargs["target"],
+                for_index={"type": ["pf"], "step": [3], "param": ["mx2t3"]},
+            )
+
+    fake_opendata = type("_OpenData", (), {"Client": _Client})
+    fake_ecmwf = type("_Ecmwf", (), {"opendata": fake_opendata})
+    import sys
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(mod, "_RateLimitedSession", _Session)
+
+    legacy = tmp_path / "step.grib2.partial"
+    google_target = mod._source_partial_path(legacy, kind="pf", source="google")
+    aws_target = mod._source_partial_path(legacy, kind="pf", source="aws")
+    with pytest.raises(requests.Timeout):
+        mod._retrieve_step_with_controlled_ranges(
+            _Client("google"), target=google_target, date=20260515, time=0,
+            stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+        )
+    google_manifest = mod._range_resume_manifest_path(google_target)
+    assert google_target.read_bytes() == b"ab"
+    assert google_manifest.exists()
+
+    with pytest.raises(requests.Timeout):
+        mod._retrieve_step_with_controlled_ranges(
+            _Client("aws"), target=aws_target, date=20260515, time=0,
+            stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+        )
+    assert google_target.read_bytes() == b"ab"
+    assert google_manifest.exists()
+
+    phase = "google_resume"
+    result = mod._retrieve_step_with_controlled_ranges(
+        _Client("google"), target=google_target, date=20260515, time=0,
+        stream="enfo", type=["pf"], step=[3], param=["mx2t3"],
+    )
+    assert result.size == 4
+    assert google_target.read_bytes() == b"abcd"
+    assert range_calls[-1:] == [("google", "bytes=2-3")]
+
+
+def test_fetch_one_step_uses_distinct_pf_cf_paths_for_each_mirror(tmp_path, monkeypatch):
+    """The canonical ENS file is assembled from one mirror's namespaced pair."""
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _Client:
+        def __init__(self, source=None):
+            self.source = source
+            self.url = f"https://{source}.example/base"
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _Client
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    calls: list[tuple[str, Path]] = []
+
+    def fake_retrieve(client, *, target, **kwargs):
+        kind = kwargs["type"][0]
+        calls.append((kind, Path(target)))
+        Path(target).write_bytes(kind.upper().encode())
+
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    status, canonical = mod._fetch_one_step(
+        cycle_date=RUN_DATE,
+        cycle_hour=RUN_HOUR,
+        param="mx2t3",
+        step=3,
+        output_dir=output_dir,
+        mirrors=("aws",),
+    )
+
+    legacy = mod._step_cache_path(
+        output_dir, run_date=RUN_DATE, run_hour=RUN_HOUR, step=3, param="mx2t3"
+    ).with_suffix(".grib2.partial")
+    assert status == "OK"
+    assert Path(canonical).read_bytes() == b"CFPF"
+    assert [kind for kind, _ in calls] == ["pf", "cf"]
+    assert calls[0][1] == mod._source_partial_path(legacy, kind="pf", source="aws")
+    assert calls[1][1] == mod._source_partial_path(legacy, kind="cf", source="aws")
+    assert calls[0][1] != calls[1][1]
+    low_legacy = mod._step_cache_path(
+        output_dir, run_date=RUN_DATE, run_hour=RUN_HOUR, step=3, param="mn2t3"
+    ).with_suffix(".grib2.partial")
+    assert mod._source_partial_path(low_legacy, kind="pf", source="aws") != calls[0][1]
+    assert not calls[0][1].exists()
+    assert not calls[1][1].exists()
+
+
+def test_legacy_checkpoint_adoption_requires_matching_origin_and_vacant_destination(tmp_path):
+    """Legacy shared pairs move only for the matching Client.url and never clobber."""
+    import json
+
+    import src.data.ecmwf_open_data as mod
+
+    def seed(target: Path, *, url: str) -> None:
+        target.write_bytes(b"ab")
+        mod._write_range_resume_manifest(
+            target,
+            plan=((f"{url}/step.grib2", 0, 2),),
+            completed_ranges=1,
+            entity_tags={f"{url}/step.grib2": '"entity-v1"'},
+        )
+
+    legacy = tmp_path / "legacy.pf.partial"
+    seed(legacy, url="https://aws.example/base")
+    destination = mod._source_partial_path(legacy, kind="pf", source="aws")
+    assert mod._adopt_legacy_checkpoint(
+        legacy, destination, source_base="https://google.example/base"
+    ) is False
+    assert legacy.read_bytes() == b"ab"
+    assert mod._range_resume_manifest_path(legacy).exists()
+    assert not destination.exists()
+
+    seed(legacy, url="https://aws.example/base")
+    destination.write_bytes(b"destination")
+    assert mod._adopt_legacy_checkpoint(
+        legacy, destination, source_base="https://aws.example/base"
+    ) is False
+    assert destination.read_bytes() == b"destination"
+    assert legacy.read_bytes() == b"ab"
+
+    destination.unlink()
+    assert mod._adopt_legacy_checkpoint(
+        legacy, destination, source_base="https://aws.example/base"
+    ) is True
+    assert destination.read_bytes() == b"ab"
+    assert json.loads(mod._range_resume_manifest_path(destination).read_text())["completed_ranges"] == 1
+    assert not legacy.exists()
+    assert not mod._range_resume_manifest_path(legacy).exists()
+
+
+@pytest.mark.parametrize("status_code", (429, 503))
+def test_transient_resume_head_preserves_checkpoint_for_retry(tmp_path, status_code):
+    """Transient HEAD validation cannot discard a verified range prefix."""
+    import requests
+
+    import src.data.ecmwf_open_data as mod
+
+    target = tmp_path / "step.pf.partial"
+    plan = (("https://aws.example/base/step.grib2", 0, 2),)
+    target.write_bytes(b"ab")
+    mod._write_range_resume_manifest(
+        target, plan=plan, completed_ranges=1,
+        entity_tags={plan[0][0]: '"entity-v1"'},
+    )
+
+    class _Response:
+        def __init__(self):
+            self.status_code = status_code
+            self.headers = {}
+
+        def close(self):
+            pass
+
+    class _Session:
+        def head(self, url, *, timeout=None, verify=None):
+            return _Response()
+
+    with pytest.raises(requests.HTTPError):
+        mod._load_range_resume(
+            target, plan=plan, session=_Session(), verify=True, deadline=None
+        )
+    assert target.read_bytes() == b"ab"
+    assert mod._range_resume_manifest_path(target).exists()
+
+
 # ---------------------------------------------------------------------------
 # test 6: .partial file does NOT count as resume (REL-2)
 # ---------------------------------------------------------------------------
