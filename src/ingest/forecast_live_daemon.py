@@ -769,6 +769,32 @@ def _collector_cycle_kwargs(
     return kwargs
 
 
+def _probe_newest_opendata_cycle_availability(
+    identity: dict[str, object],
+    *,
+    poll_deadline_monotonic: float,
+) -> dict[str, object]:
+    """Read exact-cycle index evidence before allocating retry work to an older run."""
+    from src.data.ecmwf_open_data import (
+        OPENDATA_AVAILABILITY_PROBE_SECONDS,
+        probe_open_ens_cycle_release,
+    )
+
+    scheduled_for = identity.get("scheduled_for")
+    if not isinstance(scheduled_for, datetime):
+        return {"status": "unknown", "reason": "IDENTITY_SCHEDULE_MISSING"}
+    probe_deadline = min(
+        poll_deadline_monotonic,
+        time.monotonic() + float(OPENDATA_AVAILABILITY_PROBE_SECONDS),
+    )
+    return probe_open_ens_cycle_release(
+        track=str(identity["track"]),
+        run_date=scheduled_for.date(),
+        run_hour=scheduled_for.hour,
+        deadline_monotonic=probe_deadline,
+    )
+
+
 def _expected_source_run_id(identity: dict[str, object]) -> str:
     scheduled_for = identity.get("scheduled_for")
     if not isinstance(scheduled_for, datetime):
@@ -1008,6 +1034,8 @@ def _run_opendata_track_if_due(
     _source_paused: Callable[[str], bool] | None = None,
     _now_utc: datetime | None = None,
     _poll_deadline_monotonic: float | None = None,
+    _use_availability_probe: bool = False,
+    _availability_probe: Callable[..., dict[str, object]] | None = None,
 ) -> dict:
     from src.data.release_calendar import FetchDecision
 
@@ -1038,19 +1066,73 @@ def _run_opendata_track_if_due(
                 "journal": current_metadata,
             }
 
-    newest_result = run_opendata_track(
-        track,
-        _locks_dir_override=_locks_dir_override,
-        _collector=_collector,
-        _source_paused=_source_paused,
-        _job_conn=_job_conn,
-        _now_utc=now,
-    )
-    if (
-        identity["decision"] is not FetchDecision.FETCH_ALLOWED
-        or str(newest_result.get("status") or "").lower() != "skipped_not_released"
-        or time.monotonic() >= poll_deadline_monotonic
-    ):
+    source_paused = _source_paused or _is_source_paused
+    if source_paused(str(identity["source_id"])):
+        return {
+            "status": "paused_by_control_plane",
+            "source": identity["source_id"],
+            "track": track,
+        }
+
+    if identity["decision"] is not FetchDecision.FETCH_ALLOWED:
+        return run_opendata_track(
+            track,
+            _locks_dir_override=_locks_dir_override,
+            _collector=_collector,
+            _source_paused=_source_paused,
+            _job_conn=_job_conn,
+            _now_utc=now,
+        )
+
+    if _use_availability_probe:
+        availability = (_availability_probe or _probe_newest_opendata_cycle_availability)(
+            identity,
+            poll_deadline_monotonic=poll_deadline_monotonic,
+        )
+        availability_status = str(availability.get("status") or "unknown").lower()
+        if availability_status == "released":
+            return run_opendata_track(
+                track,
+                _locks_dir_override=_locks_dir_override,
+                _collector=_collector,
+                _source_paused=_source_paused,
+                _job_conn=_job_conn,
+                _now_utc=now,
+            )
+        if availability_status != "not_released":
+            logger.warning(
+                "forecast-live OpenData %s availability probe unknown: %s; running newest collector",
+                track,
+                availability.get("reason") or "AVAILABILITY_PROBE_UNKNOWN",
+            )
+            newest_result = run_opendata_track(
+                track,
+                _locks_dir_override=_locks_dir_override,
+                _collector=_collector,
+                _source_paused=_source_paused,
+                _job_conn=_job_conn,
+                _now_utc=now,
+            )
+            return {**newest_result, "availability_probe": availability}
+        newest_result = {
+            "status": "skipped_not_released",
+            "source": identity["source_id"],
+            "track": track,
+            "selection": identity.get("metadata"),
+            "availability_probe": availability,
+        }
+    else:
+        newest_result = run_opendata_track(
+            track,
+            _locks_dir_override=_locks_dir_override,
+            _collector=_collector,
+            _source_paused=_source_paused,
+            _job_conn=_job_conn,
+            _now_utc=now,
+        )
+        if str(newest_result.get("status") or "").lower() != "skipped_not_released":
+            return newest_result
+    if time.monotonic() >= poll_deadline_monotonic:
         return newest_result
     retry_now = now if _now_utc is not None else _utcnow().astimezone(timezone.utc)
     retry = _retry_identity_for_failed_prior_run(
@@ -1209,12 +1291,20 @@ def _run_journaled_opendata_track(track: str) -> dict:
         conn.close()
 
 
-def _run_journaled_opendata_track_if_due(track: str) -> dict:
+def _run_journaled_opendata_track_if_due(
+    track: str,
+    *,
+    _use_availability_probe: bool = False,
+) -> dict:
     from src.state.db import get_forecasts_connection
 
     conn = get_forecasts_connection(write_class="bulk")
     try:
-        result = _run_opendata_track_if_due(track, _job_conn=conn)
+        result = _run_opendata_track_if_due(
+            track,
+            _job_conn=conn,
+            _use_availability_probe=_use_availability_probe,
+        )
         return _commit_opendata_result_and_wake(conn, result)
     except Exception:
         conn.commit()
@@ -1235,6 +1325,13 @@ def _run_due_opendata_tracks(
     ) as executor:
         futures = {track: executor.submit(runner, track) for track in tracks}
         return {track: futures[track].result() for track in tracks}
+
+
+def _run_journaled_opendata_track_safe_poll(track: str) -> dict:
+    return _run_journaled_opendata_track_if_due(
+        track,
+        _use_availability_probe=True,
+    )
 
 
 def _safe_cycle_executor() -> ThreadPoolExecutor:
@@ -1263,7 +1360,7 @@ def _dispatch_due_opendata_tracks(
     singleton authority.
     """
 
-    runner = _runner or _run_journaled_opendata_track_if_due
+    runner = _runner or _run_journaled_opendata_track_safe_poll
     executor = _executor or _safe_cycle_executor()
     inflight = (
         _inflight if _inflight is not None else _OPENDATA_SAFE_CYCLE_FUTURES

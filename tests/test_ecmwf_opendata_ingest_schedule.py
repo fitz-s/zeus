@@ -203,6 +203,97 @@ def test_not_released_newest_cycle_retries_one_exact_failed_predecessor(monkeypa
     assert calls[1]["_cycle_deadline_monotonic"] > time.monotonic()
 
 
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_safe_poll_not_released_probe_allocates_remaining_window_to_prior_debt(monkeypatch, track):
+    """Both tracks give the same poll's remaining budget to their exact prior failure."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    current = daemon._forecast_work_identity(track, now_utc=now)
+    prior = daemon._forecast_work_identity_for_cycle(
+        track,
+        cycle_time=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+        now_utc=now,
+    )
+    conn = _job_run_conn()
+    _insert_job_run(conn, prior, status="FAILED", recorded_at=now - timedelta(seconds=61))
+    calls: list[dict] = []
+
+    def run(_track, **kwargs):
+        calls.append(kwargs)
+        return {"status": "partial", "source_run_status": "PARTIAL"}
+
+    monkeypatch.setattr(daemon, "run_opendata_track", run)
+    result = daemon._run_opendata_track_if_due(
+        track,
+        _job_conn=conn,
+        _now_utc=now,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_args, **_kwargs: {"status": "not_released"},
+    )
+
+    assert current["scheduled_for"] > prior["scheduled_for"]
+    assert result["status"] == "partial"
+    assert len(calls) == 1
+    assert calls[0]["_identity"] == prior
+    assert calls[0]["_cycle_deadline_monotonic"] > time.monotonic()
+    assert conn.execute("SELECT COUNT(*) AS n FROM job_run").fetchone()["n"] == 1
+
+
+def test_safe_poll_released_probe_prioritizes_current_cycle_over_older_debt(monkeypatch):
+    """A fully evidenced newest index always uses the normal current collector first."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon,
+        "run_opendata_track",
+        lambda _track, **kwargs: calls.append(kwargs) or {"status": "ok"},
+    )
+
+    result = daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _job_conn=conn,
+        _now_utc=now,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_args, **_kwargs: {"status": "released"},
+    )
+
+    assert result["status"] == "ok"
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
+def test_safe_poll_unknown_probe_runs_newest_collector_without_authorizing_older_retry(monkeypatch):
+    """Slow or unknown availability keeps newest data reachable but never chooses old debt."""
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon,
+        "run_opendata_track",
+        lambda _track, **kwargs: calls.append(kwargs) or {"status": "skipped_not_released"},
+    )
+
+    result = daemon._run_opendata_track_if_due(
+        "mx2t6_high",
+        _job_conn=conn,
+        _now_utc=now,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_args, **_kwargs: {"status": "unknown", "reason": "NETWORK"},
+    )
+
+    assert result["status"] == "skipped_not_released"
+    assert result["availability_probe"]["reason"] == "NETWORK"
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
 @pytest.mark.parametrize(
     ("status", "age_seconds", "job_run_id"),
     (

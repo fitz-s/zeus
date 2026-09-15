@@ -727,6 +727,270 @@ def test_cycle_deadline_stops_new_steps_and_marks_retry_as_failed(tmp_path, monk
     assert result["reason"] == "CYCLE_DEADLINE_EXCEEDED"
 
 
+def test_cycle_deadline_checkpoint_is_reused_by_the_next_continuity_attempt(tmp_path, monkeypatch):
+    """A deadline stops new work but leaves the completed step for the next poll."""
+    import src.data.ecmwf_open_data as mod
+
+    attempted: list[int] = []
+
+    def fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors, _deadline):
+        attempted.append(step)
+        path = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
+        if path.exists():
+            return ("OK", path)
+        _make_fake_grib(path)
+        if step == 3:
+            time.sleep(0.10)
+        return ("OK", path)
+
+    monkeypatch.setattr(mod, "STEP_HOURS", [3, 6])
+    monkeypatch.setattr(mod, "_DOWNLOAD_MAX_WORKERS", 1)
+    monkeypatch.setattr(mod, "_fetch_one_step", fetch)
+    paths = _make_paths(mod, tmp_path)
+    first = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=True,
+        conn=_make_conn(),
+        _paths=paths,
+        now_utc=NOW_UTC,
+        cycle_deadline_monotonic=time.monotonic() + 0.05,
+    )
+
+    assert first["reason"] == "CYCLE_DEADLINE_EXCEEDED"
+    checkpoint = mod._step_cache_path(
+        paths.raw_root / "raw" / "ecmwf_open_ens" / "ecmwf" / RUN_DATE.strftime("%Y%m%d"),
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        step=3,
+        param="mx2t3",
+    )
+    assert checkpoint.exists()
+    first_attempt_count = len(attempted)
+
+    second = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=True,
+        conn=_make_conn(),
+        _paths=paths,
+        now_utc=NOW_UTC,
+        cycle_deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert 6 in attempted[first_attempt_count:]
+    assert second["status"] != "download_failed"
+
+
+def test_availability_probe_requires_exact_full_member_index_evidence(monkeypatch):
+    """A metadata 200 is insufficient without PF+CF/oper evidence for all 51 members."""
+    import sys
+    import types
+    import src.data.ecmwf_open_data as mod
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = lambda *, source: object()
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    calls: list[tuple[str, str, int]] = []
+
+    def member_count(_client, *, param, stream, ensemble_type, step, **_kwargs):
+        calls.append((param, ensemble_type, step))
+        return 50 if ensemble_type == "pf" else 1
+
+    monkeypatch.setattr(mod, "_probe_index_member_count", member_count)
+    result = mod.probe_open_ens_cycle_release(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "released"
+    assert calls == [("mx2t3", "pf", 3), ("mx2t3", "cf", 3)]
+
+
+@pytest.mark.parametrize("pf_members,cf_members", ((49, 2), (51, 0), (50, 0)))
+def test_availability_probe_rejects_wrong_pf_cf_member_distribution(
+    monkeypatch, pf_members, cf_members
+):
+    """Only the exact 50 PF plus 1 CF/oper shape authorizes newest collection."""
+    import sys
+    import types
+    import src.data.ecmwf_open_data as mod
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = lambda *, source: object()
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(
+        mod,
+        "_probe_index_member_count",
+        lambda _client, *, ensemble_type, **_kwargs: (
+            pf_members if ensemble_type == "pf" else cf_members
+        ),
+    )
+
+    result = mod.probe_open_ens_cycle_release(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "unknown"
+
+
+def test_availability_probe_pf_evidence_with_missing_cf_stays_unknown(monkeypatch):
+    """A published PF index plus missing CF/oper is partial newest data, never old-cycle absence."""
+    import sys
+    import types
+    import src.data.ecmwf_open_data as mod
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = lambda *, source: object()
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+
+    def member_count(_client, *, ensemble_type, **_kwargs):
+        if ensemble_type == "pf":
+            return 50
+        raise ValueError("Cannot find index entries matching {'type': ['cf']}")
+
+    monkeypatch.setattr(mod, "_probe_index_member_count", member_count)
+    result = mod.probe_open_ens_cycle_release(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result == {"status": "unknown", "reason": "INCOMPLETE_CF"}
+
+
+def test_availability_probe_requires_every_mirror_to_lack_exact_pf_before_not_released(monkeypatch):
+    """Old continuation begins only after every configured mirror lacks the exact PF index."""
+    import sys
+    import types
+    import src.data.ecmwf_open_data as mod
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = lambda *, source: object()
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    calls: list[str] = []
+
+    def missing_pf(_client, *, ensemble_type, **_kwargs):
+        calls.append(ensemble_type)
+        raise ValueError("Cannot find index entries matching {'type': ['pf']}")
+
+    monkeypatch.setattr(mod, "_probe_index_member_count", missing_pf)
+    result = mod.probe_open_ens_cycle_release(
+        track="mn2t6_low",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "not_released"
+    assert calls == ["pf"] * len(mod._DOWNLOAD_SOURCES)
+
+
+def test_availability_probe_network_error_is_unknown_not_not_released(monkeypatch):
+    """An unavailable probe cannot authorize an older retry by pretending 404."""
+    import sys
+    import types
+    import requests
+    import src.data.ecmwf_open_data as mod
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = lambda *, source: object()
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(
+        mod,
+        "_probe_index_member_count",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+    )
+
+    result = mod.probe_open_ens_cycle_release(
+        track="mn2t6_low",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "unknown"
+
+
+def test_availability_probe_rejects_constructor_network_sources(monkeypatch):
+    """A configured Azure source is unknown until its constructor can be deadline-bounded."""
+    import src.data.ecmwf_open_data as mod
+
+    monkeypatch.setattr(mod, "_DOWNLOAD_SOURCES", ("azure",))
+    result = mod.probe_open_ens_cycle_release(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result == {"status": "unknown", "reason": "UNSAFE_PROBE_SOURCE:azure"}
+
+
+def test_availability_probe_applies_source_role_gate_before_client_construction(monkeypatch):
+    """A disabled source registry blocks the probe before any network-capable Client exists."""
+    import sys
+    import types
+    import src.data.ecmwf_open_data as mod
+
+    client_constructed = False
+
+    class Client:
+        def __init__(self, **_kwargs):
+            nonlocal client_constructed
+            client_constructed = True
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = Client
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+
+    def blocked_source(_source_id):
+        raise RuntimeError("SOURCE_DISABLED")
+
+    monkeypatch.setattr(mod, "gate_source", blocked_source)
+    with pytest.raises(RuntimeError, match="SOURCE_DISABLED"):
+        mod.probe_open_ens_cycle_release(
+            track="mx2t6_high",
+            run_date=RUN_DATE,
+            run_hour=RUN_HOUR,
+            deadline_monotonic=time.monotonic() + 1.0,
+        )
+
+    assert client_constructed is False
+
+
 def test_cycle_deadline_blocks_unbounded_legacy_sdk_path(tmp_path):
     """Fallback retries refuse the SDK path that cannot expose request/chunk deadlines."""
     import requests

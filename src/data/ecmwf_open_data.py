@@ -537,6 +537,11 @@ _DOWNLOAD_MAX_WORKERS: int = int(os.environ.get("ZEUS_ECMWF_MAX_WORKERS", "2"))
 _PER_STEP_TIMEOUT_SECONDS: int = int(os.environ.get("ZEUS_ECMWF_STEP_TIMEOUT_SECONDS", "180"))
 _PER_STEP_MAX_RETRIES: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRIES", "2"))
 _PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER", "5"))
+# A release probe is one metadata/index handoff, not a GRIB fetch. Reuse the
+# existing retry handoff interval so an unresponsive newest cycle cannot spend
+# the older cycle's entire one-minute continuity window.
+OPENDATA_AVAILABILITY_PROBE_SECONDS: int = _PER_STEP_RETRY_AFTER
+_PROBE_SAFE_CLIENT_SOURCES = frozenset({"aws", "google"})
 # 404 → NOT_RELEASED (no retry); all others below trigger retry then failover.
 _RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
 
@@ -884,6 +889,155 @@ def _resolve_index_parts(
     if not resolved:
         raise ValueError(f"Cannot find index entries matching {for_index!r}")
     return resolved
+
+
+def _probe_index_member_count(
+    client: Any,
+    *,
+    cycle_date: date,
+    cycle_hour: int,
+    param: str,
+    stream: str,
+    ensemble_type: str,
+    step: int,
+    deadline_monotonic: float,
+) -> int:
+    """Read one exact ensemble index without downloading any GRIB bytes."""
+    session = _RateLimitedSession()
+    session._zeus_deadline = deadline_monotonic
+    client.session = session
+    try:
+        target = Path(tempfile.gettempdir()) / "zeus_opendata_availability_probe.grib2"
+        result = client._get_urls(
+            target=str(target),
+            use_index=False,
+            date=int(cycle_date.strftime("%Y%m%d")),
+            time=cycle_hour,
+            stream=stream,
+            type=[ensemble_type],
+            step=[step],
+            param=[param],
+        )
+        _remaining_step_timeout(deadline_monotonic)
+        return sum(
+            len(parts)
+            for _url, parts in _resolve_index_parts(
+                client,
+                result,
+                deadline=deadline_monotonic,
+            )
+        )
+    finally:
+        session.close()
+
+
+def probe_open_ens_cycle_release(
+    *,
+    track: str,
+    run_date: date,
+    run_hour: int,
+    deadline_monotonic: float,
+) -> dict[str, object]:
+    """Classify exact-cycle release from index evidence without source writes.
+
+    ``released`` means the exact track parameter's nearest step has the full
+    51-member ENS shape (50 PF + 1 CF/oper fallback). It is only permission to
+    run the normal collector, never source-run or readiness truth itself.
+    """
+    if track not in TRACKS:
+        raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
+    if time.monotonic() >= deadline_monotonic:
+        return {"status": "unknown", "reason": "AVAILABILITY_PROBE_DEADLINE"}
+    source_spec = gate_source(SOURCE_ID)
+    gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
+
+    cfg = TRACKS[track]
+    probe_step = min(STEP_HOURS)
+    absent_pf_mirrors = 0
+    # Azure's Client constructor obtains an SAS token before the
+    # deadline-aware session is installed. Do not create that network path.
+    if any(mirror not in _PROBE_SAFE_CLIENT_SOURCES for mirror in _DOWNLOAD_SOURCES):
+        return {
+            "status": "unknown",
+            "reason": f"UNSAFE_PROBE_SOURCE:{next(mirror for mirror in _DOWNLOAD_SOURCES if mirror not in _PROBE_SAFE_CLIENT_SOURCES)}",
+        }
+    from ecmwf.opendata import Client  # imported here: conda env only on daemon worker
+
+    for mirror in _DOWNLOAD_SOURCES:
+        if time.monotonic() >= deadline_monotonic:
+            return {"status": "unknown", "reason": "AVAILABILITY_PROBE_DEADLINE"}
+        try:
+            client = Client(source=mirror)
+            pf_members = _probe_index_member_count(
+                client,
+                cycle_date=run_date,
+                cycle_hour=run_hour,
+                param=cfg["open_data_param"],
+                stream="enfo",
+                ensemble_type="pf",
+                step=probe_step,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except requests.HTTPError as exc:
+            if getattr(exc.response, "status_code", None) == 404:
+                absent_pf_mirrors += 1
+                continue
+            return {"status": "unknown", "reason": f"HTTP_{getattr(exc.response, 'status_code', 'UNKNOWN')}"}
+        except ValueError as exc:
+            if "Cannot find index entries matching" in str(exc):
+                absent_pf_mirrors += 1
+                continue
+            return {"status": "unknown", "reason": f"INDEX_ERROR:{type(exc).__name__}"}
+        except (requests.RequestException, OSError) as exc:
+            return {"status": "unknown", "reason": f"NETWORK:{type(exc).__name__}"}
+
+        # Any PF index evidence means the newest cycle has begun publishing.
+        # Missing/incomplete CF must therefore retain newest-cycle priority.
+        if pf_members != 50:
+            return {"status": "unknown", "reason": f"INCOMPLETE_PF_MEMBERS:{pf_members}"}
+        try:
+            try:
+                cf_members = _probe_index_member_count(
+                    client,
+                    cycle_date=run_date,
+                    cycle_hour=run_hour,
+                    param=cfg["open_data_param"],
+                    stream="enfo",
+                    ensemble_type="cf",
+                    step=probe_step,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except ValueError as exc:
+                if "Cannot find index entries matching" not in str(exc):
+                    raise
+                try:
+                    cf_members = _probe_index_member_count(
+                        client,
+                        cycle_date=run_date,
+                        cycle_hour=run_hour,
+                        param=cfg["open_data_param"],
+                        stream="oper",
+                        ensemble_type="fc",
+                        step=probe_step,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except (requests.HTTPError, ValueError):
+                    return {"status": "unknown", "reason": "INCOMPLETE_CF"}
+            if cf_members == 1:
+                return {
+                    "status": "released",
+                    "mirror": mirror,
+                    "pf_members": pf_members,
+                    "cf_members": cf_members,
+                    "step": probe_step,
+                }
+            return {"status": "unknown", "reason": f"INCOMPLETE_CF_MEMBERS:{cf_members}"}
+        except (requests.RequestException, OSError) as exc:
+            return {"status": "unknown", "reason": f"NETWORK:{type(exc).__name__}"}
+
+    if absent_pf_mirrors == len(_DOWNLOAD_SOURCES):
+        return {"status": "not_released", "reason": "NOT_RELEASED_PF_INDEX"}
+    return {"status": "unknown", "reason": "AVAILABILITY_PROBE_INCOMPLETE"}
 
 
 def _retrieve_step_with_controlled_ranges(
