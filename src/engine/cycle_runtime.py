@@ -5052,10 +5052,8 @@ def _parse_market_timestamp(value) -> datetime | None:
 def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | None) -> dict | None:
     """Return closed-market evidence from stable market end timestamps.
 
-    Live CLOB market-info can disappear or fail after close. The persisted
-    market_end/close timestamp from executable snapshots is contract topology,
-    not a stale tradability quote, so it can prove that further live exit
-    attempts are no longer actionable.
+    Persisted market end/close times are schedule hints. They cannot prove
+    current venue closure or authorize clearing exit state when quotes fail.
     """
 
     if conn is None:
@@ -9575,18 +9573,9 @@ def execute_monitoring_phase(
                 if deadline_expiry == "global":
                     break
                 continue
-            # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
-            # evidence source.
-            #   * source="clob_market_info" → the VENUE itself reports
-            #     closed=True AND accepting_orders=False. This is authoritative
-            #     "will-not-accept-a-sell" truth → terminal stamp now, as before.
-            #   * source="executable_snapshot_market_end" → a STATIC time
-            #     heuristic (market_close_at/market_end_at passed). The venue may
-            #     still be accepting orders with a live bid, so a reversal caught
-            #     just before close must get one real shot at place_sell_order.
-            #     Defer the terminal stamp: run the full refresh→evaluate_exit→
-            #     execute_exit lane below, and only stamp MARKET_CLOSED if the
-            #     market is genuinely untradeable (no finite executable best_bid).
+            # Only explicit CLOB closure pre-empts monitoring. An elapsed
+            # scheduled end is a topology hint; even a missing quote may be
+            # transient, so it must not reset exit state or stop redecision.
             deferred_static_closed_market_info = None
             if closed_market_info is not None:
                 _closed_source = str(closed_market_info.get("source") or "")
@@ -11079,48 +11068,13 @@ def execute_monitoring_phase(
                 summary["exits"] += 1
                 portfolio_dirty = True
 
-            # FIX 2b (2026-06-20): apply the DEFERRED static-time closed-market
-            # stamp only now that the live exit lane has run. The terminal stamp
-            # is correct ONLY for a genuinely untradeable market — i.e. one with
-            # no finite executable best_bid. If a bid still exists the position
-            # stays monitored (it already took its real shot at place_sell_order
-            # above when should_exit fired, and can exit a later cycle while a
-            # bid persists); a reversal caught just before the static close is no
-            # longer pre-empted into MARKET_CLOSED_AWAITING_SETTLEMENT.
+            # An elapsed scheduled end and a missing quote do not prove venue
+            # closure. Preserve normal refresh/retry state until CLOB confirms
+            # closed AND not accepting orders in the authoritative branch above.
             if (
                 deferred_static_closed_market_info is not None
-                and not ExitContext._is_finite(getattr(exit_context, "best_bid", None))
+                and ExitContext._is_finite(getattr(exit_context, "best_bid", None))
             ):
-                from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
-
-                closed_hold_written = mark_market_closed_hold_to_settlement(
-                    pos,
-                    reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
-                    error=str(
-                        deferred_static_closed_market_info.get("source")
-                        or "market_closed_non_accepting_orders"
-                    ),
-                    conn=conn,
-                    preserve_exit_reason=True,
-                )
-                if closed_hold_written:
-                    portfolio_dirty = True
-                    summary["monitor_closed_market_pending_settlement_after_eval"] = (
-                        summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
-                    )
-                    summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
-                    summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
-                        {
-                            "position_id": pos.trade_id,
-                            "reason": "market_closed_no_executable_bid",
-                            **deferred_static_closed_market_info,
-                        }
-                    )
-                else:
-                    summary["monitor_canonical_write_failed"] = (
-                        summary.get("monitor_canonical_write_failed", 0) + 1
-                    )
-            elif deferred_static_closed_market_info is not None:
                 summary["day0_static_closed_market_tradable_bid_preserved"] = (
                     summary.get("day0_static_closed_market_tradable_bid_preserved", 0) + 1
                 )

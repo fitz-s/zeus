@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-06-20; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-08-06
+# Last reused or audited: 2026-09-15
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -395,32 +395,15 @@ class TestRpcFallThroughDedupe:
 # FIX 2b — static-time close defers; venue-confirmed close stamps immediately
 # ---------------------------------------------------------------------------
 
-class TestDay0StaticClosedDefersTerminalStamp:
-    """The day0 closed-market pre-emption must only defer for the static-time
-    source, and the deferred terminal stamp must require NO executable bid."""
-
-    # NOTE: the static-source-vs-venue-source discrimination is covered
-    # BEHAVIORALLY by TestDay0StaticClosedBehavioral
-    # (test_static_close_with_live_bid_is_not_pre_empted /
-    # test_static_close_with_no_bid_still_stamps_terminal). A prior source-text
-    # assertion that read cycle_runtime.__file__ was removed (PR #416 review
-    # 2026-06-21): it was brittle to refactors and bypassed the behavioral contract.
-
-    def test_deferred_stamp_requires_no_executable_bid(self):
-        """The deferred terminal stamp fires only when best_bid is not finite —
-        a finite executable bid keeps the position tradable (no stamp)."""
-        # finite bid → tradable → must NOT be deemed untradeable
-        assert ExitContext._is_finite(0.42) is True
-        # missing bid → genuinely untradeable → terminal stamp is correct
-        assert ExitContext._is_finite(None) is False
-
-
 class TestDay0StaticClosedBehavioral:
     """Behavioral: a day0 position on a market past its STATIC market_close_at,
     with a live executable bid, must NOT be pre-empted into
     MARKET_CLOSED_AWAITING_SETTLEMENT before the exit lane runs."""
 
     def _seed_past_close_snapshot(self, conn: sqlite3.Connection, condition_id: str) -> None:
+        from src.state.snapshot_repo import init_snapshot_schema
+
+        init_snapshot_schema(conn)
         conn.execute(
             """
             INSERT INTO executable_market_snapshots (
@@ -453,7 +436,8 @@ class TestDay0StaticClosedBehavioral:
         )
         conn.commit()
 
-    def _run(self, monkeypatch, *, best_bid):
+    def _run(self, monkeypatch, *, best_bid, position_fields=None, recover_bid=None,
+             run_exit_preflight=True):
         import logging as _logging
         from datetime import datetime, timezone
 
@@ -477,6 +461,8 @@ class TestDay0StaticClosedBehavioral:
             no_token_id="tok_no_1",
             exit_state="",
         )
+        for key, value in (position_fields or {}).items():
+            setattr(pos, key, value)
         _seed_position_current(conn, pos)
         portfolio = _portfolio(pos)
 
@@ -544,8 +530,14 @@ class TestDay0StaticClosedBehavioral:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             conn, StaticClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps,
+            deps=deps, run_exit_preflight=run_exit_preflight,
         )
+        if recover_bid is not None:
+            best_bid = recover_bid
+            cycle_runtime.execute_monitoring_phase(
+                conn, StaticClob(), portfolio, Artifact(), Tracker(), summary,
+                deps=deps, run_exit_preflight=run_exit_preflight,
+            )
         return results, summary, pos
 
     def test_static_close_with_live_bid_is_not_pre_empted(self, monkeypatch):
@@ -566,15 +558,48 @@ class TestDay0StaticClosedBehavioral:
             "MARKET_CLOSED_AWAITING_SETTLEMENT" == r for r in reasons
         ), "no terminal MARKET_CLOSED monitor result while a bid still exists"
 
-    def test_static_close_with_no_bid_still_stamps_terminal(self, monkeypatch):
+    def test_static_close_with_no_bid_preserves_redecision(self, monkeypatch):
         results, summary, pos = self._run(monkeypatch, best_bid=None)
 
-        # No executable bid → genuinely untradeable → the deferred lane applies
-        # the terminal stamp after evaluation (just later, not pre-emptively).
-        assert summary.get("monitor_closed_market_pending_settlement_after_eval", 0) == 1, (
-            "a static-closed market with NO executable bid must still receive the "
-            "terminal MARKET_CLOSED stamp (post-eval)"
+        assert summary.get("monitor_closed_market_pending_settlement_after_eval", 0) == 0
+        assert "MARKET_CLOSED_AWAITING_SETTLEMENT" not in pos.last_exit_error
+        assert "closed_market_hold_no_action_authority" not in pos.applied_validations
+        assert summary.get("monitor_failed", 0) == 0
+        assert len(results) == 1
+
+    @pytest.mark.parametrize("exit_state", ["retry_pending", "sell_pending"])
+    def test_static_missing_quote_preserves_pending_exit_state(self, monkeypatch, exit_state):
+        if exit_state == "sell_pending":
+            monkeypatch.setattr(
+                "src.execution.exit_lifecycle._last_exit_order_id",
+                lambda *_args, **_kwargs: "existing-exit-order",
+            )
+        fields = {
+            "state": "pending_exit", "exit_state": exit_state,
+            "exit_retry_count": 3 if exit_state == "retry_pending" else 0,
+            "next_exit_retry_at": (
+                (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+                if exit_state == "retry_pending" else None
+            ),
+            "order_status": exit_state,
+        }
+        results, summary, pos = self._run(
+            monkeypatch, best_bid=None, position_fields=fields, run_exit_preflight=False,
         )
+        assert len(results) == 1
+        assert summary.get("monitor_failed", 0) == 0
+        assert {key: getattr(pos, key) for key in fields} == fields
+        assert "MARKET_CLOSED_AWAITING_SETTLEMENT" not in pos.last_exit_error
+
+    def test_static_missing_quote_is_refreshed_again_when_bid_recovers(self, monkeypatch):
+        results, summary, pos = self._run(
+            monkeypatch, best_bid=None, recover_bid=0.42,
+        )
+        assert len(results) == 2
+        assert summary.get("monitor_failed", 0) == 0
+        assert summary.get("day0_static_closed_market_tradable_bid_preserved", 0) == 1
+        assert summary.get("monitor_closed_market_pending_settlement_after_eval", 0) == 0
+        assert "MARKET_CLOSED_AWAITING_SETTLEMENT" not in pos.last_exit_error
 
     def test_venue_closed_still_records_day0_hard_fact(self, monkeypatch):
         """Venue closed blocks sell submission, not settlement-observation truth."""
@@ -679,6 +704,7 @@ class TestDay0StaticClosedBehavioral:
         }
         assert changed_fields == {
             "_canonical_monitor_refreshed_at",
+            "_zeus_held_monitor_full_depth_action_authority",
             "next_exit_retry_at",
         }
         assert results == []
