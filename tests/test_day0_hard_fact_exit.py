@@ -2310,12 +2310,95 @@ class TestDay0ExposureCap:
 # R20 — hard-fact exit survives monitor canonical-write failure (PR#404 P0-4)
 # ===========================================================================
 
+def _production_monitor_topology(tmp_path, monkeypatch, position, *, phase):
+    """The topology exit_lifecycle passes into execute_monitoring_phase: tmp
+    trade+world+forecasts DBs, the write-capable conn, the held-monitor
+    read_conn (world and forecasts attached; get_held_monitor_read_connection,
+    2026-09-14) and the canonical position_current row that makes ``position``
+    a monitor candidate (the canonical projection owns the monitor set)."""
+    import sqlite3
+
+    import src.state.db as db_module
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import (
+        append_many_and_project,
+        get_held_monitor_read_connection,
+        init_schema_forecasts,
+        init_schema_trade_only,
+        init_schema_world_only,
+        transition_phase,
+    )
+
+    trade_path = tmp_path / "zeus_trades.db"
+    world_path = tmp_path / "zeus-world.db"
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    for path, init in (
+        (trade_path, init_schema_trade_only),
+        (world_path, init_schema_world_only),
+        (forecasts_path, init_schema_forecasts),
+    ):
+        with sqlite3.connect(path) as bootstrap:
+            init(bootstrap)
+            bootstrap.commit()
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_path)
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    conn = sqlite3.connect(trade_path)
+    conn.row_factory = sqlite3.Row
+    entry_phase = "active" if phase == "pending_exit" else phase
+    events, projection = build_entry_canonical_write(
+        position,
+        phase_after=entry_phase,
+        decision_id=f"dec-{position.trade_id}",
+        source_module="tests.test_day0_hard_fact_exit",
+    )
+    projection["phase"] = entry_phase
+    append_many_and_project(conn, events, projection)
+    if phase == "pending_exit":
+        # The entry builder stops at the entry phases; pending_exit has one
+        # writer, the exit organ's transition_phase (EXIT_INTENT persisted,
+        # no sell order yet = the stranded shape the monitor must release).
+        assert transition_phase(
+            conn,
+            position,
+            event_type="EXIT_INTENT",
+            reason=str(position.exit_reason or "EXIT_INTENT"),
+            error="",
+        )
+    conn.commit()
+    read_conn = get_held_monitor_read_connection()
+    assert read_conn is not None
+    return conn, read_conn
+
+
+class _DeepBookClob:
+    """Executable sell book on every token: the held monitor derives its quote
+    and full-depth action authority from get_orderbook, not get_best_bid_ask."""
+
+    def __init__(self, bid, ask):
+        self._bid, self._ask = bid, ask
+
+    def get_best_bid_ask(self, token_id):
+        return self._bid, self._ask, 100.0, 100.0
+
+    def get_orderbook(self, token_id):
+        return {
+            "bids": [{"price": f"{self._bid:.2f}", "size": "100"}],
+            "asks": [{"price": f"{self._ask:.2f}", "size": "100"}],
+        }
+
+    def get_held_orderbook_snapshots_hard_deadline(self, token_ids, *, timeout_seconds):
+        # Under a held-monitor deadline the quote refresh reads books only
+        # through the bounded reader (monitor_quote_refresh).
+        return {token_id: self.get_orderbook(token_id) for token_id in token_ids}
+
+
 class TestHardFactExitDespiteCanonicalWriteFailure:
     """Operator merge blocker 4: the hard-fact lane is settlement-authority
     evidence — a monitor telemetry/canonical-event write failure must not
     `continue` past it and hold a structurally dead leg another cycle."""
 
-    def _run_phase(self, monkeypatch, *, hard_fact_verdict):
+    def _run_phase(self, tmp_path, monkeypatch, *, hard_fact_verdict):
         import logging as _logging
         import numpy as np
 
@@ -2331,24 +2414,33 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
             size_usd=10.0, entry_price=0.40, p_posterior=0.55, edge=0.15,
             shares=25.0, cost_basis_usd=10.0, state="day0_window",
             token_id="tok_yes_hf", no_token_id="tok_no_hf", unit="C", env="live",
+            condition_id="cond-hf", entered_at="2026-06-09T06:00:00Z",
+            strategy_key="forecast_qkernel_entry",
         )
         portfolio = PortfolioState(positions=[pos])
-
-        class LiveClob:
-            def get_best_bid_ask(self, token_id):
-                return 0.10, 0.12, 100.0, 100.0
+        conn, read_conn = _production_monitor_topology(
+            tmp_path, monkeypatch, pos, phase="day0_window"
+        )
+        clob = _DeepBookClob(0.10, 0.12)
 
         class Tracker:
             def record_exit(self, position):
                 pass
 
         def mock_refresh(conn, clob, position):
+            position.last_monitor_prob = position.p_posterior
+            position.last_monitor_prob_is_fresh = True
+            position.last_monitor_market_price = 0.10
+            position.last_monitor_market_price_is_fresh = True
+            position.last_monitor_best_bid = 0.10
+            position.last_monitor_best_ask = 0.12
             return EdgeContext(
                 p_raw=np.array([]), p_cal=np.array([]),
                 p_market=np.array([position.entry_price]),
                 p_posterior=position.p_posterior,
                 forward_edge=0.0, alpha=0.0,
-                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                # edge-space band; + held price 0.10 = belief CI (0.45, 0.65)
+                confidence_band_upper=0.55, confidence_band_lower=0.35,
                 entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
                 decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
                 market_velocity_1h=0.0, divergence_score=0.0,
@@ -2367,7 +2459,12 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         executed = []
         monkeypatch.setattr(
             "src.execution.exit_lifecycle.execute_exit",
-            lambda **kwargs: (executed.append(kwargs["position"].trade_id) or "exit_retry:writer_timeout"),
+            lambda **kwargs: (
+                executed.append(
+                    (kwargs["position"].trade_id, kwargs["exit_context"].exit_reason)
+                )
+                or "exit_retry:writer_timeout"
+            ),
         )
 
         results = []
@@ -2394,38 +2491,45 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         )
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
-            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps,
+            conn, clob, portfolio, Artifact(), Tracker(), summary,
+            deps=deps, read_conn=read_conn,
         )
         return results, summary, executed
 
-    def test_dead_bin_sell_preserves_exit_authority_when_canonical_write_fails(self, monkeypatch):
+    def test_dead_bin_sell_preserves_exit_authority_when_canonical_write_fails(self, tmp_path, monkeypatch):
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
             metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
         results, summary, executed = self._run_phase(
-            monkeypatch, hard_fact_verdict=verdict
+            tmp_path, monkeypatch, hard_fact_verdict=verdict
         )
         assert summary.get("day0_hard_fact_direct_exit_decisions") == 1
         assert summary.get("monitor_canonical_write_failed") == 1
         assert summary.get("monitor_canonical_write_failed_exit_authority_preserved") == 1
-        exits = [r for r in results if getattr(r, "should_exit", False)]
-        assert len(exits) == 1
-        assert executed == ["hf_p04_001"]
-        assert verdict.reason in exits[0].exit_reason
+        assert summary["exits"] == 1
+        assert [trade_id for trade_id, _ in executed] == ["hf_p04_001"]
+        assert verdict.reason in executed[0][1]
         assert summary.get("exits_suppressed_no_submit", 0) == 0
+        # A cycle whose canonical MONITOR_REFRESHED write failed mints no
+        # MonitorResult (af09b3456): the exit is the proof, not the artifact.
+        assert results == []
+        assert summary["monitors"] == 0
 
-    def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
+    def test_no_hard_fact_keeps_the_existing_failure_continue(self, tmp_path, monkeypatch):
         results, summary, executed = self._run_phase(
-            monkeypatch, hard_fact_verdict=None
+            tmp_path, monkeypatch, hard_fact_verdict=None
         )
         assert summary.get("monitor_canonical_write_failed") == 1
         assert summary.get("day0_hard_fact_exits") is None
-        reasons = [str(getattr(r, "exit_reason", "")) for r in results]
-        assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
-        assert not any(getattr(r, "should_exit", False) for r in results)
+        assert summary.get("monitor_canonical_write_failed_exit_authority_preserved") is None
+        # Without settlement authority the failed write ends the position's
+        # cycle: no MonitorResult, no exit (af09b3456 removed the
+        # MONITOR_CANONICAL_WRITE_FAILED placeholder result).
+        assert results == []
+        assert summary["monitors"] == 0
+        assert summary["exits"] == 0
         assert executed == []
 
 
@@ -2585,7 +2689,7 @@ class TestStructuralWinTerminalHold:
             "ORANGE favorable_exits counter must be 0 for a structural-win hold"
         )
 
-    def test_hard_fact_dead_bin_executes_without_global_auction(self, monkeypatch):
+    def test_hard_fact_dead_bin_executes_without_global_auction(self, tmp_path, monkeypatch):
         import logging as _logging
         from src.engine import cycle_runtime
         from src.state.portfolio import Position, PortfolioState
@@ -2598,12 +2702,14 @@ class TestStructuralWinTerminalHold:
             size_usd=10.0, entry_price=0.70, p_posterior=0.80, edge=0.10,
             shares=14.3, cost_basis_usd=10.0, state="day0_window",
             token_id="tok_no_ks", no_token_id="tok_no_ks", unit="C", env="live",
+            condition_id="cond-ks", entered_at="2026-06-09T06:00:00Z",
+            strategy_key="forecast_qkernel_entry",
         )
         portfolio = PortfolioState(positions=[pos])
-
-        class LiveClob:
-            def get_best_bid_ask(self, token_id):
-                return 0.60, 0.62, 100.0, 100.0
+        conn, read_conn = _production_monitor_topology(
+            tmp_path, monkeypatch, pos, phase="day0_window"
+        )
+        clob = _DeepBookClob(0.60, 0.62)
 
         class Tracker:
             def record_exit(self, position):
@@ -2660,8 +2766,8 @@ class TestStructuralWinTerminalHold:
         )
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
-            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps,
+            conn, clob, portfolio, Artifact(), Tracker(), summary,
+            deps=deps, read_conn=read_conn,
         )
         assert summary.get("day0_hard_fact_direct_exit_decisions") == 1
         assert summary.get("day0_hard_fact_probability_refresh_bypassed") == 1
@@ -2677,7 +2783,7 @@ class TestStructuralWinTerminalHold:
         assert executed == [pos]
 
 
-def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(monkeypatch):
+def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(tmp_path, monkeypatch):
     import logging as _logging
     import numpy as np
 
@@ -2705,16 +2811,38 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
         unit="C",
         env="live",
         strategy_key="settlement_capture",
+        condition_id="cond-pending-exit",
+        entered_at="2026-06-09T06:00:00Z",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        exit_reason="STILL_ADVERSE_WHILE_EXIT_PENDING",
     )
     portfolio = PortfolioState(positions=[pos])
+    conn, read_conn = _production_monitor_topology(
+        tmp_path, monkeypatch, pos, phase="pending_exit"
+    )
     calls = {"refresh": 0}
 
     def mock_refresh(conn, clob, position):
+        # Stub only the probability recompute; the held quote and its
+        # full-depth action authority come from the book exactly as
+        # refresh_position derives them.
+        from src.engine import monitor_refresh
+
         calls["refresh"] += 1
+        quote = monitor_refresh.monitor_quote_refresh(conn, clob, position)
+        assert quote is not None and quote.full_depth_action_authority
+        position.last_monitor_best_bid = quote.best_bid
+        position.last_monitor_best_ask = quote.best_ask
+        position.last_monitor_market_price = quote.mark_price
+        position.last_monitor_market_price_is_fresh = True
+        setattr(
+            position,
+            monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            quote.full_depth_action_authority,
+        )
         position.last_monitor_prob = 0.05
         position.last_monitor_prob_is_fresh = True
-        position.last_monitor_market_price = 0.02
-        position.last_monitor_market_price_is_fresh = True
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
@@ -2757,6 +2885,12 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
         ),
     )
 
+    executed = []
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: executed.append(kwargs["position"].trade_id) or "exit_failed:test_stub",
+    )
+
     results = []
 
     class Artifact:
@@ -2784,21 +2918,34 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
     summary = {"monitors": 0, "exits": 0}
 
     cycle_runtime.execute_monitoring_phase(
-        None,
-        object(),
+        conn,
+        _DeepBookClob(0.02, 0.04),
         portfolio,
         Artifact(),
         Tracker(),
         summary,
         deps=deps,
+        read_conn=read_conn,
     )
 
-    assert calls["refresh"] == 1
-    assert summary.get("monitor_released_pending_exit_without_order") == 1
+    # The pending-exit scan inside the monitoring phase releases a stranded
+    # no-order EXIT_INTENT before the held-monitor loop reaches it; the loop's
+    # own release counter stays untouched and the position is re-evaluated
+    # as ordinary held exposure (day0_window: the Tokyo local day is live).
+    assert summary["pending_exits_retried"] == 1
+    assert summary.get("monitor_released_pending_exit_without_order") is None
     assert summary.get("monitor_pending_exit_phase_evaluated") is None
     assert summary.get("pending_exit_exit_signal_already_in_flight") is None
-    assert summary["exits"] == 1
-    assert results and results[0].should_exit is True
+    assert pos.state == "day0_window"
+    assert calls["refresh"] == 1
+    assert summary["monitors"] == 1
+    # A statistical monitor SELL is the global auction's decision, not a local
+    # submit (ed49b674f): the cycle records the request and no order is sent.
+    assert summary["exits"] == 0
+    assert executed == []
+    assert summary.get("monitor_statistical_sell_full_family_preparation_requested") == 1
+    assert results and results[0].should_exit is False
+    assert results[0].exit_reason == "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
 
 
 # ===========================================================================
