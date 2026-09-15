@@ -1947,18 +1947,26 @@ def _track_belief_staleness(pos: Position) -> None:
         return
     count = _belief_stale_cycles.get(key, 0) + 1
     _belief_stale_cycles[key] = count
+    # The cycle's own validation tags say WHY belief is not fresh (a designed
+    # decline such as POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE, or a failed
+    # refresh); the fault line carries them so the alarm is precise.
+    reasons = ",".join(
+        tag for tag in (getattr(pos, "applied_validations", []) or [])
+        if tag != "BELIEF_AUTHORITY_FAULT" and not tag.startswith("belief_stale_cycles=")
+    )
     _append_monitor_validation(pos, f"belief_stale_cycles={count}")
     if count >= _BELIEF_STALE_FAULT_THRESHOLD:
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
         logger.error(
             "BELIEF_AUTHORITY_FAULT: position %s (%s %s %s) has had stale belief "
             "for %d consecutive monitor cycles while the market price is fresh — "
-            "the exit organ is blind on a live position",
+            "the exit organ is blind on a live position; reasons=%s",
             getattr(pos, "trade_id", "?"),
             getattr(pos, "city", "?"),
             getattr(pos, "target_date", "?"),
             getattr(pos, "direction", "?"),
             count,
+            reasons or "none",
         )
 
 

@@ -2324,6 +2324,23 @@ class TestBeliefDeadWatchdog:
         assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
         assert "belief_stale_cycles=3" in pos.applied_validations
 
+    def test_fault_line_names_the_cycles_decline_reason(self, caplog):
+        """A designed decline (post-local-day hard fact not yet available) must be
+        readable from the fault line itself, not indistinguishable from a broken
+        refresh (Hong Kong 2026-09-14, 54+ cycles)."""
+        import src.engine.monitor_refresh as mr
+
+        mr._belief_stale_cycles.clear()
+        pos = self._pos(trade_id="t-watchdog-reason")
+        caplog.set_level("ERROR", logger=mr.__name__)
+        for _ in range(3):
+            pos.applied_validations = ["POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"]
+            mr._track_belief_staleness(pos)
+        line = [r.getMessage() for r in caplog.records if "BELIEF_AUTHORITY_FAULT" in r.getMessage()]
+        assert len(line) == 1
+        assert line[0].endswith("reasons=POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+        assert "belief_stale_cycles=3" in pos.applied_validations
+
     def test_fresh_belief_resets_counter(self):
         import src.engine.monitor_refresh as mr
 
