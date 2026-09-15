@@ -1230,7 +1230,7 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                               correction_lead_bucket="day1", correction_alpha_lead=None,
                               unused_large_parent=False, extra_legacy_anchor_edges=False,
                               correction_extra_fields=None, raw_calibration_input_extra_fields=None,
-                              uncorrected_raw_q=None):
+                              uncorrected_raw_q=None, decision_cell_receipt=False):
     """Real certificate hashing and canonical economic revisions in private DBs."""
     import json
     from src.decision_kernel.certificate import build_certificate, certificate_payload_json, ParentEdge
@@ -1282,6 +1282,12 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
         "global_candidate_id": "candidate", "global_token_id": token,
         "global_jit_execution_curve_identity": "curve-hash",
     }
+    if decision_cell_receipt:
+        receipt = _valid_cell_receipt_summary(
+            decision_at=decision,
+            winner_candidate_id="candidate",
+        )
+        economics["global_auction_receipt"] = receipt["ref"].as_payload()
     parents = [parent]
     forecast_conn = None
     include_forecast = legacy or forecast_lineage
@@ -1403,6 +1409,9 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
                "temperature_metric": metric, "probability_semantics_revision": probability_revision,
                "qkernel_execution_economics": economics,
                "bin_label": bin_label if include_forecast else None}
+    if decision_cell_receipt:
+        payload["strategy_key"] = "fixture_strategy"
+        payload["global_auction_receipt"] = economics["global_auction_receipt"]
     if child_posterior_id is not None:
         payload["posterior_id"] = child_posterior_id
     if child_posterior_identity is not None:
@@ -1467,6 +1476,14 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
       CREATE TABLE venue_submission_envelopes (
         envelope_id TEXT PRIMARY KEY, order_type TEXT, post_only INTEGER);
     """)
+    if decision_cell_receipt:
+        trade.execute(
+            "CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)"
+        )
+        trade.execute(
+            "INSERT INTO decision_log VALUES (?,?,?)",
+            (7, "global_single_order_auction", json.dumps({"summary": receipt["summary"]})),
+        )
     default_order_type = "GTC" if legacy_maker else ("FAK" if legacy else "FOK")
     default_post_only = 1 if legacy_maker else 0
     trade.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)", ("command", token, decision.isoformat(), "order", "snapshot", "ENTRY", "BUY", "envelope"))
@@ -1516,10 +1533,11 @@ def _canonical_corpus_fixture(*, side="YES", corrected=True, metric="high", size
     return (*result, forecast_conn) if return_forecast else result
 
 
-def _read_canonical(world, trade, cutoff=NOW, forecast=None, *, include_cash_proofs=True):
+def _read_canonical(world, trade, cutoff=NOW, forecast=None, *, include_cash_proofs=True,
+                    trade_schema="main"):
     return live_fit.load_canonical_fit_corpus(world, trade, training_cutoff=cutoff,
         city_timezone_snapshot=tuple(sorted(_TEST_CITY_TIMEZONES.items())), forecast_conn=forecast,
-        include_cash_proofs=include_cash_proofs)
+        include_cash_proofs=include_cash_proofs, trade_schema=trade_schema)
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
@@ -2303,7 +2321,7 @@ def _accounting_cash_fixture(monkeypatch, *, available_at=None):
     available_at = available_at or (NOW - timedelta(days=2)).isoformat()
 
     def cash(_conn, *, command, fills, cutoff, schema):
-        assert schema == 'main'
+        assert schema in {'main', 'trades'}
         if not fills or datetime.fromisoformat(available_at) >= cutoff:
             return {'status': 'UNKNOWN', 'reason': 'CHAIN_CASH_PROOF_UNAVAILABLE'}
         return {'status': 'PROVEN', 'reason': 'FINALIZED_FILL_CASH_PROVEN',
@@ -2470,6 +2488,160 @@ def test_probability_only_corpus_skips_cash_decode_without_changing_fit_rows(mon
         world.close()
         trade.close()
         forecast.close()
+
+
+def _valid_cell_receipt_summary(*, decision_at, winner_candidate_id):
+    from src.contracts.global_auction_receipt import (
+        GlobalAuctionReceiptRef,
+        global_auction_artifact_summary_hash,
+        global_auction_execution_binding_hash,
+        global_auction_receipt_ref_from_summary,
+    )
+
+    summary = {
+        "schema_version": 22,
+        "selection_epoch_identity": "epoch-cell",
+        "selection_cut_at_utc": (decision_at - timedelta(minutes=1)).isoformat(),
+        "decision_at_utc": decision_at.isoformat(),
+        "full_scope_identity": "scope-cell",
+        "book_epoch_identity": "book-cell",
+        "wealth_witness_identity": "wealth-cell",
+        "wealth_economic_identity": "wealth-economic-cell",
+        "winner_event_id": "event-cell",
+        "winner_candidate_id": winner_candidate_id,
+        "winner_actuation_identity": "actuation-cell",
+        "payload_identity": "a" * 64,
+        "decision_payload_identity": "b" * 64,
+        "audit_context_sha256": "c" * 64,
+        "book_native_side_states_sha256": "d" * 64,
+        "candidate_evaluations_sha256": "e" * 64,
+        "buy_minimum_marketable_repairs_sha256": "f" * 64,
+        "holding_auction_coverage_sha256": "0" * 64,
+        "receipt_hash": "1" * 64,
+        "global_selection_revision": "selection-cell-v1",
+        "portfolio_wealth": {
+            "ledger_snapshot_id": "ledger-cell",
+            "position_set_hash": "2" * 64,
+            "collateral_authority": "collateral-cell",
+            "wealth_floor_usd": "1",
+            "wealth_ceiling_usd": "100",
+            "spendable_cash_usd": "50",
+            "reservations_usd": "0",
+        },
+        "no_trade_reason": "",
+    }
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(summary)
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(summary)
+    ref = global_auction_receipt_ref_from_summary(
+        decision_log_id=7,
+        decision_log_mode="global_single_order_auction",
+        summary=summary,
+    )
+    assert isinstance(ref, GlobalAuctionReceiptRef)
+    return {"summary": summary, "ref": ref}
+
+
+def _copy_trade_tables_to_attached_schema(trade):
+    trade.execute("ATTACH DATABASE ':memory:' AS trades")
+    tables = (
+        "decision_log", "venue_commands", "executable_market_snapshots",
+        "position_decision_attribution", "venue_trade_facts",
+        "payout_observations", "venue_submission_envelopes",
+    )
+    for table in tables:
+        trade.execute(f"CREATE TABLE trades.{table} AS SELECT * FROM main.{table}")
+
+
+@pytest.mark.parametrize("trade_schema", ["main", "trades"])
+def test_authenticated_decision_cell_survives_outcome_state_changes(monkeypatch, trade_schema):
+    _accounting_cash_fixture(monkeypatch)
+    world, trade, _ = _canonical_corpus_fixture(decision_cell_receipt=True)
+    try:
+        if trade_schema == "trades":
+            _copy_trade_tables_to_attached_schema(trade)
+        baseline = _read_canonical(world, trade, trade_schema=trade_schema)
+        assert len(baseline.records) == 1
+        baseline_cell = baseline.command_accounting[0]["decision_cell"]
+        assert baseline_cell is not None
+        assert baseline.command_accounting[0]["decision_cell_reason"] is None
+        assert baseline.command_accounting[0]["physical_endpoint_status"] == "PROVEN"
+
+        trade.execute(
+            f"UPDATE {trade_schema}.payout_observations SET payout_numerator=40+outcome_index*20, "
+            "payout_denominator=100, state='RESOLVED_NONZERO'"
+        )
+        fractional = _read_canonical(world, trade, trade_schema=trade_schema)
+        fractional_row = fractional.command_accounting[0]
+        assert fractional.records == ()
+        assert fractional.unknown == {"FRACTIONAL_PAYOUT_UNSUPPORTED": 1}
+        assert fractional_row["decision_cell"]["key_hash"] == baseline_cell["key_hash"]
+        assert fractional_row["physical_endpoint_status"] == "PROVEN"
+
+        trade.execute(
+            f"UPDATE {trade_schema}.payout_observations SET payout_numerator=NULL, "
+            "payout_denominator=NULL, state='PENDING'"
+        )
+        pending = _read_canonical(world, trade, trade_schema=trade_schema)
+        pending_row = pending.command_accounting[0]
+        assert pending.records == ()
+        assert pending.unknown == {"FINALIZED_PAYOUT_UNBOUND": 1}
+        assert pending_row["decision_cell"]["key_hash"] == baseline_cell["key_hash"]
+        assert pending_row["physical_endpoint_status"] == "UNKNOWN"
+    finally:
+        world.close()
+        trade.close()
+
+
+def test_probability_only_cell_fast_path_never_reads_receipt_table():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        decision_cell_receipt=True, forecast_lineage=True, return_forecast=True,
+    )
+    trace = []
+    try:
+        trade.set_trace_callback(trace.append)
+        corpus = _read_canonical(
+            world, trade, forecast=forecast, include_cash_proofs=False,
+        )
+        assert corpus.command_accounting[0]["decision_cell"] is None
+        assert corpus.command_accounting[0]["decision_cell_reason"] == (
+            "CELL_PROOF_NOT_REQUESTED"
+        )
+        assert not any("decision_log" in statement.lower() for statement in trace)
+    finally:
+        world.close()
+        trade.close()
+        if forecast is not None:
+            forecast.close()
+
+
+@pytest.mark.parametrize("mutation", ["clock", "execution_mode"])
+def test_decision_cell_malformed_pre_outcome_input_stays_unknown_without_corpus_crash(mutation):
+    world, trade, _ = _canonical_corpus_fixture(decision_cell_receipt=True)
+    try:
+        if mutation == "clock":
+            world.execute(
+                "UPDATE decision_certificates SET decision_time='not-a-time' "
+                "WHERE certificate_type='ActionableTradeCertificate'"
+            )
+        else:
+            row = world.execute(
+                "SELECT certificate_hash, payload_json FROM decision_certificates "
+                "WHERE certificate_type='ActionableTradeCertificate'"
+            ).fetchone()
+            payload = json.loads(row[1])
+            payload["qkernel_execution_economics"]["global_execution_mode"] = "INVALID"
+            world.execute(
+                "UPDATE decision_certificates SET payload_json=? WHERE certificate_hash=?",
+                (json.dumps(payload), row[0]),
+            )
+        corpus = _read_canonical(world, trade)
+        assert corpus.command_count == 1
+        row = corpus.command_accounting[0]
+        assert row["decision_cell"] is None
+        assert row["decision_cell_reason"].startswith("CELL_PROOF_")
+    finally:
+        world.close()
+        trade.close()
 
 
 def _sealed_cell_inputs(*, side="YES", metric="high", lead_days=1, policy=None):

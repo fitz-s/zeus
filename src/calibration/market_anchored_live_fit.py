@@ -1814,8 +1814,11 @@ def load_canonical_fit_corpus(
                 decision_log_id=receipt_ref.decision_log_id,
                 expected_mode=receipt_ref.decision_log_mode,
                 expected_receipt_hash=receipt_ref.receipt_hash,
+                schema=trade_schema,
             )
-            from src.contracts.global_auction_receipt import global_auction_receipt_ref_from_summary
+            from src.contracts.global_auction_receipt import (
+                global_auction_receipt_ref_from_summary,
+            )
 
             actual_ref = global_auction_receipt_ref_from_summary(
                 decision_log_id=receipt_ref.decision_log_id,
@@ -3016,12 +3019,15 @@ def _receipt_summary(
     decision_log_id: int,
     expected_mode: str,
     expected_receipt_hash: str,
+    schema: str = "main",
 ) -> Mapping[str, object]:
     """Read and authenticate one exact, already-persisted auction receipt."""
 
     try:
+        if schema not in {"main", "trades"}:
+            raise ValueError
         row = conn.execute(
-            "SELECT mode, artifact_json FROM main.decision_log WHERE id = ? LIMIT 1",
+            f"SELECT mode, artifact_json FROM {schema}.decision_log WHERE id = ? LIMIT 1",
             (decision_log_id,),
         ).fetchone()
         if row is None or str(row[0]) != expected_mode:
