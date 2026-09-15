@@ -7445,27 +7445,23 @@ def select_global_single_order(
         p0 = float(curve.levels[0].price)
         if not math.isfinite(p0) or not 0.0 < p0 < 1.0:
             return None
-        is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
+        action = "SELL" if isinstance(candidate, GlobalSingleOrderSellCandidate) else "BUY"
         try:
             correction = payoff_q_correction_resolver(
                 candidate, float(raw_q), p0, decision_at_utc
             )
         except PayoffQCorrectionUnavailable:
             raise
-        except Exception as exc:  # noqa: BLE001 - BUY legacy fallback only
-            if is_sell:
-                raise PayoffQCorrectionUnavailable(
-                    f"SELL correction resolver failed: {exc}"
-                ) from exc
-            return None
+        except Exception as exc:  # noqa: BLE001 - a failed correction cannot authorize raw q
+            raise PayoffQCorrectionUnavailable(
+                f"{action} correction resolver failed: {exc}"
+            ) from exc
         if correction is None:
             return None
         if not isinstance(correction, PayoffQCorrection):
-            if is_sell:
-                raise PayoffQCorrectionUnavailable(
-                    "SELL correction result has invalid type"
-                )
-            return None
+            raise PayoffQCorrectionUnavailable(
+                f"{action} correction result has invalid type"
+            )
         if not correction.matches(
             family_key=candidate.family_key,
             bin_id=candidate.bin_id,
@@ -7477,15 +7473,13 @@ def select_global_single_order(
             # A record sealed against a different leg or a superseded raw q
             # cannot describe this sizing; acting on it would break the
             # certificate's raw-q supersession check.
-            if is_sell:
-                raise PayoffQCorrectionUnavailable(
-                    "SELL correction identity or raw q mismatch"
-                )
-            return None
-        if is_sell and not math.isclose(
+            raise PayoffQCorrectionUnavailable(
+                f"{action} correction identity or raw q mismatch"
+            )
+        if not math.isclose(
             correction.p0, p0, rel_tol=0.0, abs_tol=1e-12
         ):
-            raise PayoffQCorrectionUnavailable("SELL correction p0 mismatch")
+            raise PayoffQCorrectionUnavailable(f"{action} correction p0 mismatch")
         return correction
 
     def bind_capital_horizon(

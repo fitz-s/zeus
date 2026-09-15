@@ -7195,12 +7195,12 @@ def test_var_nonconcave_where_cvar_stays_concave():
 #
 # The correction must reach the SOLVER, not just the receipt: the same scalar
 # has to size the order, seal the cut probability, and travel to the
-# certificate. These tests pin that single-value property and the fail-open
-# behavior that keeps the pre-calibrator path byte-identical.
+# certificate. Invalid corrections cannot authorize sizing on raw q; an
+# explicitly absent optional correction keeps the legacy path byte-identical.
 # ---------------------------------------------------------------------------
 
 
-def _correction_for(candidate, *, raw_q, corrected_q, p0=0.35):
+def _correction_for(candidate, *, raw_q, corrected_q, p0=None):
     from src.contracts.payoff_q_correction import PayoffQCorrection
 
     return PayoffQCorrection(
@@ -7210,7 +7210,7 @@ def _correction_for(candidate, *, raw_q, corrected_q, p0=0.35):
         token_id=candidate.token_id,
         raw_q=raw_q,
         corrected_q=corrected_q,
-        p0=p0,
+        p0=(float(candidate.economic_cost_curve.levels[0].price) if p0 is None else p0),
         lead_bucket="day1",
         alpha_lead=0.558,
         beta=0.094,
@@ -7957,7 +7957,10 @@ def test_sell_correction_rejects_invalid_result_without_raw_fallback():
 
     for resolver, detail in cases:
         decision = _global_select(
-            (sell, buy), payoff_q_correction_resolver=resolver
+            (sell, buy),
+            payoff_q_correction_resolver=lambda c, *args: (
+                resolver(c, *args) if c is sell else None
+            ),
         )
         assert decision.candidate is buy
         assert decision.rejection_reasons[sell.candidate_id] == (
@@ -8112,65 +8115,75 @@ def test_no_correction_resolver_is_byte_identical_to_the_pre_calibrator_path():
     assert baseline.payoff_q_correction is None
 
 
-def test_a_raising_correction_resolver_keeps_the_raw_q():
-    candidate = _global_candidate(
-        candidate_id="raising-buy",
-        family="raising-family",
-        side="YES",
-        q=0.90,
-        levels=(("0.35", "100"),),
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
+@pytest.mark.parametrize(
+    "fault, detail",
+    (
+        ("exception", "BUY correction resolver failed: fit unavailable"),
+        ("type", "BUY correction result has invalid type"),
+        ("family_key", "BUY correction identity or raw q mismatch"),
+        ("bin_id", "BUY correction identity or raw q mismatch"),
+        ("side", "BUY correction identity or raw q mismatch"),
+        ("token_id", "BUY correction identity or raw q mismatch"),
+        ("raw_q", "BUY correction identity or raw q mismatch"),
+        ("p0", "BUY correction p0 mismatch"),
+    ),
+)
+def test_invalid_buy_correction_cannot_fall_back_to_raw_q(
+    side, execution_mode, fault, detail,
+):
+    taker, maker = _native_maker_candidates(side=side, current_token_shares="0")
+    candidate = taker if execution_mode == "TAKER_LIMIT" else maker
+    correction = _correction_for(candidate, raw_q=0.90, corrected_q=0.52)
+    valid = _global_select(
+        (candidate,), cap="60", payoff_q_correction_resolver=lambda *_: correction,
+    )
+    raw = _global_select((candidate,), cap="60")
+    assert valid.candidate is candidate
+    assert valid.payoff_q_correction is correction
+    assert valid.expected_terminal_wealth.win_probability_mean == 0.52
+    assert valid.shares < raw.shares
+
+    def faulty_resolver(*_args):
+        if fault == "exception":
+            raise RuntimeError("fit unavailable")
+        if fault == "type":
+            return object()
+        if fault == "raw_q":
+            return replace(correction, raw_q=0.61)
+        if fault == "p0":
+            return replace(correction, p0=correction.p0 + 0.01)
+        if fault == "side":
+            return replace(correction, side="NO" if side == "YES" else "YES")
+        return replace(correction, **{fault: "foreign-identity"})
+
+    rejected = _global_select(
+        (candidate,), cap="60", payoff_q_correction_resolver=faulty_resolver,
+    )
+    assert rejected.candidate is None
+    assert rejected.shares == 0
+    assert rejected.rejection_reasons[candidate.candidate_id] == (
+        f"CALIBRATED_PAYOFF_Q_UNAVAILABLE:{detail}"
     )
 
-    def explode(candidate, raw_q, p0, at):
-        raise RuntimeError("fit unavailable")
-
-    baseline = _global_select((candidate,))
-    decision = _global_select((candidate,), payoff_q_correction_resolver=explode)
-
-    assert decision == baseline
-
-
-def test_correction_sealed_against_a_different_leg_is_refused():
-    """A record that does not name this exact leg cannot describe its sizing."""
-
-    candidate = _global_candidate(
-        candidate_id="mismatched-buy",
-        family="mismatched-family",
-        side="YES",
-        q=0.90,
-        levels=(("0.35", "100"),),
+    competitor = _global_candidate(
+        candidate_id="valid-calibrated-competitor", family="competitor-family",
+        side="YES", q=0.70, levels=(("0.40", "100"),),
     )
-    foreign = replace(
-        _correction_for(candidate, raw_q=0.90, corrected_q=0.52),
-        token_id="token-somewhere-else",
+    competitor_correction = _correction_for(
+        competitor, raw_q=0.70, corrected_q=0.60,
     )
-
-    baseline = _global_select((candidate,))
-    decision = _global_select(
-        (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: foreign
+    ranked = _global_select(
+        (candidate, competitor), cap="60",
+        payoff_q_correction_resolver=lambda c, *args: (
+            faulty_resolver(c, *args) if c is candidate else competitor_correction
+        ),
     )
-
-    assert decision == baseline
-
-
-def test_correction_naming_a_superseded_raw_q_is_refused():
-    """raw_q must match the witness projection this sizing actually used."""
-
-    candidate = _global_candidate(
-        candidate_id="stale-raw-buy",
-        family="stale-raw-family",
-        side="YES",
-        q=0.90,
-        levels=(("0.35", "100"),),
-    )
-    stale = _correction_for(candidate, raw_q=0.61, corrected_q=0.52)
-
-    baseline = _global_select((candidate,))
-    decision = _global_select(
-        (candidate,), payoff_q_correction_resolver=lambda c, raw_q, p0, at: stale
-    )
-
-    assert decision == baseline
+    assert ranked.candidate is competitor
+    assert ranked.payoff_q_correction is competitor_correction
+    assert ranked.expected_terminal_wealth.win_probability_mean == 0.60
+    assert competitor.candidate_id not in ranked.rejection_reasons
 
 
 def test_correction_resolver_receives_the_raw_q_and_gross_market_price():
