@@ -1,7 +1,7 @@
 """City-local calendar identity tests for market-anchored correction."""
 
 # Created: 2026-09-08
-# Last reused or audited: 2026-09-14
+# Last reused or audited: 2026-09-15
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
@@ -412,6 +412,7 @@ def test_entry_resolver_and_held_exit_use_actual_city_local_callers(monkeypatch,
 
     provider.load = lambda **kwargs: SimpleNamespace(
         family_key="family", bin_id="b", corrected_probability=apply_held,
+        fit_scope=CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "fixture-revision-v1"),
     )
     register_active_provider(provider)
     context = ExitContext(
@@ -1124,11 +1125,12 @@ def test_entry_warm_does_not_bind_scope_or_grant_fit_authority(monkeypatch, warm
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
 @pytest.mark.parametrize('sell_mode', ['TAKER_LIMIT', 'MAKER_REST'])
-def test_held_sell_uses_current_fit_under_entry_policy(monkeypatch, side, sell_mode):
+@pytest.mark.parametrize('entry_mode', ['TAKER_LIMIT', 'MAKER_REST'])
+def test_held_sell_uses_current_fit_under_entry_policy(monkeypatch, side, sell_mode, entry_mode):
     from src.calibration import market_anchored_live_fit as live_fit
     from src.contracts.payoff_q_correction import PayoffQCorrection
 
-    entry_scope = CalibrationFitScope('high', 'TAKER_LIMIT', 'FOK_FULL_OR_ZERO', 'entry-revision')
+    entry_scope = CalibrationFitScope('high', entry_mode, 'MAKER_REST' if entry_mode == 'MAKER_REST' else 'FOK_FULL_OR_ZERO', 'entry-revision')
     policy = live_fit.CanonicalMarketAnchoredFitProvider(
         lambda: (None, None, None), city_timezones={'Tokyo': 'Asia/Tokyo'},
     ).calibration_policy
@@ -1179,25 +1181,40 @@ def test_held_sell_uses_current_fit_under_entry_policy(monkeypatch, side, sell_m
         target_context_by_family={'family': ('Tokyo', date(2026, 1, 2))},
         market_anchored_fit_artifact_audit=audit,
     )
-    candidate = SimpleNamespace(
-        action='SELL', family_key='family', bin_id='bin', token_id='held-token',
-        position_id='held-position', side=side, execution_mode=sell_mode,
+    from decimal import Decimal
+    from src.contracts.executable_cost_curve import BookLevel
+    from tests.solve.test_solver_properties import _global_sell_candidate, _current_maker_witness
+    from src.solve import solver as S
+    candidate = _global_sell_candidate(
+        candidate_id="entry-anchor-held", family="family", side=side,
+        held_q=.83, bids=((".42", "10"),), min_tick=".01",
+        required_mode="TAKER_LIMIT", probability_functional="POSTERIOR_PREDICTIVE_MEAN",
     )
+    candidate = replace(candidate, native_ask_levels=(BookLevel(Decimal(".55"), Decimal("10")),))
+    if sell_mode == "MAKER_REST":
+        proposal = S.passive_sell_proposal_curve(candidate.executable_sell_curve, capacity=candidate.held_shares)
+        candidate = replace(candidate, execution_mode="MAKER_REST", proposal_sell_curve=proposal,
+            fill_probability=1.0, fill_probability_source="current-fill", rest_deadline_minutes=20.0,
+            asset_epoch_identity="entry-anchor-epoch")
+        fill = _current_maker_witness(candidate, proposal=proposal, asset_epoch="entry-anchor-epoch",
+            outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal(".43")),))
+        candidate = replace(candidate, maker_fill_witness=fill, fill_probability_source=fill.witness_identity)
+    expected_anchor = .43 if entry_mode == "MAKER_REST" else .55
     now = datetime(2026, 1, 1, 15, 30, tzinfo=timezone.utc)
     correction = resolver(candidate, 0.83, 0.42, now)
     assert correction.raw_q == 0.83
-    assert correction.p0 == 0.42
+    assert correction.p0 == expected_anchor
     assert correction.fit_scope is entry_scope
     assert correction.calibration_policy is policy
     assert correction.corrected_q == pytest.approx(corrected_probability(
-        artifact, p0=0.42, q_raw=0.83, city='Tokyo', target_date=date(2026, 1, 2),
+        artifact, p0=expected_anchor, q_raw=0.83, city='Tokyo', target_date=date(2026, 1, 2),
         decision_at=now, side=side,
     )[0])
     assert calls[0]['decision_at'] == now
     assert refreshed == [dict(decision_at=now, current_raw_revision="entry-revision", deadline_monotonic=None)]
     assert correction.param_hash == 'current-held-fit'
     assert loaded == [(trade, {
-        'position_id': 'held-position', 'token_id': 'held-token',
+        'position_id': candidate.position_id, 'token_id': candidate.token_id,
         'side': side, 'world_conn': world,
     })]
     recorded = next(iter(audit['consulted_scopes'].values()))

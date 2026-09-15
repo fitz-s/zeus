@@ -13970,13 +13970,19 @@ def _global_sell_execution_economics_drift(
     if curve_drift:
         return f"fields={','.join(curve_drift)}"
     correction = getattr(decision, "payoff_q_correction", None)
-    if correction is not None and (
-        Decimal(str(correction.p0))
-        != current_candidate.economic_sell_curve.levels[0].price
-    ):
-        # SCOPE: this calibrated SELL proposal. DRAIN: re-auction on the new
-        # quote. RESET: the sealed probability uses that same price anchor.
-        return "calibration_price_anchor"
+    if correction is not None:
+        try:
+            anchor = (
+                Decimal(str(current_candidate.entry_calibration_price_anchor(correction.fit_scope)))
+                if correction.fit_scope is not None
+                else current_candidate.economic_sell_curve.levels[0].price
+            )
+        except (AttributeError, TypeError, ValueError):
+            return "calibration_price_anchor"
+        if Decimal(str(correction.p0)) != anchor:
+            # SCOPE: this calibrated SELL. DRAIN: re-auction a current native
+            # book. RESET: its inherited ENTRY price feature reproduces p0.
+            return "calibration_price_anchor"
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     selected_proceeds = Decimal(
         str(getattr(decision, "cash_proceeds_usd", "0") or "0")
@@ -14121,7 +14127,7 @@ def _revalidate_global_sell_calibration(
         token_id=candidate.token_id,
         side=candidate.side,
         raw_q=raw_q,
-        p0=float(candidate.economic_sell_curve.levels[0].price),
+        p0=candidate.entry_calibration_price_anchor(binding.fit_scope),
         city=position.city,
         target_date=date.fromisoformat(str(position.target_date)[:10]),
         decision_at=actuation.decision_at_utc,

@@ -8776,3 +8776,64 @@ def test_global_ranking_compares_full_feasible_sizes_on_both_sides(better_side):
     assert decision.expected_growth.expected_delta_log_wealth > (
         0.79 * math.log(205.88 / 200) + 0.21 * math.log(195.88 / 200)
     )
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("entry_mode,expected_anchor", [("TAKER_LIMIT", .7), ("MAKER_REST", .601)])
+@pytest.mark.parametrize("wrong_anchor", [False, True])
+def test_statistical_sell_verifies_inherited_buy_anchor(side, entry_mode, expected_anchor, wrong_anchor):
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+    sell = _global_sell_candidate(
+        candidate_id="entry-anchor-sell", family="entry-anchor-family", side=side,
+        held_q=.30, bids=((".60", "10"),), shares="10", required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    sell = replace(sell, native_ask_levels=(BookLevel(Decimal(".70"), Decimal("10")),))
+    scope = CalibrationFitScope("high", entry_mode, "MAKER_REST" if entry_mode == "MAKER_REST" else "FOK_FULL_OR_ZERO", "entry-v1")
+    correction = replace(
+        _correction_for(sell, raw_q=.30, corrected_q=.40, p0=.60 if wrong_anchor else expected_anchor),
+        fit_scope=scope,
+    )
+    decision = _global_select((sell,), payoff_q_correction_resolver=lambda *_: correction)
+    if wrong_anchor:
+        assert decision.candidate is None
+        assert decision.rejection_reasons[sell.candidate_id] == "CALIBRATED_PAYOFF_Q_UNAVAILABLE:SELL correction p0 mismatch"
+    else:
+        assert decision.candidate is sell
+        assert decision.expected_terminal_wealth.held_probability_mean == .40
+        assert decision.cash_proceeds_usd == Decimal("6.0")
+        assert decision.payoff_q_correction.p0 == expected_anchor
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_missing_entry_price_feature_rejects_only_held_sell(side):
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+    sell = _global_sell_candidate(
+        candidate_id="no-entry-ask", family="no-entry-ask-family", side=side,
+        held_q=.30, bids=((".60", "10"),), required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    buy = _global_candidate(candidate_id="other-buy", family="other-family", side=side, q=.8, levels=((".4", "1000"),))
+    correction = replace(_correction_for(sell, raw_q=.30, corrected_q=.4, p0=.6),
+        fit_scope=CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "entry-v1"))
+    decision = _global_select((sell, buy), payoff_q_correction_resolver=lambda c, *_: correction if c is sell else None)
+    assert decision.candidate is buy
+    assert decision.rejection_reasons[sell.candidate_id].startswith("CALIBRATED_PAYOFF_Q_UNAVAILABLE:ENTRY_PRICE_ANCHOR_INVALID")
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_calibration_anchor_above_entry_band_does_not_block_legal_sell(side):
+    from src.contracts.payoff_q_correction import CalibrationFitScope
+    sell = _global_sell_candidate(
+        candidate_id="high-ask-legal-sell", family="high-ask-family", side=side,
+        held_q=.30, bids=((".94", "10"),), required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    sell = replace(sell, native_ask_levels=(BookLevel(Decimal(".96"), Decimal("10")),))
+    correction = replace(_correction_for(sell, raw_q=.30, corrected_q=.4, p0=.96),
+        fit_scope=CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "entry-v1"))
+    decision = _global_select((sell,), payoff_q_correction_resolver=lambda *_: correction)
+    assert decision.candidate is sell
+    assert decision.limit_price == Decimal(".94")
+    assert decision.payoff_q_correction.p0 == .96
+    assert decision.expected_terminal_wealth.held_probability_mean == .4

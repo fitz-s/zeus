@@ -248,6 +248,7 @@ class ExitContext:
     current_market_price_is_fresh: bool = False
     best_bid: Optional[float] = None
     best_ask: Optional[float] = None
+    min_tick: Optional[float] = field(default=None, kw_only=True)
     # Held-side executable depth, co-fresh with best_bid (same monitor cycle). The
     # depth-honest exit stopping law prices the true fillable-prefix proceeds from
     # bid_ladder instead of held_shares * best_bid. bid_size is the top-of-book size,
@@ -709,6 +710,7 @@ class Position:
     last_monitor_market_price_is_fresh: bool = False
     last_monitor_best_bid: Optional[float] = None
     last_monitor_best_ask: Optional[float] = None
+    last_monitor_min_tick: Optional[float] = field(default=None, kw_only=True)
     # Held-side executable depth from the same-cycle monitor quote (in-memory only,
     # not DB-persisted): top-of-book size and the top-rungs (price, size) ladder.
     # Consumed by the depth-honest exit stopping law; absent => single-level fallback.
@@ -988,16 +990,6 @@ class Position:
         if provider is None:
             return q_raw, evidence_ok, "raw"
 
-        # This stop compares immediate SELL proceeds, so use the held token's
-        # gross bid, as the global TAKER SELL correction does. An ask-weighted
-        # market price can otherwise hide a reversal merely by widening spread.
-        # SCOPE: this statistical stop; DRAIN/RESET: the next valid held bid.
-        if not ExitContext._is_finite(exit_context.best_bid):
-            return q_raw, False, "entry_calibration_unavailable"
-        p0 = float(exit_context.best_bid)
-        if not 0.0 <= p0 <= 1.0:
-            return q_raw, False, "entry_calibration_unavailable"
-
         try:
             target_date = date.fromisoformat(str(self.target_date)[:10])
         except (TypeError, ValueError):
@@ -1021,6 +1013,15 @@ class Position:
                 side=side,
                 decision_at=now_utc,
                 current_raw_revision=current_raw_revision,
+            )
+            if not exit_context.current_market_price_is_fresh:
+                raise ValueError("current market quote is stale")
+            # Recreate the immutable ENTRY policy feature from this same-cycle
+            # book: TAKER uses the ask, while MAKER uses bid + one tick.
+            p0 = binding.fit_scope.current_buy_price_anchor(
+                best_bid=exit_context.best_bid,
+                best_ask=exit_context.best_ask,
+                min_tick=exit_context.min_tick,
             )
             applied = binding.corrected_probability(
                 family_key=binding.family_key,

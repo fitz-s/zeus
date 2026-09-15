@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-14
+# Last reused/audited: 2026-09-15
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -26633,6 +26633,85 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             "current_capital_limit_resolver": current_capital_limit,
         },
     )
+    # Exercise the real auction producer, including native NO and mixed captures.
+    import src.engine.global_single_order_auction as auction_module
+    from src.contracts.payoff_q_correction import (
+        CalibrationFitScope, PayoffQCorrectionUnavailable,
+    )
+
+    for native_side in ("YES", "NO"):
+        native_token = (
+            evaluated_binding.yes_token_id
+            if native_side == "YES" else evaluated_binding.no_token_id
+        )
+        native = book_epoch.asset_by_key[
+            (held_probability.family_key, evaluated_binding.bin_id, native_side, native_token)
+        ]
+        native = replace(native, curve=replace(
+            native.curve, min_tick=Decimal(".01"),
+            levels=(BookLevel(Decimal(".20"), Decimal("1000")),),
+        ))
+        matched_sell = replace(
+            held_book_epoch.sell_assets[0], side=native_side, token_id=native_token,
+            curve=replace(
+                sell_curve, side=native_side, token_id=native_token,
+                book_hash=native.curve.book_hash, levels=native.bid_levels,
+                min_tick=native.curve.min_tick,
+            ),
+        )
+        native_prepared = dict(prepared_with_holdings)
+        native_prepared[held_event_id] = replace(
+            native_prepared[held_event_id], holdings_snapshot=SimpleNamespace(
+                family_key=held_probability.family_key,
+                ledger_snapshot_id=wealth.ledger_snapshot_id,
+                holdings=(SimpleNamespace(
+                    **{**vars(evaluated_holding), "side": native_side, "token_id": native_token}
+                ),),
+            ),
+        )
+        for mismatch in (None, "hash", "time", "tick"):
+            changed_sell = matched_sell
+            if mismatch == "hash":
+                changed_sell = replace(matched_sell, curve=replace(matched_sell.curve, book_hash="different"))
+            elif mismatch == "time":
+                changed_sell = replace(matched_sell, captured_at_utc=decision_at - _dt.timedelta(milliseconds=1))
+            elif mismatch == "tick":
+                changed_sell = replace(matched_sell, curve=replace(matched_sell.curve, min_tick=Decimal(".001")))
+            observed_candidates = []
+            original_factory = auction_module.global_sell_candidate_from_holding
+            def observe_candidate(*args, **kwargs):
+                candidate = original_factory(*args, **kwargs)
+                if candidate is not None:
+                    observed_candidates.append(candidate)
+                return candidate
+            with monkeypatch.context() as patch:
+                patch.setattr(auction_module, "global_sell_candidate_from_holding", observe_candidate)
+                select_prepared_global_auction(
+                    native_prepared,
+                    **{**auction_kwargs, "book_epoch": replace(
+                        held_book_epoch, sell_assets=(changed_sell,),
+                        assets=tuple(
+                            native if row.token_id == native_token
+                            and row.family_key == native.family_key else row
+                            for row in held_book_epoch.assets
+                        ),
+                    )},
+                )
+            assert observed_candidates, (native_side, mismatch)
+            for candidate in observed_candidates:
+                scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "entry-revision")
+                if mismatch is None:
+                    assert candidate.native_ask_levels == native.curve.levels
+                    assert candidate.entry_calibration_price_anchor(scope) == float(native.curve.levels[0].price)
+                    maker_scope = CalibrationFitScope("high", "MAKER_REST", "MAKER_REST", "entry-revision")
+                    assert candidate.entry_calibration_price_anchor(maker_scope) == float(
+                        native.bid_levels[0].price + native.curve.min_tick
+                    )
+                else:
+                    assert candidate.native_ask_levels == ()
+                    with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PRICE_ANCHOR_INVALID:ask"):
+                        candidate.entry_calibration_price_anchor(scope)
+
     weakest_binding = min(
         held_probability.bindings,
         key=lambda binding: float(
@@ -42610,21 +42689,25 @@ def test_joint_exact_fact_is_not_reissued_by_probability_cache(monkeypatch):
         )
 
 
-def _calibrated_sell_actuation_fixture():
-    from src.contracts.payoff_q_correction import PayoffQCorrection
+def _calibrated_sell_actuation_fixture(*, entry_mode="TAKER_LIMIT", sell_mode=None):
+    from src.contracts.payoff_q_correction import CalibrationFitScope, PayoffQCorrection
 
     event = _global_scope_event(city='Alpha', source_run_id='entry-policy-sell')
     actuation = _adapter_sell_actuation(
         event, selected_shares='5', probability_functional='POSTERIOR_PREDICTIVE_MEAN',
+        required_execution_mode=sell_mode,
     )
-    candidate = actuation.decision.candidate
+    candidate = replace(actuation.decision.candidate, native_ask_levels=(BookLevel(Decimal(".70"), Decimal("10")),))
+    actuation = replace(actuation, decision=replace(actuation.decision, candidate=candidate))
+    scope = CalibrationFitScope("high", entry_mode, "MAKER_REST" if entry_mode == "MAKER_REST" else "FOK_FULL_OR_ZERO", "entry-revision")
+    anchor = .70 if entry_mode == "TAKER_LIMIT" else .61
     held_q = actuation.decision.expected_terminal_wealth.held_probability_mean
     actuation.probability_witness.yes_point_q = (held_q,)
     correction = PayoffQCorrection(
         family_key=candidate.family_key, bin_id=candidate.bin_id,
         side=candidate.side, token_id=candidate.token_id,
         raw_q=held_q, corrected_q=held_q,
-        p0=float(candidate.economic_sell_curve.levels[0].price),
+        p0=anchor, fit_scope=scope,
         lead_bucket='day1', alpha_lead=0.0, beta=1.0, lambda_=1.0,
         training_cutoff='2026-07-12T00:00:00Z', n_train=25, param_hash='entry-fit',
     )
@@ -42663,7 +42746,7 @@ def test_global_sell_revalidates_sealed_entry_policy_on_current_raw_q(monkeypatc
     def load(conn, **kwargs):
         assert kwargs['position_id'] == actuation.decision.candidate.position_id
         assert kwargs['token_id'] == actuation.decision.candidate.token_id
-        binding = SimpleNamespace(corrected_probability=apply, fit_scope=SimpleNamespace(raw_probability_revision="entry-revision"))
+        binding = SimpleNamespace(corrected_probability=apply, fit_scope=correction.fit_scope)
         def at_decision(provider, **kwargs):
             assert kwargs == dict(decision_at=actuation.decision_at_utc, current_raw_revision="entry-revision", deadline_monotonic=123.0)
             return binding
@@ -42681,7 +42764,7 @@ def test_global_sell_revalidates_sealed_entry_policy_on_current_raw_q(monkeypatc
     assert calls[0]['decision_at'] == actuation.decision_at_utc
 
 
-def test_calibrated_sell_reauctions_when_better_bid_changes_probability_anchor():
+def test_calibrated_sell_reauctions_when_entry_price_feature_is_missing():
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
     actuation = _calibrated_sell_actuation_fixture()
@@ -42940,3 +43023,30 @@ def test_reduce_only_unknown_payoff_full_adapter_drains_empty_capture(monkeypatc
     finally:
         for conn in (trade, forecast, topology, world):
             conn.close()
+
+
+@pytest.mark.parametrize("entry_mode", ["TAKER_LIMIT", "MAKER_REST"])
+@pytest.mark.parametrize("changed_side", ["bid", "ask"])
+def test_sell_jit_separates_entry_price_feature_from_exit_proceeds(entry_mode, changed_side):
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    actuation = _calibrated_sell_actuation_fixture(entry_mode=entry_mode)
+    candidate = actuation.decision.candidate
+    bid = ".61" if changed_side == "bid" else ".60"
+    ask = ".72" if changed_side == "ask" else ".70"
+    jit = era._global_sell_candidate_from_raw_book(
+        candidate,
+        {"asset_id": candidate.token_id, "tick_size": ".01", "min_order_size": "5",
+         "bids": [{"price": bid, "size": "10"}], "asks": [{"price": ask, "size": "10"}]},
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(candidate, tick=".01", min_order_size="5"),
+    )
+    anchor_changes = (entry_mode == "TAKER_LIMIT" and changed_side == "ask") or (entry_mode == "MAKER_REST" and changed_side == "bid")
+    reason = era._global_sell_execution_economics_drift(decision=actuation.decision, current_candidate=jit)
+    if anchor_changes:
+        assert reason == "calibration_price_anchor"
+        with pytest.raises(ValueError, match="GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED"):
+            GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=jit)
+    else:
+        assert reason is None
+        authority = GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=jit)
+        assert authority.limit_price() >= actuation.decision.limit_price

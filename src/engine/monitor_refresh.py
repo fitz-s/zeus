@@ -739,6 +739,7 @@ class HeldTokenMonitorQuote:
     mark_price: float
     source_timestamp: str
     min_order_size: float | None = None
+    min_tick: float | None = field(default=None, kw_only=True)
     # Held-side depth ladder (top rungs, price-descending) for the depth-honest
     # exit stopping law. Empty when the book was unavailable (one-sided/degraded).
     bid_ladder: tuple[tuple[float, float], ...] = ()
@@ -828,6 +829,21 @@ def _book_min_order_size(book: dict | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if np.isfinite(value) and value > 0.0 else None
+
+
+def _book_min_tick(book: dict | None) -> float | None:
+    if not isinstance(book, dict):
+        return None
+    for key in ("tick_size", "min_tick_size", "minimum_tick_size", "minTickSize"):
+        if key not in book:
+            continue
+        try:
+            value = float(book[key])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0.0:
+            return value
+    return None
 
 
 def _fresh_canonical_monitor_orderbook(
@@ -1169,6 +1185,7 @@ def _fresh_canonical_monitor_no_bid_witness(
                     if not np.isfinite(ask_f) or ask_f <= 0.0:
                         continue
                 ask_size = 0.0
+                depth = None
                 if raw_depth is not None and str(raw_depth).strip():
                     depth = json.loads(str(raw_depth))
                     if not isinstance(depth, dict):
@@ -1197,6 +1214,7 @@ def _fresh_canonical_monitor_no_bid_witness(
                         ask_size=ask_size,
                         mark_price=bid_f,
                         source_timestamp=quote_at.isoformat(),
+                        min_tick=_book_min_tick(depth),
                         bid_ladder=(),
                         full_depth_action_authority=False,
                     )
@@ -4053,6 +4071,7 @@ def _one_sided_monitor_quote(
             mark_price=bid_f,
             source_timestamp=source_timestamp,
             min_order_size=_book_min_order_size(book),
+            min_tick=_book_min_tick(book),
             bid_ladder=(
                 _bid_ladder_from_book(book) if isinstance(book, dict) else ()
             ),
@@ -4191,6 +4210,7 @@ def monitor_quote_refresh(
             mark_price=mark_price,
             source_timestamp=source_timestamp,
             min_order_size=_book_min_order_size(book),
+            min_tick=_book_min_tick(book),
             bid_ladder=(
                 _bid_ladder_from_book(book) if isinstance(book, dict) else ()
             ),
@@ -7365,6 +7385,7 @@ def refresh_exact_one_position(pos: Position) -> EdgeContext:
     pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
+    pos.last_monitor_min_tick = None
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
@@ -7422,6 +7443,7 @@ def refresh_exact_zero_position(
     pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
+    pos.last_monitor_min_tick = None
     pos.last_monitor_bid_size = None
     pos.last_monitor_bid_ladder = ()
     pos.last_monitor_market_vig = None
@@ -7456,6 +7478,7 @@ def refresh_exact_zero_position(
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
+        pos.last_monitor_min_tick = getattr(quote, "min_tick", None)
         pos.last_monitor_bid_size = quote.bid_size
         pos.last_monitor_bid_ladder = quote.bid_ladder
         current_p_market = quote.mark_price
@@ -7537,6 +7560,7 @@ def refresh_position(
 
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
+    pos.last_monitor_min_tick = None
     pos.last_monitor_bid_size = None
     pos.last_monitor_bid_ladder = ()
     pos.last_monitor_market_vig = None
@@ -7567,6 +7591,7 @@ def refresh_position(
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
+        pos.last_monitor_min_tick = getattr(quote, "min_tick", None)
         pos.last_monitor_bid_size = quote.bid_size
         pos.last_monitor_bid_ladder = quote.bid_ladder
         current_p_market = quote.mark_price

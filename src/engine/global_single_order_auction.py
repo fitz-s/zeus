@@ -1278,6 +1278,19 @@ def select_prepared_global_auction(
                         )
                     )
                     continue
+                native_asset = book_epoch.asset_by_key.get(
+                    (family_key, str(holding.bin_id), str(holding.side), str(holding.token_id))
+                )
+                # ENTRY price features and SELL proceeds must share one capture.
+                native_ask_levels = (
+                    native_asset.curve.levels
+                    if native_asset is not None
+                    and native_asset.condition_id == asset.condition_id
+                    and native_asset.captured_at_utc == asset.captured_at_utc
+                    and native_asset.curve.book_hash == asset.curve.book_hash
+                    and native_asset.curve.min_tick == asset.curve.min_tick
+                    else ()
+                )
                 try:
                     sell_candidates = tuple(
                         candidate
@@ -1308,6 +1321,7 @@ def select_prepared_global_auction(
                                 ),
                                 asset_epoch_identity=book_epoch.witness_identity,
                                 neg_risk=asset.neg_risk,
+                                native_ask_levels=native_ask_levels,
                             )
                         )
                         is not None

@@ -78,6 +78,7 @@ from src.contracts.execution_intent import (
     venue_submit_amount_precision_error,
 )
 from src.contracts.payoff_q_correction import (
+    CalibrationFitScope,
     PayoffQCorrection,
     PayoffQCorrectionUnavailable,
 )
@@ -2374,6 +2375,17 @@ class GlobalSingleOrderSellCandidate:
     maker_fill_witness: CurrentMakerFillWitness | None = None
     asset_epoch_identity: str | None = None
 
+    def entry_calibration_price_anchor(self, scope: CalibrationFitScope) -> float:
+        """Price the inherited ENTRY feature using this candidate's native book."""
+        return scope.current_buy_price_anchor(
+            best_bid=(
+                self.executable_sell_curve.levels[0].price
+                if self.executable_sell_curve.levels else None
+            ),
+            best_ask=self.native_ask_levels[0].price if self.native_ask_levels else None,
+            min_tick=self.executable_sell_curve.min_tick,
+        )
+
     @property
     def economic_sell_curve(self) -> ExecutableSellCurve:
         """The exact executable proceeds curve scored by the auction."""
@@ -2536,6 +2548,7 @@ def global_sell_candidate_from_holding(
     execution_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
     maker_fill_witness: CurrentMakerFillWitness | None = None,
     asset_epoch_identity: str | None = None,
+    native_ask_levels: tuple[BookLevel, ...] = (),
 ) -> GlobalSingleOrderSellCandidate | None:
     """Materialize the venue-legal reducible part of an exact ledger holding."""
 
@@ -2635,6 +2648,7 @@ def global_sell_candidate_from_holding(
         maker_fill_witness=maker_fill_witness,
         asset_epoch_identity=asset_epoch_identity,
         neg_risk=neg_risk,
+        native_ask_levels=native_ask_levels,
     )
 
 
@@ -7415,9 +7429,9 @@ def select_global_single_order(
     ) -> PayoffQCorrection | None:
         """Market-anchored correction for one BUY or SELL leg, or raw q.
 
-        SELL uses its executable bid curve because the first bid is the gross
-        price of the held token being released. A proved 0/1 Day0 payoff never
-        enters calibration. Optional legacy resolvers may return None; the
+        Canonical SELL resolves its inherited ENTRY price feature inside the
+        binding resolver and independently verifies it on return. A proved
+        0/1 Day0 payoff never enters calibration. Optional legacy resolvers may return None; the
         canonical resolver raises PayoffQCorrectionUnavailable when its
         required fit is missing, so that proposal cannot size on raw q.
         """
@@ -7476,6 +7490,8 @@ def select_global_single_order(
             raise PayoffQCorrectionUnavailable(
                 f"{action} correction identity or raw q mismatch"
             )
+        if isinstance(candidate, GlobalSingleOrderSellCandidate) and correction.fit_scope is not None:
+            p0 = candidate.entry_calibration_price_anchor(correction.fit_scope)
         if not math.isclose(
             correction.p0, p0, rel_tol=0.0, abs_tol=1e-12
         ):

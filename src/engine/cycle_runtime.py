@@ -3973,6 +3973,7 @@ def _revoke_monitor_action_authority(
         pos.last_monitor_market_price = None
         pos.last_monitor_best_bid = None
         pos.last_monitor_best_ask = None
+        pos.last_monitor_min_tick = None
         pos.last_monitor_market_vig = None
 
 
@@ -6221,6 +6222,7 @@ def _build_exit_context(
         p_market = float(pos.last_monitor_market_price)
 
     best_bid = getattr(pos, "last_monitor_best_bid", None)
+    min_tick = getattr(pos, "last_monitor_min_tick", None)
 
     position_state = _position_state_value(pos)
 
@@ -6327,6 +6329,7 @@ def _build_exit_context(
         current_market_price_is_fresh=bool(getattr(pos, "last_monitor_market_price_is_fresh", False)),
         best_bid=best_bid,
         best_ask=getattr(pos, "last_monitor_best_ask", None),
+        min_tick=min_tick,
         bid_size=getattr(pos, "last_monitor_bid_size", None),
         bid_ladder=tuple(getattr(pos, "last_monitor_bid_ladder", ()) or ()),
         market_vig=getattr(pos, "last_monitor_market_vig", None),
@@ -6538,6 +6541,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     source_timestamp = str(quote.source_timestamp)
     pos.last_monitor_best_bid = bid_f
     pos.last_monitor_best_ask = ask_f
+    pos.last_monitor_min_tick = getattr(quote, "min_tick", None)
     pos.last_monitor_market_price = telemetry_market_price
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
@@ -6549,6 +6553,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
             current_market_price_is_fresh=True,
             best_bid=bid_f,
             best_ask=ask_f,
+            min_tick=getattr(quote, "min_tick", None),
             bid_size=bid_size_f,
             bid_ladder=quote.bid_ladder,
         ),
@@ -9621,6 +9626,7 @@ def execute_monitoring_phase(
                     pos.last_monitor_market_price_is_fresh = False
                     pos.last_monitor_best_bid = None
                     pos.last_monitor_best_ask = None
+                    pos.last_monitor_min_tick = None
                     pos.last_monitor_market_vig = None
                     pos.applied_validations = list(
                         dict.fromkeys(

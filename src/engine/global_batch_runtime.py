@@ -6494,7 +6494,7 @@ def _market_anchored_correction_resolver(
                 token_id=candidate.token_id,
                 side=candidate.side,
                 raw_q=raw_q,
-                p0=p0,
+                p0=candidate.entry_calibration_price_anchor(binding.fit_scope),
                 city=city,
                 target_date=target_date,
                 decision_at=decision_at_utc,

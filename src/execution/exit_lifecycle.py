@@ -3317,6 +3317,13 @@ class GlobalSellExecutionAuthority:
                 bin_id=selected.bin_id,
                 side=selected.side,
             )
+            try:
+                calibration_anchor = (
+                    Decimal(str(jit_candidate.entry_calibration_price_anchor(correction.fit_scope)))
+                    if correction.fit_scope is not None else proposal.levels[0].price
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED") from exc
             if (
                 not mean_sell
                 or not correction.matches(
@@ -3327,7 +3334,7 @@ class GlobalSellExecutionAuthority:
                 )
                 or raw_q is None
                 or not math.isclose(correction.raw_q, raw_q, rel_tol=0.0, abs_tol=1e-12)
-                or Decimal(str(correction.p0)) != proposal.levels[0].price
+                or Decimal(str(correction.p0)) != calibration_anchor
                 or not math.isclose(
                     correction.corrected_q,
                     expected_terminal.held_probability_mean,

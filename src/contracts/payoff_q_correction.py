@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused or audited: 2026-08-27
+# Last reused or audited: 2026-09-15
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring. The
 #   calibrator math lives in src/calibration/market_anchored_residual.py; this
@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 
 
 def _finite_number(value: object) -> bool:
@@ -77,6 +78,39 @@ class CalibrationFitScope:
             raise ValueError("calibration fit scope execution_contract is invalid")
         if type(self.raw_probability_revision) is not str or not self.raw_probability_revision.strip():
             raise ValueError("calibration fit scope raw_probability_revision is required")
+
+    def current_buy_price_anchor(
+        self, *, best_bid: object, best_ask: object, min_tick: object,
+    ) -> float:
+        """Recreate this ENTRY policy's price feature from one current book.
+
+        This is a probability input, not permission to BUY or a SELL proceeds
+        quote. Order price bands, size, capacity and risk remain execution law.
+        """
+        def number(value: object, field: str) -> Decimal:
+            if type(value) not in (int, float, Decimal):
+                raise PayoffQCorrectionUnavailable(f"ENTRY_PRICE_ANCHOR_INVALID:{field}")
+            result = Decimal(str(value))
+            if not result.is_finite():
+                raise PayoffQCorrectionUnavailable(f"ENTRY_PRICE_ANCHOR_INVALID:{field}")
+            return result
+
+        ask = number(best_ask, "ask")
+        if not Decimal("0") < ask < Decimal("1"):
+            raise PayoffQCorrectionUnavailable("ENTRY_PRICE_ANCHOR_INVALID:ask")
+        if self.execution_mode == "TAKER_LIMIT":
+            return float(ask)
+        bid = number(best_bid, "bid")
+        tick = number(min_tick, "tick")
+        if not Decimal("0") < bid < Decimal("1") or tick <= 0:
+            raise PayoffQCorrectionUnavailable("ENTRY_PRICE_ANCHOR_INVALID:bid_or_tick")
+        try:
+            price = bid + tick
+            if price >= ask or bid % tick != 0:
+                raise PayoffQCorrectionUnavailable("ENTRY_PRICE_ANCHOR_INVALID:passive_price")
+        except ArithmeticError as exc:
+            raise PayoffQCorrectionUnavailable("ENTRY_PRICE_ANCHOR_INVALID:passive_price") from exc
+        return float(price)
 
     def as_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -448,8 +482,8 @@ class PayoffQCorrection:
     ``raw_q`` and ``corrected_q`` are both in the HELD-TOKEN space — the
     probability that the candidate's own token pays — which is the space the
     solver sizes in and the certificate asserts on. ``p0`` is the decision-time
-    gross native fill price of that same token, i.e. the market's implied
-    probability it pays, and is the anchor the correction shrinks toward. Fees
+    gross BUY price feature of that same token under the ENTRY policy. Held
+    redecision recreates that feature; SELL proceeds remain separate. Fees
     belong to the economic cost curve.
 
     The remaining fields are provenance for settlement attribution to later

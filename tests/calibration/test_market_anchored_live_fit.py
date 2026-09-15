@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused or audited: 2026-09-13
+# Last reused or audited: 2026-09-15
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring, fit provider.
 """Tests for src/calibration/market_anchored_live_fit.py.
@@ -4228,7 +4228,7 @@ def test_monitor_uses_same_decision_clock_for_current_fit_and_correction(monkeyp
         else:
             assert calls[0]['now'] == NOW and calls[0]['deadline_monotonic'] == 123.0
         if available or day0:
-            expected = corrected_probability(entry if day0 else current, q_raw=.1, p0=.3, city='Warsaw',
+            expected = corrected_probability(entry if day0 else current, q_raw=.1, p0=context.best_ask, city='Warsaw',
                 target_date=date(2026, 8, 28), decision_at=NOW, side=side)[0]
             assert float(q) == pytest.approx(expected)
             assert evidence_ok and source == 'market_anchored'
@@ -4254,3 +4254,27 @@ def test_unidentified_or_changed_raw_revision_keeps_entry_parameters_without_ada
     finally:
         trade.close()
         world.close()
+
+
+@pytest.mark.parametrize("mode,bid,ask,tick,expected", [
+    ("TAKER_LIMIT", None, .7, None, .7),
+    ("TAKER_LIMIT", .94, .96, None, .96),
+    ("MAKER_REST", .4, .7, .01, .41),
+    ("MAKER_REST", .95, .97, .01, .96),
+])
+def test_entry_price_anchor_keeps_feature_separate_from_sell_eligibility(mode, bid, ask, tick, expected):
+    scope = _canonical_scope(execution_contract="MAKER_REST" if mode == "MAKER_REST" else "FOK_FULL_OR_ZERO")
+    assert scope.current_buy_price_anchor(best_bid=bid, best_ask=ask, min_tick=tick) == expected
+
+
+@pytest.mark.parametrize("bid,ask,tick", [
+    (.4, None, .01), (.4, float("nan"), .01), (.4, 1.0, .01),
+    (.4, True, .01), (None, .7, .01), (.4, .7, None),
+    (.4, .7, 0), (.4, .7, float("inf")), (.4, .7, True),
+    (.4, .41, .01), (.405, .7, .01), (.4, .7, 1e-100),
+])
+def test_entry_price_anchor_refuses_unreproducible_passive_feature(bid, ask, tick):
+    from src.contracts.payoff_q_correction import PayoffQCorrectionUnavailable
+    scope = _canonical_scope(execution_contract="MAKER_REST")
+    with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PRICE_ANCHOR_INVALID"):
+        scope.current_buy_price_anchor(best_bid=bid, best_ask=ask, min_tick=tick)
