@@ -3422,3 +3422,36 @@ def test_single_runs_payload_cache_load_drops_expired_durable_entries(tmp_path, 
     assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE) == {"k_fresh"}
     assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == {"k_fresh"}
     assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX) == {"id_fresh"}
+    assert set(dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT) == {"k_fresh"}
+
+
+def test_single_runs_payload_cache_load_skips_entries_without_a_stamp(tmp_path, monkeypatch) -> None:
+    """The durable rule treats a missing or unparsable recorded_at as expired; the load
+    path must apply the same rule, or the entry enters the process with no stamp and can
+    never age out (R-CE, 2026-09-14)."""
+    import json
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    cache_path = tmp_path / "single_runs_payload_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dl._SINGLE_RUNS_PAYLOAD_CACHE_SCHEMA_VERSION,
+                "entries": {
+                    "k_unstamped": {"payload": {"hourly": {"time": [1]}},
+                                    "identity_key": "id_u", "forecast_hours": 24, "past_hours": 0},
+                    "k_badstamp": {"payload": {"hourly": {"time": [2]}}, "recorded_at": "not-a-date",
+                                   "identity_key": "id_b", "forecast_hours": 24, "past_hours": 0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
+    dl._load_persisted_single_runs_payload_cache(force=True)
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE == {}
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT == {}
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == set()
+    assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX == {}

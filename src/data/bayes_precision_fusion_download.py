@@ -906,12 +906,12 @@ def _prune_single_runs_payload_cache_in_process(now_dt: datetime) -> None:
     """
     age_floor = now_dt - timedelta(hours=_SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS)
     stamp = _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT
-    dropped = {k for k in _SINGLE_RUNS_PAYLOAD_CACHE if stamp.get(k, now_dt) < age_floor}
+    dropped = {k for k in _SINGLE_RUNS_PAYLOAD_CACHE if stamp[k] < age_floor}
     overflow = len(_SINGLE_RUNS_PAYLOAD_CACHE) - len(dropped) - _SINGLE_RUNS_PAYLOAD_CACHE_MAX_ENTRIES
     if overflow > 0:
         survivors = sorted(
             (k for k in _SINGLE_RUNS_PAYLOAD_CACHE if k not in dropped),
-            key=lambda k: stamp.get(k, now_dt),
+            key=lambda k: stamp[k],
         )
         dropped.update(survivors[:overflow])
     if not dropped:
@@ -1023,22 +1023,25 @@ def _load_persisted_single_runs_payload_cache(*, force: bool = False) -> None:
     entries = payload.get("entries") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         return
+    now_dt = datetime.now(UTC)
+    age_floor = now_dt - timedelta(hours=_SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS)
     for key, entry in entries.items():
         if not isinstance(entry, dict):
             continue
         raw_payload = entry.get("payload")
         if not isinstance(raw_payload, dict):
             continue
+        # The durable rule: an entry without a valid recorded_at is expired. Applied on
+        # load as well, so every in-process key carries a stamp and none can outlive
+        # the bound by lacking one.
+        if _payload_cache_entry_expired(entry, age_floor):
+            continue
         str_key = str(key)
         _SINGLE_RUNS_PAYLOAD_CACHE.setdefault(str_key, raw_payload)
-        try:
-            recorded = datetime.fromisoformat(str(entry.get("recorded_at")))
-        except (TypeError, ValueError):
-            recorded = None
-        if recorded is not None:
-            if recorded.tzinfo is None:
-                recorded = recorded.replace(tzinfo=UTC)
-            _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.setdefault(str_key, recorded)
+        recorded = datetime.fromisoformat(str(entry["recorded_at"]))
+        if recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=UTC)
+        _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.setdefault(str_key, recorded)
         # 2026-09-07 (identity fix): prefer the identity _store_single_runs_payload_cache
         # persisted alongside this entry -- the REQUEST's own (run, lat, lon, tz) -- over
         # any recovery from the payload's own bytes. Recovery (_recover_single_runs_
@@ -1071,7 +1074,7 @@ def _load_persisted_single_runs_payload_cache(*, force: bool = False) -> None:
                 forecast_hours=forecast_hours,
                 past_hours=past_hours,
             )
-    _prune_single_runs_payload_cache_in_process(datetime.now(UTC))
+    _prune_single_runs_payload_cache_in_process(now_dt)
 
 
 def _payload_cache_entry_expired(entry: Mapping[str, object], age_floor: datetime) -> bool:
