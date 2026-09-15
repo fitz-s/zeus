@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-09-14
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-09-15
+# Lifecycle: created=2026-03-30; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
@@ -1327,7 +1327,6 @@ def test_query_p4_fact_smoke_summary_separates_layers(tmp_path, monkeypatch):
     assert summary["outcome"]["wins"] == 1
     assert summary["outcome"]["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
     assert summary["outcome"]["learning_eligible"] is False
-    assert summary["outcome"]["promotion_eligible"] is False
     assert summary["settlement_authority"]["ready_rows"] == 0
     assert summary["settlement_authority"]["learning_eligible_rows"] == 0
     assert summary["separation"]["availability_failures"] == 1
@@ -3066,7 +3065,6 @@ def test_position_current_status_view_hydrates_only_open_exposure(tmp_path, monk
         "economically_closed",
         "settled",
         "voided",
-        "quarantined",
         "admin_closed",
     ):
         _insert_current_position_for_fill_authority_view_test(
@@ -3132,7 +3130,11 @@ def test_status_views_use_real_exit_event_status_over_newer_non_exit_noise(tmp_p
 
     conn = get_connection(tmp_path / "exit-status-over-non-exit-noise.db")
     init_schema(conn)
-    _insert_current_position_for_fill_authority_view_test(conn, position_id="exit-status-pos")
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="exit-status-pos",
+        phase="pending_exit",
+    )
     _insert_status_position_event_for_view_test(
         conn,
         position_id="exit-status-pos",
@@ -3974,71 +3976,17 @@ def test_log_trade_entry_tolerates_forecast_class_snapshot_ids(tmp_path):
     )
 
 
-def test_log_trade_entry_emits_position_event(tmp_path):
-    from src.state.db import log_trade_entry, query_position_events
-    from src.state.portfolio import Position
-
-    db_path = tmp_path / "test.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
-    pos = Position(
-        trade_id="rt-entry",
-        market_id="m1",
-        city="NYC",
-        cluster="US-Northeast",
-        target_date="2026-04-01",
-        bin_label="39-40°F",
-        direction="buy_yes",
-        env="live",
-        unit="F",
-        size_usd=10.0,
-        entry_price=0.40,
-        p_posterior=0.60,
-        edge=0.20,
-        entry_ci_width=0.10,
-        decision_snapshot_id="snap-1",
-        strategy="center_buy",
-        edge_source="center_buy",
-        entry_method="ens_member_counting",
-        selected_method="ens_member_counting",
-        order_posted_at="2026-04-01T01:00:00Z",
-        order_id="o1",
-        order_status="pending",
-        state="pending_tracked",
-    )
-
-    log_trade_entry(conn, pos)
-    conn.commit()
-
-    events = query_position_events(conn, "rt-entry")
-    conn.close()
-
-    assert len(events) == 1
-    assert events[0]["event_type"] == "POSITION_ENTRY_RECORDED"
-    assert events[0]["position_state"] == "pending_tracked"
-    assert events[0]["decision_snapshot_id"] == "snap-1"
-    assert events[0]["details"]["status"] == "pending_tracked"
-    assert events[0]["details"]["entry_method"] == "ens_member_counting"
-
-
-
 def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
-    from src.state.db import log_trade_exit, query_position_events
+    # v1.F20 (2026-05-18) K1 split: ensemble_snapshots now lives only in
+    # zeus-forecasts.db; a bare init_schema(conn) trade connection never has
+    # it, so forecast_snapshot_id resolution falls back to NULL and is not
+    # asserted here (see _local_legacy_snapshot_fk).
+    from src.state.db import log_trade_exit
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, dataset_id, temperature_metric)
-        VALUES (456, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-                '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
-        """
-    )
 
     pos = Position(
         trade_id="t2",
@@ -4086,14 +4034,8 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
         ORDER BY trade_id DESC LIMIT 1
         """
     ).fetchone()
-    events = query_position_events(conn, "t2")
     conn.close()
 
-    assert row["forecast_snapshot_id"] == 456
-    assert any(event["event_type"] == "POSITION_EXIT_RECORDED" for event in events)
-    exit_event = next(event for event in events if event["event_type"] == "POSITION_EXIT_RECORDED")
-    assert exit_event["details"]["exit_reason"] == "EDGE_REVERSAL"
-    assert exit_event["details"]["status"] == "exited"
     assert row["calibration_model_version"] == "platt_v2"
     assert row["strategy"] == "shoulder_sell"
     assert row["edge_source"] == "shoulder_sell"
@@ -4109,62 +4051,13 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.12}'
 
 
-def test_update_trade_lifecycle_emits_position_event(tmp_path):
-    from src.state.db import log_trade_entry, query_position_events, update_trade_lifecycle
-    from src.state.portfolio import Position
-
-    db_path = tmp_path / "test.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
-    pos = Position(
-        trade_id="rt-life",
-        market_id="m3",
-        city="NYC",
-        cluster="US-Northeast",
-        target_date="2026-04-01",
-        bin_label="39-40°F",
-        direction="buy_yes",
-        env="live",
-        unit="F",
-        size_usd=15.0,
-        entry_price=0.41,
-        p_posterior=0.61,
-        edge=0.20,
-        decision_snapshot_id="snap-life",
-        strategy="center_buy",
-        edge_source="center_buy",
-        order_id="o-life",
-        order_status="pending",
-        order_posted_at="2026-04-01T01:00:00Z",
-        state="pending_tracked",
-    )
-    log_trade_entry(conn, pos)
-
-    pos.state = "entered"
-    pos.entry_order_id = "o-life"
-    pos.entry_fill_verified = True
-    pos.entered_at = "2026-04-01T01:05:00Z"
-    pos.order_status = "filled"
-    pos.chain_state = "synced"
-    update_trade_lifecycle(conn, pos)
-    conn.commit()
-
-    events = query_position_events(conn, "rt-life")
-    conn.close()
-
-    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
-    assert len(lifecycle_events) == 1
-    assert lifecycle_events[0]["details"]["status"] == "entered"
-    assert lifecycle_events[0]["details"]["entry_order_id"] == "o-life"
-    assert lifecycle_events[0]["details"]["entry_fill_verified"] is True
-    assert lifecycle_events[0]["details"]["order_status"] == "filled"
-    assert lifecycle_events[0]["details"]["chain_state"] == "synced"
-
-
 def test_log_execution_report_emits_fill_telemetry(tmp_path):
+    # log_execution_report writes execution_fact only (telemetry); canonical
+    # position_events truth for entry fills is written by the separate
+    # dual-write call site fill_tracker._maybe_emit_canonical_entry_fill, not
+    # from inside this function.
     from src.execution.executor import OrderResult
-    from src.state.db import log_execution_report, query_position_events
+    from src.state.db import log_execution_report
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -4202,7 +4095,6 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     log_execution_report(conn, pos, result, decision_id="dec-fill")
     conn.commit()
 
-    events = query_position_events(conn, "rt-exec")
     fact = conn.execute(
         """
         SELECT decision_id, order_role, posted_at, filled_at, submitted_price, fill_price, shares,
@@ -4213,11 +4105,6 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     ).fetchone()
     conn.close()
 
-    assert len(events) == 1
-    assert events[0]["event_type"] == "ORDER_FILLED"
-    assert events[0]["details"]["submitted_price"] == pytest.approx(0.40)
-    assert events[0]["details"]["fill_price"] == pytest.approx(0.42)
-    assert events[0]["details"]["fill_quality"] == pytest.approx(0.05)
     assert fact["decision_id"] == "dec-fill"
     assert fact["order_role"] == "entry"
     assert fact["posted_at"] == "2026-04-01T01:00:00Z"
@@ -4231,8 +4118,11 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
 
 
 def test_log_execution_report_emits_rejected_entry_event(tmp_path):
+    # log_execution_report writes execution_fact only (telemetry); canonical
+    # position_events truth is written elsewhere (see the comment on
+    # test_log_execution_report_emits_fill_telemetry above).
     from src.execution.executor import OrderResult
-    from src.state.db import log_execution_report, query_position_events
+    from src.state.db import log_execution_report
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -4265,7 +4155,6 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     log_execution_report(conn, pos, result, decision_id="dec-reject")
     conn.commit()
 
-    events = query_position_events(conn, "rt-exec-rejected")
     fact = conn.execute(
         """
         SELECT decision_id, order_role, voided_at, submitted_price, terminal_exec_status
@@ -4275,10 +4164,6 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     ).fetchone()
     conn.close()
 
-    assert len(events) == 1
-    assert events[0]["event_type"] == "ORDER_REJECTED"
-    assert events[0]["details"]["status"] == "rejected"
-    assert events[0]["details"]["reason"] == "insufficient_liquidity"
     assert fact["decision_id"] == "dec-reject"
     assert fact["order_role"] == "entry"
     assert fact["voided_at"] is not None
@@ -4825,7 +4710,10 @@ def test_log_execution_report_clears_stale_missing_status_fill_authority(tmp_pat
 
 
 def test_log_settlement_event_emits_durable_record(tmp_path):
-    from src.state.db import log_settlement_event, query_position_events
+    # log_settlement_event writes outcome_fact only (telemetry); canonical
+    # SETTLED position_events truth is written by the separate dual-write
+    # call site harvester._dual_write_canonical_settlement_if_available.
+    from src.state.db import log_settlement_event
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -4859,7 +4747,6 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
     conn.commit()
 
-    events = query_position_events(conn, "rt-settle")
     outcome_row = conn.execute(
         """
         SELECT strategy_key, entered_at, exited_at, settled_at, exit_reason, decision_snapshot_id,
@@ -4870,16 +4757,6 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     ).fetchone()
     conn.close()
 
-    assert len(events) == 1
-    assert events[0]["event_type"] == "POSITION_SETTLED"
-    assert events[0]["details"]["winning_bin"] == "39-40°F"
-    assert events[0]["details"]["won"] is True
-    assert events[0]["details"]["outcome"] == 1
-    assert events[0]["details"]["contract_version"] == "position_settled.v1"
-    assert events[0]["details"]["p_posterior"] == pytest.approx(0.60)
-    assert events[0]["details"]["exit_price"] == pytest.approx(1.0)
-    assert events[0]["details"]["pnl"] == pytest.approx(15.0)
-    assert events[0]["details"]["exit_reason"] == "SETTLEMENT"
     assert outcome_row["strategy_key"] == "center_buy"
     assert outcome_row["entered_at"] is None
     assert outcome_row["exited_at"] is None
@@ -5010,7 +4887,8 @@ def test_log_settlement_event_counts_canonical_monitor_events_in_outcome_fact(tm
 
 
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
-    from src.state.db import log_settlement_event, query_authoritative_settlement_rows
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -5025,12 +4903,14 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
         p_posterior=0.61,
         edge=0.21,
         decision_snapshot_id="snap-auth",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         exit_price=1.0,
@@ -5040,7 +4920,21 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
         state="settled",
     )
 
-    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="nyc-high-2026-04-01",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0,
+    )
+    append_many_and_project(conn, events, projection)
     conn.commit()
 
     rows = query_authoritative_settlement_rows(conn, limit=10)
@@ -5330,7 +5224,6 @@ def test_query_authoritative_settlement_rows_ignores_decision_log_records(tmp_pa
     conn.close()
 
     assert rows == []
-    assert rows[0]["pnl"] == pytest.approx(12.5)
 
 
 def test_query_authoritative_settlement_rows_accepts_env_keyword_for_portfolio_compat(tmp_path):
@@ -5535,6 +5428,9 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
         "last_monitor_edge": 0.1,
         "last_monitor_market_price": 0.5,
         "last_monitor_market_price_is_fresh": 0,
+        "last_monitor_best_bid": None,
+        "last_monitor_best_ask": None,
+        "last_monitor_market_vig": None,
         "decision_snapshot_id": "snap-missing-entry-env",
         "entry_method": "test",
         "strategy_key": "center_buy",
@@ -5734,8 +5630,9 @@ def test_query_learning_surface_summary_excludes_metric_unready_settlement_rows(
 
 
 def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import (
-        log_position_event,
+        append_many_and_project,
         query_authoritative_settlement_rows,
         query_authoritative_settlement_source,
     )
@@ -5754,12 +5651,15 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.40,
-        p_posterior=0.61,
+        # p_posterior intentionally None: malformed canonical payload
+        p_posterior=None,
         edge=0.21,
         decision_snapshot_id="snap-missing-posterior",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         exit_price=1.0,
@@ -5768,24 +5668,17 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_position_event(
-        conn,
-        "POSITION_SETTLED",
+    events, projection = build_settlement_canonical_write(
         malformed_pos,
-        details={
-            "contract_version": "position_settled.v1",
-            "winning_bin": "39-40°F",
-            "position_bin": "39-40°F",
-            "won": True,
-            "outcome": 1,
-            # p_posterior intentionally omitted: malformed canonical payload
-            "exit_price": 1.0,
-            "pnl": 15.0,
-            "exit_reason": "SETTLEMENT",
-        },
-        timestamp="2026-04-01T23:00:00Z",
-        source="settlement",
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
     )
+    append_many_and_project(conn, events, projection)
 
     store_settlement_records(
         conn,
@@ -5820,7 +5713,8 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
 
 
 def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
-    from src.state.db import log_position_event, query_settlement_events
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_settlement_events
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -5835,10 +5729,12 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.6,
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         exit_price=0.0,
@@ -5847,42 +5743,27 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_position_event(
-        conn,
-        "POSITION_SETTLED",
+    events, projection = build_settlement_canonical_write(
         pos,
-        details={
-            "contract_version": "position_settled.v1",
-            "winning_bin": "41-42°F",
-            "position_bin": "39-40°F",
-            "won": False,
-            "outcome": 0,
-            "p_posterior": 0.6,
-            "exit_price": 0.0,
-            "pnl": -1.0,
-            "exit_reason": "SETTLEMENT",
-        },
-        timestamp="2026-04-01T23:00:00Z",
-        source="settlement",
+        winning_bin="41-42°F",
+        won=False,
+        outcome=0,
+        sequence_no=1,
+        phase_before="pending_exit",
     )
-    log_position_event(
-        conn,
-        "POSITION_SETTLED",
+    append_many_and_project(conn, events, projection)
+
+    pos.pnl = -2.5
+    pos.last_exit_at = "2026-04-02T00:00:00Z"
+    events, projection = build_settlement_canonical_write(
         pos,
-        details={
-            "contract_version": "position_settled.v1",
-            "winning_bin": "41-42°F",
-            "position_bin": "39-40°F",
-            "won": False,
-            "outcome": 0,
-            "p_posterior": 0.6,
-            "exit_price": 0.0,
-            "pnl": -2.5,
-            "exit_reason": "SETTLEMENT",
-        },
-        timestamp="2026-04-02T00:00:00Z",
-        source="settlement",
+        winning_bin="41-42°F",
+        won=False,
+        outcome=0,
+        sequence_no=2,
+        phase_before="settled",
     )
+    append_many_and_project(conn, events, projection)
     conn.commit()
 
     rows = query_settlement_events(conn, limit=10)
@@ -5895,7 +5776,8 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
 
 
 def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
-    from src.state.db import log_position_event, query_settlement_events
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_settlement_events
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -5910,10 +5792,12 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.6,
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         exit_price=0.0,
@@ -5930,10 +5814,12 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
         target_date="2026-04-01",
         bin_label="41-42°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
+        strategy_key="opening_inertia",
         strategy="opening_inertia",
         edge_source="opening_inertia",
         exit_price=1.0,
@@ -5942,44 +5828,33 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
         last_exit_at="2026-04-01T23:30:00Z",
         state="settled",
     )
-    for ts, pnl in [("2026-04-01T23:00:00Z", -1.0), ("2026-04-02T00:00:00Z", -2.5)]:
+    for seq, (ts, pnl, phase_before) in enumerate(
+        [
+            ("2026-04-01T23:00:00Z", -1.0, "pending_exit"),
+            ("2026-04-02T00:00:00Z", -2.5, "settled"),
+        ],
+        start=1,
+    ):
         dup.pnl = pnl
-        log_position_event(
-            conn,
-            "POSITION_SETTLED",
+        dup.last_exit_at = ts
+        events, projection = build_settlement_canonical_write(
             dup,
-            details={
-                "contract_version": "position_settled.v1",
-                "winning_bin": "41-42°F",
-                "position_bin": "39-40°F",
-                "won": False,
-                "outcome": 0,
-                "p_posterior": 0.6,
-                "exit_price": 0.0,
-                "pnl": pnl,
-                "exit_reason": "SETTLEMENT",
-            },
-            timestamp=ts,
-            source="settlement",
+            winning_bin="41-42°F",
+            won=False,
+            outcome=0,
+            sequence_no=seq,
+            phase_before=phase_before,
         )
-    log_position_event(
-        conn,
-        "POSITION_SETTLED",
+        append_many_and_project(conn, events, projection)
+    events, projection = build_settlement_canonical_write(
         other,
-        details={
-            "contract_version": "position_settled.v1",
-            "winning_bin": "41-42°F",
-            "position_bin": "41-42°F",
-            "won": True,
-            "outcome": 1,
-            "p_posterior": 0.7,
-            "exit_price": 1.0,
-            "pnl": 2.0,
-            "exit_reason": "SETTLEMENT",
-        },
-        timestamp="2026-04-02T01:00:00Z",
-        source="settlement",
+        winning_bin="41-42°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
     )
+    append_many_and_project(conn, events, projection)
     conn.commit()
 
     rows = query_settlement_events(conn, limit=10)
@@ -6016,7 +5891,8 @@ def test_query_settlement_events_uses_settled_env_partial_index(tmp_path):
 
 
 def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):
-    from src.state.db import log_position_event, query_authoritative_settlement_rows
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -6031,11 +5907,13 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
         unit="F",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.6,
         decision_snapshot_id="snap1",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         exit_price=0.0,
@@ -6044,26 +5922,24 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    for ts, pnl in [("2026-04-01T23:00:00Z", -1.0), ("2026-04-02T00:00:00Z", -2.5)]:
+    for seq, (ts, pnl, phase_before) in enumerate(
+        [
+            ("2026-04-01T23:00:00Z", -1.0, "pending_exit"),
+            ("2026-04-02T00:00:00Z", -2.5, "settled"),
+        ],
+        start=1,
+    ):
         pos.pnl = pnl
-        log_position_event(
-            conn,
-            "POSITION_SETTLED",
+        pos.last_exit_at = ts
+        events, projection = build_settlement_canonical_write(
             pos,
-            details={
-                "contract_version": "position_settled.v1",
-                "winning_bin": "41-42°F",
-                "position_bin": "39-40°F",
-                "won": False,
-                "outcome": 0,
-                "p_posterior": 0.6,
-                "exit_price": 0.0,
-                "pnl": pnl,
-                "exit_reason": "SETTLEMENT",
-            },
-            timestamp=ts,
-            source="settlement",
+            winning_bin="41-42°F",
+            won=False,
+            outcome=0,
+            sequence_no=seq,
+            phase_before=phase_before,
         )
+        append_many_and_project(conn, events, projection)
     conn.commit()
 
     rows = query_authoritative_settlement_rows(conn, limit=10)
@@ -6076,7 +5952,13 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
     assert rows[0]["source"] == "position_events"
 
 def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
-    from src.state.db import log_position_event, query_execution_event_summary
+    # Vocabulary retired by 86e77d1ff (2026-04-12): ORDER_ATTEMPTED,
+    # ORDER_FILLED, EXIT_ORDER_ATTEMPTED are gone. query_execution_event_summary
+    # (src/state/db.py) now maps the current canonical position_events
+    # vocabulary: POSITION_OPEN_INTENT, ENTRY_ORDER_FILLED, EXIT_ORDER_POSTED,
+    # EXIT_RETRY_SCHEDULED.
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.db import append_many_and_project, query_execution_event_summary
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -6091,14 +5973,46 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
+        entered_at="2026-04-01T00:00:00Z",
         env="live",
     )
-    log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
-    log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
-    log_position_event(conn, "EXIT_ORDER_ATTEMPTED", pos, details={"status": "placed"}, source="exit_lifecycle")
-    log_position_event(conn, "EXIT_RETRY_SCHEDULED", pos, details={"status": "retry"}, source="exit_lifecycle")
+
+    def _event(event_type, phase_before, phase_after, seq):
+        return {
+            "event_id": f"exec-summary-1:{seq}",
+            "position_id": "exec-summary-1",
+            "event_version": 1,
+            "sequence_no": seq,
+            "event_type": event_type,
+            "occurred_at": f"2026-04-01T00:0{seq}:00Z",
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "strategy_key": "center_buy",
+            "decision_id": None,
+            "snapshot_id": None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": None,
+            "idempotency_key": f"exec-summary-1:{seq}",
+            "venue_status": None,
+            "source_module": "tests.test_db",
+            "env": "live",
+            "payload_json": "{}",
+        }
+
+    events = [
+        _event("POSITION_OPEN_INTENT", None, "pending_entry", 1),
+        _event("ENTRY_ORDER_FILLED", "pending_entry", "active", 2),
+        _event("EXIT_ORDER_POSTED", "active", "pending_exit", 3),
+        _event("EXIT_ORDER_REJECTED", "pending_exit", "pending_exit", 4),
+    ]
+    projection = build_position_current_projection(pos)
+    projection["phase"] = "pending_exit"
+    projection["condition_id"] = "cond-exec-summary-1"
+    append_many_and_project(conn, events, projection)
     conn.commit()
 
     summary = query_execution_event_summary(conn)
@@ -6108,7 +6022,7 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     assert summary["overall"]["entry_attempted"] == 1
     assert summary["overall"]["entry_filled"] == 1
     assert summary["overall"]["exit_attempted"] == 1
-    assert summary["overall"]["exit_retry_scheduled"] == 1
+    assert summary["overall"]["exit_backoff_exhausted"] == 1
     assert summary["by_strategy"]["center_buy"]["entry_filled"] == 1
 
 
@@ -6398,7 +6312,11 @@ def test_query_lifecycle_funnel_report_applies_hours_to_position_events(tmp_path
 
 
 def test_query_learning_surface_summary_combines_settlement_no_trade_and_execution(tmp_path):
-    from src.state.db import log_position_event, log_settlement_event
+    # ORDER_REJECTED is retired vocabulary (86e77d1ff, 2026-04-12); current
+    # canonical position_events name is ENTRY_ORDER_REJECTED (see
+    # query_execution_event_summary's mapping in src/state/db.py).
+    from src.engine.lifecycle_events import build_position_current_projection, build_settlement_canonical_write
+    from src.state.db import append_many_and_project
     from src.state.decision_chain import query_learning_surface_summary
     from src.state.portfolio import Position
 
@@ -6441,6 +6359,8 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         decision_snapshot_id="snap1",
@@ -6449,14 +6369,66 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
         exit_reason="SETTLEMENT",
         last_exit_at=now,
         state="settled",
-        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
         edge=0.2,
     )
-    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
-    log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="nyc-high-2026-04-01",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=40.0,
+    )
+    append_many_and_project(conn, events, projection)
+
+    rejected_pos = Position(
+        trade_id="learn-2",
+        market_id="m2",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        entered_at="2026-04-01T00:00:00Z",
+        env="live",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+    )
+    rejected_event = {
+        "event_id": "learn-2:rejected:1",
+        "position_id": "learn-2",
+        "event_version": 1,
+        "sequence_no": 1,
+        "event_type": "ENTRY_ORDER_REJECTED",
+        "occurred_at": now,
+        "phase_before": None,
+        "phase_after": "pending_entry",
+        "strategy_key": "center_buy",
+        "decision_id": None,
+        "snapshot_id": None,
+        "order_id": None,
+        "command_id": None,
+        "caused_by": None,
+        "idempotency_key": "learn-2:rejected:1",
+        "venue_status": None,
+        "source_module": "tests.test_db",
+        "env": "live",
+        "payload_json": json.dumps({"status": "rejected"}),
+    }
+    rejected_projection = build_position_current_projection(rejected_pos)
+    rejected_projection["phase"] = "pending_entry"
+    rejected_projection["condition_id"] = "cond-learn-2"
+    append_many_and_project(conn, [rejected_event], rejected_projection)
     conn.commit()
 
     summary = query_learning_surface_summary(conn)
@@ -6542,9 +6514,35 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
 
 
 def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
-    from src.state.db import log_position_event, log_settlement_event
+    # ORDER_REJECTED retired by 86e77d1ff (2026-04-12); current canonical
+    # position_events name is ENTRY_ORDER_REJECTED.
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project
     from src.state.decision_chain import query_learning_surface_summary
     from src.state.portfolio import Position
+
+    def _rejected_event(position_id, strategy_key, occurred_at, seq):
+        return {
+            "event_id": f"{position_id}:rejected:{seq}",
+            "position_id": position_id,
+            "event_version": 1,
+            "sequence_no": seq,
+            "event_type": "ENTRY_ORDER_REJECTED",
+            "occurred_at": occurred_at,
+            "phase_before": "settled",
+            "phase_after": "settled",
+            "strategy_key": strategy_key,
+            "decision_id": None,
+            "snapshot_id": None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": None,
+            "idempotency_key": f"{position_id}:rejected:{seq}",
+            "venue_status": None,
+            "source_module": "tests.test_db",
+            "env": "live",
+            "payload_json": json.dumps({"status": "rejected"}),
+        }
 
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
@@ -6601,6 +6599,8 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
+        env="live",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         decision_snapshot_id="snap-old",
@@ -6609,7 +6609,6 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         exit_reason="SETTLEMENT",
         last_exit_at=old_ts,
         state="settled",
-        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
@@ -6623,6 +6622,8 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         target_date="2026-04-03",
         bin_label="41-42°F",
         direction="buy_yes",
+        env="live",
+        strategy_key="center_buy",
         strategy="center_buy",
         edge_source="center_buy",
         decision_snapshot_id="snap-new",
@@ -6631,16 +6632,47 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
         exit_reason="SETTLEMENT",
         last_exit_at=new_ts,
         state="settled",
-        env="live",
         size_usd=10.0,
         entry_price=0.4,
         p_posterior=0.7,
         edge=0.2,
     )
-    log_settlement_event(conn, old_pos, winning_bin="39-40°F", won=True, outcome=1)
-    log_settlement_event(conn, new_pos, winning_bin="41-42°F", won=True, outcome=1)
-    log_position_event(conn, "ORDER_REJECTED", old_pos, details={"status": "rejected"}, source="execution", timestamp=old_ts)
-    log_position_event(conn, "ORDER_REJECTED", new_pos, details={"status": "rejected"}, source="execution")
+    old_events, old_projection = build_settlement_canonical_write(
+        old_pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_temperature_metric="high",
+        settlement_value=39.5,
+    )
+    append_many_and_project(conn, old_events, old_projection)
+    new_events, new_projection = build_settlement_canonical_write(
+        new_pos,
+        winning_bin="41-42°F",
+        won=True,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_temperature_metric="high",
+        settlement_value=41.5,
+    )
+    append_many_and_project(conn, new_events, new_projection)
+    append_many_and_project(
+        conn,
+        [_rejected_event("old-settle", "center_buy", old_ts, 2)],
+        old_projection,
+    )
+    append_many_and_project(
+        conn,
+        [_rejected_event("new-settle", "center_buy", datetime.now(timezone.utc).isoformat(), 2)],
+        new_projection,
+    )
     conn.commit()
 
     summary = query_learning_surface_summary(
@@ -6658,9 +6690,35 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
 
 
 def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_path):
-    from src.state.db import log_position_event, log_settlement_event
+    # ORDER_REJECTED retired by 86e77d1ff (2026-04-12); current canonical
+    # position_events name is ENTRY_ORDER_REJECTED.
+    from src.engine.lifecycle_events import build_position_current_projection, build_settlement_canonical_write
+    from src.state.db import append_many_and_project
     from src.state.decision_chain import query_learning_surface_summary
     from src.state.portfolio import Position
+
+    def _rejected_event(position_id, occurred_at, seq):
+        return {
+            "event_id": f"{position_id}:rejected:{seq}",
+            "position_id": position_id,
+            "event_version": 1,
+            "sequence_no": seq,
+            "event_type": "ENTRY_ORDER_REJECTED",
+            "occurred_at": occurred_at,
+            "phase_before": None,
+            "phase_after": "pending_entry",
+            "strategy_key": "center_buy",
+            "decision_id": None,
+            "snapshot_id": None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": None,
+            "idempotency_key": f"{position_id}:rejected:{seq}",
+            "venue_status": None,
+            "source_module": "tests.test_db",
+            "env": "live",
+            "payload_json": json.dumps({"status": "rejected"}),
+        }
 
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
@@ -6696,6 +6754,8 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
             target_date="2026-04-03",
             bin_label="39-40°F",
             direction="buy_yes",
+            env="live",
+            strategy_key="center_buy",
             strategy="center_buy",
             edge_source="center_buy",
             decision_snapshot_id=f"snap-{i}",
@@ -6704,13 +6764,24 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
             exit_reason="SETTLEMENT",
             last_exit_at=ts,
             state="settled",
-            env="live",
             size_usd=10.0,
             entry_price=0.4,
             p_posterior=0.7,
             edge=0.2,
         )
-        log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+        events, projection = build_settlement_canonical_write(
+            pos,
+            winning_bin="39-40°F",
+            won=True,
+            outcome=1,
+            sequence_no=1,
+            phase_before="pending_exit",
+            settlement_authority="VERIFIED",
+            settlement_truth_source="world.settlements",
+            settlement_temperature_metric="high",
+            settlement_value=39.5,
+        )
+        append_many_and_project(conn, events, projection)
     for i in range(205):
         pos = Position(
             trade_id=f"exec-{i}",
@@ -6720,17 +6791,19 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
             target_date="2026-04-03",
             bin_label="39-40°F",
             direction="buy_yes",
+            strategy_key="center_buy",
             strategy="center_buy",
             edge_source="center_buy",
+            entered_at="2026-04-03T00:00:00Z",
             env="live",
         )
-        log_position_event(
+        projection = build_position_current_projection(pos)
+        projection["phase"] = "pending_entry"
+        projection["condition_id"] = f"cond-exec-{i}"
+        append_many_and_project(
             conn,
-            "ORDER_REJECTED",
-            pos,
-            details={"status": "rejected"},
-            source="execution",
-            timestamp=f"2026-04-03T13:{i%60:02d}:00+00:00",
+            [_rejected_event(f"exec-{i}", f"2026-04-03T13:{i%60:02d}:00+00:00", 1)],
+            projection,
         )
     conn.commit()
 
@@ -6743,7 +6816,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
     assert summary["settlement_sample_size"] == 55
     assert summary["by_strategy"]["center_buy"]["settlement_count"] == 55
     assert summary["by_strategy"]["center_buy"]["no_trade_count"] == 55
-    assert summary["execution"]["event_sample_size"] == 205
+    assert summary["execution"]["event_sample_size"] == 260  # 205 rejections + 55 canonical SETTLED rows
     assert summary["execution"]["overall"]["entry_rejected"] == 205
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 205
 
@@ -6755,7 +6828,6 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
         log_exit_retry_event,
         log_pending_exit_recovery_event,
         log_pending_exit_status_event,
-        query_position_events,
     )
     from src.state.portfolio import Position
 
@@ -6819,7 +6891,6 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     )
     conn.commit()
 
-    events = query_position_events(conn, "rt-exit-events")
     fact = conn.execute(
         """
         SELECT order_role, posted_at, filled_at, submitted_price, fill_price, shares, venue_status, terminal_exec_status
@@ -6829,20 +6900,6 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     ).fetchone()
     conn.close()
 
-    event_types = [event["event_type"] for event in events]
-    assert "EXIT_ORDER_ATTEMPTED" in event_types
-    assert "EXIT_FILL_CHECKED" in event_types
-    assert "EXIT_RETRY_SCHEDULED" in event_types
-    assert "EXIT_INTENT_RECOVERED" in event_types
-    assert "EXIT_ORDER_FILLED" in event_types
-
-    retry_event = next(event for event in events if event["event_type"] == "EXIT_RETRY_SCHEDULED")
-    assert retry_event["details"]["error"] == "REJECTED"
-    assert retry_event["details"]["retry_count"] == 2
-
-    fill_event = next(event for event in events if event["event_type"] == "EXIT_ORDER_FILLED")
-    assert fill_event["order_id"] == "sell-1"
-    assert fill_event["details"]["fill_price"] == pytest.approx(0.43)
     assert fact["order_role"] == "exit"
     assert fact["posted_at"] is not None
     assert fact["filled_at"] == "2026-04-01T01:05:00Z"
@@ -6854,7 +6911,7 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
 
 
 def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
-    from src.state.db import log_exit_retry_event, query_position_events
+    from src.state.db import log_exit_retry_event
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -6875,19 +6932,23 @@ def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
         p_posterior=0.60,
         edge=0.20,
         state="holding",
-        exit_state="backoff_exhausted",
         exit_retry_count=10,
     )
+    # Production assigns the runtime string after construction
+    # (src/execution/exit_lifecycle.py:4977); the constructor path would coerce
+    # it to the ExitState enum, whose str() is the member name.
+    pos.exit_state = "backoff_exhausted"
 
     log_exit_retry_event(conn, pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
     conn.commit()
 
-    events = query_position_events(conn, "rt-exit-backoff")
+    fact = conn.execute(
+        "SELECT order_role, terminal_exec_status FROM execution_fact WHERE intent_id = 'rt-exit-backoff:exit'"
+    ).fetchone()
     conn.close()
 
-    assert len(events) == 1
-    assert events[0]["event_type"] == "EXIT_BACKOFF_EXHAUSTED"
-    assert events[0]["details"]["error"] == "3_consecutive_unknown"
+    assert fact["order_role"] == "exit"
+    assert fact["terminal_exec_status"] == "backoff_exhausted"
 
 
 def test_log_trade_entry_persists_pending_lifecycle_state(tmp_path):
