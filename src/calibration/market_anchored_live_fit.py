@@ -718,6 +718,8 @@ def _command_accounting(command, fills, pair, *, conn, cutoff, schema,
                net_markout_per_share_numerator=None, net_markout_per_share_denominator=None,
                endpoint_available_at=None, physical_endpoint_status="UNKNOWN",
                physical_endpoint_reason=None, calibration_evidence_reason=None,
+               decision_cell=None,
+               decision_cell_reason="DECISION_IDENTITY_NOT_EVALUATED",
                calibration_policy=None, calibration_policy_reason=None,
                calibration_training_manifest=None,
                calibration_training_manifest_reason="CALIBRATION_EVIDENCE_NOT_EVALUATED")
@@ -1042,6 +1044,166 @@ def _sealed_training_manifest(
     if type(correction.get("n_train")) is not int or correction["n_train"] != manifest.row_count:
         return None, "CALIBRATION_TRAINING_MANIFEST_COUNT_MISMATCH"
     return manifest.as_payload(), None
+
+
+def _sealed_decision_cell(
+    *,
+    command: Mapping[str, object],
+    certificate: Mapping[str, object],
+    payload: Mapping[str, object],
+    economics: Mapping[str, object],
+    side: object,
+    metric: object,
+    target: date | None,
+    local_date: date | None,
+    decision_at: datetime | None,
+    execution_mode: object,
+    execution_contract: object,
+    raw: object,
+    p0: object,
+    raw_probability_revision: object,
+    pre_outcome_reasons: tuple[str, ...],
+    calibration_policy: Mapping[str, object] | None,
+    calibration_policy_reason: str | None,
+    training_manifest: Mapping[str, object] | None,
+    training_manifest_reason: str | None,
+    raw_forecast_lineage: Mapping[str, object] | None,
+    raw_forecast_lineage_reason: str | None,
+    receipt_ref: object | None,
+    receipt_summary: Mapping[str, object] | None,
+    receipt_reason: str | None,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Build one authenticated decision cell independently of outcome proofs."""
+
+    if pre_outcome_reasons:
+        return None, f"CELL_PROOF_{pre_outcome_reasons[0]}"
+    strategy_key = payload.get("strategy_key")
+    if (
+        not isinstance(strategy_key, str)
+        or not strategy_key.strip()
+        or strategy_key != strategy_key.strip()
+    ):
+        return None, "CELL_STRATEGY_KEY_UNBOUND"
+    if (
+        not isinstance(metric, str) or metric not in {"high", "low"}
+        or target is None or local_date is None
+        or decision_at is None or decision_at.tzinfo is None
+        or decision_at.utcoffset() is None
+    ):
+        return None, "CELL_EVENT_CLUSTER_UNBOUND"
+    lead_bucket = lead_bucket_of(local_date, target)
+    if lead_bucket is None:
+        return None, "CELL_LEAD_BUCKET_UNBOUND"
+    if (
+        not isinstance(side, str) or side not in {"YES", "NO"}
+        or not isinstance(execution_mode, str) or not execution_mode
+        or not isinstance(execution_contract, str) or not execution_contract
+        or not _finite_policy_number(raw)
+        or not _finite_policy_number(p0)
+        or not 0 <= float(raw) <= 1
+        or not 0 <= float(p0) <= 1
+        or not isinstance(raw_probability_revision, str)
+        or not raw_probability_revision.strip()
+        or raw_probability_revision != raw_probability_revision.strip()
+    ):
+        return None, "CELL_ANCHOR_OR_PROBABILITY_UNBOUND"
+    if calibration_policy_reason or not isinstance(calibration_policy, Mapping):
+        return None, calibration_policy_reason or "CELL_CALIBRATION_POLICY_UNSEALED"
+    policy_hash = calibration_policy.get("policy_hash")
+    if not isinstance(policy_hash, str) or not policy_hash.strip():
+        return None, "CELL_CALIBRATION_POLICY_UNSEALED"
+    if receipt_reason or receipt_ref is None or not isinstance(receipt_summary, Mapping):
+        return None, receipt_reason or "CELL_RECEIPT_UNBOUND"
+
+    try:
+        from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+
+        if not isinstance(receipt_ref, GlobalAuctionReceiptRef):
+            return None, "CELL_RECEIPT_UNBOUND"
+        receipt_ref.assert_matches_actuation(
+            winner_event_id=receipt_summary.get("winner_event_id"),
+            winner_candidate_id=receipt_summary.get("winner_candidate_id"),
+            winner_actuation_identity=receipt_summary.get("winner_actuation_identity"),
+            selection_epoch_identity=receipt_summary.get("selection_epoch_identity"),
+        )
+        if (
+            receipt_summary.get("schema_version") != receipt_ref.schema_version
+            or receipt_summary.get("receipt_hash") != receipt_ref.receipt_hash
+            or receipt_summary.get("execution_binding_hash") != receipt_ref.execution_binding_hash
+            or receipt_summary.get("artifact_summary_hash") != receipt_ref.artifact_summary_hash
+            or receipt_summary.get("winner_candidate_id")
+            != economics.get("global_candidate_id")
+            or receipt_summary.get("winner_candidate_id") != payload.get("candidate_id")
+            or not str(receipt_summary.get("winner_event_id") or "").strip()
+            or not str(receipt_summary.get("winner_actuation_identity") or "").strip()
+            or receipt_summary.get("no_trade_reason") not in (None, "")
+            or not isinstance(receipt_summary.get("global_selection_revision"), str)
+            or not receipt_summary["global_selection_revision"].strip()
+        ):
+            return None, "CELL_RECEIPT_BINDING_UNBOUND"
+        selection_at = _parse_ts(receipt_summary.get("selection_cut_at_utc"))
+        receipt_decision_at = _parse_ts(receipt_summary.get("decision_at_utc"))
+        if (
+            selection_at is None or receipt_decision_at is None
+            or selection_at > receipt_decision_at
+            or receipt_decision_at > decision_at.astimezone(timezone.utc)
+        ):
+            return None, "CELL_RECEIPT_CLOCK_UNBOUND"
+    except (AttributeError, TypeError, ValueError):
+        return None, "CELL_RECEIPT_UNBOUND"
+
+    parameter_hash = economics.get("market_anchored_correction")
+    parameter_hash = (
+        parameter_hash.get("param_hash")
+        if isinstance(parameter_hash, Mapping)
+        else None
+    )
+    if not isinstance(parameter_hash, str) or not parameter_hash.strip():
+        parameter_hash = None
+    certificate_hash = certificate.get("certificate_hash")
+    if not isinstance(certificate_hash, str) or not certificate_hash.strip():
+        return None, "CELL_CERTIFICATE_HASH_UNBOUND"
+    command_created_at = _parse_ts(command.get("created_at"))
+    certificate_persisted_at = _parse_ts(certificate.get("persisted_at"))
+    if (
+        command_created_at is None or certificate_persisted_at is None
+        or certificate_persisted_at > command_created_at
+    ):
+        return None, "CELL_COMMAND_CERTIFICATE_CLOCK_UNBOUND"
+    key = {
+        "strategy_key": strategy_key,
+        "receipt_schema_version": receipt_ref.schema_version,
+        "global_selection_revision": receipt_summary["global_selection_revision"],
+        "metric": metric,
+        "side": side,
+        "lead_bucket": lead_bucket,
+        "execution_mode": execution_mode,
+        "execution_contract": execution_contract,
+        "probability_semantics_revision": raw_probability_revision,
+        "calibration_policy_hash": policy_hash,
+    }
+    from src.decision_kernel.canonicalization import stable_hash
+
+    return {
+        "key": key,
+        "key_hash": stable_hash(key),
+        "metadata": {
+            "parameter_hash": parameter_hash,
+            "event_cluster": {
+                "city": payload.get("city"),
+                "target_date": target.isoformat(),
+                "metric": metric,
+            },
+            "decision_time": decision_at.astimezone(timezone.utc).isoformat(),
+            "decision_certificate_hash": certificate_hash,
+            "receipt_hash": receipt_ref.receipt_hash,
+            "decision_log_id": receipt_ref.decision_log_id,
+            "raw_forecast_lineage": raw_forecast_lineage,
+            "raw_forecast_lineage_reason": raw_forecast_lineage_reason,
+            "training_manifest": training_manifest,
+            "training_manifest_reason": training_manifest_reason,
+        },
+    }, None
 
 
 def load_canonical_fit_corpus(
@@ -1612,6 +1774,67 @@ def load_canonical_fit_corpus(
             include_cash_proofs=include_cash_proofs,
         )
         check_deadline()
+    receipt_cache: dict[
+        tuple[object, ...],
+        tuple[object | None, Mapping[str, object] | None, str | None],
+    ] = {}
+
+    def receipt_for(payload: Mapping[str, object], economics: Mapping[str, object]):
+        """Authenticate and cache the exact receipt sealed by this certificate."""
+
+        receipt_raw = economics.get("global_auction_receipt")
+        payload_receipt = payload.get("global_auction_receipt")
+        if receipt_raw is None:
+            receipt_raw = payload_receipt
+        elif payload_receipt is not None and payload_receipt != receipt_raw:
+            return None, None, "CELL_RECEIPT_BINDING_UNBOUND"
+        try:
+            from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+
+            receipt_ref = GlobalAuctionReceiptRef.from_payload(receipt_raw)
+        except (TypeError, ValueError, KeyError):
+            return None, None, "CELL_RECEIPT_UNBOUND"
+        key = (
+            receipt_ref.decision_log_id,
+            receipt_ref.decision_log_mode,
+            receipt_ref.receipt_hash,
+        )
+        cached = receipt_cache.get(key)
+        if cached is not None:
+            canonical_ref, summary, reason = cached
+            if reason:
+                return receipt_ref, None, reason
+            if canonical_ref != receipt_ref:
+                return None, None, "CELL_RECEIPT_BINDING_UNBOUND"
+            return receipt_ref, summary, reason
+        reason = None
+        try:
+            summary = _receipt_summary(
+                trade_conn,
+                decision_log_id=receipt_ref.decision_log_id,
+                expected_mode=receipt_ref.decision_log_mode,
+                expected_receipt_hash=receipt_ref.receipt_hash,
+            )
+            from src.contracts.global_auction_receipt import global_auction_receipt_ref_from_summary
+
+            actual_ref = global_auction_receipt_ref_from_summary(
+                decision_log_id=receipt_ref.decision_log_id,
+                decision_log_mode=receipt_ref.decision_log_mode,
+                summary=summary,
+            )
+            receipt_cache[key] = (actual_ref, summary, None)
+            if actual_ref != receipt_ref:
+                return None, None, "CELL_RECEIPT_BINDING_UNBOUND"
+            return receipt_ref, summary, None
+        except PayoffQCorrectionUnavailable:
+            summary = None
+            reason = "CELL_RECEIPT_UNBOUND"
+        except (TypeError, ValueError, KeyError):
+            summary = None
+            reason = "CELL_RECEIPT_UNBOUND"
+        receipt_cache[key] = (None, summary, reason)
+        return receipt_ref, summary, reason
+
     unknown: Counter[str] = Counter()
     accepted = []
     for command in commands:
@@ -1619,13 +1842,19 @@ def load_canonical_fit_corpus(
         command_id = command["command_id"]
         accounting_row = accounting[command_id]
         reasons = []
+        if not include_cash_proofs:
+            accounting_row["decision_cell_reason"] = "CELL_PROOF_NOT_REQUESTED"
         if command["order_side"] != "BUY":
+            if include_cash_proofs:
+                accounting_row["decision_cell_reason"] = "CELL_COMMAND_SIDE_UNSUPPORTED"
             unknown["ENTRY_NOT_BUY"] += 1
             accounting_row["calibration_evidence_reason"] = "ENTRY_NOT_BUY"
             continue
         hs = links[command_id]
         certificate = certificates.get(next(iter(hs))) if len(hs) == 1 else None
         if certificate is None:
+            if include_cash_proofs:
+                accounting_row["decision_cell_reason"] = "CELL_CERTIFICATE_UNBOUND"
             unknown["CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS"] += 1
             accounting_row["calibration_evidence_reason"] = "CERTIFICATE_LINK_MISSING_OR_AMBIGUOUS"
             continue
@@ -1802,6 +2031,82 @@ def load_canonical_fit_corpus(
             reasons.insert(0, typed_exact_reason)
         if p0 is None or (correction.get("applied") is True and not equal(correction.get("p0"), p0)):
             reasons.append("DECISION_ANCHOR_UNBOUND")
+        city, target = payload.get("city"), _parse_date(payload.get("target_date"))
+        metric = payload.get("temperature_metric", payload.get("metric"))
+        local_date = _city_local_target_date(decision_at, city, city_timezone_snapshot) if decision_at else None
+        lead_bucket = lead_bucket_of(local_date, target) if local_date is not None and target is not None else None
+        calibration_policy_payload = None
+        calibration_policy_reason = "CALIBRATION_POLICY_UNAVAILABLE"
+        raw_forecast_lineage = None
+        raw_forecast_lineage_reason = "FORECAST_LINEAGE_UNAVAILABLE"
+        training_manifest = None
+        training_manifest_reason = "CALIBRATION_FIT_SCOPE_UNAVAILABLE"
+        receipt_ref = None
+        receipt_summary = None
+        receipt_reason = "CELL_RECEIPT_UNBOUND"
+        if include_cash_proofs and (not city or target is None or local_date is None or metric not in ("high", "low")):
+            calibration_policy_reason = "CELL_EVENT_CLUSTER_UNBOUND"
+            raw_forecast_lineage_reason = "CELL_EVENT_CLUSTER_UNBOUND"
+        elif include_cash_proofs and not reasons and lead_bucket is not None:
+            calibration_policy_payload, calibration_policy_reason = _sealed_calibration_policy(
+                correction,
+                raw_q=raw,
+                p0=p0,
+                payload=payload,
+                side=side,
+                expected_lead_bucket=lead_bucket or "",
+                legacy_expected_lead_bucket=legacy_lead_bucket_of(local_date, target),
+                execution_mode=mode,
+                execution_contract=execution_contract,
+                raw_probability_revision=raw_probability_revision,
+            )
+            raw_forecast_lineage, raw_forecast_lineage_reason = forecast_lineage_for(
+                certificate, edges[certificate["certificate_id"]], payload, economics, raw,
+                raw_probability_revision, side, city, target, metric, decision_at,
+            )
+            if raw_probability_revision:
+                try:
+                    training_scope = CalibrationFitScope(
+                        metric=metric, execution_mode=mode,
+                        execution_contract=execution_contract,
+                        raw_probability_revision=raw_probability_revision,
+                    )
+                except (TypeError, ValueError):
+                    training_manifest_reason = "CALIBRATION_FIT_SCOPE_UNAVAILABLE"
+                else:
+                    training_manifest, training_manifest_reason = _sealed_training_manifest(
+                        correction,
+                        calibration_policy=calibration_policy_payload,
+                        decision_at=decision_at,
+                        scope=training_scope,
+                    )
+        if include_cash_proofs:
+            if reasons:
+                cell, cell_reason = None, f"CELL_PROOF_{reasons[0]}"
+            elif not city or target is None or local_date is None or metric not in ("high", "low"):
+                cell, cell_reason = None, "CELL_EVENT_CLUSTER_UNBOUND"
+            elif lead_bucket is None:
+                cell, cell_reason = None, "CELL_LEAD_BUCKET_UNBOUND"
+            else:
+                receipt_ref, receipt_summary, receipt_reason = receipt_for(payload, economics)
+                cell, cell_reason = _sealed_decision_cell(
+                    command=command, certificate=certificate, payload=payload, economics=economics,
+                    side=side, metric=metric, target=target, local_date=local_date,
+                    decision_at=decision_at, execution_mode=mode,
+                    execution_contract=execution_contract, raw=raw, p0=p0,
+                    raw_probability_revision=raw_probability_revision,
+                    pre_outcome_reasons=tuple(reasons),
+                    calibration_policy=calibration_policy_payload,
+                    calibration_policy_reason=calibration_policy_reason,
+                    training_manifest=training_manifest,
+                    training_manifest_reason=training_manifest_reason,
+                    raw_forecast_lineage=raw_forecast_lineage,
+                    raw_forecast_lineage_reason=raw_forecast_lineage_reason,
+                    receipt_ref=receipt_ref, receipt_summary=receipt_summary,
+                    receipt_reason=receipt_reason,
+                )
+            accounting_row["decision_cell"] = cell
+            accounting_row["decision_cell_reason"] = cell_reason
         pair = payouts[command["condition_id"]]
         if not _coherent_finalized_pair(pair):
             reasons.append("FINALIZED_PAYOUT_UNBOUND")
@@ -1829,9 +2134,6 @@ def load_canonical_fit_corpus(
             fill_available_at = max(filter(None, (fill_available_at, observed, ingested)))
         if shares <= 0:
             reasons.append("CONFIRMED_FILL_MISSING")
-        city, target = payload.get("city"), _parse_date(payload.get("target_date"))
-        metric = payload.get("temperature_metric", payload.get("metric"))
-        local_date = _city_local_target_date(decision_at, city, city_timezone_snapshot) if decision_at else None
         if not city or target is None or local_date is None or metric not in ("high", "low"):
             reasons.append("FAMILY_OR_LOCAL_CLOCK_UNBOUND")
         elif lead_bucket_of(local_date, target) is None:
@@ -1841,37 +2143,42 @@ def load_canonical_fit_corpus(
             unknown[reasons[0]] += 1
             accounting_row["calibration_evidence_reason"] = reasons[0]
             continue
-        calibration_policy_payload, calibration_policy_reason = _sealed_calibration_policy(
-            correction,
-            raw_q=raw,
-            p0=p0,
-            payload=payload,
-            side=side,
-            expected_lead_bucket=lead_bucket_of(local_date, target),
-            legacy_expected_lead_bucket=legacy_lead_bucket_of(local_date, target),
-            execution_mode=mode,
-            execution_contract=execution_contract,
-            raw_probability_revision=raw_probability_revision,
-        )
-        raw_forecast_lineage, raw_forecast_lineage_reason = forecast_lineage_for(
-            certificate, edges[certificate["certificate_id"]], payload, economics, raw,
-            raw_probability_revision, side, city, target, metric, decision_at,
-        )
+        if not include_cash_proofs:
+            calibration_policy_payload, calibration_policy_reason = _sealed_calibration_policy(
+                correction,
+                raw_q=raw,
+                p0=p0,
+                payload=payload,
+                side=side,
+                expected_lead_bucket=lead_bucket or "",
+                legacy_expected_lead_bucket=legacy_lead_bucket_of(local_date, target),
+                execution_mode=mode,
+                execution_contract=execution_contract,
+                raw_probability_revision=raw_probability_revision,
+            )
+            raw_forecast_lineage, raw_forecast_lineage_reason = forecast_lineage_for(
+                certificate, edges[certificate["certificate_id"]], payload, economics, raw,
+                raw_probability_revision, side, city, target, metric, decision_at,
+            )
+            if raw_probability_revision:
+                try:
+                    training_scope = CalibrationFitScope(
+                        metric=metric, execution_mode=mode,
+                        execution_contract=execution_contract,
+                        raw_probability_revision=raw_probability_revision,
+                    )
+                except (TypeError, ValueError):
+                    training_manifest_reason = "CALIBRATION_FIT_SCOPE_UNAVAILABLE"
+                else:
+                    training_manifest, training_manifest_reason = _sealed_training_manifest(
+                        correction,
+                        calibration_policy=calibration_policy_payload,
+                        decision_at=decision_at,
+                        scope=training_scope,
+                    )
         held = next(row for row in pair if row["outcome_index"] == outcome_index)
         accounting_row["calibration_policy"] = calibration_policy_payload
         accounting_row["calibration_policy_reason"] = calibration_policy_reason
-        training_manifest, training_manifest_reason = (None, "CALIBRATION_FIT_SCOPE_UNAVAILABLE")
-        if raw_probability_revision:
-            training_manifest, training_manifest_reason = _sealed_training_manifest(
-                correction,
-                calibration_policy=calibration_policy_payload,
-                decision_at=decision_at,
-                scope=CalibrationFitScope(
-                    metric=metric, execution_mode=mode,
-                    execution_contract=execution_contract,
-                    raw_probability_revision=raw_probability_revision,
-                ),
-            )
         accounting_row["calibration_training_manifest"] = training_manifest
         accounting_row["calibration_training_manifest_reason"] = training_manifest_reason
         cash = accounting_row["chain_cash"]

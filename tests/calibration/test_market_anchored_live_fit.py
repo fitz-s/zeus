@@ -2472,6 +2472,214 @@ def test_probability_only_corpus_skips_cash_decode_without_changing_fit_rows(mon
         forecast.close()
 
 
+def _sealed_cell_inputs(*, side="YES", metric="high", lead_days=1, policy=None):
+    from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    target = date(2026, 8, 27) + timedelta(days=lead_days)
+    policy = policy or _known_policy(
+        input_revision=live_fit.CANONICAL_CALIBRATION_INPUT_REVISION,
+        metric_pooling=live_fit.CANONICAL_CALIBRATION_METRIC_POOLING,
+        lead_calendar_revision=LEAD_CALENDAR_REVISION,
+    )
+    receipt_ref = GlobalAuctionReceiptRef(
+        decision_log_id=7, decision_log_mode="global_single_order_auction",
+        receipt_hash="b" * 64, execution_binding_hash="c" * 64,
+        artifact_summary_hash="d" * 64, schema_version=22,
+        winner_event_id="event-a", winner_candidate_id="candidate-a",
+        winner_actuation_identity="actuation-a", selection_epoch_identity="epoch-a",
+    )
+    summary = {
+        **receipt_ref.as_payload(),
+        "global_selection_revision": "selection-v1",
+        "selection_cut_at_utc": "2026-08-27T11:59:00+00:00",
+        "decision_at_utc": decision_at.isoformat(),
+        "no_trade_reason": "",
+    }
+    payload = {
+        "strategy_key": "strategy-a", "candidate_id": "candidate-a",
+        "city": "Austin", "target_date": target.isoformat(),
+    }
+    economics = {
+        "global_candidate_id": "candidate-a",
+        "market_anchored_correction": {"param_hash": "param-a"},
+    }
+    return {
+        "command": {"created_at": decision_at.isoformat()},
+        "certificate": {
+            "certificate_hash": "certificate-a", "persisted_at": decision_at.isoformat(),
+        },
+        "payload": payload, "economics": economics, "side": side,
+        "metric": metric, "target": target, "local_date": decision_at.date(),
+        "decision_at": decision_at, "execution_mode": "TAKER_LIMIT",
+        "execution_contract": "FOK_FULL_OR_ZERO", "raw": .70, "p0": .35,
+        "raw_probability_revision": "raw-v1", "pre_outcome_reasons": (),
+        "calibration_policy": policy.as_payload(), "calibration_policy_reason": None,
+        "training_manifest": {"manifest_hash": "manifest-a"},
+        "training_manifest_reason": "FORECAST_LINEAGE_UNAVAILABLE",
+        "raw_forecast_lineage": None,
+        "raw_forecast_lineage_reason": "FORECAST_LINEAGE_PARENT_UNBOUND",
+        "receipt_ref": receipt_ref, "receipt_summary": summary,
+        "receipt_reason": None,
+    }
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_decision_cell_key_separates_side_and_metric_but_not_metadata(side, metric):
+    args = _sealed_cell_inputs(side=side, metric=metric)
+    cell, reason = live_fit._sealed_decision_cell(**args)
+    assert reason is None
+    assert cell["key"]["side"] == side
+    assert cell["key"]["metric"] == metric
+    assert cell["key"]["lead_bucket"] == "day1"
+    original_hash = cell["key_hash"]
+
+    args["economics"]["market_anchored_correction"]["param_hash"] = "param-b"
+    args["payload"]["city"] = "Chicago"
+    args["certificate"]["certificate_hash"] = "certificate-b"
+    changed, reason = live_fit._sealed_decision_cell(**args)
+    assert reason is None
+    assert changed["key_hash"] == original_hash
+    assert changed["metadata"]["parameter_hash"] == "param-b"
+    assert changed["metadata"]["event_cluster"]["city"] == "Chicago"
+    assert changed["metadata"]["decision_certificate_hash"] == "certificate-b"
+
+
+def test_decision_cell_key_splits_lead_policy_and_selection_revision():
+    base = _sealed_cell_inputs()
+    original, reason = live_fit._sealed_decision_cell(**base)
+    assert reason is None
+
+    day2 = {**base, "target": date(2026, 8, 29)}
+    day2["payload"] = {**base["payload"], "target_date": "2026-08-29"}
+    changed, reason = live_fit._sealed_decision_cell(**day2)
+    assert reason is None and changed["key_hash"] != original["key_hash"]
+
+    policy = _known_policy(
+        input_revision=live_fit.CANONICAL_CALIBRATION_INPUT_REVISION,
+        metric_pooling=live_fit.CANONICAL_CALIBRATION_METRIC_POOLING,
+        lead_calendar_revision=LEAD_CALENDAR_REVISION, lambda_=1.0,
+    )
+    policy_args = {**base, "calibration_policy": policy.as_payload()}
+    changed, reason = live_fit._sealed_decision_cell(**policy_args)
+    assert reason is None and changed["key_hash"] != original["key_hash"]
+
+    receipt_args = {
+        **base,
+        "receipt_summary": {
+            **base["receipt_summary"], "global_selection_revision": "selection-v2",
+        },
+    }
+    changed, reason = live_fit._sealed_decision_cell(**receipt_args)
+    assert reason is None and changed["key_hash"] != original["key_hash"]
+
+
+def test_decision_cell_rejects_missing_proof_without_endpoint_dependency():
+    args = _sealed_cell_inputs()
+    args["receipt_ref"] = None
+    args["receipt_summary"] = None
+    args["receipt_reason"] = "CELL_RECEIPT_UNBOUND"
+    cell, reason = live_fit._sealed_decision_cell(**args)
+    assert cell is None and reason == "CELL_RECEIPT_UNBOUND"
+
+    args = _sealed_cell_inputs()
+    cell, reason = live_fit._sealed_decision_cell(**args)
+    assert reason is None
+    assert cell["metadata"]["raw_forecast_lineage"] is None
+    assert cell["metadata"]["raw_forecast_lineage_reason"] == (
+        "FORECAST_LINEAGE_PARENT_UNBOUND"
+    )
+    assert cell["metadata"]["training_manifest_reason"] == (
+        "FORECAST_LINEAGE_UNAVAILABLE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("strategy_key", "CELL_STRATEGY_KEY_UNBOUND"),
+        ("raw_probability_revision", "CELL_ANCHOR_OR_PROBABILITY_UNBOUND"),
+    ],
+)
+def test_decision_cell_rejects_noncanonical_identity_whitespace(field, expected):
+    args = _sealed_cell_inputs()
+    if field == "strategy_key":
+        args["payload"] = {**args["payload"], "strategy_key": " strategy-a"}
+    else:
+        args["raw_probability_revision"] = "raw-v1 "
+    cell, reason = live_fit._sealed_decision_cell(**args)
+    assert cell is None and reason == expected
+
+
+@pytest.mark.parametrize(
+    ("lead_days", "expected"),
+    [(0, "day0"), (1, "day1"), (2, "day2plus"), (5, "day2plus")],
+)
+def test_decision_cell_uses_city_local_day_bucket_boundaries(lead_days, expected):
+    cell, reason = live_fit._sealed_decision_cell(**_sealed_cell_inputs(lead_days=lead_days))
+    assert reason is None and cell["key"]["lead_bucket"] == expected
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("policy", "CALIBRATION_POLICY_INVALID"),
+        ("receipt", "CELL_RECEIPT_BINDING_UNBOUND"),
+        ("secondary_hash", "CELL_RECEIPT_BINDING_UNBOUND"),
+        ("clock", "CELL_RECEIPT_CLOCK_UNBOUND"),
+    ],
+)
+def test_decision_cell_bad_policy_receipt_or_clock_stays_unknown(mutation, expected):
+    args = _sealed_cell_inputs()
+    if mutation == "policy":
+        args["calibration_policy"] = None
+        args["calibration_policy_reason"] = "CALIBRATION_POLICY_INVALID"
+    elif mutation == "receipt":
+        args["receipt_summary"] = {
+            **args["receipt_summary"], "no_trade_reason": "NO_WINNER",
+        }
+    elif mutation == "secondary_hash":
+        args["receipt_summary"] = {
+            **args["receipt_summary"], "execution_binding_hash": "e" * 64,
+        }
+    else:
+        args["receipt_summary"] = {
+            **args["receipt_summary"],
+            "decision_at_utc": "2026-08-27T12:01:00+00:00",
+        }
+    cell, reason = live_fit._sealed_decision_cell(**args)
+    assert cell is None and reason == expected
+
+
+def test_command_accounting_always_retains_decision_cell_fields_and_fast_path_reason():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        full = _read_canonical(world, trade, forecast=forecast)
+        row = full.command_accounting[0]
+        assert row["decision_cell"] is None
+        assert row["decision_cell_reason"] == "CELL_STRATEGY_KEY_UNBOUND"
+        probability_only = _read_canonical(
+            world, trade, forecast=forecast, include_cash_proofs=False,
+        )
+        fast_row = probability_only.command_accounting[0]
+        assert fast_row["decision_cell"] is None
+        assert fast_row["decision_cell_reason"] == "CELL_PROOF_NOT_REQUESTED"
+        assert probability_only.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1",
+        ) == full.fit_rows(
+            metric="high", execution_mode="TAKER_LIMIT",
+            execution_contract="FOK_FULL_OR_ZERO", probability_revision="fixture-revision-v1",
+        )
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
 def test_canonical_fit_skips_unused_parent_payload_but_keeps_child_header_edges():
     world, trade, _, forecast, certificate, parents = _canonical_corpus_fixture(
         return_details=True, forecast_lineage=True, unused_large_parent=True,
