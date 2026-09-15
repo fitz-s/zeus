@@ -497,6 +497,143 @@ def _write_complete_ogimet_day(
     conn.close()
 
 
+def _beijing_city() -> SimpleNamespace:
+    return SimpleNamespace(
+        name="Beijing", timezone="Asia/Shanghai", wu_station="ZBAA",
+        settlement_source_type="noaa", settlement_unit="C",
+    )
+
+
+def test_final_complete_hourly_observation_extreme_accepts_a_fully_valid_day(
+    tmp_path: Path,
+) -> None:
+    """Positive control for ``_final_complete_hourly_observation_extreme``
+    (day0_hard_fact_exit.py:284): a full local day of VERIFIED/OK/
+    historical_hourly rows plus the following-day boundary row promotes to
+    a ``FinalDailyObservation``. Each rejection-axis test below starts from
+    this same fixture and breaks exactly one property."""
+    from src.execution.day0_hard_fact_exit import (
+        _final_complete_hourly_observation_extreme,
+    )
+
+    db_path = _instants_db(tmp_path)
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", timezone_name="Asia/Shanghai",
+        target_date="2026-09-13",
+    )
+    conn = sqlite3.connect(str(db_path))
+    result = _final_complete_hourly_observation_extreme(
+        city=_beijing_city(), target_date="2026-09-13", metric="high",
+        now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
+    )
+    conn.close()
+
+    assert result is not None
+    assert result.raw_extreme == 20.0
+    assert result.station_id == "ZBAA"
+
+
+@pytest.mark.parametrize(
+    "column,bad_value",
+    [
+        ("authority", "UNVERIFIED"),
+        ("causality_status", "SUSPECT"),
+        ("source_role", "realtime_current"),
+        ("time_basis", "utc_instant"),
+        ("temp_unit", "F"),
+    ],
+)
+def test_final_complete_hourly_observation_extreme_rejects_one_disqualified_row(
+    tmp_path: Path, column: str, bad_value: str,
+) -> None:
+    """Every row-level filter the exit authority applies
+    (day0_hard_fact_exit.py:426-437 -- source/station/time_basis/unit/
+    authority/causality/source_role) disqualifies its one row from
+    ``target_values``, which breaks the exact expected-hours SET match --
+    the predicate returns None (not-complete), the same as a hole in the
+    ledger, rather than promoting on a partially trustworthy day."""
+    from src.execution.day0_hard_fact_exit import (
+        _final_complete_hourly_observation_extreme,
+    )
+
+    db_path = _instants_db(tmp_path)
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", timezone_name="Asia/Shanghai",
+        target_date="2026-09-13",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        f"""
+        UPDATE observation_instants SET {column} = ?
+         WHERE target_date = ?
+           AND utc_timestamp = (
+               SELECT MIN(utc_timestamp) FROM observation_instants
+                WHERE target_date = ?
+           )
+        """,
+        (bad_value, "2026-09-13", "2026-09-13"),
+    )
+    conn.commit()
+
+    result = _final_complete_hourly_observation_extreme(
+        city=_beijing_city(), target_date="2026-09-13", metric="high",
+        now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
+    )
+    conn.close()
+
+    assert result is None
+
+
+def test_final_complete_hourly_observation_extreme_rejects_a_missing_hour(
+    tmp_path: Path,
+) -> None:
+    """23 of the 24 expected local hours present: ``set(target_values) !=
+    expected_hours`` even though every present row is otherwise valid --
+    exact-set completeness, not a row count, is what the predicate checks."""
+    from src.execution.day0_hard_fact_exit import (
+        _final_complete_hourly_observation_extreme,
+    )
+
+    db_path = _instants_db(tmp_path)
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", timezone_name="Asia/Shanghai",
+        target_date="2026-09-13", hours=23,
+    )
+    conn = sqlite3.connect(str(db_path))
+    result = _final_complete_hourly_observation_extreme(
+        city=_beijing_city(), target_date="2026-09-13", metric="high",
+        now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
+    )
+    conn.close()
+
+    assert result is None
+
+
+def test_final_complete_hourly_observation_extreme_rejects_missing_following_day_boundary(
+    tmp_path: Path,
+) -> None:
+    """All 24 target-day hours present but no following-day boundary row:
+    the source has not yet proven it advanced past the target day, so the
+    predicate must not promote."""
+    from src.execution.day0_hard_fact_exit import (
+        _final_complete_hourly_observation_extreme,
+    )
+
+    db_path = _instants_db(tmp_path)
+    _write_complete_ogimet_day(
+        db_path, city="Beijing", station="ZBAA", timezone_name="Asia/Shanghai",
+        target_date="2026-09-13", include_next_day_boundary=False,
+    )
+    conn = sqlite3.connect(str(db_path))
+    result = _final_complete_hourly_observation_extreme(
+        city=_beijing_city(), target_date="2026-09-13", metric="high",
+        now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
+    )
+    conn.close()
+
+    assert result is None
+
+
 def test_ogimet_local_day_end_selection_picks_only_cities_whose_local_day_ended(
     monkeypatch, tmp_path: Path
 ) -> None:
