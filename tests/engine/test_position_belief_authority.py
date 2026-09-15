@@ -494,6 +494,9 @@ class TestLoadReplacementBelief:
     def test_held_floor_uses_corrected_same_clock_publication(self, tmp_path):
         from src.state.schema.observation_prints_schema import append_print, ensure_table
 
+        # Target date after Shenzhen's NOAA transition (2026-08-24 in
+        # config/cities.json): the ogimet channel is this date's settlement
+        # authority, not merely the runtime's current source.
         world_db = tmp_path / "zeus-world.db"
         conn = sqlite3.connect(world_db)
         ensure_table(conn)
@@ -502,29 +505,29 @@ class TestLoadReplacementBelief:
             city="Shenzhen",
             station_id="ZGSZ",
             source_channel="ogimet_metar_zgsz",
-            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            publish_ts_utc="2026-09-09T08:00:00+00:00",
             value_native=37.0,
             unit="C",
-            fetched_at_utc="2026-08-09T08:50:52+00:00",
+            fetched_at_utc="2026-09-09T08:50:52+00:00",
         )
         append_print(
             conn,
             city="Shenzhen",
             station_id="ZGSZ",
             source_channel="ogimet_metar_zgsz",
-            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            publish_ts_utc="2026-09-09T08:00:00+00:00",
             value_native=36.0,
             unit="C",
-            fetched_at_utc="2026-08-09T10:18:22+00:00",
+            fetched_at_utc="2026-09-09T10:18:22+00:00",
         )
         conn.commit()
         conn.close()
 
         observed = _observed_running_extreme_native(
             city="Shenzhen",
-            target_date="2026-08-09",
+            target_date="2026-09-09",
             metric="high",
-            now=datetime(2026, 8, 9, 10, 20, tzinfo=timezone.utc),
+            now=datetime(2026, 9, 9, 10, 20, tzinfo=timezone.utc),
             world_db_path=str(world_db),
         )
 
@@ -2457,6 +2460,22 @@ class TestLiveEnumDirectionIntegration:
         )
         assert is_fresh is True, refresh_pos.applied_validations
         assert prob == pytest.approx(1.0 - 0.242)
+
+        # The monitor hands the loader a plain string (monitor_refresh
+        # normalises before the call), so the path above cannot notice a
+        # removed loader-boundary normalisation. Hit the loader directly with
+        # the enum and require parity with the string form.
+        from src.contracts.semantic_types import Direction
+
+        loader_kwargs = dict(
+            city="Karachi", target_date="2026-06-12", temperature_metric="high",
+            bin_label=BIN, db_path=forecasts_db,
+        )
+        via_enum = real_loader(direction=Direction.NO, **loader_kwargs)
+        via_str = real_loader(direction="buy_no", **loader_kwargs)
+        assert via_enum is not None and via_str is not None
+        assert via_enum.held_side_prob == pytest.approx(via_str.held_side_prob)
+        assert via_enum.held_side_prob == pytest.approx(1.0 - 0.242)
 
 
 def test_monitor_loader_requests_held_continuity_exemption(forecasts_db, monkeypatch):
