@@ -2259,6 +2259,14 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
             "rounded_value": 33.0,
             "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
             "settlement_unit": "C",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
             "_edli_day0_remaining_vector_witness": pinned_provenance[
                 "day0_remaining_vector_witness"
             ],
@@ -2330,6 +2338,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
         decision_time=datetime(2026, 6, 9, 12, tzinfo=timezone.utc),
         max_age=timedelta(hours=2),
         day0_payload_out=payload_out,
+        allow_partial_deterministic=False,
         probability_use=getattr(era._CurrentProbabilityUse, probability_use),
         raw_input_hwm_conn=None,
         raw_input_hwm_deadline_monotonic=None,
