@@ -304,6 +304,9 @@ def _final_wu_hourly_observation_conn(
     following_utc_offset: timedelta = timedelta(0),
     following_imported_offset: timedelta = timedelta(minutes=15),
     time_basis: str = "utc_hour_bucket_extremum",
+    authority: str = "VERIFIED",
+    causality_status: str = "OK",
+    source_role: str = "historical_hourly",
 ) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -354,9 +357,9 @@ def _final_wu_hourly_observation_conn(
                 value,
                 "C",
                 (observed_at + timedelta(minutes=15)).isoformat(),
-                "VERIFIED",
-                "OK",
-                "historical_hourly",
+                authority,
+                causality_status,
+                source_role,
             )
         )
     if include_following_day:
@@ -382,9 +385,9 @@ def _final_wu_hourly_observation_conn(
                     + following_utc_offset
                     + following_imported_offset
                 ).isoformat(),
-                "VERIFIED",
-                "OK",
-                "historical_hourly",
+                authority,
+                causality_status,
+                source_role,
             )
         )
     conn.executemany(
@@ -577,6 +580,9 @@ def test_post_local_day_complete_wu_dst_hours_are_not_final(target_date):
         {"source": "ogimet_metar_llbg"},
         {"station_id": "LLBG"},
         {"following_imported_offset": timedelta(hours=5)},
+        {"authority": "UNVERIFIED"},
+        {"causality_status": "SUSPECT"},
+        {"source_role": "realtime_current"},
     ),
 )
 def test_post_local_day_incomplete_or_wrong_noaa_evidence_is_not_final(overrides):
