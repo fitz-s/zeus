@@ -6579,7 +6579,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 1.0,
                 max(0.0, preflight_deadline_monotonic - time.monotonic()),
             )
-            if held_cities and hwm_budget_seconds >= 0.25:
+            # A short optional probe can embargo the same metadata request
+            # needed by the reserved full-budget fetch. Repair known evidence
+            # debt first; the fetch still proves its exact provider run.
+            if (
+                held_cities
+                and not strict_refresh_due_families
+                and hwm_budget_seconds >= 0.25
+            ):
                 provider_run_hwm = probe_day0_provider_run_hwm(
                     held_cities,
                     decision_time=decision_time,

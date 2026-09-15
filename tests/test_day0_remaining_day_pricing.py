@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-14
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-14; last_reused=2026-09-14
+# Last reused or audited: 2026-09-15
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -11160,6 +11160,98 @@ class TestRequestHashProvenance:
         assert captured["deadline_monotonic"] == 12.0
         assert captured["fetch_budget_s"] == 4.0
         assert captured["fetch_timeout_s"] == 4.0
+
+    @pytest.mark.parametrize("debt", ["held", "pending", None])
+    def test_strict_recovery_fetch_precedes_optional_metadata_probe(
+        self, monkeypatch, tmp_path, debt
+    ):
+        import httpx
+        from contextlib import contextmanager
+        import src.config as config_module
+        import src.state.db as db_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_client import fetch as _fetch_openmeteo
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+        from src.events import reactor
+
+        today = datetime.now(UTC).date().isoformat()
+        held = SimpleNamespace(name="Held", timezone="UTC")
+        pending = SimpleNamespace(name="Pending", timezone="UTC")
+        held_family = (held.name, today, "high")
+        pending_family = (pending.name, today, "low")
+        due = {"held": {held_family}, "pending": {pending_family}, None: set()}[debt]
+        tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "quota.json")
+        url = "https://api.open-meteo.com/data/ecmwf_ifs/static/meta.json"
+        transport_timeouts = []
+        captured = {}
+
+        class Transport:
+            def get(self, request_url, *, params, timeout):
+                transport_timeouts.append(timeout)
+                request = httpx.Request("GET", request_url, params=params)
+                if debt is not None and timeout <= 1.0:
+                    raise httpx.ConnectTimeout("slow TLS handshake", request=request)
+                return httpx.Response(200, json={"ok": True}, request=request)
+
+        def metadata(timeout):
+            return _fetch_openmeteo(
+                url, {}, timeout=timeout, max_retries=1, quota=tracker,
+                client=Transport(), count_toward_quota=False,
+            )
+
+        def hwm_probe(*_args, **kwargs):
+            metadata(kwargs["timeout_s"])
+            return {"ecmwf_ifs": "release_hint"}
+
+        @contextmanager
+        def read_connection():
+            yield object()
+
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [held, pending])
+        monkeypatch.setattr(reactor, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setattr(reactor, "_edli_current_held_position_family_keys", lambda: {held_family})
+        monkeypatch.setattr(reactor, "_day0_hourly_refresh_budget_seconds", lambda: 6.0)
+        monkeypatch.setattr(reactor, "_day0_hourly_fetch_timeout_seconds", lambda: 4.0)
+        monkeypatch.setattr(
+            reactor, "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset(due), proved=True,
+            ),
+        )
+        monkeypatch.setattr(vectors_module, "probe_day0_provider_run_hwm", hwm_probe)
+        release_due = frozenset({(held.name, today)})
+        monkeypatch.setattr(vectors_module, "day0_hourly_release_due_city_dates", lambda *_args, **_kwargs: release_due)
+        monkeypatch.setattr(db_module, "get_forecasts_connection_with_world_read_only", read_connection)
+        monkeypatch.setattr(vectors_module, "read_day0_current_temperature_state", lambda **_kwargs: None)
+
+        def refresh(cities, **kwargs):
+            captured.update(kwargs)
+            captured["cities"] = [city.name for city in cities]
+            captured["fetched"] = metadata(kwargs["timeout_s"])
+            return SimpleNamespace(
+                vectors_written=3, cities_attempted=1,
+                cities_skipped_throttle=0, cities_skipped_quota=0,
+                incomplete_expected_bundles=0, priority_reserve_exhausted=False,
+                budget_exhausted=False,
+            )
+
+        monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert captured.get("fetched") == {"ok": True}
+        assert captured["timeout_s"] == 4.0
+        assert captured["cities"][0] == held.name
+        assert captured["quota_critical_cities"] == 1
+        if debt is not None:
+            assert transport_timeouts == [4.0]
+            assert captured["provider_run_hwm"] == {}
+            assert captured["release_due_city_dates"] == frozenset()
+            assert captured["quota_priority_cities"] == (1 if debt == "pending" else 0)
+        else:
+            assert len(transport_timeouts) == 2
+            assert transport_timeouts[0] <= 1.0
+            assert captured["provider_run_hwm"] == {"ecmwf_ifs": "release_hint"}
+            assert captured["release_due_city_dates"] == release_due
 
     def test_scheduler_rotates_held_cities_without_demoting_them(self):
         from src.events import reactor
