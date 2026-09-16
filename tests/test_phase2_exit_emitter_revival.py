@@ -475,7 +475,7 @@ class TestDay0StaticClosedBehavioral:
             def record_exit(self, position):
                 pass
 
-        def mock_refresh(conn_, clob_, position):
+        def mock_refresh(conn_, clob_, position, **_kwargs):
             # refresh_position normally sets last_monitor_best_bid; emulate it so
             # _build_exit_context observes the executable bid (or its absence).
             position.last_monitor_best_bid = best_bid

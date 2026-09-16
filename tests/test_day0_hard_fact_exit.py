@@ -2456,7 +2456,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
             def record_exit(self, position):
                 pass
 
-        def mock_refresh(conn, clob, position):
+        def mock_refresh(conn, clob, position, **kwargs):
             position.last_monitor_prob = position.p_posterior
             position.last_monitor_prob_is_fresh = True
             position.last_monitor_market_price = 0.10
@@ -2614,7 +2614,7 @@ class TestStructuralWinTerminalHold:
             def record_exit(self, position):
                 pass
 
-        def mock_refresh(conn, clob, position):
+        def mock_refresh(conn, clob, position, **kwargs):
             raise AssertionError(
                 "structural-win hold must not rebuild probability or read a quote"
             )
@@ -2812,6 +2812,99 @@ class TestStructuralWinTerminalHold:
         assert executed == [pos]
 
 
+def test_held_monitor_refresh_reads_off_read_conn_and_writes_quote_on_conn(
+    tmp_path, monkeypatch
+):
+    """The per-position refresh is handed the held-monitor read_conn for its
+    reads and the write-capable conn for its quote evidence row. c4f59a23d
+    moved the reads onto the read-only handle and, with them, the
+    token_price_log INSERT ('attempt to write a readonly database' on every
+    refresh from the 2026-09-14 21:17Z boot until the last held position
+    settled); the caller commits that row at its write-lock boundary."""
+    import logging as _logging
+    import numpy as np
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+    from src.state.portfolio import Position, PortfolioState
+
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+    pos = Position(
+        trade_id="quote_route_001", market_id="mkt_qr", city="Tokyo",
+        cluster="East Asia", target_date="2026-06-10",
+        bin_label="25°C on June 10?", direction="buy_yes",
+        size_usd=10.0, entry_price=0.40, p_posterior=0.55, edge=0.15,
+        shares=25.0, cost_basis_usd=10.0, state="day0_window",
+        token_id="tok_yes_qr", no_token_id="tok_no_qr", unit="C", env="live",
+        condition_id="cond-qr", entered_at="2026-06-09T06:00:00Z",
+        strategy_key="forecast_qkernel_entry",
+    )
+    conn, read_conn = _production_monitor_topology(
+        tmp_path, monkeypatch, pos, phase="day0_window"
+    )
+    routed = []
+
+    def spy_refresh(refresh_conn, clob, position, **kwargs):
+        routed.append((refresh_conn, kwargs.get("quote_conn")))
+        position.last_monitor_prob = position.p_posterior
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.40
+        position.last_monitor_best_ask = 0.42
+        return EdgeContext(
+            p_raw=np.array([]), p_cal=np.array([]),
+            p_market=np.array([position.entry_price]),
+            p_posterior=position.p_posterior,
+            forward_edge=0.15, alpha=0.0,
+            confidence_band_upper=0.25, confidence_band_lower=0.05,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
+            market_velocity_1h=0.0, divergence_score=0.0,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", spy_refresh)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda *, position, city, now=None, world_conn=None, **kwargs: None,
+    )
+
+    class Artifact:
+        def add_monitor_result(self, result):
+            pass
+
+    class Tracker:
+        def record_exit(self, position):
+            pass
+
+    deps = type(
+        "Deps", (),
+        {
+            "MonitorResult": type(
+                "MonitorResult", (),
+                {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+            ),
+            "logger": _logging.getLogger("test_quote_route"),
+            "cities_by_name": {
+                "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+            },
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+            ),
+        },
+    )
+    summary = {"monitors": 0, "exits": 0}
+    try:
+        cycle_runtime.execute_monitoring_phase(
+            conn, _DeepBookClob(0.40, 0.42), PortfolioState(positions=[pos]),
+            Artifact(), Tracker(), summary, deps=deps, read_conn=read_conn,
+        )
+    finally:
+        read_conn.close()
+        conn.close()
+    assert routed, "the held monitor never reached the per-position refresh"
+    assert [(r is read_conn, q is conn) for r, q in routed] == [(True, True)] * len(routed)
+
+
 def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(tmp_path, monkeypatch):
     import logging as _logging
     import numpy as np
@@ -2854,7 +2947,7 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(tm
     )
     calls = {"refresh": 0}
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **kwargs):
         # Stub only the probability recompute; the held quote and its
         # full-depth action authority come from the book exactly as
         # refresh_position derives them.

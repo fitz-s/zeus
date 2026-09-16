@@ -81,7 +81,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     tracker = MockTracker()
     
     # Mock refresh_position to return an EdgeContext that triggers divergent panic
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         _ = position.entry_method
         position.last_monitor_market_price = 0.40
         position.last_monitor_market_price_is_fresh = True

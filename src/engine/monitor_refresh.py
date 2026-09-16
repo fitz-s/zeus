@@ -7543,12 +7543,17 @@ def refresh_position(
     pos: Position,
     *,
     refresh_quote: bool = True,
+    quote_conn=None,
 ) -> EdgeContext:
     """Recompute held q and optionally fetch its executable market price.
 
     Blueprint v2 §7 Layer 1: uses same method as entry (p_raw_vector with MC noise).
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
     Missing probability authority materializes as non-finite probability fields.
+    ``conn`` serves every read. The quote evidence row is written on
+    ``quote_conn`` when the caller reads off a read-only handle (the held
+    monitor since c4f59a23d); a caller with one write-capable connection
+    passes it as ``conn`` alone.
     """
     monitor_evaluated_at = datetime.now(timezone.utc).isoformat()
     pos.last_monitor_at = monitor_evaluated_at
@@ -7915,7 +7920,7 @@ def refresh_position(
     # stale-q toxicity may fetch an adjacent CLOB book. The remaining edge/CI
     # work is read-only but can be expensive, so persist quote evidence only
     # after all of it; the caller commits immediately on return before venue I/O.
-    _persist_monitor_quote(conn, pos, quote)
+    _persist_monitor_quote(conn if quote_conn is None else quote_conn, pos, quote)
 
     return EdgeContext(
         p_raw=np.array([]),

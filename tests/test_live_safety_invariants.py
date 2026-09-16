@@ -427,7 +427,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     readthrough_deadlines: list[float] = []
     clock = [0.0]
 
-    def fake_refresh(conn, clob, position):
+    def fake_refresh(conn, clob, position, **_kwargs):
         visited.append(position.trade_id)
         readthrough_deadlines.append(
             position._zeus_held_monitor_deadline_monotonic
@@ -563,7 +563,7 @@ def test_monitor_probability_reads_use_remaining_claim_after_fair_admitted_slice
 
     current_started: list[str] = []
 
-    def slow_refresh(_conn, _clob, position):
+    def slow_refresh(_conn, _clob, position, **_kwargs):
         current_started.append(position.trade_id)
         clock[0] += 5.0
         return _monitor_test_edge_context(position)
@@ -678,7 +678,7 @@ def test_monitor_defers_before_primary_belief_read_when_reserve_is_unavailable(
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 0.0)
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda *_args: calls.append("refresh"),
+        lambda *_args, **_kwargs: calls.append("refresh"),
     )
     monkeypatch.setattr(
         cycle_runtime,
@@ -856,7 +856,7 @@ def test_monitor_probability_reads_share_the_cycle_deadline(
 
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         deadlines.append(
             (
                 position.trade_id,
@@ -964,7 +964,7 @@ def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monke
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             visited.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -1034,7 +1034,7 @@ def test_monitor_deadline_degraded_cycles_never_execute_reserved_thirds(monkeypa
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             visited.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -1116,7 +1116,7 @@ def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeyp
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             visited.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -1232,7 +1232,7 @@ def test_monitoring_phase_processes_local_books_before_blocking_network_fetch(
         ),
     )
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         events.append(f"refresh:{position.trade_id}")
         position.last_monitor_prob = 0.61
         position.last_monitor_prob_is_fresh = True
@@ -1377,7 +1377,7 @@ def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
         "_fresh_local_held_monitor_orderbooks",
         lambda _conn, _positions, **_kwargs: local_books,
     )
-    def _refresh_through_singular_quote(_conn, clob, position):
+    def _refresh_through_singular_quote(_conn, clob, position, **_kwargs):
         from src.engine.monitor_refresh import monitor_quote_refresh
 
         monitor_quote_refresh(_conn, clob, position)
@@ -1482,7 +1482,7 @@ def test_monitoring_phase_oldest_debt_precedes_repeating_nonabsorbing_urgency(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             visited.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -1600,7 +1600,7 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
         ),
     )
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         events.append(f"refresh:{position.trade_id}")
         return _monitor_test_edge_context(position)
 
@@ -1743,7 +1743,7 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             events.append(f"refresh:{position.trade_id}")
             or _monitor_test_edge_context(position)
         ),
@@ -1970,7 +1970,7 @@ def test_monitoring_phase_caps_and_rotates_dead_bin_deadline_rescue(monkeypatch)
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+        lambda _conn, _clob, position, **_kwargs: _monitor_test_edge_context(position),
     )
     monkeypatch.setattr(
         Position,
@@ -2089,7 +2089,7 @@ def test_monitoring_phase_reservations_do_not_override_zero_deadline(monkeypatch
         },
     )
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         events.append(f"refresh:{position.trade_id}")
         return _monitor_test_edge_context(position)
 
@@ -2174,7 +2174,7 @@ def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypa
     visited: list[str] = []
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             visited.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -2353,7 +2353,7 @@ def test_monitor_ready_hwm_covers_book_without_overtaking_debt(
         lambda *_args, **_kwargs: None,
     )
 
-    def _refresh(_conn, current_clob, position):
+    def _refresh(_conn, current_clob, position, **_kwargs):
         monitor_quote_refresh(_conn, current_clob, position)
         clock[0] += 3.0
         return _monitor_test_edge_context(position)
@@ -2599,7 +2599,7 @@ def _run_monitor_coverage_pipeline(
         lambda *_args, **_kwargs: None,
     )
 
-    def _mock_refresh_position(_conn, _clob, position):
+    def _mock_refresh_position(_conn, _clob, position, **_kwargs):
         if primary_read_elapsed_seconds is not None:
             from src.engine import monitor_refresh
 
@@ -3055,7 +3055,7 @@ def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
         lambda *_args, **_kwargs: {},
     )
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         events.append(f"refresh:{position.trade_id}")
         return _monitor_test_edge_context(position)
 
@@ -3153,7 +3153,7 @@ def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budge
 
     monkeypatch.setattr(cycle_runtime.time, "monotonic", stable_elapsed_clock)
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         events.append(f"refresh:{position.trade_id}")
         position.last_monitor_prob = 0.61
         position.last_monitor_prob_is_fresh = True
@@ -3673,6 +3673,74 @@ def test_refresh_position_finishes_read_only_work_before_quote_writer(monkeypatc
     conn.close()
 
 
+def test_refresh_position_writes_quote_evidence_on_the_write_capable_connection(
+    tmp_path, monkeypatch
+):
+    """Reads run on the held monitor's read-only handle; the quote evidence row
+    lands on ``quote_conn``. c4f59a23d routed the per-position reads off the
+    write connection and took the token_price_log INSERT with them: every
+    refresh logged 'attempt to write a readonly database' and the market-path
+    velocity/flash-crash readers saw no fresh rows while positions were held."""
+    import src.state.db as db_module
+    from src.engine import monitor_refresh
+    from src.state.db import get_held_monitor_read_connection, init_schema_trade_only
+
+    trade_path = tmp_path / "zeus_trades.db"
+    with sqlite3.connect(trade_path) as bootstrap:
+        init_schema_trade_only(bootstrap)
+        bootstrap.commit()
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+    write_conn = sqlite3.connect(trade_path)
+    read_conn = get_held_monitor_read_connection()
+    assert read_conn is not None
+    pos = _make_position(
+        trade_id="quote-evidence-on-write-conn",
+        city="Chicago",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    quote = monitor_refresh.HeldTokenMonitorQuote(
+        token_id=pos.token_id,
+        best_bid=0.40,
+        best_ask=0.42,
+        bid_size=20.0,
+        ask_size=20.0,
+        mark_price=0.41,
+        source_timestamp="2026-09-15T15:30:00+00:00",
+        min_order_size=1.0,
+        bid_ladder=((0.40, 20.0),),
+        full_depth_action_authority=True,
+    )
+    monkeypatch.setattr(
+        monitor_refresh, "monitor_quote_refresh", lambda *_args, **_kwargs: quote
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_probability_refresh",
+        lambda position, **_kwargs: (float("nan"), position, False),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_detect_whale_toxicity_from_orderbook",
+        lambda *_args, **_kwargs: False,
+    )
+    try:
+        monitor_refresh.refresh_position(
+            read_conn, object(), pos, quote_conn=write_conn
+        )
+        assert read_conn.in_transaction is False
+        assert write_conn.in_transaction is True
+        write_conn.commit()
+        rows = write_conn.execute(
+            "SELECT token_id, bid, ask FROM token_price_log"
+        ).fetchall()
+        assert rows == [(pos.token_id, 0.40, 0.42)]
+    finally:
+        read_conn.close()
+        write_conn.close()
+
+
 def test_global_sell_reauction_waits_for_outer_commit_before_network(monkeypatch):
     """A staged release cannot publish a wake before its outer commit."""
     from src.engine import cycle_runtime
@@ -4118,7 +4186,7 @@ def test_monitoring_phase_prefetch_install_failure_is_not_local_ready(monkeypatc
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+        lambda _conn, _clob, position, **_kwargs: _monitor_test_edge_context(position),
     )
     summary = {"monitors": 0, "exits": 0}
 
@@ -4233,7 +4301,7 @@ def test_monitor_writer_timeout_preserves_nonred_exit_authority(monkeypatch):
     )
     results = []
     exits = []
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         context = _monitor_test_edge_context(position)
         context.divergence_score = 0.0
         context.market_velocity_1h = 0.0
@@ -7515,7 +7583,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
 
     observed_refresh = []
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         observed_refresh.append((
             position.trade_id,
             getattr(position.state, "value", position.state),
@@ -7753,7 +7821,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             "monitor_event_id": "debt-monitor-event",
         }
 
-    def fake_refresh(_conn, _clob, position):
+    def fake_refresh(_conn, _clob, position, **_kwargs):
         position.last_monitor_prob = 0.0 if posterior_support_zero else 0.10
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
@@ -8746,7 +8814,7 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     )
     refreshes = []
 
-    def refresh_current(_conn, _clob, refreshed):
+    def refresh_current(_conn, _clob, refreshed, **_kwargs):
         refreshes.append(refreshed.trade_id)
         refreshed.last_monitor_prob = 0.08
         refreshed.last_monitor_prob_is_fresh = True
@@ -10653,7 +10721,7 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
         def record_exit(self, position):
             raise AssertionError("dust hold must not record an exit")
 
-    def refresh_current_dust(_conn, _clob, position):
+    def refresh_current_dust(_conn, _clob, position, **_kwargs):
         position.last_monitor_prob = 0.0
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = -0.49
@@ -10888,7 +10956,7 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
 
     observed_refresh = []
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         observed_refresh.append((
             position.trade_id,
             getattr(position.state, "value", position.state),
@@ -11032,7 +11100,7 @@ def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
 
     observed_refresh = []
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         observed_refresh.append((
             position.trade_id,
             getattr(position.state, "value", position.state),
@@ -11156,7 +11224,7 @@ def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(
         def record_exit(self, position):
             raise AssertionError("fake exit lifecycle does not report a fill")
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         position.last_monitor_prob = 0.02
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_market_price = 0.06
@@ -11351,7 +11419,7 @@ def test_pending_exit_retry_cooldown_refreshes_belief_without_duplicate_exit(
     refreshes = []
     execute_calls = []
 
-    def refresh_position(_conn, _clob, position):
+    def refresh_position(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
         position.last_monitor_at = "2026-07-02T20:20:00+00:00"
         position.last_monitor_prob = 0.03
@@ -14080,7 +14148,7 @@ def test_identical_metadata_inflight_continues_full_monitor_redecision(monkeypat
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, pos: (
+        lambda _conn, _clob, pos, **_kwargs: (
             refreshes.append(pos.trade_id) or _monitor_test_edge_context(pos)
         ),
     )
@@ -15421,7 +15489,7 @@ def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout
         lambda *_args, **_kwargs: {},
     )
 
-    def fake_refresh(_conn, clob, position):
+    def fake_refresh(_conn, clob, position, **_kwargs):
         quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
         assert quote is not None
         refreshes.append(position.trade_id)
@@ -15576,7 +15644,7 @@ def test_monitoring_partial_batch_fallback_targets_only_missing_token(monkeypatc
 
     refreshed: list[str] = []
 
-    def refresh(_conn, current_clob, position):
+    def refresh(_conn, current_clob, position, **_kwargs):
         assert monitor_refresh.monitor_quote_refresh(
             _conn,
             current_clob,
@@ -15719,7 +15787,7 @@ def test_monitoring_batch_transport_does_not_retry_after_deadline(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda *_args: refreshes.append(position.trade_id),
+        lambda *_args, **_kwargs: refreshes.append(position.trade_id),
     )
 
     summary = {"monitors": 0, "exits": 0}
@@ -15793,7 +15861,7 @@ def test_monitoring_successful_empty_or_partial_batch_does_not_retry_singularly(
         lambda *_args, **_kwargs: {},
     )
 
-    def fake_refresh(_conn, clob, position):
+    def fake_refresh(_conn, clob, position, **_kwargs):
         quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
         if position.token_id in batch_response:
             assert quote is not None
@@ -15875,7 +15943,7 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
 
     observed_refresh_states = []
 
-    def mock_refresh(conn, clob, position):
+    def mock_refresh(conn, clob, position, **_kwargs):
         observed_refresh_states.append((position.state, position.entry_method))
         return EdgeContext(
             p_raw=np.array([]),
@@ -16016,7 +16084,7 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda conn, clob, position: EdgeContext(
+        lambda conn, clob, position, **_kwargs: EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
             p_market=np.array([position.entry_price]),
@@ -16317,7 +16385,7 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
     )
     monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: incident_now)
 
-    def refresh_position(_conn, _clob, position):
+    def refresh_position(_conn, _clob, position, **_kwargs):
         position.last_monitor_at = incident_now.isoformat()
         position.last_monitor_prob = 0.9003278024817638
         position.last_monitor_prob_is_fresh = True
@@ -16910,7 +16978,7 @@ def test_venue_confirmed_local_only_fill_enters_open_set_before_chain_sync(
     assert runtime.positions[0].effective_shares == pytest.approx(69.34)
     assert cycle_runtime._monitoring_phase_positions(portfolio) == [pos]
 
-    def fake_refresh(conn_arg, clob_arg, position):
+    def fake_refresh(conn_arg, clob_arg, position, **_kwargs):
         assert position is pos
         position.last_monitor_prob = 0.12
         position.last_monitor_prob_is_fresh = True
@@ -17038,7 +17106,7 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     append_many_and_project(conn, entry_events, entry_projection)
     portfolio = _make_portfolio(pos)
 
-    def fake_refresh(conn_arg, clob_arg, position):
+    def fake_refresh(conn_arg, clob_arg, position, **_kwargs):
         assert conn_arg is conn
         position.last_monitor_prob = 0.62
         position.last_monitor_prob_is_fresh = True
@@ -22242,7 +22310,7 @@ def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
     emitted = []
     results = []
 
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         context = _monitor_test_edge_context(position)
         context.fresh_prob = None
         context.fresh_prob_is_fresh = False
@@ -22319,7 +22387,7 @@ def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
     emitted = []
     results = []
 
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         context = _monitor_test_edge_context(position)
         position.last_monitor_market_price_is_fresh = False
         position.last_monitor_best_bid = None
@@ -22402,7 +22470,7 @@ def test_quote_incomplete_current_dust_is_scoped_from_full_book_debt(monkeypatch
     )
     emitted = []
 
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         context = _monitor_test_edge_context(position)
         position.last_monitor_market_price_is_fresh = False
         position.last_monitor_best_bid = None
@@ -22793,7 +22861,7 @@ def _assert_primary_monitor_progress(monkeypatch, *, clock, position):
 
     evaluations: list[str] = []
 
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         return _monitor_test_edge_context(position)
 
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
@@ -23158,7 +23226,7 @@ def test_current_redecision_precedes_auxiliary_debt_scan(monkeypatch):
         assert deadline_monotonic == pytest.approx(1.0)
         order.append("hwm")
 
-    def refresh(_conn, _clob, current):
+    def refresh(_conn, _clob, current, **_kwargs):
         assert current is position
         order.append("refresh")
         return _monitor_test_edge_context(current)
@@ -23291,7 +23359,7 @@ def test_pending_retry_recovery_waits_for_current_canonical_redecision(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, current: (
+        lambda _conn, _clob, current, **_kwargs: (
             order.append("refresh") or _monitor_test_edge_context(current)
         ),
     )
@@ -23429,7 +23497,7 @@ def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
         ),
     )
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
         clock[0] += 0.2
         return _monitor_test_edge_context(position)
@@ -25874,7 +25942,7 @@ def test_global_sell_debt_deferral_preserves_primary_monitor_refresh(monkeypatch
         lambda *_args, **_kwargs: False,
     )
 
-    def refresh(_conn, _clob, refreshed):
+    def refresh(_conn, _clob, refreshed, **_kwargs):
         refreshes.append(refreshed.trade_id)
         return _monitor_test_edge_context(refreshed)
 
@@ -26099,7 +26167,7 @@ def test_blocked_global_debt_lineage_preserves_eight_primary_refreshes(
     refreshes = []
     canonical_refreshes = []
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
         position.last_monitor_prob = 0.60
         position.last_monitor_prob_is_fresh = True
@@ -26165,7 +26233,7 @@ def test_monitor_refresh_deadline_preserves_current_refresh_without_decision(mon
         lambda *_args, **_kwargs: [position],
     )
 
-    def refresh(*_args):
+    def refresh(*_args, **_kwargs):
         clock[0] = 6.0
         return _monitor_test_edge_context(position)
 
@@ -26239,7 +26307,7 @@ def test_completed_position_commit_uses_outer_monitor_deadline(monkeypatch):
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda *_args: (clock.__setitem__(0, 4.9) or _monitor_test_edge_context(position)),
+        lambda *_args, **_kwargs: (clock.__setitem__(0, 4.9) or _monitor_test_edge_context(position)),
     )
     monkeypatch.setattr(
         Position,
@@ -26310,7 +26378,7 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
         lambda *_args, **_kwargs: False,
     )
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
         position.last_monitor_at = f"attempt-{len(refreshes)}"
         position.last_monitor_prob = 0.60
@@ -26393,7 +26461,7 @@ def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypa
         lambda *_args, **_kwargs: False,
     )
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         if position is positions[0]:
             position.last_monitor_prob = 0.01
             position.last_monitor_prob_is_fresh = True
@@ -26485,7 +26553,7 @@ def test_admitted_refresh_exception_does_not_poison_statistical_tail(monkeypatch
         },
     )
 
-    def refresh(_conn, _clob, position):
+    def refresh(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
         if position is positions[0]:
             position.last_monitor_prob = 0.01
@@ -26595,7 +26663,7 @@ def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
     monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", market_info)
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             refreshes.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),
@@ -26700,7 +26768,7 @@ def test_admitted_metadata_failure_does_not_poison_statistical_tail(
     monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", market_info)
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda _conn, _clob, position: (
+        lambda _conn, _clob, position, **_kwargs: (
             refreshes.append(position.trade_id)
             or _monitor_test_edge_context(position)
         ),

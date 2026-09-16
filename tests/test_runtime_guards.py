@@ -1110,7 +1110,7 @@ def test_bba_only_monitor_truth_cannot_emit_exit_intent(monkeypatch, bid):
         full_depth_action_authority=False,
     )
 
-    def _refresh_position(_conn, _clob, refreshed_pos):
+    def _refresh_position(_conn, _clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_at = quote.source_timestamp
         refreshed_pos.last_monitor_market_price = quote.mark_price
         refreshed_pos.last_monitor_market_price_is_fresh = True
@@ -3637,7 +3637,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
     monkeypatch.setattr("src.data.market_scanner._clob_market_is_live", lambda condition_id: True)
     monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [])
-    def _mock_refresh(conn, clob, pos):
+    def _mock_refresh(conn, clob, pos, **_kwargs):
         pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
         assert pos.entry_method
         pos.last_monitor_market_price_is_fresh = True
@@ -5152,7 +5152,7 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
-    def _mock_refresh(conn, clob, pos):
+    def _mock_refresh(conn, clob, pos, **_kwargs):
         pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
         assert pos.entry_method
         pos.last_monitor_market_price_is_fresh = True
@@ -9270,7 +9270,7 @@ def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatc
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
     monkeypatch.setattr(cycle_runner, "cities_by_name", {"NYC": NYC}, raising=False)
 
-    def _tracking_refresh(conn, clob, pos):
+    def _tracking_refresh(conn, clob, pos, **_kwargs):
         from src.contracts import EdgeContext, EntryMethod
         pos.entry_method = getattr(pos, "entry_method", EntryMethod.ENS_MEMBER_COUNTING.value)
         assert pos.entry_method
@@ -15086,7 +15086,7 @@ def test_monitoring_phase_pre_chain_refresh_skips_exit_preflight(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pre-chain refresh must not retry exits")),
     )
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refresh_calls.append(refreshed_pos.trade_id)
         refreshed_pos.last_monitor_prob = 0.61
         refreshed_pos.last_monitor_prob_is_fresh = True
@@ -15150,7 +15150,7 @@ def test_monitoring_phase_continues_when_pending_exit_preflight_fails(monkeypatc
         ),
     )
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refresh_calls.append(refreshed_pos.trade_id)
         refreshed_pos.last_monitor_prob = 0.62
         refreshed_pos.last_monitor_prob_is_fresh = True
@@ -15213,7 +15213,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
     auction_requests = []
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_market_price = 0.43
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.42
@@ -15339,7 +15339,7 @@ def test_pending_exit_retry_snapshot_identity_seed_uses_current_clob_quote(tmp_p
 
     clob = CurrentClob()
 
-    def _refresh_position(conn_arg, clob_arg, refreshed_pos):
+    def _refresh_position(conn_arg, clob_arg, refreshed_pos, **_kwargs):
         assert refreshed_pos.no_token_id == ""
         refreshed_pos.last_monitor_market_price = 0.99
         refreshed_pos.last_monitor_market_price_is_fresh = False
@@ -15402,7 +15402,7 @@ def test_orange_risk_holds_when_bid_is_unfavorable(monkeypatch):
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_market_price = 0.39
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.39
@@ -15453,7 +15453,7 @@ def test_orange_risk_does_not_override_incomplete_exit_context(monkeypatch):
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_market_price = 0.43
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.42
@@ -15506,7 +15506,7 @@ def test_yellow_risk_does_not_take_favorable_exit(monkeypatch):
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.YELLOW.value}
 
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_market_price = 0.43
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.42
@@ -15650,7 +15650,7 @@ def test_monitor_statistical_sell_authority_failure_publishes_isolated_wake(monk
     artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0}
 
-    def _refresh_position(conn, clob, pos):
+    def _refresh_position(conn, clob, pos, **_kwargs):
         pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
         assert pos.entry_method
         pos.last_monitor_market_price = 0.46
@@ -15718,7 +15718,7 @@ def _entry_decision_evidence() -> DecisionEvidence:
 
 
 def _patch_fresh_exit_refresh(monkeypatch) -> None:
-    def _refresh_position(conn, clob, refreshed_pos):
+    def _refresh_position(conn, clob, refreshed_pos, **_kwargs):
         refreshed_pos.last_monitor_market_price = 0.46
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.45

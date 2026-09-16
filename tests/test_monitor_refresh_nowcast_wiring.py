@@ -2574,7 +2574,7 @@ def test_held_monitor_releases_trade_transaction_before_probability_refresh(
         lambda *args, **kwargs: None,
     )
 
-    def _refresh_position(conn_arg, clob, refreshed_pos):
+    def _refresh_position(conn_arg, clob, refreshed_pos, **_kwargs):
         assert conn_arg.in_transaction is False
         refreshed_pos.last_monitor_prob = 0.61
         refreshed_pos.last_monitor_prob_is_fresh = True

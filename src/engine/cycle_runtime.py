@@ -7458,7 +7458,7 @@ def execute_monitoring_phase(
                     request_deadline,
                 )
                 try:
-                    refresh_position(read_conn, clob, position)
+                    refresh_position(read_conn, clob, position, quote_conn=conn)
                 finally:
                     if previous_deadline is None:
                         try:
@@ -9784,7 +9784,7 @@ def execute_monitoring_phase(
                     summary[
                         "held_monitor_primary_belief_started_position_ids"
                     ].append(str(getattr(pos, "trade_id", "") or ""))
-                    edge_ctx = refresh_position(read_conn, clob, pos)
+                    edge_ctx = refresh_position(read_conn, clob, pos, quote_conn=conn)
                     admitted_child_stage = None
                     _primary_read_elapsed = getattr(
                         pos,
