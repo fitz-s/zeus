@@ -1,7 +1,7 @@
 """City-local calendar identity tests for market-anchored correction."""
 
 # Created: 2026-09-08
-# Last reused or audited: 2026-09-15
+# Last reused or audited: 2026-09-16
 # Authority basis: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from src.calibration.market_anchored_live_fit import (
 )
 from src.contracts.payoff_q_correction import (
     CalibrationFitScope, CalibrationPolicySpec, PayoffQCorrectionUnavailable,
+    SourceIdentityBaseline,
 )
 from src.engine import event_reactor_adapter as adapter
 from src.engine import cycle_runner
@@ -734,6 +735,80 @@ def test_entry_resolver_borrows_all_handles_and_passes_deadline_and_scope(monkey
     with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
         resolver(SimpleNamespace(family_key="one", side="YES", execution_mode="TAKER_LIMIT"), .8, .4, now)
     assert seen == {"connections": (world, trade, forecast), "scope": scope, "now": now, "deadline": 123.0}
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_entry_resolver_uses_source_baseline_only_for_exact_current_insufficient_scope(
+    monkeypatch, side,
+):
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "current-raw-v3")
+    token = f"{side.lower()}-token"
+    witness = SimpleNamespace(
+        family_key="one", q_version="q-v3", witness_identity="witness-v3",
+        probability_content_identity="content-v3", source_truth_identity="source-v3",
+        sample_matrix_identity="samples-v3",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+
+    class Provider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def artifact(self, **_kwargs):
+            return None
+
+        def insufficient_support(self, *, scope, now, deadline_monotonic):
+            assert scope.raw_probability_revision == "current-raw-v3"
+            assert now == datetime(2026, 1, 2, tzinfo=timezone.utc)
+            return True
+
+    monkeypatch.setattr(
+        "src.calibration.market_anchored_live_fit.CanonicalMarketAnchoredFitProvider",
+        Provider,
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name", lambda: {"Tokyo": SimpleNamespace(timezone="Asia/Tokyo")},
+    )
+    monkeypatch.setattr(adapter, "_prepared_global_probability_semantics_revision", lambda *_: "current-raw-v3")
+    audit: dict[str, object] = {}
+    maker_scope = CalibrationFitScope("high", "MAKER_REST", "MAKER_REST", "current-raw-v3")
+    resolver = _entry_resolver(
+        object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        prepared_by_family={"one": prepared},
+        calibration_scope_resolver=lambda candidate, *_: (
+            maker_scope if candidate.execution_mode == "MAKER_REST" else scope
+        ),
+        market_anchored_fit_artifact_audit=audit,
+    )
+    candidate = SimpleNamespace(
+        family_key="one", bin_id="bin-a", side=side, token_id=token,
+        execution_mode="TAKER_LIMIT", action="BUY",
+        probability_witness_identity=witness.witness_identity,
+    )
+    baseline = resolver(candidate, .61, .32, now)
+    assert isinstance(baseline, SourceIdentityBaseline)
+    assert baseline.matches_witness(witness)
+    assert baseline.raw_probability_revision == scope.raw_probability_revision
+    recorded = next(iter(audit["source_identity_baselines"].values()))
+    assert recorded["status"] == "SOURCE_IDENTITY_BASELINE"
+    assert recorded["baseline"] == baseline.as_payload()
+    sibling = SimpleNamespace(
+        family_key="one", bin_id="bin-b", side=side, token_id=f"{side.lower()}-sibling",
+        execution_mode="TAKER_LIMIT", action="BUY",
+        probability_witness_identity=witness.witness_identity,
+    )
+    maker = SimpleNamespace(
+        family_key="one", bin_id="bin-c", side=side, token_id=f"{side.lower()}-maker",
+        execution_mode="MAKER_REST", action="BUY",
+        probability_witness_identity=witness.witness_identity,
+    )
+    assert isinstance(resolver(sibling, .61, .32, now), SourceIdentityBaseline)
+    assert isinstance(resolver(maker, .61, .34, now), SourceIdentityBaseline)
+    assert len(audit["source_identity_baselines"]) == 3
+    candidate.probability_witness_identity = "wrong-witness"
+    with pytest.raises(PayoffQCorrectionUnavailable, match="SCOPED_FIT_UNAVAILABLE"):
+        resolver(candidate, .61, .32, now)
 
 
 def test_entry_resolver_records_each_consulted_fit_artifact(monkeypatch):

@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-15
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Last reused/audited: 2026-09-16
+# Lifecycle: created=2026-07-03; last_reviewed=2026-09-16; last_reused=2026-09-16
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -8837,3 +8837,69 @@ def test_calibration_anchor_above_entry_band_does_not_block_legal_sell(side):
     assert decision.limit_price == Decimal(".94")
     assert decision.payoff_q_correction.p0 == .96
     assert decision.expected_terminal_wealth.held_probability_mean == .4
+
+
+def _source_identity_for(candidate, raw_q, p0):
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    witness = _global_probability_witness(candidate)
+    current_q = S.family_payoff_point_q(witness, bin_id=candidate.bin_id, side=candidate.side)
+    assert current_q == pytest.approx(raw_q)
+    return SourceIdentityBaseline(
+        family_key=candidate.family_key, bin_id=candidate.bin_id,
+        side=candidate.side, token_id=candidate.token_id,
+        raw_q=current_q, p0=p0, raw_probability_revision="source-clock-test-v1",
+        q_version=witness.q_version,
+        probability_witness_identity=witness.witness_identity,
+        probability_content_identity=witness.probability_content_identity,
+        source_truth_identity=witness.source_truth_identity,
+        sample_matrix_identity=witness.sample_matrix_identity,
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("family_joint", (False, True))
+def test_source_identity_preserves_source_sizing_and_joint_family_law(side, family_joint):
+    candidate = _with_precliff_depth(_global_candidate(
+        candidate_id=f"source-{side}", family=f"source-{side}", side=side,
+        q=0.8, levels=(("0.4", "1000"),),
+    ))
+    kwargs = dict(cap="100", fractional_kelly_multiplier="0.25")
+    if family_joint:
+        kwargs["family_portfolio_endowment_resolver"] = lambda _: _family_endowment(candidate)
+    baseline = _global_select((candidate,), **kwargs)
+    policy = _source_identity_for(candidate, 0.8, 0.4)
+    actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy, **kwargs)
+    assert actual.candidate is candidate
+    assert actual.payoff_q_correction is policy
+    assert replace(actual, payoff_q_correction=None) == baseline
+    assert policy.as_cert_fields()["applied"] is False
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("field", (
+    "q_version", "probability_witness_identity", "probability_content_identity",
+    "source_truth_identity", "sample_matrix_identity",
+))
+def test_source_identity_rejects_same_q_with_superseded_source(side, field):
+    candidate = _global_candidate(candidate_id="source-seal", family="source-seal", side=side, q=0.8)
+    policy = replace(_source_identity_for(candidate, 0.8, 0.4), **{field: "superseded"})
+    actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
+    assert actual.candidate is None
+    assert actual.rejection_reasons[candidate.candidate_id] == (
+        "CALIBRATED_PAYOFF_Q_UNAVAILABLE:BUY source identity superseded"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_source_identity_sell_redecides_on_current_source(side):
+    candidate = _global_sell_candidate(
+        candidate_id="source-sell", family="source-sell", side=side,
+        held_q=0.2, bids=(("0.6", "10"),), shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    baseline = _global_select((candidate,))
+    policy = _source_identity_for(candidate, 0.2, 0.6)
+    actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
+    assert actual.candidate is candidate
+    assert replace(actual, payoff_q_correction=None) == baseline

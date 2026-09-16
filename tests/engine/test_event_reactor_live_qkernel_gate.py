@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-09-15
+# Last reused/audited: 2026-09-16
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -7010,3 +7010,124 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         is None
     )
     assert drift_reason["reason"] == "model_identity_drift:c"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_current_source_identity_is_sealed_into_entry_economics(side):
+    from tests.solve.test_solver_properties import (
+        _global_candidate, _global_probability_witness, _global_select, _source_identity_for,
+    )
+    candidate = _global_candidate(
+        candidate_id="identity-entry", family="identity-entry", side=side,
+        q=0.7, levels=(("0.4", "100"),),
+    )
+    policy = _source_identity_for(candidate, 0.7, 0.4)
+    decision = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
+    cert = _current_qkernel_cert(side=side)
+    cert.update(payoff_q_point=0.7, payoff_q_lcb=0.7, pre_qkernel_q_lcb_5pct=0.7,
+                cost=0.4, edge_lcb=0.3)
+    current = era._global_current_state_execution_economics(
+        cert, decision=decision, witness=_global_probability_witness(candidate),
+    )
+    assert current["market_anchored_correction"] == policy.as_cert_fields()
+    assert current["payoff_q_point"] == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("field", ("q_version", "probability_content_identity", "source_truth_identity"))
+def test_current_source_identity_jit_rejects_same_probability_new_source(field):
+    from dataclasses import replace
+    from tests.solve.test_solver_properties import (
+        _global_candidate, _global_probability_witness, _global_select, _source_identity_for,
+    )
+    candidate = _global_candidate(candidate_id="identity-jit", family="identity-jit", side="YES", q=0.7)
+    policy = _source_identity_for(candidate, 0.7, 0.4)
+    decision = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
+    decision = replace(decision, payoff_q_correction=replace(policy, **{field: "different"}))
+    cert = _current_qkernel_cert(side="YES")
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_SOURCE_IDENTITY_SUPERSEDED"):
+        era._global_current_state_execution_economics(
+            cert, decision=decision, witness=_global_probability_witness(candidate),
+        )
+
+
+def test_source_policy_revision_changes_actuation_and_economic_seals():
+    from dataclasses import replace
+    from src.engine.global_single_order_auction import (
+        global_single_order_actuation_identity, global_single_order_economic_identity,
+    )
+    from tests.solve.test_solver_properties import (
+        _DECISION_AT, _global_candidate, _global_probability_witness, _global_select, _source_identity_for,
+    )
+    candidate = _global_candidate(candidate_id="identity-hash", family="identity-hash", side="YES", q=0.7)
+    policy = _source_identity_for(candidate, 0.7, 0.4)
+    decision = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
+    changed = replace(decision, payoff_q_correction=replace(policy, raw_probability_revision="different"))
+    def economic(d):
+        return global_single_order_economic_identity(
+            decision=d, probability_witness=_global_probability_witness(candidate),
+            wealth_economic_identity="wealth",
+        )
+    def actuation(d):
+        return global_single_order_actuation_identity(
+            decision=d, winner_event_id="event", universe_witness_identity="universe",
+            wealth_witness_identity="wealth", selection_epoch_identity="epoch",
+            selection_cut_at_utc=_DECISION_AT, decision_at_utc=_DECISION_AT,
+        )
+    assert economic(decision) != economic(changed)
+    assert actuation(decision) != actuation(changed)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("wrong_entry_token", (False, True))
+def test_source_identity_entry_policy_reproduces_at_sell_jit(monkeypatch, side, wrong_entry_token):
+    from dataclasses import replace
+    from src.calibration.market_anchored_live_fit import HeldSourceIdentityBinding
+    from tests.solve.test_solver_properties import (
+        _DECISION_AT, _global_sell_candidate, _global_probability_witness,
+        _global_select, _source_identity_for,
+    )
+    candidate = _global_sell_candidate(
+        candidate_id="identity-sell-jit", family="identity-sell-jit", side=side,
+        held_q=0.2, bids=(("0.6", "10"),), shares="10",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    current = _source_identity_for(candidate, 0.2, 0.6)
+    entry = replace(current, raw_q=0.9, q_version="entry-q", raw_probability_revision="entry-revision")
+    if wrong_entry_token:
+        entry = replace(entry, token_id="foreign-token")
+    binding = HeldSourceIdentityBinding(
+        baseline=entry, position_id=candidate.position_id, decision_log_id=1,
+        decision_certificate_hash="authenticated-entry",
+    )
+    monkeypatch.setattr("src.calibration.market_anchored_live_fit.load_held_entry_calibration", lambda *a, **k: binding)
+    decision = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: current)
+    actuation = SimpleNamespace(decision=decision, probability_witness=_global_probability_witness(candidate),
+                                decision_at_utc=_DECISION_AT)
+    def verify():
+        era._revalidate_global_sell_calibration(
+            None, None, None, actuation=actuation, position=SimpleNamespace(),
+            current_raw_revision=current.raw_probability_revision,
+        )
+    if wrong_entry_token:
+        with pytest.raises(ValueError):
+            verify()
+    else:
+        verify()
+        assert decision.expected_terminal_wealth.held_probability_mean == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("bid,allowed", (("0.65", True), ("0.55", False)))
+def test_identity_sell_accepts_improved_proceeds_without_price_calibration(bid, allowed):
+    from tests.solve.test_solver_properties import (
+        _global_sell_candidate, _global_select, _source_identity_for,
+    )
+    kwargs = dict(candidate_id="identity-price", family="identity-price", side="YES",
+                  held_q=0.2, shares="10", probability_functional="POSTERIOR_PREDICTIVE_MEAN")
+    selected = _global_sell_candidate(bids=(("0.6", "10"),), **kwargs)
+    policy = _source_identity_for(selected, 0.2, 0.6)
+    decision = _global_select((selected,), payoff_q_correction_resolver=lambda *_: policy)
+    current = _global_sell_candidate(bids=((bid, "10"),), **kwargs)
+    reason = era._global_sell_execution_economics_drift(decision=decision, current_candidate=current)
+    assert (reason is None) is allowed
+    if not allowed:
+        assert "net_proceeds" in reason

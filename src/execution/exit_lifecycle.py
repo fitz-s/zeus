@@ -3310,7 +3310,11 @@ class GlobalSellExecutionAuthority:
         proposal = jit_candidate.economic_sell_curve
         correction = getattr(decision, "payoff_q_correction", None)
         if correction is not None:
+            from src.contracts.payoff_q_correction import SourceIdentityBaseline
             from src.solve.solver import family_payoff_point_q
+
+            if isinstance(correction, SourceIdentityBaseline) and not correction.matches_witness(actuation.probability_witness):
+                raise ValueError("GLOBAL_SELL_EXECUTION_CALIBRATION_SUPERSEDED")
 
             raw_q = family_payoff_point_q(
                 actuation.probability_witness,
@@ -3334,7 +3338,10 @@ class GlobalSellExecutionAuthority:
                 )
                 or raw_q is None
                 or not math.isclose(correction.raw_q, raw_q, rel_tol=0.0, abs_tol=1e-12)
-                or Decimal(str(correction.p0)) != calibration_anchor
+                or (
+                    not isinstance(correction, SourceIdentityBaseline)
+                    and Decimal(str(correction.p0)) != calibration_anchor
+                )
                 or not math.isclose(
                     correction.corrected_q,
                     expected_terminal.held_probability_mean,

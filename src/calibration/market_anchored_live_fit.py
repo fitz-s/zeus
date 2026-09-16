@@ -66,6 +66,7 @@ from src.contracts.payoff_q_correction import (
     CanonicalTrainingManifest,
     PayoffQCorrection,
     PayoffQCorrectionUnavailable,
+    SourceIdentityBaseline,
 )
 
 # One fit serves this long before a refit is attempted. Six hours matches the
@@ -2747,6 +2748,42 @@ class CanonicalMarketAnchoredFitProvider:
             now=now, deadline_monotonic=deadline_monotonic,
         ) is not None
 
+    def insufficient_support(
+        self, *, scope: CalibrationFitScope, now: datetime,
+        deadline_monotonic: float | None = None,
+    ) -> bool:
+        """Prove an exact current scope has too little canonical evidence.
+
+        Absence, malformed handles, expiry, query timeout, and fit errors are
+        intentionally indistinguishable from unavailable authority here.  Only
+        a successfully prepared current corpus whose exact weighted scope is
+        below the configured floor may enable a source-identity baseline.
+        """
+
+        if not isinstance(scope, CalibrationFitScope):
+            return False
+        prepared = self._prepared_corpus(
+            now=now, deadline_monotonic=deadline_monotonic,
+        )
+        if prepared is None or self._expired(deadline_monotonic):
+            return False
+        try:
+            corpus = prepared[-1]
+            rows = corpus.fit_rows(
+                metric=scope.metric,
+                execution_mode=scope.execution_mode,
+                execution_contract=scope.execution_contract,
+                probability_revision=scope.raw_probability_revision,
+            )
+            weight = sum(float(row.w) for row in rows)
+        except Exception:  # noqa: BLE001 - no successful exact read, no baseline
+            return False
+        return (
+            not self._expired(deadline_monotonic)
+            and math.isfinite(weight)
+            and weight < self._min_train_rows
+        )
+
     def artifact(
         self, *, scope: CalibrationFitScope, now: datetime,
         deadline_monotonic: float | None = None,
@@ -3327,6 +3364,110 @@ class HeldEntryCalibrationBinding:
         )
 
 
+@dataclass(frozen=True)
+class HeldSourceIdentityBinding:
+    """Authenticated held ENTRY baseline without a residual-fit artifact."""
+
+    baseline: SourceIdentityBaseline
+    position_id: str
+    decision_log_id: int
+    decision_certificate_hash: str
+    decision_at: datetime | None = None
+
+    def at_decision(
+        self, _provider: CanonicalMarketAnchoredFitProvider | None, *,
+        decision_at: datetime, current_raw_revision: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> "HeldSourceIdentityBinding":
+        """Require a current source revision and an aware decision clock.
+
+        This policy is source-bound, not fit-bound: a new revision does not
+        inherit entry q.  ``bind_current`` below seals the new witness instead.
+        """
+
+        if (
+            not isinstance(current_raw_revision, str)
+            or not current_raw_revision.strip()
+            or not isinstance(decision_at, datetime)
+            or decision_at.tzinfo is None
+            or decision_at.utcoffset() is None
+            or (
+                deadline_monotonic is not None
+                and (
+                    not math.isfinite(float(deadline_monotonic))
+                    or time.monotonic() >= float(deadline_monotonic)
+                )
+            )
+        ):
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE")
+        return replace(self, decision_at=decision_at.astimezone(timezone.utc))
+
+    def bind_current(
+        self, *, witness: object, raw_revision: str, raw_q: float, p0: float,
+    ) -> SourceIdentityBaseline:
+        """Seal the held candidate to the exact current source witness."""
+
+        decision_at = self.decision_at
+        captured_at = getattr(witness, "captured_at_utc", None)
+        max_age = getattr(witness, "max_age", None)
+        if (
+            not isinstance(raw_revision, str)
+            or not raw_revision.strip()
+            or decision_at is None
+            or not isinstance(captured_at, datetime)
+            or captured_at.tzinfo is None
+            or captured_at.utcoffset() is None
+            or not isinstance(max_age, timedelta)
+            or max_age <= timedelta(0)
+        ):
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE")
+        age = decision_at - captured_at.astimezone(timezone.utc)
+        if age < timedelta(0) or age > max_age:
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_EXPIRED")
+        try:
+            current = SourceIdentityBaseline(
+                family_key=self.baseline.family_key,
+                bin_id=self.baseline.bin_id,
+                side=self.baseline.side,
+                token_id=self.baseline.token_id,
+                raw_q=raw_q,
+                p0=p0,
+                raw_probability_revision=raw_revision,
+                q_version=str(getattr(witness, "q_version", "") or ""),
+                probability_witness_identity=str(
+                    getattr(witness, "witness_identity", "") or ""
+                ),
+                probability_content_identity=str(
+                    getattr(witness, "probability_content_identity", "") or ""
+                ),
+                source_truth_identity=str(
+                    getattr(witness, "source_truth_identity", "") or ""
+                ),
+                sample_matrix_identity=str(
+                    getattr(witness, "sample_matrix_identity", "") or ""
+                ),
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE") from exc
+        if not current.matches_witness(witness):
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        matching = [
+            binding for binding in bindings
+            if str(getattr(binding, "bin_id", "") or "") == current.bin_id
+        ]
+        expected_token = None
+        if len(matching) == 1:
+            expected_token = (
+                getattr(matching[0], "yes_token_id", None)
+                if current.side == "YES"
+                else getattr(matching[0], "no_token_id", None)
+            )
+        if str(expected_token or "") != current.token_id:
+            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
+        return current
+
+
 def load_held_entry_calibration(
     trade_conn: sqlite3.Connection,
     *,
@@ -3335,7 +3476,7 @@ def load_held_entry_calibration(
     side: str,
     world_conn: sqlite3.Connection | None = None,
     world_schema_alias: str = "world",
-) -> HeldEntryCalibrationBinding:
+) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
     """Load one position's immutable ENTRY calibration without fitting or opening DBs."""
 
     if (
@@ -3496,6 +3637,54 @@ def load_held_entry_calibration(
     ):
         raise _held_correction_unavailable("TOKEN_OR_SIDE_MISMATCH")
     correction = certificate_value("market_anchored_correction")
+    if isinstance(correction, Mapping) and correction.get("applied") is False:
+        try:
+            baseline = SourceIdentityBaseline.from_payload(dict(correction))
+        except (TypeError, ValueError) as exc:
+            raise _held_correction_unavailable("BASELINE_BINDING_INVALID") from exc
+        if not baseline.matches(
+            family_key=str(certificate_value("global_family_key")),
+            bin_id=str(certificate_value("global_bin_id")),
+            token_id=token_id,
+            side=side,
+        ):
+            raise _held_correction_unavailable("BASELINE_BINDING_INVALID")
+        try:
+            audit_context = _load_held_audit_context(
+                trade_conn,
+                decision_log_id=receipt_ref.decision_log_id,
+                expected_mode=receipt_ref.decision_log_mode,
+                expected_receipt_hash=receipt_ref.receipt_hash,
+            )
+            audit = audit_context.get("market_anchored_fit_artifact_audit")
+            baselines = audit.get("source_identity_baselines") if isinstance(audit, Mapping) else None
+            if not isinstance(baselines, Mapping):
+                raise ValueError
+            matches = []
+            for entry in baselines.values():
+                if not isinstance(entry, Mapping):
+                    continue
+                scope_payload = entry.get("scope")
+                try:
+                    scope = CalibrationFitScope.from_payload(scope_payload)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    entry.get("status") == "SOURCE_IDENTITY_BASELINE"
+                    and entry.get("baseline") == baseline.as_payload()
+                    and scope.raw_probability_revision == baseline.raw_probability_revision
+                ):
+                    matches.append(entry)
+            if len(matches) != 1:
+                raise ValueError
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise _held_correction_unavailable("BASELINE_RECEIPT_BINDING_INVALID") from exc
+        return HeldSourceIdentityBinding(
+            baseline=baseline,
+            position_id=position_id,
+            decision_log_id=decision_log_id,
+            decision_certificate_hash=certificate_hash,
+        )
     try:
         if not isinstance(correction, Mapping) or correction.get("applied") is not True:
             raise ValueError
@@ -3605,7 +3794,7 @@ class HeldEntryCalibrationProvider:
     def load(
         self, *, position_id: str, token_id: str, side: str, decision_at: datetime,
         current_raw_revision: str | None,
-    ) -> HeldEntryCalibrationBinding:
+    ) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
         binding = load_held_entry_calibration(
             self._trade_conn,
             position_id=position_id,
@@ -3623,5 +3812,5 @@ class HeldEntryCalibrationProvider:
 class UnavailableHeldEntryCalibrationProvider:
     """Explicit live-monitor sentinel; required ENTRY proof cannot become raw q."""
 
-    def load(self, **_kwargs) -> HeldEntryCalibrationBinding:
+    def load(self, **_kwargs) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
         raise _held_correction_unavailable("READER_UNAVAILABLE")

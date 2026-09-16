@@ -6346,6 +6346,7 @@ def _market_anchored_correction_resolver(
     )
     from src.contracts.payoff_q_correction import (
         CalibrationFitScope, PayoffQCorrection, PayoffQCorrectionUnavailable,
+        SourceIdentityBaseline,
     )
     from src.config import runtime_cities_by_name
 
@@ -6385,6 +6386,31 @@ def _market_anchored_correction_resolver(
             "scope": scope_payload,
             "status": "UNAVAILABLE",
             "reason": str(reason or "UNKNOWN"),
+        }
+
+    def record_baseline(
+        candidate: object, baseline: SourceIdentityBaseline,
+        scope: CalibrationFitScope,
+    ) -> None:
+        """Audit source-only authority without mislabeling it as a fit."""
+
+        if market_anchored_fit_artifact_audit is None:
+            return
+        baselines = market_anchored_fit_artifact_audit.setdefault(
+            "source_identity_baselines", {}
+        )
+        if not isinstance(baselines, dict):
+            raise TypeError("market_anchored_fit_artifact_audit baseline field is invalid")
+        scope_payload = scope.as_payload()
+        identity = "|".join((
+            str(getattr(candidate, "family_key", "") or ""),
+            str(scope_payload["scope_hash"]),
+            str(baseline.as_payload()["baseline_hash"]),
+        ))
+        baselines[identity] = {
+            "status": "SOURCE_IDENTITY_BASELINE",
+            "scope": scope_payload,
+            "baseline": baseline.as_payload(),
         }
 
     artifact_audit_by_object: dict[
@@ -6456,6 +6482,7 @@ def _market_anchored_correction_resolver(
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         if str(getattr(candidate, "action", "BUY")) == "SELL":
             from src.calibration.market_anchored_live_fit import (
+                HeldSourceIdentityBinding,
                 load_held_entry_calibration,
             )
 
@@ -6480,6 +6507,31 @@ def _market_anchored_correction_resolver(
                 provider, decision_at=decision_at_utc, current_raw_revision=current_raw_revision,
                 deadline_monotonic=deadline_monotonic,
             )
+            if isinstance(binding, HeldSourceIdentityBinding):
+                prepared = prepared_by_family.get(str(candidate.family_key))
+                witness = getattr(prepared, "probability_witness", None)
+                try:
+                    p0 = float(candidate.economic_sell_curve.levels[0].price)
+                except (AttributeError, IndexError, TypeError, ValueError) as exc:
+                    raise PayoffQCorrectionUnavailable(
+                        "CURRENT_SELL_PRICE_UNAVAILABLE"
+                    ) from exc
+                baseline = binding.bind_current(
+                    witness=witness,
+                    raw_revision=current_raw_revision or "",
+                    raw_q=raw_q,
+                    p0=p0,
+                )
+                if market_anchored_fit_artifact_audit is not None:
+                    market_anchored_fit_artifact_audit.setdefault(
+                        "held_source_identity_bindings", {}
+                    )[candidate.position_id] = {
+                        "entry_certificate_hash": binding.decision_certificate_hash,
+                        "current_raw_revision": current_raw_revision,
+                        "policy": baseline._POLICY,
+                        "baseline_hash": baseline.as_payload()["baseline_hash"],
+                    }
+                return baseline
             if market_anchored_fit_artifact_audit is not None:
                 market_anchored_fit_artifact_audit.setdefault("held_bindings", {})[candidate.position_id] = {
                     "entry_certificate_hash": binding.decision_certificate_hash,
@@ -6530,6 +6582,54 @@ def _market_anchored_correction_resolver(
         )
         record_artifact(scope, artifact)
         if artifact is None:
+            support_check = getattr(provider, "insufficient_support", None)
+            insufficient = bool(
+                callable(support_check)
+                and support_check(
+                    scope=scope, now=decision_at_utc,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            )
+            if insufficient:
+                prepared_witness = getattr(prepared, "probability_witness", None)
+                from src.engine.event_reactor_adapter import (
+                    _prepared_global_probability_semantics_revision,
+                )
+
+                raw_revision = _prepared_global_probability_semantics_revision(
+                    prepared, forecast_conn,
+                )
+                try:
+                    baseline = SourceIdentityBaseline(
+                        family_key=str(candidate.family_key), bin_id=str(candidate.bin_id),
+                        side=str(candidate.side), token_id=str(candidate.token_id),
+                        raw_q=raw_q, p0=p0,
+                        raw_probability_revision=str(raw_revision or ""),
+                        q_version=str(getattr(prepared_witness, "q_version", "") or ""),
+                        probability_witness_identity=str(
+                            getattr(prepared_witness, "witness_identity", "") or ""
+                        ),
+                        probability_content_identity=str(
+                            getattr(prepared_witness, "probability_content_identity", "") or ""
+                        ),
+                        source_truth_identity=str(
+                            getattr(prepared_witness, "source_truth_identity", "") or ""
+                        ),
+                        sample_matrix_identity=str(
+                            getattr(prepared_witness, "sample_matrix_identity", "") or ""
+                        ),
+                    )
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    baseline = None
+                if (
+                    baseline is not None
+                    and baseline.raw_probability_revision == scope.raw_probability_revision
+                    and baseline.matches_witness(prepared_witness)
+                    and str(getattr(candidate, "probability_witness_identity", "") or "")
+                    == baseline.probability_witness_identity
+                ):
+                    record_baseline(candidate, baseline, scope)
+                    return baseline
             record_unavailable(candidate, "SCOPED_FIT_UNAVAILABLE", scope)
         applied = corrected_probability(
             artifact,

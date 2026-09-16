@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused or audited: 2026-09-15
+# Last reused or audited: 2026-09-16
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   item 9 ("Market-anchored walk-forward calibrator") — live wiring, fit provider.
 """Tests for src/calibration/market_anchored_live_fit.py.
@@ -45,6 +45,7 @@ from src.contracts.payoff_q_correction import (
     CalibrationPolicySpec,
     CanonicalTrainingManifest,
     PayoffQCorrection,
+    SourceIdentityBaseline,
 )
 from src.calibration.market_anchored_residual import (
     CLIP_D,
@@ -4278,3 +4279,117 @@ def test_entry_price_anchor_refuses_unreproducible_passive_feature(bid, ask, tic
     scope = _canonical_scope(execution_contract="MAKER_REST")
     with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PRICE_ANCHOR_INVALID"):
         scope.current_buy_price_anchor(best_bid=bid, best_ask=ask, min_tick=tick)
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_source_identity_baseline_round_trips_and_rejects_any_tampering(side):
+    baseline = SourceIdentityBaseline(
+        family_key="Warsaw|2026-08-28|high", bin_id="bin-a", side=side,
+        token_id=f"{side.lower()}-token", raw_q=.61, p0=.32,
+        raw_probability_revision="replacement-current-v1", q_version="q-v1",
+        probability_witness_identity="witness-v1", probability_content_identity="content-v1",
+        source_truth_identity="source-v1", sample_matrix_identity="samples-v1",
+    )
+    payload = baseline.as_payload()
+    assert baseline.corrected_q == baseline.raw_q
+    assert baseline.fit_scope is None
+    assert SourceIdentityBaseline.from_payload(payload) == baseline
+    for key, value in (("q_raw", .62), ("source_truth_identity", "other")):
+        corrupted = dict(payload)
+        corrupted[key] = value
+        with pytest.raises(ValueError):
+            SourceIdentityBaseline.from_payload(corrupted)
+    with pytest.raises(ValueError):
+        SourceIdentityBaseline.from_payload({**payload, "unexpected": True})
+
+
+def test_canonical_provider_proves_insufficient_scope_but_not_unavailable_corpus():
+    world, trade, _, forecast = _canonical_corpus_fixture(
+        return_forecast=True, forecast_lineage=True,
+    )
+    try:
+        scope = _canonical_scope()
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (world, trade, forecast), city_timezones=_TEST_CITY_TIMEZONES,
+            min_train_rows=2,
+        )
+        assert provider.insufficient_support(scope=scope, now=NOW)
+        unavailable = CanonicalMarketAnchoredFitProvider(
+            lambda: (_ for _ in ()).throw(sqlite3.OperationalError("closed")),
+            city_timezones=_TEST_CITY_TIMEZONES, min_train_rows=2,
+        )
+        assert not unavailable.insufficient_support(scope=scope, now=NOW)
+    finally:
+        world.close()
+        trade.close()
+        forecast.close()
+
+
+def test_held_source_identity_loader_authenticates_baseline_without_fit_audit(monkeypatch):
+    trade, world, _artifact, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        baseline = SourceIdentityBaseline(
+            family_key=correction.family_key, bin_id=correction.bin_id, side=side,
+            token_id=token, raw_q=.60, p0=.30,
+            raw_probability_revision="raw-revision-v1", q_version="q-v1",
+            probability_witness_identity="witness-v1", probability_content_identity="content-v1",
+            source_truth_identity="source-v1", sample_matrix_identity="samples-v1",
+        )
+        certificate = json.loads(world.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_hash = 'cert-a'"
+        ).fetchone()[0])
+        certificate["market_anchored_correction"] = baseline.as_cert_fields()
+        from src.decision_kernel.canonicalization import stable_hash
+
+        scope = CalibrationFitScope(
+            "high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO",
+            baseline.raw_probability_revision,
+        )
+        monkeypatch.setattr(
+            live_fit, "_load_held_audit_context",
+            lambda *_args, **_kwargs: {"market_anchored_fit_artifact_audit": {
+                "revision": "canonical_entry_fit_artifact_audit_v1",
+                "source_identity_baselines": {
+                    "fixture": {
+                        "status": "SOURCE_IDENTITY_BASELINE",
+                        "scope": scope.as_payload(),
+                        "baseline": baseline.as_payload(),
+                    },
+                },
+            }},
+        )
+
+        world.execute(
+            "UPDATE decision_certificates SET payload_json = ?, payload_hash = ? WHERE certificate_hash = 'cert-a'",
+            (json.dumps(certificate), stable_hash(certificate)),
+        )
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert isinstance(binding, live_fit.HeldSourceIdentityBinding)
+        current = SimpleNamespace(
+            family_key=correction.family_key, q_version="q-v2",
+            witness_identity="witness-v2", probability_content_identity="content-v2",
+            source_truth_identity="source-v2", sample_matrix_identity="samples-v2",
+            captured_at_utc=NOW, max_age=timedelta(minutes=5),
+            bindings=(SimpleNamespace(bin_id=correction.bin_id, yes_token_id=token if side == "YES" else "yes", no_token_id=token if side == "NO" else "no"),),
+        )
+        rebound = binding.at_decision(
+            None, decision_at=NOW, current_raw_revision="raw-revision-v2",
+        ).bind_current(
+            witness=current, raw_revision="raw-revision-v2", raw_q=.55, p0=.42,
+        )
+        assert rebound.raw_probability_revision == "raw-revision-v2"
+        assert rebound.matches_witness(current)
+        certificate["market_anchored_correction"]["q_raw"] = .01
+        world.execute(
+            "UPDATE decision_certificates SET payload_json = ?, payload_hash = ? WHERE certificate_hash = 'cert-a'",
+            (json.dumps(certificate), stable_hash(certificate)),
+        )
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable, match="BASELINE_BINDING_INVALID"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()

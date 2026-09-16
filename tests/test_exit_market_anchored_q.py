@@ -1,5 +1,5 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-15
+# Last reused or audited: 2026-09-16
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   (market-anchored calibrator, item 9) + this task's fix — the exit stop was
 #   comparing against the RAW posterior-predictive point (measured +0.170
@@ -564,3 +564,34 @@ def test_monitor_book_without_tick_metadata_keeps_quote_tick_unavailable():
     )
     assert quote is not None
     assert quote.min_tick is None
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("fresh_quote", (True, False))
+def test_authenticated_identity_holding_uses_current_source_without_residual(direction, fresh_quote):
+    from src.calibration.market_anchored_live_fit import HeldSourceIdentityBinding
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    side = "YES" if direction == "buy_yes" else "NO"
+    baseline = SourceIdentityBaseline(
+        family_key="family", bin_id="bin", side=side,
+        token_id="yes-token" if side == "YES" else "no-token",
+        raw_q=0.9, p0=0.4, raw_probability_revision="entry-revision",
+        q_version="entry-q", probability_witness_identity="entry-witness",
+        probability_content_identity="entry-content", source_truth_identity="entry-source",
+        sample_matrix_identity="entry-samples",
+    )
+    binding = HeldSourceIdentityBinding(
+        baseline=baseline, position_id="pos-market-anchored-exit",
+        decision_log_id=1, decision_certificate_hash="authenticated-certificate",
+    )
+    register_active_provider(SimpleNamespace(load=lambda **_: binding))
+    ctx = replace(_exit_context(fresh_prob=0.3, current_market_price=0.5, best_bid=0.5),
+                  current_market_price_is_fresh=fresh_quote)
+    position = _held_position(direction)
+    raw, raw_ok = position._held_side_point_with_confidence(ctx)
+    q, valid, source = position._exit_q_mean_and_source(ctx)
+    assert raw_ok
+    assert q == raw
+    assert valid is fresh_quote
+    assert source == ("source_identity_baseline" if fresh_quote else "entry_calibration_unavailable")

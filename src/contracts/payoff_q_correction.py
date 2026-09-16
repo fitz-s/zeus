@@ -48,6 +48,180 @@ class PayoffQCorrectionUnavailable(ValueError):
 
 
 @dataclass(frozen=True)
+class SourceIdentityBaseline:
+    """Authenticated raw-q policy when the current fit corpus is insufficient.
+
+    This is deliberately not a degenerate ``PayoffQCorrection``.  It records
+    the exact source-clock probability authority that supplied raw q, while
+    making no claim that a residual fit existed, was trained, or produced a
+    confidence bound.  A later decision binds a new baseline to its own
+    witness; identity transport across revisions is never implicit.
+    """
+
+    family_key: str
+    bin_id: str
+    side: str
+    token_id: str
+    raw_q: float
+    p0: float
+    raw_probability_revision: str
+    q_version: str
+    probability_witness_identity: str
+    probability_content_identity: str
+    source_truth_identity: str
+    sample_matrix_identity: str
+
+    _TYPE = "SourceIdentityBaseline"
+    _VERSION = 1
+    _POLICY = "SOURCE_IDENTITY_BASELINE_V1"
+
+    def __post_init__(self) -> None:
+        if self.side not in {"YES", "NO"}:
+            raise ValueError("source identity baseline side must be YES or NO")
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (
+                self.family_key,
+                self.bin_id,
+                self.token_id,
+                self.raw_probability_revision,
+                self.q_version,
+                self.probability_witness_identity,
+                self.probability_content_identity,
+                self.source_truth_identity,
+                self.sample_matrix_identity,
+            )
+        ):
+            raise ValueError("source identity baseline requires complete identity")
+        if not all(_finite_number(value) and 0.0 <= float(value) <= 1.0
+                   for value in (self.raw_q, self.p0)):
+            raise ValueError("source identity baseline probabilities must lie in [0, 1]")
+        object.__setattr__(self, "raw_q", float(self.raw_q))
+        object.__setattr__(self, "p0", float(self.p0))
+
+    @property
+    def corrected_q(self) -> float:
+        """The policy acts on raw q without claiming a fitted transform."""
+
+        return self.raw_q
+
+    @property
+    def fit_scope(self) -> None:
+        """A source baseline has no calibration population or fake fit scope."""
+
+        return None
+
+    @staticmethod
+    def _witness_value(witness: object, name: str) -> object:
+        if isinstance(witness, dict):
+            return witness.get(name)
+        return getattr(witness, name, None)
+
+    def matches(
+        self, *, family_key: str, bin_id: str, side: str, token_id: str,
+    ) -> bool:
+        """True only for the candidate leg this baseline sealed."""
+
+        return (
+            self.family_key == family_key
+            and self.bin_id == bin_id
+            and self.side == side
+            and self.token_id == token_id
+        )
+
+    def matches_witness(self, witness: object) -> bool:
+        """Bind every current source identity used to authorize raw q."""
+
+        return all(
+            self._witness_value(witness, name) == expected
+            for name, expected in (
+                ("family_key", self.family_key),
+                ("q_version", self.q_version),
+                ("witness_identity", self.probability_witness_identity),
+                ("probability_content_identity", self.probability_content_identity),
+                ("source_truth_identity", self.source_truth_identity),
+                ("sample_matrix_identity", self.sample_matrix_identity),
+            )
+        )
+
+    def as_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "type": self._TYPE,
+            "version": self._VERSION,
+            "policy": self._POLICY,
+            "applied": False,
+            "family_key": self.family_key,
+            "bin_id": self.bin_id,
+            "side": self.side,
+            "token_id": self.token_id,
+            "q_raw": self.raw_q,
+            "q_corrected": self.corrected_q,
+            "p0": self.p0,
+            "raw_probability_revision": self.raw_probability_revision,
+            "q_version": self.q_version,
+            "probability_witness_identity": self.probability_witness_identity,
+            "probability_content_identity": self.probability_content_identity,
+            "source_truth_identity": self.source_truth_identity,
+            "sample_matrix_identity": self.sample_matrix_identity,
+        }
+        payload["baseline_hash"] = self._hash_payload(payload)
+        return payload
+
+    @staticmethod
+    def _hash_payload(payload: dict[str, object]) -> str:
+        from src.decision_kernel.canonicalization import stable_hash
+
+        return stable_hash(payload)
+
+    def as_cert_fields(self) -> dict[str, object]:
+        """Exact certificate fields, including the content-addressed baseline."""
+
+        return self.as_payload()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "SourceIdentityBaseline":
+        if not isinstance(payload, dict):
+            raise ValueError("source identity baseline payload must be an object")
+        expected = {
+            "type", "version", "policy", "applied", "family_key", "bin_id",
+            "side", "token_id", "q_raw", "q_corrected", "p0",
+            "raw_probability_revision", "q_version", "probability_witness_identity",
+            "probability_content_identity", "source_truth_identity",
+            "sample_matrix_identity", "baseline_hash",
+        }
+        if set(payload) != expected:
+            raise ValueError("source identity baseline payload fields are not exact")
+        if (
+            payload.get("type") != cls._TYPE
+            or type(payload.get("version")) is not int
+            or payload.get("version") != cls._VERSION
+            or payload.get("policy") != cls._POLICY
+            or payload.get("applied") is not False
+        ):
+            raise ValueError("source identity baseline payload type or policy is invalid")
+        baseline_hash = payload.get("baseline_hash")
+        unsigned = {key: payload[key] for key in expected if key != "baseline_hash"}
+        if not isinstance(baseline_hash, str) or baseline_hash != cls._hash_payload(unsigned):
+            raise ValueError("source identity baseline hash is invalid")
+        if payload["q_corrected"] != payload["q_raw"]:
+            raise ValueError("source identity baseline corrected q is invalid")
+        candidate = cls(
+            family_key=payload["family_key"], bin_id=payload["bin_id"],
+            side=payload["side"], token_id=payload["token_id"],
+            raw_q=payload["q_raw"], p0=payload["p0"],
+            raw_probability_revision=payload["raw_probability_revision"],
+            q_version=payload["q_version"],
+            probability_witness_identity=payload["probability_witness_identity"],
+            probability_content_identity=payload["probability_content_identity"],
+            source_truth_identity=payload["source_truth_identity"],
+            sample_matrix_identity=payload["sample_matrix_identity"],
+        )
+        if candidate.as_payload() != payload:
+            raise ValueError("source identity baseline payload is not canonical")
+        return candidate
+
+
+@dataclass(frozen=True)
 class CalibrationFitScope:
     """Exact ENTRY population that produced one calibrated-q artifact."""
 

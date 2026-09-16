@@ -80,6 +80,7 @@ from src.contracts.execution_intent import (
 from src.contracts.payoff_q_correction import (
     CalibrationFitScope,
     PayoffQCorrection,
+    SourceIdentityBaseline,
     PayoffQCorrectionUnavailable,
 )
 from src.contracts.strategy_capital_allocation import (
@@ -4004,8 +4005,8 @@ class GlobalSingleOrderDecision:
     # The market-anchored correction this BUY was SIZED with, sealed here so the
     # actuation certificate acts on the same scalar rather than re-deriving it
     # from a fit that may have refitted since. None means the candidate kept its
-    # raw witness probability (every fail-open case).
-    payoff_q_correction: PayoffQCorrection | None = None
+    # raw witness probability. SourceIdentityBaseline seals that policy explicitly.
+    payoff_q_correction: PayoffQCorrection | SourceIdentityBaseline | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -7225,7 +7226,7 @@ def select_global_single_order(
     | None = None,
     payoff_q_correction_resolver: Callable[
         [GlobalSingleOrderCandidate, float, float, datetime],
-        PayoffQCorrection | None,
+        PayoffQCorrection | SourceIdentityBaseline | None,
     ]
     | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -7345,7 +7346,7 @@ def select_global_single_order(
     buy_capital_limits: dict[str, Decimal] = {}
     joint_buy_cost_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
-    buy_corrections: dict[str, PayoffQCorrection | None] = {}
+    buy_corrections: dict[str, PayoffQCorrection | SourceIdentityBaseline | None] = {}
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
@@ -7426,14 +7427,14 @@ def select_global_single_order(
         *,
         raw_q: float,
         witness: FamilyPayoffWitness,
-    ) -> PayoffQCorrection | None:
+    ) -> PayoffQCorrection | SourceIdentityBaseline | None:
         """Market-anchored correction for one BUY or SELL leg, or raw q.
 
         Canonical SELL resolves its inherited ENTRY price feature inside the
         binding resolver and independently verifies it on return. A proved
         0/1 Day0 payoff never enters calibration. Optional legacy resolvers may return None; the
-        canonical resolver raises PayoffQCorrectionUnavailable when its
-        required fit is missing, so that proposal cannot size on raw q.
+        canonical resolver returns a sealed source-identity policy only for
+        verified insufficient residual support; invalid evidence still raises.
         """
 
         if (
@@ -7472,7 +7473,7 @@ def select_global_single_order(
             ) from exc
         if correction is None:
             return None
-        if not isinstance(correction, PayoffQCorrection):
+        if not isinstance(correction, (PayoffQCorrection, SourceIdentityBaseline)):
             raise PayoffQCorrectionUnavailable(
                 f"{action} correction result has invalid type"
             )
@@ -7490,6 +7491,8 @@ def select_global_single_order(
             raise PayoffQCorrectionUnavailable(
                 f"{action} correction identity or raw q mismatch"
             )
+        if isinstance(correction, SourceIdentityBaseline) and not correction.matches_witness(witness):
+            raise PayoffQCorrectionUnavailable(f"{action} source identity superseded")
         if isinstance(candidate, GlobalSingleOrderSellCandidate) and correction.fit_scope is not None:
             p0 = candidate.entry_calibration_price_anchor(correction.fit_scope)
         if not math.isclose(
@@ -8125,7 +8128,7 @@ def select_global_single_order(
                 == (1 if candidate.side == "YES" else 0)
             }
             if len(exact_winner_ids) == len(positive_family_candidates) or any(
-                buy_corrections.get(candidate.candidate_id) is not None
+                isinstance(buy_corrections.get(candidate.candidate_id), PayoffQCorrection)
                 for candidate in family_candidates
             ):
                 # Per-claim calibrated probabilities are not a MECE joint law.

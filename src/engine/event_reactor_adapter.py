@@ -13972,7 +13972,9 @@ def _global_sell_execution_economics_drift(
     if curve_drift:
         return f"fields={','.join(curve_drift)}"
     correction = getattr(decision, "payoff_q_correction", None)
-    if correction is not None:
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    if correction is not None and not isinstance(correction, SourceIdentityBaseline):
         try:
             anchor = (
                 Decimal(str(current_candidate.entry_calibration_price_anchor(correction.fit_scope)))
@@ -14113,6 +14115,28 @@ def _revalidate_global_sell_calibration(
         side=candidate.side,
         world_conn=world_conn,
     )
+    from src.calibration.market_anchored_live_fit import HeldSourceIdentityBinding
+
+    if isinstance(binding, HeldSourceIdentityBinding):
+        binding = binding.at_decision(
+            None, decision_at=actuation.decision_at_utc,
+            current_raw_revision=current_raw_revision,
+            deadline_monotonic=deadline_monotonic,
+        )
+        reproduced = binding.bind_current(
+            witness=actuation.probability_witness,
+            raw_revision=current_raw_revision,
+            raw_q=raw_q,
+            # Identity q has no price feature. Keep its cut-time price
+            # provenance; current proceeds are checked by the SELL action law.
+            p0=correction.p0,
+        )
+        terminal = decision.expected_terminal_wealth
+        if (reproduced != correction or terminal is None or not math.isclose(
+            terminal.held_probability_mean, raw_q, rel_tol=0.0, abs_tol=1e-12,
+        )):
+            raise ValueError("GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED")
+        return
     provider = None
     if current_raw_revision == binding.fit_scope.raw_probability_revision:
         provider = CanonicalMarketAnchoredFitProvider(
@@ -16479,6 +16503,10 @@ def _global_current_state_execution_economics(
     # check below on the raw value — the correction cannot mask a stale q.
     q_correction = getattr(decision, "payoff_q_correction", None)
     if q_correction is not None:
+        from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+        if isinstance(q_correction, SourceIdentityBaseline) and not q_correction.matches_witness(witness):
+            raise ValueError("GLOBAL_CURRENT_STATE_SOURCE_IDENTITY_SUPERSEDED")
         if not math.isclose(
             float(q_correction.raw_q),
             float(current_point_q),

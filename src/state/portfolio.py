@@ -1016,6 +1016,13 @@ class Position:
             )
             if not exit_context.current_market_price_is_fresh:
                 raise ValueError("current market quote is stale")
+            from src.calibration.market_anchored_live_fit import HeldSourceIdentityBinding
+
+            if isinstance(binding, HeldSourceIdentityBinding):
+                # The authenticated ENTRY policy uses current source q. Its
+                # fresh probability/confidence checks ran above; no book price
+                # is a calibration feature of this identity policy.
+                return q_raw, evidence_ok, "source_identity_baseline"
             # Recreate the immutable ENTRY policy feature from this same-cycle
             # book: TAKER uses the ask, while MAKER uses bid + one tick.
             p0 = binding.fit_scope.current_buy_price_anchor(
