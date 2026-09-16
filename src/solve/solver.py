@@ -7229,6 +7229,10 @@ def select_global_single_order(
         PayoffQCorrection | SourceIdentityBaseline | None,
     ]
     | None = None,
+    buy_probability_rejection_resolver: Callable[
+        [GlobalSingleOrderCandidate, float], str | None
+    ]
+    | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
@@ -7979,6 +7983,20 @@ def select_global_single_order(
             # RESET: the exact current fit supplies a calibrated acting q.
             rejections[candidate.candidate_id] = f"CALIBRATED_PAYOFF_Q_UNAVAILABLE:{exc}"
             continue
+        if correction is not None:
+            payoff_probability_mean = correction.corrected_q
+        if buy_probability_rejection_resolver is not None:
+            try:
+                probability_reason = buy_probability_rejection_resolver(
+                    candidate, payoff_probability_mean,
+                )
+            except Exception:  # noqa: BLE001 - an unknown policy cannot establish an optimum
+                return superseded_decision(
+                    candidate.candidate_id, "BUY_PROBABILITY_AUTHORITY_UNAVAILABLE",
+                )
+            if probability_reason is not None:
+                rejections[candidate.candidate_id] = probability_reason
+                continue
         if (
             family_portfolio_endowment_resolver is not None
             and isinstance(
@@ -7995,8 +8013,6 @@ def select_global_single_order(
                 candidate.family_key, []
             ).append(candidate)
         buy_corrections[candidate.candidate_id] = correction
-        if correction is not None:
-            payoff_probability_mean = correction.corrected_q
         score = _score_global_single_order_buy_expected(
             candidate,
             payoff_probability_mean=payoff_probability_mean,

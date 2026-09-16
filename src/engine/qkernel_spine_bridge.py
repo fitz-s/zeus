@@ -248,6 +248,8 @@ class PreparedGlobalFamily:
         tuple[str, str, str, str, float], ...
     ] = ()
     day0_payoff_truth_by_bin_side: tuple[tuple[str, str, str], ...] = ()
+    day0_saturated_statistical_sides: tuple[tuple[str, str], ...] = ()
+    day0_saturation_witness_identity: str | None = None
     day0_exit_authority_status: str = "not_applicable"
     day0_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"

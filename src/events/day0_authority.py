@@ -408,7 +408,12 @@ def _remaining_day_lcb_has_current_band_tightening(
     q_live: float,
     q_lcb: float,
 ) -> bool:
-    """License only a non-degenerate, identity-bound tightening of the local transform."""
+    """Validate current mean tightening or the existing non-degenerate band route."""
+
+    if _remaining_day_lcb_has_complete_current_state_economics(
+        payload, q_live=q_live, q_lcb=q_lcb,
+    ):
+        return True
 
     economics = payload.get("qkernel_execution_economics")
     if not isinstance(economics, Mapping):
@@ -457,6 +462,73 @@ def _remaining_day_lcb_has_current_band_tightening(
         and math.isfinite(payoff_q_point)
         and math.isclose(payoff_q_action, q_live, rel_tol=1e-9, abs_tol=1e-6)
         and math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6)
+    )
+
+
+def _remaining_day_lcb_has_complete_current_state_economics(
+    payload: Mapping[str, object],
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> bool:
+    """Verify the sealed current posterior-mean exception for a Day0 entry.
+
+    SCOPE: the selected Day0 certificate. DRAIN: recompute current qkernel economics.
+    RESET: a newly sealed certificate satisfying every binding below.
+    """
+
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, Mapping):
+        return False
+    from src.decision_kernel.canonicalization import (
+        qkernel_current_state_rejection_reason,
+    )
+
+    if qkernel_current_state_rejection_reason(economics) is not None:
+        return False
+    if (
+        economics.get("q_lcb_guard_basis") != "CURRENT_POSTERIOR_BAND"
+        or economics.get("selection_guard_basis")
+        != "CURRENT_POSTERIOR_PREDICTIVE_MEAN"
+        or economics.get("global_probability_functional")
+        != "POSTERIOR_PREDICTIVE_MEAN"
+        or economics.get("q_lcb_guard_abstained") is not False
+        or economics.get("selection_guard_abstained") is not False
+    ):
+        return False
+    try:
+        scalar_q = float(q_live)
+        scalar_lcb = float(q_lcb)
+        payoff_q_point = float(economics.get("payoff_q_point"))
+        payoff_q_action = float(economics.get("payoff_q_action"))
+        payoff_q_lcb = float(economics.get("payoff_q_lcb"))
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (
+            scalar_q,
+            scalar_lcb,
+            payoff_q_point,
+            payoff_q_action,
+            payoff_q_lcb,
+            selection_guard_q_safe,
+        )
+    ):
+        return False
+    return (
+        0.0 <= scalar_lcb <= scalar_q < 1.0
+        and 0.0 <= payoff_q_lcb <= payoff_q_action < 1.0
+        and math.isclose(payoff_q_point, payoff_q_action, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(payoff_q_action, scalar_q, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isclose(payoff_q_lcb, scalar_lcb, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isclose(
+            selection_guard_q_safe,
+            scalar_q,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        )
     )
 
 
@@ -537,6 +609,11 @@ def _assert_remaining_day_lcb_is_supported_by_transform(
     if (
         q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
         and not _remaining_day_lcb_has_guarded_qkernel_lcb(
+            payload,
+            q_live=q_live,
+            q_lcb=q_lcb,
+        )
+        and not _remaining_day_lcb_has_complete_current_state_economics(
             payload,
             q_live=q_live,
             q_lcb=q_lcb,

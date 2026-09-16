@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-15
+# Last reused/audited: 2026-09-16
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -43452,3 +43452,178 @@ def test_sell_jit_separates_entry_price_feature_from_exit_proceeds(entry_mode, c
         assert reason is None
         authority = GlobalSellExecutionAuthority.from_current(actuation=actuation, jit_candidate=jit)
         assert authority.limit_price() >= actuation.decision.limit_price
+
+
+def _saturated_day0_auction_inputs():
+    at = _dt.datetime(2026, 6, 13, 12, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Chicago", source_run_id="saturated-current")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=at)
+    family_key = scope.family_keys[0]
+    bindings = tuple(
+        OutcomeTokenBinding(f"bin-{i}", f"condition-{i}", f"yes-{i}", f"no-{i}")
+        for i in range(3)
+    )
+    fields = dict(
+        family_key=family_key, bindings=bindings,
+        yes_point_q=np.asarray([0.0, 0.8, 0.2]),
+        yes_q_samples=np.tile([0.0, 0.75, 0.25], (400, 1)),
+        q_version="day0-current", resolution_identity="resolution",
+        topology_identity="topology", posterior_identity_hash="posterior",
+        source_truth_identity="source", authority_certificate_hash="certificate",
+        band_alpha=0.05, band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1", captured_at_utc=at,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        **fields, max_age=_dt.timedelta(seconds=30),
+        witness_identity=joint_probability_witness_identity(**fields),
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="saturated-current", probability_witness=witness, candidate_seeds=(),
+    )
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_lcb_transform": {
+            "absorbing_yes_conditions": [], "absorbing_no_conditions": [],
+            "yes_lcb_by_condition": {f"condition-{i}": q for i, q in enumerate([0., .75, .25])},
+            "no_lcb_by_condition": {f"condition-{i}": q for i, q in enumerate([1., .25, .75])},
+        },
+    }
+    wealth = _test_wealth_witness(
+        ledger_snapshot_id="ledger", position_set_hash="positions",
+        wealth_floor_usd=Decimal("1000"), wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"), reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN", captured_at_utc=at, max_age=_dt.timedelta(seconds=30),
+    )
+    prepared = global_batch_runtime._bind_selection_holdings(
+        {event.event_id: prepared}, portfolio_state=SimpleNamespace(positions=()),
+        wealth_witness=wealth,
+    )[event.event_id]
+    assets = []
+    for index, side, token, price in ((0, "NO", "no-0", "0.10"), (1, "YES", "yes-1", "0.60")):
+        candidate = _global_test_buy_candidate(
+            family_key=family_key, probability_witness_identity=witness.witness_identity,
+            book_identity=f"book-{index}", price=price, captured_at=at,
+            candidate_id=f"candidate-{index}", bin_id=f"bin-{index}",
+            condition_id=f"condition-{index}", side=side, token_id=token,
+        )
+        assets.append(CurrentGlobalBookAsset(
+            family_key=family_key, bin_id=candidate.bin_id, condition_id=candidate.condition_id,
+            gamma_market_id=f"gamma-{index}", market_event_id=event.event_id,
+            side=side, token_id=token, curve=candidate.executable_cost_curve,
+            bid_levels=candidate.native_bid_levels, captured_at_utc=at, neg_risk=False,
+        ))
+    states = tuple((
+        a.family_key, a.bin_id, a.condition_id, a.side, a.token_id, "EXECUTABLE",
+        a.curve.book_hash, a.market_event_id, a.gamma_market_id, str(a.neg_risk),
+    ) for a in assets)
+    book = CurrentGlobalBookEpoch(
+        assets=tuple(assets), asset_states=states, captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(asset_states=states, captured_at_utc=at),
+    )
+    kwargs = dict(
+        selection_epoch_identity="current-saturated-cut", selection_cut_at_utc=at,
+        current_scope=scope, current_scope_identity_resolver=lambda: scope.scope_identity,
+        venue_universe_identity=book.witness_identity,
+        current_venue_universe_identity_resolver=lambda: book.witness_identity,
+        universe_max_age=book.max_age,
+        current_probability_resolver=lambda _: CurrentFamilyProbabilityAuthority.from_witness(witness),
+        current_execution_resolver=lambda c: book.execution_authority(c, checked_at_utc=at),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth, capital_limit_usd=Decimal("100"), decision_at_utc=at,
+        book_epoch=book,
+    )
+    return event.event_id, prepared, payload, kwargs
+
+
+def test_day0_saturated_no_is_removed_before_joint_kelly_and_yes_wins():
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    original = select_prepared_global_auction({event_id: prepared}, **kwargs)
+    assert original.decision.candidate.side == "NO"
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    assert bound.day0_saturated_statistical_sides == (("bin-0", "NO"),)
+    selected = select_prepared_global_auction({event_id: bound}, **kwargs)
+    assert selected.decision.candidate.side == "YES", selected.decision.no_trade_reason
+    assert selected.decision.candidate.bin_id == "bin-1"
+    blocked = [row for row in selected.decision.candidate_evaluations if row.side == "NO"]
+    assert blocked and all(row.rejection_reason == "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" for row in blocked)
+    assert selected.decision.expected_growth.expected_ev_usd > 0
+
+
+@pytest.mark.parametrize("case", ["absorbing", "unknown_transform", "lower_cap", "new_witness"])
+def test_day0_saturation_filter_does_not_invent_authority(case):
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    if case == "absorbing":
+        payload["_edli_day0_lcb_transform"]["absorbing_no_conditions"] = ["condition-0"]
+    elif case == "unknown_transform":
+        payload.pop("_edli_day0_lcb_transform")
+    elif case == "lower_cap":
+        prepared = replace(prepared, candidate_payoff_q_lcb_caps=((
+            prepared.probability_witness.family_key, "condition-0", "bin-0", "NO", .8,
+        ),))
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    if case == "new_witness":
+        bound = replace(bound, day0_saturation_witness_identity="older-cut")
+    selected = select_prepared_global_auction({event_id: bound}, **kwargs)
+    assert selected.decision.candidate.side == "NO"
+    assert "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" not in selected.decision.rejection_reasons.values()
+
+
+def test_day0_saturation_filter_uses_calibrated_mean_not_raw_certainty():
+    from src.contracts.payoff_q_correction import PayoffQCorrection
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    seen = []
+    def correction(candidate, raw_q, p0, decision_at):
+        seen.append((candidate.side, raw_q))
+        return PayoffQCorrection(
+            family_key=candidate.family_key, bin_id=candidate.bin_id, side=candidate.side,
+            token_id=candidate.token_id, raw_q=raw_q, corrected_q=min(raw_q, .9), p0=p0,
+            lead_bucket="day0", alpha_lead=0., beta=1., lambda_=1.,
+            training_cutoff=decision_at - _dt.timedelta(days=1), n_train=100, param_hash="fixture-fit",
+        )
+    selected = select_prepared_global_auction(
+        {event_id: bound}, payoff_q_correction_resolver=correction, **kwargs,
+    )
+    assert ("NO", 1.0) in seen
+    assert selected.decision.candidate.side == "NO", selected.decision.no_trade_reason
+    assert selected.decision.expected_terminal_wealth.win_probability_mean == pytest.approx(.9)
+
+
+def test_day0_saturation_marks_yes_and_no_by_native_side():
+    _, prepared, payload, _ = _saturated_day0_auction_inputs()
+    old = prepared.probability_witness
+    fields = {
+        name: getattr(old, name) for name in (
+            "family_key", "bindings", "q_version", "resolution_identity", "topology_identity",
+            "posterior_identity_hash", "source_truth_identity", "authority_certificate_hash",
+            "band_alpha", "band_basis", "captured_at_utc",
+        )
+    }
+    fields.update(yes_point_q=np.asarray([1., 0., 0.]), yes_q_samples=np.tile([1., 0., 0.], (400, 1)))
+    witness = JointOutcomeProbabilityWitness(
+        **fields, max_age=old.max_age, witness_identity=joint_probability_witness_identity(**fields),
+    )
+    prepared = replace(prepared, probability_witness=witness)
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    assert set(bound.day0_saturated_statistical_sides) == {
+        ("bin-0", "YES"), ("bin-1", "NO"), ("bin-2", "NO"),
+    }
+    payload["_edli_day0_lcb_transform"]["absorbing_yes_conditions"] = ["condition-0"]
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    assert ("bin-0", "YES") not in bound.day0_saturated_statistical_sides
+    assert ("bin-1", "NO") in bound.day0_saturated_statistical_sides
+
+
+def test_day0_saturation_marker_drains_when_same_cut_cap_tightens():
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    blocked = select_prepared_global_auction({event_id: bound}, **kwargs)
+    assert blocked.decision.candidate.side == "YES"
+    key = (prepared.probability_witness.family_key, "bin-0", "NO", "no-0")
+    tightened = select_prepared_global_auction(
+        {event_id: bound}, payoff_q_lcb_by_candidate={key: .8}, **kwargs,
+    )
+    assert tightened.decision.candidate.side == "NO"
+    assert "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" not in tightened.decision.rejection_reasons.values()

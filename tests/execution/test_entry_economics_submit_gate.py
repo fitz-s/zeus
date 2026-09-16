@@ -19,7 +19,6 @@ from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
 )
-from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.verifier import _verify_actionable_qkernel_economics
 from src.engine.event_bound_final_intent import conservative_submit_expected_edge
 from src.execution.executor import (
@@ -794,6 +793,37 @@ def test_entry_economics_blocks_day0_degenerate_remaining_window_lcb():
     assert verdict["allowed"] is False
     assert verdict["reason"] == "day0_probability_authority_missing"
     assert "degenerate with q_live" in verdict["details"]["error"]
+
+
+def test_entry_economics_accepts_day0_complete_current_state_mean_when_lcb_equals_q():
+    economics = _current_state_mean_buy_econ(
+        payoff_q_point=0.70,
+        payoff_q_action=0.70,
+        payoff_q_lcb=0.70,
+        global_current_sample_payoff_q_mean=0.70,
+        edge_lcb=0.30,
+        edge_expected=0.30,
+        selection_guard_q_safe=0.70,
+    )
+    actionable_payload = _day0_actionable_payload(q_live=0.70, q_lcb=0.70)
+    actionable_payload["probability_authority"] = (
+        "day0_remaining_day_global_probability_v1"
+    )
+    actionable_payload["qkernel_execution_economics"] = economics
+    verdict = _entry_economics_component(
+        _intent(
+            q_live=0.70,
+            q_lcb_5pct=0.70,
+            expected_edge=0.30,
+            limit_price=0.40,
+            qkernel_execution_economics=economics,
+        ),
+        shares=5.0,
+        actionable_payload=actionable_payload,
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["day0_observation_authority"] is True
 
 
 def test_entry_economics_accepts_day0_selection_guard_without_oof_sample_count():

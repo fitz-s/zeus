@@ -39161,6 +39161,70 @@ def _prepared_candidate_payoff_q_lcb_cap(
     return matches[0]
 
 
+def _bind_day0_saturated_statistical_sides(
+    prepared: object, payload: Mapping[str, object],
+):
+    """Record current bands that cannot license a statistical action q of one.
+
+    Final LCB is min(action q, sample lower-CVaR, current cap). A saturated
+    bound refutes certainty, not a calibrated mean below one. The auction
+    consumes this only after calibration and keeps the final authority check.
+    """
+
+    from types import SimpleNamespace
+
+    from src.events.day0_authority import DAY0_REMAINING_DAY_LCB_TOLERANCE
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness, family_exact_yes_payoff, family_payoff_q_lcb,
+    )
+
+    witness = prepared.probability_witness
+    transform = payload.get("_edli_day0_lcb_transform")
+    if (
+        not isinstance(witness, JointOutcomeProbabilityWitness)
+        or payload.get("_edli_q_source") != "day0_remaining_day"
+        or payload.get("probability_authority") != "day0_remaining_day_global_probability_v1"
+        or payload.get("_edli_day0_q_mode") != "remaining_day"
+        or not isinstance(transform, Mapping)
+    ):
+        return prepared
+    saturated = []
+    for binding in witness.bindings:
+        if family_exact_yes_payoff(witness, bin_id=binding.bin_id) is not None:
+            continue
+        for side, token_id in (("YES", binding.yes_token_id), ("NO", binding.no_token_id)):
+            absorbing = transform.get(f"absorbing_{side.lower()}_conditions")
+            bounds = transform.get(f"{side.lower()}_lcb_by_condition")
+            if (
+                not token_id
+                or not isinstance(absorbing, (list, tuple, set))
+                or binding.condition_id in absorbing
+                or not isinstance(bounds, Mapping)
+                or binding.condition_id not in bounds
+            ):
+                continue
+            candidate = SimpleNamespace(
+                family_key=witness.family_key, condition_id=binding.condition_id,
+                bin_id=binding.bin_id, side=side, token_id=token_id,
+            )
+            try:
+                cap = _prepared_candidate_payoff_q_lcb_cap(prepared, candidate)
+                bound = family_payoff_q_lcb(
+                    witness, bin_id=binding.bin_id, side=side, payoff_q_lcb_cap=cap,
+                )
+            except (TypeError, ValueError):
+                # Incomplete early evidence grants nothing; final authority
+                # still owns its rejection. Do not create a wider entry gate.
+                continue
+            if bound is not None and bound >= 1.0 - DAY0_REMAINING_DAY_LCB_TOLERANCE:
+                saturated.append((binding.bin_id, side))
+    return dataclass_replace(
+        prepared,
+        day0_saturated_statistical_sides=tuple(saturated),
+        day0_saturation_witness_identity=witness.witness_identity,
+    )
+
+
 class _CurrentProbabilityUse(StrEnum):
     ENTRY = "entry"
     HELD_MONITOR = "held_monitor"
@@ -41755,7 +41819,7 @@ def _prepare_current_global_probability_family(
         if is_day0
         else "non_day0_family"
     )
-    return PreparedGlobalFamily(
+    prepared = PreparedGlobalFamily(
         decision_id=stable_hash(
             {
                 "authority_certificate_hash": authority_certificate_hash,
@@ -41781,6 +41845,7 @@ def _prepare_current_global_probability_family(
             family=family,
         ),
     )
+    return _bind_day0_saturated_statistical_sides(prepared, payload)
 
 
 def _current_global_probability_components(

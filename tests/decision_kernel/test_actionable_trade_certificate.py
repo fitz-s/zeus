@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-05-25; last_reviewed=2026-09-16; last_reused=2026-09-16
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -898,6 +898,147 @@ def _day0_qkernel_economics() -> dict:
         }
     )
     return economics
+
+
+def _complete_current_state_day0_payload(
+    *,
+    q_live: float = 0.70,
+    q_lcb: float = 0.70,
+    transform_lcb: float = 0.70,
+    **economics_overrides,
+) -> dict:
+    economics = {
+        **_action_payload()["qkernel_execution_economics"],
+        "decision_id": "decision-current-day0",
+        "receipt_hash": "receipt-current-day0",
+        "q_version": "q-current-day0",
+        "sample_hash": "sample-current-day0",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "sample-current-day0",
+        "selection_guard_basis": "CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "sample-current-day0",
+        "selection_guard_n": 64,
+        "selection_guard_q_safe": q_live,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "payoff_q_point": q_live,
+        "payoff_q_action": q_live,
+        "payoff_q_lcb": q_lcb,
+    }
+    economics.update(economics_overrides)
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    return {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 64,
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "remaining_day_probability_authority": "day0_remaining_day_global_probability_v1",
+        "remaining_day_q_source": "day0_remaining_day",
+        "remaining_day_q_mode": "remaining_day",
+        "remaining_day_models": 64,
+        "rounded_value": 25,
+        "observation_time": "2026-07-26T06:50:00+00:00",
+        "observation_available_at": "2026-07-26T06:55:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-1": transform_lcb},
+            "no_lcb_by_condition": {"condition-1": 0.0},
+            "absorbing_yes_conditions": [],
+            "absorbing_no_conditions": [],
+        },
+        "qkernel_execution_economics": economics,
+    }
+
+
+def test_day0_authority_accepts_complete_current_state_mean_when_lcb_equals_q():
+    from src.events.day0_authority import assert_live_day0_probability_authority
+
+    payload = _complete_current_state_day0_payload()
+
+    assert_live_day0_probability_authority(
+        payload,
+        direction="buy_yes",
+        condition_id="condition-1",
+        q_live=0.70,
+        q_lcb=0.70,
+    )
+
+
+def test_day0_authority_accepts_complete_current_state_mean_tightening():
+    from src.events.day0_authority import assert_live_day0_probability_authority
+
+    payload = _complete_current_state_day0_payload(transform_lcb=0.80)
+
+    assert_live_day0_probability_authority(
+        payload,
+        direction="buy_yes",
+        condition_id="condition-1",
+        q_live=0.70,
+        q_lcb=0.70,
+    )
+
+
+def test_day0_authority_rejects_complete_current_state_mean_at_certain_q_without_absorbing_proof():
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_probability_authority,
+    )
+
+    payload = _complete_current_state_day0_payload(
+        q_live=1.0,
+        q_lcb=1.0,
+        transform_lcb=1.0,
+    )
+
+    with pytest.raises(Day0AuthorityError, match="degenerate with q_live"):
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_yes",
+            condition_id="condition-1",
+            q_live=1.0,
+            q_lcb=1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda economics: economics.pop("current_state_identity_hash"),
+        lambda economics: economics.update(sample_hash="tampered-sample"),
+        lambda economics: economics.update(selection_guard_n=1),
+        lambda economics: economics.update(
+            global_probability_functional="LOWER_CVAR_PARAMETER_DRAWS"
+        ),
+        lambda economics: economics.update(
+            q_lcb_guard_basis="DAY0_REMAINING_DAY_Q_LCB"
+        ),
+        lambda economics: economics.update(payoff_q_action=0.69),
+    ),
+)
+def test_day0_authority_rejects_incomplete_current_state_mean(mutation):
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_probability_authority,
+    )
+
+    payload = _complete_current_state_day0_payload()
+    economics = payload["qkernel_execution_economics"]
+    mutation(economics)
+    if "current_state_identity_hash" in economics:
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+
+    with pytest.raises(Day0AuthorityError):
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_yes",
+            condition_id="condition-1",
+            q_live=0.70,
+            q_lcb=0.70,
+        )
 
 
 def _replacement_global_day0_probability_authority(
