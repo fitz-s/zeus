@@ -8969,9 +8969,18 @@ def process_current_global_batch(
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
                     )
-            if (
-                selected.decision.candidate is None
-                and selected.decision.no_trade_reason
+            # An unevaluated result (every whole-scope abort before candidate
+            # materialization, plus the cancelled-mid-solve case constructed
+            # directly above rather than through ``_no_trade``) must never
+            # reach `_store_global_auction_receipt`: its book-side proof
+            # demands full candidate coverage, which an unevaluated cut never
+            # built. `getattr` guards test doubles that predate the
+            # ``evaluated`` field (e.g. plain SimpleNamespace stand-ins),
+            # mirroring the existing materialization_excluded_by_family reads
+            # below.
+            if selected.decision.candidate is None and (
+                not getattr(selected, "evaluated", True)
+                or selected.decision.no_trade_reason
                 == "GLOBAL_SELECTION_CANCELLED"
             ):
                 return selected

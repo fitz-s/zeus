@@ -16924,6 +16924,78 @@ def test_global_book_token_reuse_for_batch_missing_family_raises_keyerror():
         era._reuse_global_book_token_bindings_for_batch(batch, cached_universe)
 
 
+def test_probe_global_book_epoch_cache_reserves_one_second_before_selection(
+    monkeypatch,
+):
+    """global_batch_runtime.select_once stamps its own selection_at 0.7-1.3s
+    after this probe runs, and the selector's freshness check compares that
+    later timestamp against the same deadline. The probe must therefore
+    treat a book epoch as already expired one second before its real
+    deadline (mirroring _global_book_prefetch_is_consumable's reserve), or a
+    book epoch it accepts as current here can still expire before selection
+    reads it (GLOBAL_BOOK_EPOCH_EXPIRED)."""
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    captured_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    max_age = _dt.timedelta(seconds=10)
+    deadline = captured_at + max_age
+    probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+    states = (("family", "bin", "condition", "YES", "yes-token", "EXECUTABLE"),)
+    epoch = CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=captured_at,
+        max_age=max_age,
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=captured_at,
+        ),
+    )
+    assert era._store_global_book_epoch(
+        conn,
+        probabilities,
+        epoch,
+        checked_at=captured_at,
+    ) == "stored"
+
+    # Real deadline is 0.5s away: the reserve pulls the checked instant 1s
+    # forward, past the deadline, so this must already read as expired.
+    near_deadline = deadline - _dt.timedelta(seconds=0.5)
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        probabilities,
+        checked_at=near_deadline,
+        allowed=True,
+    )
+    assert cached is None
+    assert reason == "expired"
+
+    # Real deadline is 2s away: even reserved forward by 1s, still current.
+    fresh = deadline - _dt.timedelta(seconds=2)
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        probabilities,
+        checked_at=fresh,
+        allowed=True,
+    )
+    assert cached is epoch
+    assert reason == "hit"
+    conn.close()
+
+
 @contextmanager
 def _expired_topology_reuse_harness(
     monkeypatch,
@@ -31049,6 +31121,140 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
+
+
+def test_global_batch_unevaluated_no_trade_skips_book_materialization_proof(
+    monkeypatch,
+):
+    """A whole-scope abort raised before candidate materialization (e.g. the
+    book-epoch-expired race between the freshness probe and selection) must
+    never reach the book-side receipt proof: that proof demands every
+    EXECUTABLE book side resolve to a candidate, which an unevaluated cut
+    never built. Regression coverage for
+    GLOBAL_AUCTION_RECEIPT_BUY_BOOK_MATERIALIZATION_MISMATCH firing on a
+    ``_no_trade`` result and masking its real (typed) no-trade reason behind
+    ``GLOBAL_AUCTION_FAILED:ValueError:...``. Unlike the cancelled-selection
+    test above, this one lets the real (unstubbed)
+    ``_store_global_auction_receipt`` run against a real book epoch carrying
+    an EXECUTABLE, non-excluded asset -- on the parent commit this raises the
+    MISMATCH ValueError instead of returning cleanly.
+    """
+    trade_conn = sqlite3.connect(":memory:")
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-a",
+        bindings=(
+            SimpleNamespace(
+                bin_id="bin-a",
+                condition_id="condition-a",
+                yes_token_id="yes-a",
+                no_token_id="no-a",
+            ),
+        ),
+    )
+    asset_states = (
+        (
+            family_key,
+            "bin-a",
+            "condition-a",
+            "YES",
+            "yes-a",
+            "EXECUTABLE",
+            "book-hash-a",
+            "market-event-a",
+            "gamma-a",
+            "False",
+        ),
+    )
+    book_venue_identity = current_global_book_epoch_identity(
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+    )
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=book_venue_identity,
+    )
+
+    def select(*_args, **_kwargs):
+        import src.engine.global_single_order_auction as gsoa
+
+        return gsoa._no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-witness",
+            economic_identity="wealth-economic",
+            ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: book_venue_identity,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=trade_conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=bridge.PreparedGlobalFamily(
+                    decision_id=f"decision-{family_key}",
+                    probability_witness=witness,
+                    candidate_seeds=(),
+                ),
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "unevaluated no-trade must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+            current_book_epoch_provider=lambda probabilities, _at: (
+                probabilities,
+                book_epoch,
+            ),
+        )
+    finally:
+        trade_conn.close()
+
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    receipt = result.receipts[event.event_id]
+    assert receipt.submitted is False
+    assert receipt.reason == "GLOBAL_AUCTION_NO_TRADE:GLOBAL_BOOK_EPOCH_EXPIRED"
 
 
 def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):

@@ -252,6 +252,11 @@ class PreparedGlobalAuctionResult:
     materialization_excluded_by_family: Mapping[str, str] = field(
         default_factory=dict
     )
+    # False only for a scope aborted before candidate materialization began
+    # (every ``_no_trade`` return below). The book-side receipt proof is a
+    # statement about an evaluation that happened; an unevaluated result must
+    # never reach it, so this flag is what lets the caller tell the two apart.
+    evaluated: bool = True
 
     def __post_init__(self) -> None:
         if (self.decision.candidate is None) != (self.winner_event_id is None):
@@ -635,6 +640,7 @@ def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
         ),
         winner_event_id=None,
         actuation=None,
+        evaluated=False,
     )
 
 

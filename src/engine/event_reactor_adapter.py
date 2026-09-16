@@ -3607,7 +3607,13 @@ def _probe_global_book_epoch_cache(
     if not callable(current_identity):
         return None, "current_identity_missing"
     try:
-        if current_identity(checked_at.astimezone(UTC)) is None:
+        # Mirror _global_book_prefetch_is_consumable's one-second reserve:
+        # global_batch_runtime.select_once stamps its own selection_at
+        # 0.7-1.3s after this probe runs, and the freshness check there
+        # compares that later timestamp against the same deadline. Without
+        # the reserve, a book epoch this probe accepts as current can still
+        # expire before selection reads it (GLOBAL_BOOK_EPOCH_EXPIRED).
+        if current_identity(checked_at.astimezone(UTC) + timedelta(seconds=1)) is None:
             return None, "expired"
         return entry.epoch, hit_reason
     except (TypeError, ValueError) as exc:
