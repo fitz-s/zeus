@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-25 (native-token rest/duplicate scope)
+# Last reused or audited: 2026-09-16 (selection-time native-token duplicate scope)
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 #   + live_order_pathology GAP-4 rest-then-cross re-rest evidence
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
@@ -614,3 +614,64 @@ class TestMinutesToEventEnd:
         # End of 2026-06-10 UTC = 2026-06-11T00:00Z; NOW is 22:00Z -> 120 minutes.
         minutes = adapter._minutes_to_family_event_end(family, NOW)
         assert minutes is not None and abs(minutes - 120.0) < 0.01
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("mode", ["MAKER_REST", "TAKER_LIMIT"])
+@pytest.mark.parametrize("state", ["ACKED", "PARTIAL", "UNKNOWN"])
+def test_global_selection_excludes_active_native_entry_and_resets(side, mode, state):
+    trade = _db()
+    _add(trade, token_id="held-token", command_state=state)
+    world = sqlite3.connect(":memory:")
+    world.execute(
+        "CREATE TABLE edli_live_order_events (aggregate_id TEXT, event_sequence INTEGER, "
+        "event_type TEXT, payload_json TEXT, occurred_at TEXT)"
+    )
+    world.execute(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?, ?, ?)",
+        ("aggregate-1", 1, "SubmitPlanBuilt", json.dumps({
+            "condition_id": "condition-1", "token_id": "held-token",
+            "direction": "buy_yes" if side == "YES" else "buy_no",
+        }), NOW.isoformat()),
+    )
+    candidate = SimpleNamespace(
+        action="BUY", family_key="same-family", condition_id="condition-1",
+        token_id="held-token", side=side, execution_mode=mode,
+    )
+
+    def rejection(current=candidate):
+        return adapter._global_active_entry_duplicate_reason(
+            current, trade_conn=trade, live_cap_conn=world
+        )
+
+    assert rejection().startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:")
+    assert rejection(SimpleNamespace(**(vars(candidate) | {"action": "SELL"}))) is None
+    assert rejection(SimpleNamespace(**(vars(candidate) | {"token_id": "sibling-token"}))) is None
+    assert rejection(SimpleNamespace(**(vars(candidate) | {"condition_id": "other-condition"}))) is None
+    trade.execute("UPDATE venue_commands SET state='CANCELLED' WHERE command_id='c1'")
+    assert rejection() is None
+    trade.execute("UPDATE venue_commands SET state=? WHERE command_id='c1'", (state,))
+    _add(trade, command_id="new-terminal", token_id="held-token", command_state="FILLED")
+    assert rejection().startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:")
+    world.execute(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?, ?, ?)",
+        ("aggregate-1", 2, "CapTransitioned", '{"to_status":"RELEASED"}', NOW.isoformat()),
+    )
+    assert rejection() is None, "the unchanged final aggregate law owns the veto"
+    world.close()
+    trade.close()
+
+
+def test_missing_active_command_hint_retains_final_lock_authority(monkeypatch):
+    trade = sqlite3.connect(":memory:")
+    candidate = SimpleNamespace(
+        action="BUY", condition_id="condition-1", token_id="token-1", side="YES",
+    )
+    monkeypatch.setattr(
+        adapter, "_locked_live_opportunity_active_order_reason",
+        lambda *_args, **_kwargs: pytest.fail("missing hint is not early authority"),
+    )
+    assert adapter._global_active_entry_duplicate_reason(
+        candidate, trade_conn=trade, live_cap_conn=object()
+    ) is None
+    trade.close()

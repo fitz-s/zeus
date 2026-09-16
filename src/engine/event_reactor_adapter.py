@@ -6502,6 +6502,48 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
+def _global_active_entry_duplicate_reason(
+    candidate: object,
+    *,
+    trade_conn: sqlite3.Connection | None,
+    live_cap_conn: sqlite3.Connection | None,
+) -> str | None:
+    """Exclude a known active native order before spending a full auction on it."""
+
+    if str(getattr(candidate, "action", "BUY") or "BUY").upper() != "BUY":
+        return None
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    if trade_conn is None or not token_id or not condition_id or side not in {"YES", "NO"}:
+        return None
+    # This indexed hint only avoids repeated aggregate scans for untouched tokens.
+    # An unavailable hint grants no authority: final submission still checks the lock.
+    try:
+        states = trade_conn.execute(
+            "SELECT state FROM venue_commands "
+            "WHERE token_id = ? AND intent_kind = 'ENTRY' AND side = 'BUY'",
+            (token_id,),
+        )
+        active = any(
+            str(row[0] or "").upper() not in _TERMINAL_VENUE_COMMAND_STATES
+            for row in states
+        )
+    except sqlite3.Error:
+        return None
+    if not active:
+        return None
+    # SCOPE: this native token/direction, including both execution modes.
+    # DRAIN: compare other candidates now; monitor/reconcile the existing order.
+    # RESET: each call rereads terminal state and the unchanged aggregate lock.
+    return _locked_live_opportunity_active_order_reason(
+        live_cap_conn,
+        condition_id=condition_id,
+        token_id=token_id,
+        direction="buy_yes" if side == "YES" else "buy_no",
+    )
+
+
 def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
@@ -11669,6 +11711,13 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if family_block_reason is not None:
                 return family_block_reason
+            duplicate_reason = _global_active_entry_duplicate_reason(
+                candidate,
+                trade_conn=trade_conn,
+                live_cap_conn=live_cap_conn or trade_conn,
+            )
+            if duplicate_reason is not None:
+                return duplicate_reason
             family_key = str(getattr(candidate, "family_key", "") or "").strip()
             owner = _global_entry_policy_by_family.get(family_key)
             side = str(getattr(candidate, "side", "") or "").strip().upper()

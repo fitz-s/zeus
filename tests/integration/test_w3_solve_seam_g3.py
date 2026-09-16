@@ -11173,6 +11173,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             forecast_conn=forecast,
             topology_conn=topology,
             calibration_conn=world,
+            live_cap_conn=world,
             portfolio_state_provider=lambda: pytest.fail(
                 "cycle-start portfolio must not back global selection wealth"
             ),
@@ -11228,6 +11229,25 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is True
+    duplicate_checks = []
+    with monkeypatch.context() as active_order_probe:
+        active_order_probe.setattr(
+            era, "_global_active_entry_duplicate_reason",
+            lambda current, **kwargs: duplicate_checks.append((current, kwargs))
+            or "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:exact-native-token",
+        )
+        active_candidate = SimpleNamespace(action="BUY", token_id="native-token")
+        for policy_name in (
+            "candidate_policy_rejection_resolver",
+            "proof_candidate_policy_rejection_resolver",
+        ):
+            assert captured[policy_name](active_candidate).startswith(
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+            )
+        assert len(duplicate_checks) == 2
+        assert all(item[0] is active_candidate for item in duplicate_checks)
+        assert all(item[1]["trade_conn"] is trade for item in duplicate_checks)
+        assert all(item[1]["live_cap_conn"] is world for item in duplicate_checks)
     exact_request = SimpleNamespace(
         schema_version=4,
         position_id="position-nyc",
