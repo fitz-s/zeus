@@ -6872,6 +6872,14 @@ def _compute_posterior_payload(
                 )
             except Exception:
                 pass
+    # The carrier is only reachable inside the fusion gate above, so this raise
+    # must share that gate's precondition. Without it, a family whose fusion
+    # capture was never available skips the whole region — no exception, so
+    # `_day0_shared_carrier_error` stays None — and then hard-errors here with a
+    # generic string naming a carrier it never attempted. That case is already
+    # the designed BAYES_PRECISION_FUSION_CAPTURE_MISSING degrade, which the
+    # live gate rejects on its own. A carrier that WAS attempted and failed
+    # still raises, now carrying the real captured reason.
     if (
         _target_local_day_has_started(request)
         and _day0_observed_extreme_c(request) is not None
@@ -6879,6 +6887,8 @@ def _compute_posterior_payload(
             _is_noaa_preliminary_source(request.day0_observed_extreme_source)
             or _is_hko_provisional_source(request.day0_observed_extreme_source)
         )
+        and bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.predictive_sigma_c is not None
         and _day0_shared_carrier is None
     ):
         raise ValueError(
