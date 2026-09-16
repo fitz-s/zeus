@@ -26187,6 +26187,57 @@ def _review_required_cancel_failed_already_canceled_fill_recovery(
     return "advanced"
 
 
+def _position_scope_has_fill_evidence(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+) -> bool:
+    """Return whether ANY command bound to this position claims a fill.
+
+    A per-command absence proof is too narrow to license voiding a position that
+    was never projected: a sibling increment could have filled and lost its own
+    projection write. Fail closed on a read error — an unreadable proof is not a
+    proof of absence.
+    """
+
+    if not position_id:
+        return True
+    try:
+        if _table_exists(conn, "venue_trade_facts"):
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_trade_facts
+                 WHERE command_id IN (
+                           SELECT command_id
+                             FROM venue_commands
+                            WHERE position_id = ?
+                       )
+                   AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            if row is not None:
+                return True
+        if _table_exists(conn, "position_events"):
+            row = conn.execute(
+                "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+                (position_id,),
+            ).fetchone()
+            if row is not None:
+                return True
+    except sqlite3.Error:
+        logger.warning(
+            "recovery: position-scope fill evidence unreadable for %s; failing closed",
+            position_id,
+            exc_info=True,
+        )
+        return True
+    return False
+
+
 def _review_required_cancel_failed_already_canceled_no_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
@@ -26301,25 +26352,40 @@ def _review_required_cancel_failed_already_canceled_no_fill_recovery(
     if fact_state is None or not no_fill_proven or matching_open_orders or matching_trades:
         return "stayed"
 
-    current = _dict_row(
-        conn.execute(
-            "SELECT phase, shares, cost_basis_usd, order_id, city, target_date, "
-            "strategy_key "
-            "FROM position_current WHERE position_id = ? LIMIT 1",
-            (str(command.get("position_id") or ""),),
-        ).fetchone()
-    )
+    position_id = str(command.get("position_id") or "")
+    projection_row = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, order_id, city, target_date, "
+        "strategy_key "
+        "FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    current = _dict_row(projection_row)
     try:
         shares = Decimal(str(current.get("shares") or "0"))
         cost_basis = Decimal(str(current.get("cost_basis_usd") or "0"))
     except (InvalidOperation, TypeError, ValueError):
         return "stayed"
     phase = str(current.get("phase") or "")
-    zero_pending = (
-        phase in {"pending_entry", "voided"}
-        and shares == 0
-        and cost_basis == 0
-    )
+    # An ACK whose persistence died after the venue side effect can leave the
+    # command bound to a position that was never projected at all. A missing row
+    # is zero exposure, exactly as the sibling post-ACK lane already reads it
+    # (`_no_positive_position_projection` returns True when the row is absent);
+    # `_dict_row(None)` would otherwise yield phase="" and read as ambiguous,
+    # stranding the command forever. Absence is only admissible when nothing
+    # anywhere on the position claims a fill, so the proof widens from this
+    # command to every command bound to the same position.
+    projection_absent = projection_row is None and bool(position_id)
+    if projection_absent and not _position_scope_has_fill_evidence(
+        conn,
+        position_id=position_id,
+    ):
+        zero_pending = True
+    else:
+        zero_pending = (
+            phase in {"pending_entry", "voided"}
+            and shares == 0
+            and cost_basis == 0
+        )
     existing_position = (
         cmd.intent_kind == IntentKind.ENTRY
         and phase in {"active", "day0_window", "pending_exit"}

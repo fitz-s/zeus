@@ -4320,6 +4320,57 @@ def reconciled_increment_no_fill_proof(
     }
 
 
+def _position_scope_proves_no_fill(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    """Return whether the command's position has no fill claim anywhere.
+
+    Mirrors ``command_recovery._position_scope_has_fill_evidence`` on the
+    durable side: a missing ``position_current`` row may stand in for zero
+    exposure only when no command bound to that position carries a positive
+    trade fact and nothing was ever projected for it. Fails closed.
+    """
+
+    with _row_factory_as(conn, sqlite3.Row):
+        row = conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    position_id = str((row["position_id"] if row is not None else "") or "").strip()
+    if not position_id:
+        return False
+    try:
+        if _review_clearance_table_exists(conn, "venue_trade_facts"):
+            hit = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_trade_facts
+                 WHERE command_id IN (
+                           SELECT command_id
+                             FROM venue_commands
+                            WHERE position_id = ?
+                       )
+                   AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            if hit is not None:
+                return False
+        if _review_clearance_table_exists(conn, "position_events"):
+            hit = conn.execute(
+                "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+                (position_id,),
+            ).fetchone()
+            if hit is not None:
+                return False
+    except sqlite3.Error:
+        return False
+    return True
+
+
 def _validate_review_cancel_unknown_no_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -4431,22 +4482,35 @@ def _validate_review_cancel_unknown_no_fill_payload(
         ).fetchone()
     if command is None or not str(command["venue_order_id"] or "").strip():
         raise ValueError("cancel-unknown no-fill clearance requires command venue_order_id")
+    # A post-ACK persistence failure can strand a command on a position that was
+    # never projected. The sibling submit-terminal-no-fill validator already
+    # treats an absent row as zero exposure by default; this one must agree, or
+    # the command can never terminalise. Absence is licensed only when no
+    # command on the position claims a fill and nothing was ever projected.
     if current is None:
-        raise ValueError("cancel-unknown no-fill clearance requires position_current")
-    # An unfilled incremental order can share an already-active position row
-    # with older fills.  Command-specific CLOB facts prove whether this order
-    # added exposure; the aggregate position must not be mistaken for its fill.
-    phase = str(current["phase"] or "")
-    try:
-        shares = Decimal(str(current["shares"] or "0"))
-        cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))
-    except (InvalidOperation, TypeError) as exc:
-        raise ValueError("cancel-unknown no-fill position_current exposure is invalid") from exc
-    zero_pending = (
-        phase in {"pending_entry", "voided"}
-        and shares == Decimal("0")
-        and cost_basis == Decimal("0")
-    )
+        if not _position_scope_proves_no_fill(conn, command_id):
+            raise ValueError(
+                "cancel-unknown no-fill clearance requires position_current"
+            )
+        phase = ""
+        shares = Decimal("0")
+        cost_basis = Decimal("0")
+        zero_pending = True
+    else:
+        # An unfilled incremental order can share an already-active position row
+        # with older fills.  Command-specific CLOB facts prove whether this order
+        # added exposure; the aggregate position must not be mistaken for its fill.
+        phase = str(current["phase"] or "")
+        try:
+            shares = Decimal(str(current["shares"] or "0"))
+            cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))
+        except (InvalidOperation, TypeError) as exc:
+            raise ValueError("cancel-unknown no-fill position_current exposure is invalid") from exc
+        zero_pending = (
+            phase in {"pending_entry", "voided"}
+            and shares == Decimal("0")
+            and cost_basis == Decimal("0")
+        )
     increment_proof = payload.get("existing_position_increment_proof")
     persisted_increment = reconciled_increment_no_fill_proof(conn, command_id)
     increment_matches = (
