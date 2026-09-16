@@ -31046,6 +31046,7 @@ def _reconcile_passes_short_conn(
         or full_deadline
         or (scheduler_deadline if scope == "restart_preflight" else None)
     )
+    cross_db_factory = conn_factory
     conn_factory = _recovery_priority_conn_factory(
         conn_factory,
         scope=scope,
@@ -31314,7 +31315,7 @@ def _reconcile_passes_short_conn(
             connection so its complete atomic write set can commit.
             """
 
-            base_factory = conn_factory if cross_db else capital_conn_factory
+            base_factory = cross_db_factory if cross_db else capital_conn_factory
             priority_factory = _recovery_priority_conn_factory(
                 base_factory,
                 scope="live_tick",
