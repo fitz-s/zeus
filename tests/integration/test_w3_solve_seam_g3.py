@@ -32238,6 +32238,7 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
     import src.runtime.reactor_wake as reactor_wake
 
     captured = {}
+    preflight_order = []
     routine_monitor_pending = [True]
     wake_revision = [1]
     wake_reason = ["held_position_monitor_pending"]
@@ -32267,17 +32268,17 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
     monkeypatch.setattr(
         era,
         "_global_preflight_candidate_receipt",
-        lambda *_args, **_kwargs: stable_receipt,
+        lambda *_args, **_kwargs: preflight_order.append("candidate") or stable_receipt,
     )
     monkeypatch.setattr(
         era,
         "_global_preflight_entry_authority_receipt",
-        lambda _event, receipt, **_kwargs: receipt,
+        lambda _event, receipt, **_kwargs: preflight_order.append("authority") or receipt,
     )
     monkeypatch.setattr(
         era,
         "_global_preflight_entry_jit_receipt",
-        lambda _event, receipt, **_kwargs: receipt,
+        lambda _event, receipt, **_kwargs: preflight_order.append("jit") or receipt,
     )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
@@ -32311,6 +32312,7 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
         authority,
     )
     assert result.status == "STABLE"
+    assert preflight_order == ["candidate", "jit", "authority"]
     assert cancelled() is False
 
     wake_revision[0] += 1
@@ -35269,6 +35271,11 @@ def test_global_batch_falls_through_family_local_preflight_block(
     ("reason", "blocked_action", "sibling_action"),
     (
         (
+            "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:DAY0_DIURNAL_NOWCAST_VETO",
+            "BUY",
+            "BUY",
+        ),
+        (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
             "classes=EXECUTION_PRICE_MISSING=1",
@@ -35408,13 +35415,15 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         "LIVE_INFERENCE_INPUTS_MISSING:"
         "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
     )
+    distinct_buy = family_entry_block or blocked_action == sibling_action == "BUY"
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",
         action=("BUY" if family_entry_block else sibling_action),
         family_key=family_key,
-        bin_id=("bin-b" if family_entry_block else "bin-a"),
-        side=("YES" if family_entry_block else "NO"),
-        token_id=("token-b" if family_entry_block else "token-a"),
+        bin_id=("bin-b" if distinct_buy else "bin-a"),
+        side=("YES" if distinct_buy else "NO"),
+        token_id=("token-b" if distinct_buy else "token-a"),
+        execution_mode=execution_mode,
     )
     candidate_c = SimpleNamespace(
         candidate_id="candidate-c",
@@ -35467,7 +35476,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         witness_identity="book-candidate",
         captured_at_utc=decision_at,
         max_age=_dt.timedelta(seconds=30),
-        assets=((asset, sibling_buy_asset) if family_entry_block else (asset,)),
+        assets=((asset, sibling_buy_asset) if distinct_buy else (asset,)),
         sell_assets=(asset,),
     )
     calls = {

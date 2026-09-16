@@ -1281,6 +1281,212 @@ def test_day0_admission_rejection_receipt_reason_ignores_unrelated_errors() -> N
 
 
 @pytest.mark.parametrize(
+    ("direction", "execution_mode", "expected_order_mode"),
+    (
+        ("buy_yes", "TAKER_LIMIT", "TAKER"),
+        ("buy_no", "TAKER_LIMIT", "TAKER"),
+        ("buy_yes", "MAKER_REST", "MAKER"),
+        ("buy_no", "MAKER_REST", "MAKER"),
+    ),
+)
+@pytest.mark.parametrize("rejection", [None, "DAY0_DIURNAL_NOWCAST_VETO"])
+def test_global_preflight_authority_applies_day0_admission_to_sealed_jit_candidate(
+    monkeypatch, direction, execution_mode, expected_order_mode, rejection
+) -> None:
+    """The global candidate is blocked before STABLE using its sealed JIT mode/book."""
+
+    event = _day0_event_payload()
+    snapshot = SimpleNamespace(
+        snapshot_id="jit-day0",
+        raw_orderbook_hash="book-day0",
+        selected_outcome_token_id="held-token-day0",
+        orderbook_top_bid=0.42,
+        orderbook_top_ask=0.44,
+        min_tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        captured_at=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+        orderbook_depth_jsonb='{"asks": [{"price": "0.44", "size": "10"}]}',
+    )
+    candidate = SimpleNamespace(
+        execution_mode=execution_mode,
+        book_snapshot_id=snapshot.snapshot_id,
+        executable_cost_curve=SimpleNamespace(snapshot_id=snapshot.snapshot_id),
+    )
+    handoff = object.__new__(era._GlobalJitHandoff)
+    object.__setattr__(handoff, "candidate", candidate)
+    object.__setattr__(handoff, "authority", SimpleNamespace(snapshot=snapshot))
+    object.__setattr__(handoff, "raw_book_json", "{}")
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction=direction,
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+        global_jit_candidate=handoff,
+    )
+    cap = object.__new__(era.DecisionCertificate)
+    payload = _day0_action_payload(
+        bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+        direction=direction,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        era,
+        "_actionable_payload_from_receipt",
+        lambda *_args, **_kwargs: dict(payload),
+    )
+    monkeypatch.setattr(era, "_assert_live_entry_submit_authority", lambda _payload: None)
+    monkeypatch.setattr(
+        era,
+        "_stamp_day0_live_admission_payload",
+        lambda actionable_payload, **kwargs: captured.update(
+            stamped_payload=actionable_payload, stamp_kwargs=kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_live_submit_admission_rejection_reason",
+        lambda **kwargs: captured.update(predicate=kwargs) or rejection,
+    )
+
+    monkeypatch.setattr(
+        era,
+        "_build_live_cap_certificate_from_ledger",
+        lambda **_kwargs: cap,
+    )
+    trade_conn = object()
+    blocked = era._global_preflight_entry_authority_receipt(
+        event,
+        receipt,
+        decision_time=datetime(2026, 7, 2, 2, 18, tzinfo=timezone.utc),
+        live_cap_conn=None,
+        trade_conn=trade_conn,
+    )
+
+    if rejection is None:
+        assert blocked is receipt
+    else:
+        assert blocked.proof_accepted is False
+        assert blocked.side_effect_status == "NO_SUBMIT"
+        assert blocked.reason == (
+            "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:" + rejection
+        )
+        assert era._global_preflight_block_status(blocked.reason) == "CANDIDATE_BLOCKED"
+    assert captured["predicate"]["order_mode"] == expected_order_mode
+    assert captured["stamp_kwargs"]["held_token_id"] == "held-token-day0"
+    assert captured["stamp_kwargs"]["book_captured_at"] == snapshot.captured_at
+    assert captured["stamp_kwargs"]["trade_conn"] is trade_conn
+    witness = captured["predicate"]["authority_witness"]
+    assert isinstance(witness, era.SealedBookObservation)
+    assert witness.quote_seen_at == snapshot.captured_at.isoformat()
+    assert witness.book_captured_at == snapshot.captured_at.isoformat()
+    assert witness.checked_at == snapshot.captured_at.isoformat()
+    assert captured["predicate"]["world_conn"] is trade_conn
+
+
+def test_global_preflight_day0_missing_jit_cannot_be_stable() -> None:
+    event = _day0_event_payload()
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+    )
+
+    blocked = era._global_preflight_entry_authority_receipt(
+        event,
+        receipt,
+        decision_time=datetime(2026, 7, 2, 2, 18, tzinfo=timezone.utc),
+        live_cap_conn=None,
+    )
+
+    assert blocked.proof_accepted is False
+    assert blocked.reason.endswith("GLOBAL_PREFLIGHT_DAY0_JIT_HANDOFF_INVALID")
+    assert era._global_preflight_block_status(blocked.reason) == "CANDIDATE_BLOCKED"
+
+
+def test_global_preflight_day0_ask_gate_uses_trade_connection(monkeypatch) -> None:
+    event = _day0_event_payload()
+    world_conn = sqlite3.connect(":memory:")
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(
+        "CREATE TABLE executable_market_snapshots ("
+        "selected_outcome_token_id TEXT, captured_at TEXT, orderbook_top_ask REAL)"
+    )
+    captured_at = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+    trade_conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?)",
+        (
+            ("held-token-day0", "2026-07-02T02:08:00+00:00", 0.45),
+            ("held-token-day0", "2026-07-02T02:12:00+00:00", 0.46),
+        ),
+    )
+    trade_conn.commit()
+    snapshot = SimpleNamespace(
+        snapshot_id="jit-day0",
+        raw_orderbook_hash="book-day0",
+        selected_outcome_token_id="held-token-day0",
+        orderbook_top_bid=0.42,
+        orderbook_top_ask=0.44,
+        min_tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        captured_at=captured_at,
+        orderbook_depth_jsonb='{"asks": [{"price": "0.44", "size": "10"}]}',
+    )
+    candidate = SimpleNamespace(
+        execution_mode="MAKER_REST",
+        book_snapshot_id=snapshot.snapshot_id,
+        executable_cost_curve=SimpleNamespace(snapshot_id=snapshot.snapshot_id),
+    )
+    handoff = object.__new__(era._GlobalJitHandoff)
+    object.__setattr__(handoff, "candidate", candidate)
+    object.__setattr__(handoff, "authority", SimpleNamespace(snapshot=snapshot))
+    object.__setattr__(handoff, "raw_book_json", "{}")
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_no",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+        global_jit_candidate=handoff,
+    )
+    cap = object.__new__(era.DecisionCertificate)
+    payload = _day0_action_payload(
+        bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+        direction="buy_no",
+    )
+    monkeypatch.setattr(era, "_build_live_cap_certificate_from_ledger", lambda **_: cap)
+    monkeypatch.setattr(era, "_assert_live_entry_submit_authority", lambda _: None)
+    monkeypatch.setattr(
+        era, "_actionable_payload_from_receipt", lambda *_args, **_kwargs: dict(payload)
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.day0_entry_bin_still_alive",
+        lambda **_: True,
+    )
+
+    blocked = era._global_preflight_entry_authority_receipt(
+        event,
+        receipt,
+        decision_time=datetime(2026, 7, 2, 2, 18, tzinfo=timezone.utc),
+        live_cap_conn=world_conn,
+        trade_conn=trade_conn,
+    )
+
+    assert blocked.reason == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:"
+        "DAY0_ASK_REPRICING_VETO"
+    )
+    assert blocked.proof_accepted is False
+    assert era._global_preflight_block_status(blocked.reason) == "CANDIDATE_BLOCKED"
+
+
+@pytest.mark.parametrize(
     "gate",
     (
         "DAY0_CITY_NOT_ALLOWLISTED",  # legacy value, still a valid detail string post-M-13

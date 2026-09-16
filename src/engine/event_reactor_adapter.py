@@ -9433,12 +9433,6 @@ def event_bound_live_adapter_from_trade_conn(
                 or str(receipt.reason or "").startswith("GLOBAL_SELL_")
             )
             if not sell_preflight:
-                receipt = _global_preflight_entry_authority_receipt(
-                    event,
-                    receipt,
-                    decision_time=at,
-                    live_cap_conn=live_cap_conn or trade_conn,
-                )
                 receipt = _global_preflight_entry_jit_receipt(
                     event,
                     receipt,
@@ -9446,6 +9440,13 @@ def event_bound_live_adapter_from_trade_conn(
                     book_quote_provider=pre_submit_book_quote_provider,
                     current_candidate_override=jit_handoff,
                     checked_at_utc=datetime.now(UTC),
+                    trade_conn=trade_conn,
+                )
+                receipt = _global_preflight_entry_authority_receipt(
+                    event,
+                    receipt,
+                    decision_time=datetime.now(UTC),
+                    live_cap_conn=live_cap_conn or trade_conn,
                     trade_conn=trade_conn,
                 )
             reason = str(receipt.reason or "")
@@ -15427,6 +15428,7 @@ def _global_preflight_block_status(reason: str) -> str:
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
             "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
             "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:",
         )
     ):
         # These reject the selected action, not the current q/book/wealth epoch.
@@ -15541,6 +15543,7 @@ def _global_preflight_entry_authority_receipt(
     *,
     decision_time: datetime,
     live_cap_conn: sqlite3.Connection | None,
+    trade_conn: sqlite3.Connection | None = None,
 ) -> EventSubmissionReceipt:
     """Run the pure final-entry authority check while the auction can fall through."""
 
@@ -15549,6 +15552,42 @@ def _global_preflight_entry_authority_receipt(
         or receipt.decision_proof_bundle is None
     ):
         return receipt
+    handoff = receipt.global_jit_candidate
+    day0_order_mode: str | None = None
+    # SCOPE: selected Day0 candidate. DRAIN: rerank this cut; recapture next cut.
+    # RESET: current sealed inputs pass the same final admission predicate.
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        if not isinstance(handoff, _GlobalJitHandoff):
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:"
+                    "GLOBAL_PREFLIGHT_DAY0_JIT_HANDOFF_INVALID"
+                ),
+                proof_accepted=False,
+            )
+        day0_order_mode = {
+            "MAKER_REST": "MAKER",
+            "TAKER_LIMIT": "TAKER",
+        }.get(
+            str(getattr(handoff.candidate, "execution_mode", "") or "")
+            .strip()
+            .upper()
+        )
+        if day0_order_mode is None:
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:"
+                    "GLOBAL_PREFLIGHT_DAY0_JIT_MODE_INVALID:"
+                    f"{getattr(handoff.candidate, 'execution_mode', '') or 'missing'}"
+                ),
+                proof_accepted=False,
+            )
     try:
         live_cap = _build_live_cap_certificate_from_ledger(
             event=event,
@@ -15563,6 +15602,40 @@ def _global_preflight_entry_authority_receipt(
             event=event,
         )
         _assert_live_entry_submit_authority(actionable_payload)
+        if day0_order_mode is not None:
+            snapshot = handoff.authority.snapshot
+            _stamp_day0_live_admission_payload(
+                actionable_payload,
+                event_payload=_payload(event),
+                held_token_id=(
+                    str(getattr(snapshot, "selected_outcome_token_id", "") or "")
+                    or str(actionable_payload.get("token_id") or "")
+                ),
+                book_captured_at=getattr(snapshot, "captured_at", None),
+                decision_time=decision_time,
+                trade_conn=trade_conn,
+            )
+            day0_rejection = _day0_live_submit_admission_rejection_reason(
+                event=event,
+                actionable_payload=actionable_payload,
+                authority_witness=_sealed_book_observation_from_global_jit_handoff(
+                    handoff
+                ),
+                order_mode=day0_order_mode,
+                decision_time=decision_time,
+                world_conn=trade_conn,
+            )
+            if day0_rejection is not None:
+                return dataclass_replace(
+                    receipt,
+                    submitted=False,
+                    side_effect_status="NO_SUBMIT",
+                    reason=(
+                        "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:"
+                        f"{day0_rejection}"
+                    ),
+                    proof_accepted=False,
+                )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         return dataclass_replace(
             receipt,
@@ -23294,6 +23367,60 @@ def _log_day0_nowcast_fault(exc: BaseException) -> None:
     )
 
 
+def _stamp_day0_live_admission_payload(
+    actionable_payload: dict[str, object],
+    *,
+    event_payload: Mapping[str, object],
+    held_token_id: str | None,
+    book_captured_at: datetime | None,
+    decision_time: datetime,
+    trade_conn: sqlite3.Connection | None,
+) -> None:
+    """Stamp the exact Day0 inputs consumed by the final admission predicate."""
+
+    stamp_day0_diurnal_nowcast(
+        actionable_payload,
+        event_payload=event_payload,
+        decision_time=decision_time,
+    )
+    stamp_day0_held_ask_repricing(
+        actionable_payload,
+        held_token_id=held_token_id,
+        book_captured_at=book_captured_at,
+        trade_conn=trade_conn,
+    )
+
+
+def _sealed_book_observation_from_global_jit_handoff(
+    handoff: _GlobalJitHandoff,
+) -> SealedBookObservation:
+    """Project one sealed global JIT snapshot into the final gate's witness type."""
+
+    snapshot = handoff.authority.snapshot
+    captured_at = snapshot.captured_at.isoformat()
+    return SealedBookObservation(
+        quote_seen_at=captured_at,
+        book_hash=str(snapshot.raw_orderbook_hash),
+        current_best_bid=(
+            float(snapshot.orderbook_top_bid)
+            if snapshot.orderbook_top_bid is not None
+            else None
+        ),
+        current_best_ask=(
+            float(snapshot.orderbook_top_ask)
+            if snapshot.orderbook_top_ask is not None
+            else None
+        ),
+        tick_size=float(snapshot.min_tick_size),
+        min_order_size=float(snapshot.min_order_size),
+        neg_risk=bool(snapshot.neg_risk),
+        book_authority_id="clob_jit_book",
+        book_captured_at=captured_at,
+        orderbook_depth_jsonb=str(snapshot.orderbook_depth_jsonb),
+        checked_at=captured_at,
+    )
+
+
 def _day0_live_submit_admission_rejection_reason(
     *,
     event: OpportunityEvent,
@@ -23529,11 +23656,6 @@ def _build_live_execution_command_certificates(
         # Stamp the Day0 residual-nowcast verdict BEFORE the certificate seals the
         # payload hash, so the veto the admission gate applies below is auditable on the
         # certificate and on the no-submit receipt that carries it.
-        stamp_day0_diurnal_nowcast(
-            actionable_payload,
-            event_payload=_payload(event),
-            decision_time=decision_time,
-        )
         # Same seal-before-hash discipline, same fail-open contract: count how many
         # distinct asks the HELD token showed in the 10 minutes BEFORE the sealed book
         # we are about to price against. The JIT snapshot is that sealed book — its
@@ -23546,13 +23668,15 @@ def _build_live_execution_command_certificates(
             if global_jit_handoff is not None
             else None
         )
-        stamp_day0_held_ask_repricing(
+        _stamp_day0_live_admission_payload(
             actionable_payload,
+            event_payload=_payload(event),
             held_token_id=(
                 str(getattr(_day0_sealed_snapshot, "selected_outcome_token_id", "") or "")
                 or str(actionable_payload.get("token_id") or "")
             ),
             book_captured_at=getattr(_day0_sealed_snapshot, "captured_at", None),
+            decision_time=decision_time,
             trade_conn=trade_conn,
         )
         actionable = build_actionable_trade_certificate(
@@ -23615,18 +23739,8 @@ def _build_live_execution_command_certificates(
         else:
             # Global BUY provisional mode needs only the already-sealed book
             # touch/depth. Non-book gates run once, against the exact final intent.
-            authority_witness = SealedBookObservation(
-                quote_seen_at=sealed_book_override.captured_at,
-                book_hash=sealed_book_override.raw_orderbook_hash,
-                current_best_bid=sealed_book_override.best_bid,
-                current_best_ask=sealed_book_override.best_ask,
-                tick_size=sealed_book_override.tick_size,
-                min_order_size=sealed_book_override.min_order_size,
-                neg_risk=sealed_book_override.neg_risk,
-                book_authority_id="clob_jit_book",
-                book_captured_at=sealed_book_override.captured_at,
-                orderbook_depth_jsonb=sealed_book_override.orderbook_depth_jsonb,
-                checked_at=sealed_book_override.captured_at,
+            authority_witness = _sealed_book_observation_from_global_jit_handoff(
+                global_jit_handoff
             )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
