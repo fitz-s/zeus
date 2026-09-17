@@ -75,6 +75,43 @@ class TestAuthenticated404Terminalises:
         assert fact["state"] == "VENUE_WIPED"
         assert float(fact["matched_size"]) == 0.0
 
+    def test_the_live_client_shape_also_terminalises(self, conn, mock_client):
+        """The live PolymarketClient has no venue_reads_are_complete attribute.
+
+        It declares instead that an authenticated point read reports a missing
+        order as absence rather than as an error. That is the same statement
+        this branch needs, and keying only on the snapshot client's flag left
+        the fix inert on the live path — measured against the real client, which
+        returns ABSENT for venue_reads_are_complete and True for
+        authenticated_point_absence_returns_none.
+        """
+        from src.venue.polymarket_v2_adapter import VenueOrderNotFound
+
+        order_id = "ord-gone-at-venue"
+        _insert(
+            conn,
+            size=135.02,
+            price=0.15,
+            event_slug="lowest-temperature-in-zhengzhou-on-september-16-2026-17c",
+        )
+        _advance_to_acked(conn, venue_order_id=order_id)
+        _arm_post_ack_review(conn, order_id=order_id)
+
+        mock_client.get_order.side_effect = VenueOrderNotFound(order_id)
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        # Exactly the live shape: no completeness flag, absence-returns-none set.
+        if hasattr(type(mock_client), "venue_reads_are_complete"):
+            delattr(type(mock_client), "venue_reads_are_complete")
+        type(mock_client).authenticated_point_absence_returns_none = True
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+
     def test_an_incomplete_account_read_does_not_terminalise(
         self, conn, mock_client
     ):
@@ -90,6 +127,7 @@ class TestAuthenticated404Terminalises:
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
         type(mock_client).venue_reads_are_complete = False
+        type(mock_client).authenticated_point_absence_returns_none = False
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 

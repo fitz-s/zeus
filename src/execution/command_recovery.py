@@ -22950,7 +22950,17 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         point_order_matched = _point_order_matched_size(point_order, side=command.get("side"))
     elif (
         point_order_authenticated_absent
-        and getattr(client, "venue_reads_are_complete", False) is True
+        # A snapshot client declares its whole account read complete; the live
+        # client instead declares that its authenticated point read reports a
+        # missing order as absence rather than as an error. Either is the
+        # statement this branch needs — that the 404 is trustworthy — and the
+        # account-wide absence is established separately by the open-order and
+        # trade checks below.
+        and (
+            getattr(client, "venue_reads_are_complete", False) is True
+            or getattr(client, "authenticated_point_absence_returns_none", False)
+            is True
+        )
         and not matching_open_orders
         and not matching_trades
         and _trade_fact_count(conn, cmd.command_id) == 0
