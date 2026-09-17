@@ -59,3 +59,44 @@ def test_the_channel_names_match_the_writer_tags(station: str) -> None:
     from src.data.daily_obs_append import noaa_wrh_source_tag
 
     assert noaa_wrh_source_tag(station) == f"noaa_wrh_{station.lower()}"
+
+
+def _event_branch() -> str:
+    src = inspect.getsource(plan._latest_authorized_day0_fact)
+    start = src.index("settlement_channel_source = (")
+    return src[start : start + 2400]
+
+
+def test_the_event_branch_settles_on_the_page_not_the_mirror() -> None:
+    """DAY0_EXTREME_UPDATED events are the other absorbing path into Day0.
+
+    The prints-ledger branch was split first; this branch reads committed
+    events and had the same defect — a NOAA event only counted as a settlement
+    channel when it came from ogimet_metar_<station>, so the mirror could still
+    declare a bin absorbed through it.
+    """
+    block = _event_branch()
+    settlement_part = block[: block.index("event_source_allowed")]
+    assert 'f"noaa_wrh_{expected_station.lower()}"' in settlement_part
+    assert "ogimet_metar_" not in settlement_part
+
+
+def test_the_mirror_remains_allowed_event_evidence() -> None:
+    """It must still advance refresh and redecision, just not settle."""
+    block = _event_branch()
+    allowed_part = block[block.index("event_source_allowed") :]
+    assert 'f"ogimet_metar_{expected_station.lower()}"' in allowed_part
+    assert 'f"noaa_wrh_{expected_station.lower()}"' in allowed_part
+
+
+def test_the_awc_fast_tail_is_evidence_only_for_noaa() -> None:
+    """aviationweather_metar carries 95% of today's Day0 events.
+
+    It is absorbing by finality, so it must never appear in the settlement
+    channel test — only in the allowed-evidence test, where it already is.
+    """
+    block = _event_branch()
+    settlement_part = block[: block.index("event_source_allowed")]
+    allowed_part = block[block.index("event_source_allowed") :]
+    assert "aviationweather_metar" not in settlement_part
+    assert "aviationweather_metar" in allowed_part

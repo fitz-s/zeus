@@ -1083,8 +1083,13 @@ def _latest_authorized_day0_fact(
                     )
                     or (
                         source_type == "noaa"
+                        # The page is the product the venue resolves off. The
+                        # METAR reconstruction rounds into a different settlement
+                        # integer on 7.7% of HIGH and 9.3% of LOW city-days, so
+                        # it cannot alone declare a bin absorbed; it stays
+                        # allowed as evidence just below.
                         and event_source
-                        == f"ogimet_metar_{expected_station.lower()}"
+                        == f"noaa_wrh_{expected_station.lower()}"
                     )
                     or (
                         source_type == "hko"
@@ -1111,7 +1116,12 @@ def _latest_authorized_day0_fact(
                     or (
                         source_type == "noaa"
                         and event_source
-                        == f"ogimet_metar_{expected_station.lower()}"
+                        in {
+                            # Both lanes are valid Day0 evidence; only the page
+                            # may serve as the settlement channel above.
+                            f"noaa_wrh_{expected_station.lower()}",
+                            f"ogimet_metar_{expected_station.lower()}",
+                        }
                     )
                     or (
                         source_type == "hko"
