@@ -2189,7 +2189,13 @@ def _bind_current_maker_fill_witnesses(
                 native_bid_levels=asset.bid_levels,
             )
             if proposal is not None:
+                # No executable ask means no counterparty exists at any price, which is a
+                # strictly worse position to rest in than the furthest measured band — not an
+                # average one. Pricing it at the pooled rate is the same mistake the bands
+                # exist to remove, so the empty book withdraws the maker sibling outright.
                 ask_levels = tuple(getattr(asset.curve, "levels", ()) or ())
+                if not ask_levels:
+                    continue
                 attach(
                     action="BUY",
                     family_key=asset.family_key,
@@ -2200,9 +2206,7 @@ def _bind_current_maker_fill_witnesses(
                     position_id=None,
                     held_shares=None,
                     proposal=proposal,
-                    counterparty_price=(
-                        Decimal(ask_levels[0].price) if ask_levels else None
-                    ),
+                    counterparty_price=Decimal(ask_levels[0].price),
                 )
     if "SELL" in samples:
         sell_asset_by_key = {
